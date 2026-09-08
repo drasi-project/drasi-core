@@ -21,14 +21,20 @@ mod mock_source;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+};
 use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
-use drasi_lib::channels::{BootstrapEventSender, ComponentStatus};
+use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, ComponentStatus};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::{DrasiLib, Query, Source};
 use mock_source::MockSource;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 /// A bootstrap provider that always fails.
@@ -47,12 +53,77 @@ impl BootstrapProvider for FailingBootstrapProvider {
     }
 }
 
+struct FailOnceAfterEventBootstrapProvider {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl BootstrapProvider for FailOnceAfterEventBootstrapProvider {
+    async fn bootstrap(
+        &self,
+        _request: BootstrapRequest,
+        context: &BootstrapContext,
+        event_tx: BootstrapEventSender,
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult> {
+        let attempt = self.attempts.fetch_add(1, Ordering::AcqRel);
+        event_tx
+            .send(BootstrapEvent {
+                source_id: context.source_id.clone(),
+                change: SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(
+                                &context.source_id,
+                                "bootstrap-person",
+                            ),
+                            labels: vec![Arc::from("Person")].into(),
+                            effective_from: 1_000,
+                        },
+                        properties: ElementPropertyMap::from(serde_json::json!({
+                            "name": "Recovered"
+                        })),
+                    },
+                },
+                timestamp: chrono::Utc::now(),
+                sequence: context.next_sequence(),
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("bootstrap receiver closed"))?;
+
+        if attempt == 0 {
+            anyhow::bail!("simulated failure after a bootstrap event");
+        }
+        Ok(BootstrapResult {
+            event_count: 1,
+            source_position: None,
+        })
+    }
+}
+
 /// Poll a query's status until it reaches `Error` or a 5 second deadline elapses.
 async fn wait_for_error_status(core: &DrasiLib, query_id: &str) -> Result<ComponentStatus> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut status = core.get_query_status(query_id).await?;
     while tokio::time::Instant::now() < deadline {
         if status == ComponentStatus::Error {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        status = core.get_query_status(query_id).await?;
+    }
+    Ok(status)
+}
+
+async fn wait_for_status(
+    core: &DrasiLib,
+    query_id: &str,
+    expected: ComponentStatus,
+) -> Result<ComponentStatus> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut status = core.get_query_status(query_id).await?;
+    while tokio::time::Instant::now() < deadline {
+        if status == expected {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -142,5 +213,54 @@ async fn query_enters_error_state_when_multiple_bootstraps_fail() -> Result<()> 
         "Query should transition to Error state when multiple bootstraps fail, got {status:?}"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_bootstrap_can_stop_and_rebootstrap_without_partial_results() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("retry-source")?;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    mock_source
+        .set_bootstrap_provider(Box::new(FailOnceAfterEventBootstrapProvider {
+            attempts: attempts.clone(),
+        }))
+        .await;
+    let query = Query::cypher("retry-query")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("retry-source")
+        .auto_start(true)
+        .build();
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("bootstrap-retry-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    assert_eq!(
+        wait_for_error_status(&core, "retry-query").await?,
+        ComponentStatus::Error
+    );
+    core.stop_query("retry-query").await?;
+    assert_eq!(
+        wait_for_status(&core, "retry-query", ComponentStatus::Stopped).await?,
+        ComponentStatus::Stopped
+    );
+    core.start_query("retry-query").await?;
+    assert_eq!(
+        wait_for_status(&core, "retry-query", ComponentStatus::Running).await?,
+        ComponentStatus::Running
+    );
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+    assert_eq!(
+        core.get_query_results("retry-query").await?.len(),
+        1,
+        "retry must replace partial volatile bootstrap output"
+    );
+
+    core.stop().await?;
     Ok(())
 }

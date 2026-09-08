@@ -155,6 +155,33 @@ impl QueryOutputState {
         self.as_of_sequence.saturating_add(1)
     }
 
+    /// Replace the process-local projection with a verified durable snapshot.
+    ///
+    /// Callers must validate the sequence, outbox, and live-result bundle before
+    /// invoking this method. The in-memory outbox retains the newest entries when
+    /// the configured capacity is lower than the durable history.
+    pub(crate) fn hydrate(
+        &mut self,
+        results: im::HashMap<u64, serde_json::Value>,
+        as_of_sequence: u64,
+        mut outbox: Vec<Arc<QueryResult>>,
+    ) {
+        if outbox.len() > self.outbox_capacity {
+            outbox.drain(..outbox.len() - self.outbox_capacity);
+        }
+
+        self.results = results;
+        self.as_of_sequence = as_of_sequence;
+        self.outbox = outbox.into();
+    }
+
+    /// Reset all process-local output state after persistent state is cleared.
+    pub(crate) fn reset(&mut self) {
+        self.results.clear();
+        self.as_of_sequence = 0;
+        self.outbox.clear();
+    }
+
     /// Apply a result prepared for the current next sequence.
     ///
     /// Returns `None` when another writer advanced the state while the result was
@@ -164,14 +191,24 @@ impl QueryOutputState {
         &mut self,
         result: QueryResult,
     ) -> Option<Arc<QueryResult>> {
+        self.try_apply_prepared_arc(Arc::new(result))
+    }
+
+    pub(crate) fn try_apply_prepared_arc(
+        &mut self,
+        result: Arc<QueryResult>,
+    ) -> Option<Arc<QueryResult>> {
         let expected_sequence = self.next_sequence();
         if result.sequence != expected_sequence {
             return None;
         }
 
         self.apply_diffs(&result.results);
-        let result = self.advance_sequence_and_push(result);
-        debug_assert_eq!(result.sequence, expected_sequence);
+        self.as_of_sequence = result.sequence;
+        if self.outbox.len() >= self.outbox_capacity {
+            self.outbox.pop_front();
+        }
+        self.outbox.push_back(result.clone());
         Some(result)
     }
 
@@ -184,6 +221,14 @@ impl QueryOutputState {
         &mut self,
         result: QueryResult,
     ) -> Result<Arc<QueryResult>, PreparedSequenceMismatch> {
+        self.apply_committed_arc(Arc::new(result))
+    }
+
+    /// Apply the exact result allocation that was serialized into durable output.
+    pub(crate) fn apply_committed_arc(
+        &mut self,
+        result: Arc<QueryResult>,
+    ) -> Result<Arc<QueryResult>, PreparedSequenceMismatch> {
         let expected = self.next_sequence();
         if result.sequence != expected {
             return Err(PreparedSequenceMismatch {
@@ -193,8 +238,11 @@ impl QueryOutputState {
         }
 
         self.apply_diffs(&result.results);
-        let result = self.advance_sequence_and_push(result);
-        debug_assert_eq!(result.sequence, expected);
+        self.as_of_sequence = result.sequence;
+        if self.outbox.len() >= self.outbox_capacity {
+            self.outbox.pop_front();
+        }
+        self.outbox.push_back(result.clone());
         Ok(result)
     }
 

@@ -43,11 +43,12 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_query_ast::api::QueryConfiguration;
 use drasi_query_cypher::CypherParser;
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, RwLock};
 
 use super::*;
 use crate::{
-    channels::ChangeReceiver,
+    bootstrap::BootstrapResult,
+    channels::{BootstrapEvent, ChangeReceiver},
     config::{QueryConfig, QueryLanguage},
 };
 
@@ -70,6 +71,7 @@ enum BackendFault {
     None,
     Commit,
     CommitThenBlock(Arc<CommitBlock>),
+    CheckpointStageAfterOne,
     OutboxStage,
     LiveResultsStage,
 }
@@ -155,6 +157,76 @@ struct FailingOutboxWriter {
 
 struct FailingLiveResultsWriter {
     inner: Arc<dyn LiveResultsWriter>,
+}
+
+struct FailingSecondCheckpointStore {
+    inner: Arc<dyn CheckpointStore>,
+    stage_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl CheckpointStore for FailingSecondCheckpointStore {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        self.inner.transaction_domain()
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.inner.is_persistent()
+    }
+
+    async fn stage_checkpoint(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        source_position: Option<&Bytes>,
+    ) -> std::result::Result<(), IndexError> {
+        if self.stage_calls.fetch_add(1, Ordering::AcqRel) == 1 {
+            return Err(IndexError::CorruptedData);
+        }
+        self.inner
+            .stage_checkpoint(source_id, sequence, source_position)
+            .await
+    }
+
+    async fn read_checkpoint(
+        &self,
+        source_id: &str,
+    ) -> std::result::Result<Option<SourceCheckpoint>, IndexError> {
+        self.inner.read_checkpoint(source_id).await
+    }
+
+    async fn read_all_checkpoints(
+        &self,
+    ) -> std::result::Result<HashMap<String, SourceCheckpoint>, IndexError> {
+        self.inner.read_all_checkpoints().await
+    }
+
+    async fn clear_checkpoints(&self) -> std::result::Result<(), IndexError> {
+        self.inner.clear_checkpoints().await
+    }
+
+    async fn write_config_hash(&self, hash: u64) -> std::result::Result<(), IndexError> {
+        self.inner.write_config_hash(hash).await
+    }
+
+    async fn read_config_hash(&self) -> std::result::Result<Option<u64>, IndexError> {
+        self.inner.read_config_hash().await
+    }
+
+    async fn write_result_sequence(
+        &self,
+        query_id: &str,
+        sequence: u64,
+    ) -> std::result::Result<(), IndexError> {
+        self.inner.write_result_sequence(query_id, sequence).await
+    }
+
+    async fn read_result_sequence(
+        &self,
+        query_id: &str,
+    ) -> std::result::Result<Option<u64>, IndexError> {
+        self.inner.read_result_sequence(query_id).await
+    }
 }
 
 #[async_trait]
@@ -257,9 +329,9 @@ impl ChangeDispatcher<QueryResult> for RecordingDispatcher {
 
 struct AtomicHostFixture {
     base: QueryBase,
-    bootstrap_gate: Arc<Notify>,
     priority_queue: PriorityQueue,
     output_state: Arc<RwLock<QueryOutputState>>,
+    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>>,
     output_rx: mpsc::UnboundedReceiver<Arc<QueryResult>>,
     dispatch_count: Arc<AtomicUsize>,
     future_queue_source: Arc<FutureQueueSource>,
@@ -272,6 +344,7 @@ struct AtomicHostFixture {
     continuous_query: Arc<ContinuousQuery>,
     position_handle: Arc<AtomicU64>,
     publication_recovery: AtomicPublicationRecovery,
+    mode: QueryProcessingMode,
 }
 
 async fn build_host(
@@ -280,6 +353,17 @@ async fn build_host(
     fault: BackendFault,
     force_legacy: bool,
     observer: Option<Arc<dyn QueryProcessingObserver>>,
+) -> (QueryCompositeHost, AtomicHostFixture) {
+    build_host_with_bootstrap(path, query_text, fault, force_legacy, observer, Vec::new()).await
+}
+
+async fn build_host_with_bootstrap(
+    path: &Path,
+    query_text: &str,
+    fault: BackendFault,
+    force_legacy: bool,
+    observer: Option<Arc<dyn QueryProcessingObserver>>,
+    bootstrap_inputs: Vec<QueryBootstrapInput>,
 ) -> (QueryCompositeHost, AtomicHostFixture) {
     let provider = RocksDbIndexProvider::new(path, true, false);
     let mut created = provider
@@ -309,6 +393,17 @@ async fn build_host(
                 transaction_domain,
                 block,
             });
+        }
+        BackendFault::CheckpointStageAfterOne => {
+            let inner = created
+                .checkpoint_store
+                .as_ref()
+                .expect("RocksDB checkpoint store")
+                .clone();
+            created.checkpoint_store = Some(Arc::new(FailingSecondCheckpointStore {
+                inner,
+                stage_calls: AtomicUsize::new(0),
+            }));
         }
         BackendFault::OutboxStage => {
             let inner = created
@@ -401,7 +496,6 @@ async fn build_host(
         })]));
     let output_state = Arc::new(RwLock::new(QueryOutputState::new(16)));
     let priority_queue = PriorityQueue::new(16);
-    let bootstrap_gate = Arc::new(Notify::new());
     let future_queue_source = Arc::new(FutureQueueSource::new(
         continuous_query.future_queue(),
         QUERY_ID.to_string(),
@@ -414,7 +508,7 @@ async fn build_host(
     let output_dependencies = QueryOutputDependencies::new(
         QUERY_ID.to_string(),
         output_state.clone(),
-        dispatchers,
+        dispatchers.clone(),
         Some(outbox_writer.clone()),
         Some(live_results_writer.clone()),
         Some(checkpoint_store.clone()),
@@ -432,12 +526,16 @@ async fn build_host(
             "atomic-host-test".to_string(),
             QUERY_ID.to_string(),
             priority_queue.clone(),
-            bootstrap_gate.clone(),
             base.status_handle(),
             future_queue_source.clone(),
             ingress_fence,
         ),
-        mode,
+        QueryBootstrapScope::new(
+            bootstrap_inputs,
+            checkpoint_store.clone(),
+            Some(session_control.clone()),
+        ),
+        mode.clone(),
         QueryLiveDependencies::new(
             continuous_query.clone(),
             checkpoint_store.clone(),
@@ -451,9 +549,9 @@ async fn build_host(
         host,
         AtomicHostFixture {
             base,
-            bootstrap_gate,
             priority_queue,
             output_state,
+            dispatchers,
             output_rx,
             dispatch_count,
             future_queue_source,
@@ -466,6 +564,7 @@ async fn build_host(
             continuous_query,
             position_handle,
             publication_recovery,
+            mode,
         },
     )
 }
@@ -511,7 +610,6 @@ fn sequenced_event(
 
 async fn start_host(host: QueryCompositeHost, fixture: &AtomicHostFixture) {
     host.start(&fixture.base).await;
-    fixture.bootstrap_gate.notify_one();
     wait_for_status(&fixture.base, ComponentStatus::Running).await;
 }
 
@@ -612,6 +710,245 @@ async fn assert_no_durable_output(fixture: &AtomicHostFixture) {
             .expect("read result sequence"),
         None
     );
+}
+
+#[tokio::test]
+async fn rocksdb_multi_source_bootstrap_commits_live_rows_and_handoff_before_running() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (source_a_tx, source_a_rx) = mpsc::channel(4);
+    let (source_b_tx, source_b_rx) = mpsc::channel(4);
+    let (result_a_tx, result_a_rx) = oneshot::channel();
+    let (result_b_tx, result_b_rx) = oneshot::channel();
+    let (host, mut fixture) = build_host_with_bootstrap(
+        temp_dir.path(),
+        "MATCH (n:Person) RETURN n.name AS name",
+        BackendFault::None,
+        false,
+        None,
+        vec![
+            QueryBootstrapInput::new(SOURCE_ID.to_string(), source_a_rx, Some(result_a_rx)),
+            QueryBootstrapInput::new(
+                "atomic-host-source-b".to_string(),
+                source_b_rx,
+                Some(result_b_rx),
+            ),
+        ],
+    )
+    .await;
+    host.start(&fixture.base).await;
+    let started = receive_result(&mut fixture.output_rx).await;
+    assert_eq!(started.metadata["control_signal"], "bootstrapStarted");
+    assert_eq!(
+        QueryBootstrapScope::read_recovery_state(fixture.checkpoint_store.as_ref())
+            .await
+            .expect("read in-progress marker"),
+        QueryBootstrapRecoveryState::InProgress
+    );
+
+    source_a_tx
+        .send(BootstrapEvent {
+            source_id: SOURCE_ID.to_string(),
+            change: person_change("bootstrap-a", "Ada", 1_000),
+            timestamp: chrono::Utc::now(),
+            sequence: 0,
+        })
+        .await
+        .expect("send source A bootstrap event");
+    source_b_tx
+        .send(BootstrapEvent {
+            source_id: "atomic-host-source-b".to_string(),
+            change: person_change("bootstrap-b", "Grace", 2_000),
+            timestamp: chrono::Utc::now(),
+            sequence: 0,
+        })
+        .await
+        .expect("send source B bootstrap event");
+    result_a_tx
+        .send(Ok(BootstrapResult {
+            event_count: 1,
+            source_position: Some(Bytes::from_static(b"boundary-a")),
+        }))
+        .expect("send source A bootstrap result");
+    result_b_tx
+        .send(Ok(BootstrapResult {
+            event_count: 1,
+            source_position: Some(Bytes::from_static(b"boundary-b")),
+        }))
+        .expect("send source B bootstrap result");
+    drop(source_a_tx);
+    drop(source_b_tx);
+
+    let completed = receive_result(&mut fixture.output_rx).await;
+    assert_eq!(completed.metadata["control_signal"], "bootstrapCompleted");
+    wait_for_status(&fixture.base, ComponentStatus::Running).await;
+    assert_eq!(
+        QueryBootstrapScope::read_recovery_state(fixture.checkpoint_store.as_ref())
+            .await
+            .expect("read completed marker"),
+        QueryBootstrapRecoveryState::Complete
+    );
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_checkpoint(SOURCE_ID)
+            .await
+            .expect("read source A checkpoint"),
+        Some(SourceCheckpoint::new(
+            0,
+            Some(Bytes::from_static(b"boundary-a"))
+        ))
+    );
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_checkpoint("atomic-host-source-b")
+            .await
+            .expect("read source B checkpoint"),
+        Some(SourceCheckpoint::new(
+            0,
+            Some(Bytes::from_static(b"boundary-b"))
+        ))
+    );
+    assert_eq!(
+        fixture
+            .live_results_writer
+            .read_snapshot(QUERY_ID)
+            .await
+            .expect("read bootstrap live rows")
+            .len(),
+        2
+    );
+    assert!(fixture
+        .outbox_writer
+        .read_from(QUERY_ID, 0)
+        .await
+        .expect("read bootstrap outbox")
+        .is_empty());
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .expect("read bootstrap output sequence"),
+        None
+    );
+    assert_eq!(fixture.output_state.read().await.results_len(), 2);
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
+    let fresh_state = Arc::new(RwLock::new(QueryOutputState::new(16)));
+    let dependencies = QueryOutputDependencies::new(
+        QUERY_ID.to_string(),
+        fresh_state.clone(),
+        Arc::new(RwLock::new(Vec::new())),
+        Some(fixture.outbox_writer.clone()),
+        Some(fixture.live_results_writer.clone()),
+        Some(fixture.checkpoint_store.clone()),
+        16,
+        Arc::new(QueryOutputMetrics::new()),
+    );
+    QueryCompositeHost::reconcile_output_state(&fixture.mode, &dependencies)
+        .await
+        .expect("hydrate the sequence-0 bootstrap snapshot");
+    assert_eq!(fresh_state.read().await.as_of_sequence(), 0);
+    assert_eq!(fresh_state.read().await.results_len(), 2);
+
+    stop_host(&fixture).await;
+}
+
+#[tokio::test]
+async fn atomic_bootstrap_persistence_failure_rolls_back_and_keeps_handoff_closed() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (bootstrap_tx, bootstrap_rx) = mpsc::channel(2);
+    let (result_tx, result_rx) = oneshot::channel();
+    let (host, mut fixture) = build_host_with_bootstrap(
+        temp_dir.path(),
+        "MATCH (n:Person) RETURN n.name AS name",
+        BackendFault::LiveResultsStage,
+        false,
+        None,
+        vec![QueryBootstrapInput::new(SOURCE_ID.to_string(), bootstrap_rx, Some(result_rx))],
+    )
+    .await;
+    host.start(&fixture.base).await;
+    let started = receive_result(&mut fixture.output_rx).await;
+    assert_eq!(started.metadata["control_signal"], "bootstrapStarted");
+    bootstrap_tx
+        .send(BootstrapEvent {
+            source_id: SOURCE_ID.to_string(),
+            change: person_change("bootstrap-rollback", "Rollback", 1_000),
+            timestamp: chrono::Utc::now(),
+            sequence: 0,
+        })
+        .await
+        .expect("send failing bootstrap event");
+    result_tx
+        .send(Ok(BootstrapResult::default()))
+        .expect("send bootstrap result");
+    drop(bootstrap_tx);
+
+    wait_for_status(&fixture.base, ComponentStatus::Error).await;
+    assert!(!element_exists(&fixture, "bootstrap-rollback").await);
+    assert_no_durable_output(&fixture).await;
+    assert_eq!(fixture.output_state.read().await.results_len(), 0);
+    assert_eq!(
+        QueryBootstrapScope::read_recovery_state(fixture.checkpoint_store.as_ref())
+            .await
+            .expect("read failed bootstrap marker"),
+        QueryBootstrapRecoveryState::InProgress
+    );
+    if let Ok(Some(result)) =
+        tokio::time::timeout(Duration::from_millis(50), fixture.output_rx.recv()).await
+    {
+        assert_ne!(result.metadata["control_signal"], "bootstrapCompleted");
+    }
+
+    stop_host(&fixture).await;
+}
+
+#[tokio::test]
+async fn atomic_bootstrap_checkpoint_failure_does_not_complete_handoff() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (bootstrap_tx, bootstrap_rx) = mpsc::channel(1);
+    let (result_tx, result_rx) = oneshot::channel();
+    let (host, mut fixture) = build_host_with_bootstrap(
+        temp_dir.path(),
+        "MATCH (n:Person) RETURN n.name AS name",
+        BackendFault::CheckpointStageAfterOne,
+        false,
+        None,
+        vec![QueryBootstrapInput::new(SOURCE_ID.to_string(), bootstrap_rx, Some(result_rx))],
+    )
+    .await;
+    host.start(&fixture.base).await;
+    let started = receive_result(&mut fixture.output_rx).await;
+    assert_eq!(started.metadata["control_signal"], "bootstrapStarted");
+    result_tx
+        .send(Ok(BootstrapResult {
+            event_count: 0,
+            source_position: Some(Bytes::from_static(b"handoff")),
+        }))
+        .expect("send bootstrap result");
+    drop(bootstrap_tx);
+
+    wait_for_status(&fixture.base, ComponentStatus::Error).await;
+    assert!(fixture
+        .checkpoint_store
+        .read_checkpoint(SOURCE_ID)
+        .await
+        .expect("read failed handoff checkpoint")
+        .is_none());
+    assert_eq!(
+        QueryBootstrapScope::read_recovery_state(fixture.checkpoint_store.as_ref())
+            .await
+            .expect("read handoff marker"),
+        QueryBootstrapRecoveryState::InProgress
+    );
+    if let Ok(Some(result)) =
+        tokio::time::timeout(Duration::from_millis(50), fixture.output_rx.recv()).await
+    {
+        assert_ne!(result.metadata["control_signal"], "bootstrapCompleted");
+    }
+
+    stop_host(&fixture).await;
 }
 
 struct FailAfterStagingObserver;
@@ -861,7 +1198,7 @@ async fn rocksdb_atomic_source_fault_matrix_rolls_back_and_fences() {
 
     for (name, fault, observer) in cases {
         let temp_dir = tempfile::TempDir::new().expect("create temp directory");
-        let (host, fixture) = build_host(
+        let (host, mut fixture) = build_host(
             temp_dir.path(),
             "MATCH (n:Person) RETURN n.name AS name",
             fault,
@@ -919,7 +1256,7 @@ async fn cancellation_during_atomic_hook_rolls_back_without_ack_or_dispatch() {
         staged_tx: Mutex::new(Some(staged_tx)),
         release_rx: AsyncMutex::new(Some(release_rx)),
     });
-    let (host, fixture) = build_host(
+    let (host, mut fixture) = build_host(
         temp_dir.path(),
         "MATCH (n:Person) RETURN n.name AS name",
         BackendFault::None,
@@ -992,7 +1329,7 @@ async fn cancellation_after_commit_marks_output_recovery_required() {
         committed_tx: Mutex::new(Some(committed_tx)),
         release_rx: AsyncMutex::new(Some(release_rx)),
     });
-    let (host, fixture) = build_host(
+    let (host, mut fixture) = build_host(
         temp_dir.path(),
         "MATCH (n:Person) RETURN n.name AS name",
         BackendFault::None,
@@ -1040,6 +1377,33 @@ async fn cancellation_after_commit_marks_output_recovery_required() {
             .expect("read committed result sequence"),
         Some(1)
     );
+    let durable = fixture
+        .outbox_writer
+        .read_from(QUERY_ID, 0)
+        .await
+        .expect("read committed source outbox");
+    let dependencies = QueryOutputDependencies::new(
+        QUERY_ID.to_string(),
+        fixture.output_state.clone(),
+        fixture.dispatchers.clone(),
+        Some(fixture.outbox_writer.clone()),
+        Some(fixture.live_results_writer.clone()),
+        Some(fixture.checkpoint_store.clone()),
+        16,
+        Arc::new(QueryOutputMetrics::new()),
+    )
+    .with_publication_recovery(fixture.publication_recovery.clone());
+    QueryCompositeHost::reconcile_output_state(&fixture.mode, &dependencies)
+        .await
+        .expect("reconcile committed source output");
+    let recovered = receive_result(&mut fixture.output_rx).await;
+    assert_eq!(recovered.sequence, 1);
+    assert_eq!(
+        rmp_serde::to_vec(recovered.as_ref()).expect("serialize recovered source output"),
+        durable[0].1
+    );
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 1);
+    assert!(!fixture.publication_recovery.is_required());
     fixture.future_queue_source.stop().await;
 }
 
@@ -1116,7 +1480,7 @@ async fn cancellation_while_future_commit_returns_late_keeps_recovery_fence_arme
         committed_tx: Mutex::new(Some(committed_tx)),
         commits_before_block: AtomicUsize::new(1),
     });
-    let (host, fixture) = build_host(
+    let (host, mut fixture) = build_host(
         temp_dir.path(),
         "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
         BackendFault::CommitThenBlock(commit_block),
@@ -1164,6 +1528,33 @@ async fn cancellation_while_future_commit_returns_late_keeps_recovery_fence_arme
             .expect("read future result sequence"),
         Some(1)
     );
+    let durable = fixture
+        .outbox_writer
+        .read_from(QUERY_ID, 0)
+        .await
+        .expect("read committed future outbox");
+    let dependencies = QueryOutputDependencies::new(
+        QUERY_ID.to_string(),
+        fixture.output_state.clone(),
+        fixture.dispatchers.clone(),
+        Some(fixture.outbox_writer.clone()),
+        Some(fixture.live_results_writer.clone()),
+        Some(fixture.checkpoint_store.clone()),
+        16,
+        Arc::new(QueryOutputMetrics::new()),
+    )
+    .with_publication_recovery(fixture.publication_recovery.clone());
+    QueryCompositeHost::reconcile_output_state(&fixture.mode, &dependencies)
+        .await
+        .expect("reconcile committed future");
+    let recovered = receive_result(&mut fixture.output_rx).await;
+    assert_eq!(recovered.sequence, 1);
+    assert_eq!(
+        rmp_serde::to_vec(recovered.as_ref()).expect("serialize recovered future"),
+        durable[0].1
+    );
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 1);
+    assert!(!fixture.publication_recovery.is_required());
     fixture.future_queue_source.stop().await;
 }
 
@@ -1240,7 +1631,7 @@ async fn stale_prepared_sequence_after_commit_is_fatal_and_not_acknowledged() {
     let observer = Arc::new(StaleSequenceAfterCommitObserver {
         output_state: Mutex::new(None),
     });
-    let (host, fixture) = build_host(
+    let (host, mut fixture) = build_host(
         temp_dir.path(),
         "MATCH (n:Person) RETURN n.name AS name",
         BackendFault::None,
@@ -1276,6 +1667,24 @@ async fn stale_prepared_sequence_after_commit_is_fatal_and_not_acknowledged() {
     assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
     assert_eq!(fixture.output_state.read().await.as_of_sequence(), 1);
     assert!(fixture.publication_recovery.is_required());
+    let dependencies = QueryOutputDependencies::new(
+        QUERY_ID.to_string(),
+        fixture.output_state.clone(),
+        fixture.dispatchers.clone(),
+        Some(fixture.outbox_writer.clone()),
+        Some(fixture.live_results_writer.clone()),
+        Some(fixture.checkpoint_store.clone()),
+        16,
+        Arc::new(QueryOutputMetrics::new()),
+    )
+    .with_publication_recovery(fixture.publication_recovery.clone());
+    QueryCompositeHost::reconcile_output_state(&fixture.mode, &dependencies)
+        .await
+        .expect("reconcile stale process-local output");
+    let recovered = receive_result(&mut fixture.output_rx).await;
+    assert_eq!(recovered.sequence, 1);
+    assert_eq!(recovered.results.len(), 1);
+    assert!(!fixture.publication_recovery.is_required());
 
     stop_host(&fixture).await;
 }
@@ -1627,33 +2036,88 @@ async fn capability_selection_requires_the_complete_created_indexes_bundle() {
 }
 
 #[tokio::test]
-async fn a6_does_not_hydrate_atomic_output_sequence_during_startup() {
+async fn atomic_startup_hydrates_durable_output_and_continues_sequence() {
     let temp_dir = tempfile::TempDir::new().expect("create temp directory");
     let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
     let created = provider
-        .create_indexes("unhydrated-sequence")
+        .create_indexes("hydrated-sequence")
         .await
         .expect("create RocksDB indexes");
+    let mode = QueryProcessingMode::from_created_indexes(&created);
     let checkpoint_store = created
         .checkpoint_store
         .as_ref()
         .expect("checkpoint store")
         .clone();
+    let outbox_writer = created
+        .outbox_writer
+        .as_ref()
+        .expect("outbox writer")
+        .clone();
+    let live_results_writer = created
+        .live_results_writer
+        .as_ref()
+        .expect("live-results writer")
+        .clone();
+    let durable_result = QueryResult::new(
+        "hydrated-sequence".to_string(),
+        41,
+        chrono::Utc::now(),
+        vec![ResultDiff::Add {
+            data: json!({ "name": "Durable" }),
+            row_signature: 7,
+        }],
+        HashMap::new(),
+    );
+    let durable_bytes = rmp_serde::to_vec(&durable_result).expect("serialize durable result");
+    created
+        .set
+        .session_control
+        .begin()
+        .await
+        .expect("begin durable seed transaction");
+    outbox_writer
+        .append("hydrated-sequence", 41, &durable_bytes)
+        .await
+        .expect("seed durable outbox");
+    let row_bytes =
+        rmp_serde::to_vec(&json!({ "name": "Durable" })).expect("serialize durable live row");
+    live_results_writer
+        .apply_mutations(
+            "hydrated-sequence",
+            &[RowMutation {
+                row_signature: 7,
+                data: Some(&row_bytes),
+            }],
+        )
+        .await
+        .expect("seed durable live row");
     checkpoint_store
-        .write_result_sequence("unhydrated-sequence", 41)
+        .write_result_sequence("hydrated-sequence", 41)
         .await
         .expect("seed durable result sequence");
+    created
+        .set
+        .session_control
+        .commit()
+        .await
+        .expect("commit durable seed transaction");
+
     let output_state = Arc::new(RwLock::new(QueryOutputState::new(16)));
-    let output = OutputPublicationStage::new(QueryOutputDependencies::new(
-        "unhydrated-sequence".to_string(),
-        output_state,
+    let dependencies = QueryOutputDependencies::new(
+        "hydrated-sequence".to_string(),
+        output_state.clone(),
         Arc::new(RwLock::new(Vec::new())),
-        created.outbox_writer,
-        created.live_results_writer,
+        Some(outbox_writer),
+        Some(live_results_writer),
         Some(checkpoint_store),
         16,
         Arc::new(QueryOutputMetrics::new()),
-    ));
+    );
+    QueryCompositeHost::reconcile_output_state(&mode, &dependencies)
+        .await
+        .expect("hydrate durable output");
+    let output = OutputPublicationStage::new(dependencies);
     let contexts = [QueryPartEvaluationContext::Adding {
         after: QueryVariables::from([(
             Box::<str>::from("name"),
@@ -1665,9 +2129,208 @@ async fn a6_does_not_hydrate_atomic_output_sequence_during_startup() {
     let prepared = output
         .prepare_atomic(&contexts, SOURCE_ID, ProfilingMetadata::default())
         .await
-        .expect("prepare unhydrated output");
+        .expect("prepare hydrated output");
+    assert_eq!(prepared.result.sequence, 42);
+    let state = output_state.read().await;
+    assert_eq!(state.as_of_sequence(), 41);
+    assert_eq!(state.get_result(&7), Some(&json!({ "name": "Durable" })));
     assert_eq!(
-        prepared.result.sequence, 1,
-        "A7 owns startup hydration from durable result sequence 41"
+        rmp_serde::to_vec(
+            state
+                .fetch_outbox_after(40)
+                .expect("hydrated outbox")
+                .first()
+                .expect("durable result")
+                .as_ref()
+        )
+        .expect("serialize hydrated result"),
+        durable_bytes
     );
+}
+
+#[tokio::test]
+async fn atomic_startup_rejects_a_gapped_durable_outbox() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
+    let created = provider
+        .create_indexes("gapped-output")
+        .await
+        .expect("create RocksDB indexes");
+    let mode = QueryProcessingMode::from_created_indexes(&created);
+    let checkpoint_store = created.checkpoint_store.clone().expect("checkpoint store");
+    let outbox_writer = created.outbox_writer.clone().expect("outbox writer");
+    let live_results_writer = created
+        .live_results_writer
+        .clone()
+        .expect("live-results writer");
+    for sequence in [40, 42] {
+        let result = QueryResult::new(
+            "gapped-output".to_string(),
+            sequence,
+            chrono::Utc::now(),
+            vec![ResultDiff::Add {
+                data: json!({ "sequence": sequence }),
+                row_signature: sequence,
+            }],
+            HashMap::new(),
+        );
+        outbox_writer
+            .append(
+                "gapped-output",
+                sequence,
+                &rmp_serde::to_vec(&result).expect("serialize gapped result"),
+            )
+            .await
+            .expect("seed gapped outbox");
+    }
+    let row_bytes =
+        rmp_serde::to_vec(&json!({ "sequence": 42 })).expect("serialize latest live row");
+    live_results_writer
+        .apply_mutations(
+            "gapped-output",
+            &[RowMutation {
+                row_signature: 42,
+                data: Some(&row_bytes),
+            }],
+        )
+        .await
+        .expect("seed latest live row");
+    checkpoint_store
+        .write_result_sequence("gapped-output", 42)
+        .await
+        .expect("seed durable result sequence");
+
+    let output_state = Arc::new(RwLock::new(QueryOutputState::new(16)));
+    let dependencies = QueryOutputDependencies::new(
+        "gapped-output".to_string(),
+        output_state.clone(),
+        Arc::new(RwLock::new(Vec::new())),
+        Some(outbox_writer),
+        Some(live_results_writer),
+        Some(checkpoint_store),
+        16,
+        Arc::new(QueryOutputMetrics::new()),
+    );
+    let error = QueryCompositeHost::reconcile_output_state(&mode, &dependencies)
+        .await
+        .expect_err("gapped durable outbox must be rejected");
+    assert!(format!("{error:#}").contains("gap"));
+    assert_eq!(output_state.read().await.as_of_sequence(), 0);
+}
+
+#[tokio::test]
+async fn atomic_startup_rejects_missing_sequence_and_live_snapshot_artifacts() {
+    let sequence_dir = tempfile::TempDir::new().expect("create sequence temp directory");
+    let sequence_provider = RocksDbIndexProvider::new(sequence_dir.path(), true, false);
+    let sequence_created = sequence_provider
+        .create_indexes("missing-sequence")
+        .await
+        .expect("create missing-sequence indexes");
+    let sequence_mode = QueryProcessingMode::from_created_indexes(&sequence_created);
+    let sequence_outbox = sequence_created
+        .outbox_writer
+        .clone()
+        .expect("sequence outbox");
+    let sequence_live = sequence_created
+        .live_results_writer
+        .clone()
+        .expect("sequence live results");
+    let result = QueryResult::new(
+        "missing-sequence".to_string(),
+        1,
+        chrono::Utc::now(),
+        vec![ResultDiff::Add {
+            data: json!({ "name": "missing-sequence" }),
+            row_signature: 1,
+        }],
+        HashMap::new(),
+    );
+    sequence_outbox
+        .append(
+            "missing-sequence",
+            1,
+            &rmp_serde::to_vec(&result).expect("serialize missing-sequence result"),
+        )
+        .await
+        .expect("seed outbox without result sequence");
+    let row = rmp_serde::to_vec(&json!({ "name": "missing-sequence" }))
+        .expect("serialize missing-sequence row");
+    sequence_live
+        .apply_mutations(
+            "missing-sequence",
+            &[RowMutation {
+                row_signature: 1,
+                data: Some(&row),
+            }],
+        )
+        .await
+        .expect("seed live row without result sequence");
+    let sequence_state = Arc::new(RwLock::new(QueryOutputState::new(16)));
+    let sequence_dependencies = QueryOutputDependencies::new(
+        "missing-sequence".to_string(),
+        sequence_state,
+        Arc::new(RwLock::new(Vec::new())),
+        Some(sequence_outbox),
+        Some(sequence_live),
+        sequence_created.checkpoint_store.clone(),
+        16,
+        Arc::new(QueryOutputMetrics::new()),
+    );
+    let error = QueryCompositeHost::reconcile_output_state(&sequence_mode, &sequence_dependencies)
+        .await
+        .expect_err("outbox without a result sequence must be rejected");
+    assert!(format!("{error:#}").contains("result sequence is 0"));
+
+    let live_dir = tempfile::TempDir::new().expect("create live-result temp directory");
+    let live_provider = RocksDbIndexProvider::new(live_dir.path(), true, false);
+    let live_created = live_provider
+        .create_indexes("missing-live")
+        .await
+        .expect("create missing-live indexes");
+    let live_mode = QueryProcessingMode::from_created_indexes(&live_created);
+    let live_checkpoint = live_created
+        .checkpoint_store
+        .clone()
+        .expect("live checkpoint store");
+    let live_outbox = live_created.outbox_writer.clone().expect("live outbox");
+    let live_writer = live_created
+        .live_results_writer
+        .clone()
+        .expect("live results");
+    let result = QueryResult::new(
+        "missing-live".to_string(),
+        1,
+        chrono::Utc::now(),
+        vec![ResultDiff::Add {
+            data: json!({ "name": "missing-live" }),
+            row_signature: 1,
+        }],
+        HashMap::new(),
+    );
+    live_outbox
+        .append(
+            "missing-live",
+            1,
+            &rmp_serde::to_vec(&result).expect("serialize missing-live result"),
+        )
+        .await
+        .expect("seed outbox without live row");
+    live_checkpoint
+        .write_result_sequence("missing-live", 1)
+        .await
+        .expect("seed result sequence without live row");
+    let live_dependencies = QueryOutputDependencies::new(
+        "missing-live".to_string(),
+        Arc::new(RwLock::new(QueryOutputState::new(16))),
+        Arc::new(RwLock::new(Vec::new())),
+        Some(live_outbox),
+        Some(live_writer),
+        Some(live_checkpoint),
+        16,
+        Arc::new(QueryOutputMetrics::new()),
+    );
+    let error = QueryCompositeHost::reconcile_output_state(&live_mode, &live_dependencies)
+        .await
+        .expect_err("outbox mutation without a live row must be rejected");
+    assert!(format!("{error:#}").contains("live-result row"));
 }

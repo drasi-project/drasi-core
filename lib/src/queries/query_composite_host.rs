@@ -14,14 +14,13 @@
 
 //! Fixed query pipeline host.
 //!
-//! `DrasiQuery` still owns construction, source subscriptions, and bootstrap
-//! coordination. The bootstrap gate is therefore an explicit dependency of this
-//! host until that coordination moves with the rest of startup in a later layer.
+//! `DrasiQuery` owns construction and source subscription setup. This host owns
+//! bootstrap supervision, durable output reconciliation, and live processing.
 
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Instant, SystemTime},
@@ -34,14 +33,15 @@ use drasi_core::{
     evaluation::context::QueryPartEvaluationContext,
     interface::{
         AtomicResultTransaction, CheckpointStore, CreatedIndexes, IndexError, LiveResultsWriter,
-        OutboxWriter, RowMutation,
+        OutboxWriter, RowMutation, SessionControl, SessionGuard,
     },
     models::SourceChange,
     query::ContinuousQuery,
 };
+use futures::StreamExt;
 use log::{debug, error, info, warn};
 use tokio::{
-    sync::{oneshot, Mutex as AsyncMutex, Notify, RwLock},
+    sync::{oneshot, Mutex as AsyncMutex, RwLock},
     task::JoinHandle,
 };
 use tracing::Instrument;
@@ -49,14 +49,49 @@ use tracing::Instrument;
 use super::{PriorityQueue, QueryBase, QueryOutputState, SequenceDedup};
 use crate::{
     channels::{
-        ChangeDispatcher, ComponentStatus, QueryResult, ResultDiff, SourceControl, SourceEvent,
-        SourceEventWrapper,
+        BootstrapEventReceiver, ChangeDispatcher, ComponentStatus, QueryResult, ResultDiff,
+        SourceControl, SourceEvent, SourceEventWrapper,
     },
     component_graph::ComponentStatusHandle,
     metrics::QueryOutputMetrics,
     profiling::ProfilingMetadata,
     sources::FutureQueueSource,
 };
+
+/// Versioned private marker stored through the existing checkpoint store.
+///
+/// A NUL-prefixed identifier is rejected as a configured source id by
+/// `DrasiQuery`, so it cannot collide with a real source checkpoint.
+pub(super) const QUERY_BOOTSTRAP_MARKER_V1: &str = "\0drasi:query-bootstrap:v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QueryBootstrapRecoveryState {
+    Absent,
+    InProgress,
+    Complete,
+}
+
+pub(super) struct QueryBootstrapInput {
+    source_id: String,
+    receiver: BootstrapEventReceiver,
+    result_receiver: Option<oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
+}
+
+impl QueryBootstrapInput {
+    pub(super) fn new(
+        source_id: String,
+        receiver: BootstrapEventReceiver,
+        result_receiver: Option<
+            oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>,
+        >,
+    ) -> Self {
+        Self {
+            source_id,
+            receiver,
+            result_receiver,
+        }
+    }
+}
 
 /// Shared owner for every task that can enqueue into one query's priority queue.
 ///
@@ -154,20 +189,36 @@ impl QueryIngressFence {
 /// to the host's in-memory output state.
 #[derive(Clone, Default)]
 pub(super) struct AtomicPublicationRecovery {
-    required: Arc<AtomicBool>,
+    pending: Arc<Mutex<Option<Arc<QueryResult>>>>,
 }
 
 impl AtomicPublicationRecovery {
     pub(super) fn is_required(&self) -> bool {
-        self.required.load(Ordering::Acquire)
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
-    fn require(&self) {
-        self.required.store(true, Ordering::Release);
+    fn require(&self, result: Arc<QueryResult>) {
+        *self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
     }
 
-    fn reconcile_in_memory(&self) {
-        self.required.store(false, Ordering::Release);
+    fn pending_result(&self) -> Option<Arc<QueryResult>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn reconcile_in_memory(&self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }
 
@@ -178,9 +229,7 @@ struct CommittedPublicationGuard {
 
 impl CommittedPublicationGuard {
     fn new(recovery: AtomicPublicationRecovery, has_output: bool) -> Self {
-        if has_output {
-            recovery.require();
-        }
+        debug_assert!(!has_output || recovery.is_required());
         Self {
             recovery,
             armed: has_output,
@@ -197,9 +246,7 @@ impl CommittedPublicationGuard {
 
 impl Drop for CommittedPublicationGuard {
     fn drop(&mut self) {
-        if self.armed {
-            self.recovery.require();
-        }
+        debug_assert!(!self.armed || self.recovery.is_required());
     }
 }
 
@@ -208,7 +255,6 @@ pub(super) struct QueryHostRuntime {
     instance_id: String,
     query_id: String,
     priority_queue: PriorityQueue,
-    bootstrap_gate: Arc<Notify>,
     status_handle: ComponentStatusHandle,
     future_queue_source: Arc<FutureQueueSource>,
     ingress_fence: QueryIngressFence,
@@ -219,7 +265,6 @@ impl QueryHostRuntime {
         instance_id: String,
         query_id: String,
         priority_queue: PriorityQueue,
-        bootstrap_gate: Arc<Notify>,
         status_handle: ComponentStatusHandle,
         future_queue_source: Arc<FutureQueueSource>,
         ingress_fence: QueryIngressFence,
@@ -228,7 +273,6 @@ impl QueryHostRuntime {
             instance_id,
             query_id,
             priority_queue,
-            bootstrap_gate,
             status_handle,
             future_queue_source,
             ingress_fence,
@@ -274,6 +318,7 @@ pub(super) enum QueryProcessingMode {
 #[derive(Clone)]
 pub(super) struct AtomicQueryResources {
     transaction: AtomicResultTransaction,
+    session_control: Arc<dyn SessionControl>,
     checkpoint_store: Arc<dyn CheckpointStore>,
     outbox_writer: Arc<dyn OutboxWriter>,
     live_results_writer: Arc<dyn LiveResultsWriter>,
@@ -304,6 +349,7 @@ impl QueryProcessingMode {
 
         Self::Atomic(AtomicQueryResources {
             transaction,
+            session_control: created.set.session_control.clone(),
             checkpoint_store: checkpoint_store.clone(),
             outbox_writer: outbox_writer.clone(),
             live_results_writer: live_results_writer.clone(),
@@ -387,12 +433,291 @@ impl QueryOutputDependencies {
     }
 }
 
+/// Host-owned bootstrap lifecycle for one query start.
+pub(super) struct QueryBootstrapScope {
+    inputs: Vec<QueryBootstrapInput>,
+    checkpoint_store: Arc<dyn CheckpointStore>,
+    session_control: Option<Arc<dyn SessionControl>>,
+}
+
+impl QueryBootstrapScope {
+    pub(super) fn new(
+        inputs: Vec<QueryBootstrapInput>,
+        checkpoint_store: Arc<dyn CheckpointStore>,
+        session_control: Option<Arc<dyn SessionControl>>,
+    ) -> Self {
+        Self {
+            inputs,
+            checkpoint_store,
+            session_control,
+        }
+    }
+
+    pub(super) async fn read_recovery_state(
+        checkpoint_store: &dyn CheckpointStore,
+    ) -> Result<QueryBootstrapRecoveryState> {
+        let marker = checkpoint_store
+            .read_checkpoint(QUERY_BOOTSTRAP_MARKER_V1)
+            .await
+            .context("failed to read the query bootstrap recovery marker")?;
+        match marker.map(|checkpoint| checkpoint.sequence) {
+            None => Ok(QueryBootstrapRecoveryState::Absent),
+            Some(0) => Ok(QueryBootstrapRecoveryState::InProgress),
+            Some(1) => Ok(QueryBootstrapRecoveryState::Complete),
+            Some(sequence) => {
+                anyhow::bail!("invalid query bootstrap recovery marker sequence {sequence}")
+            }
+        }
+    }
+
+    async fn run(
+        &mut self,
+        instance_id: &str,
+        query_id: &str,
+        continuous_query: Arc<ContinuousQuery>,
+        mode: QueryProcessingMode,
+        output: Arc<OutputPublicationStage>,
+    ) -> Result<Vec<String>> {
+        if self.inputs.is_empty() {
+            info!("Query '{query_id}' has no bootstrap channels");
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "Query '{query_id}' starting bootstrap from {} sources",
+            self.inputs.len()
+        );
+        if self.checkpoint_store.is_persistent() {
+            self.persist_checkpoints(&[(QUERY_BOOTSTRAP_MARKER_V1, 0, None)])
+                .await
+                .context("failed to persist the bootstrap in-progress marker")?;
+        } else {
+            output.reset_bootstrap_state().await;
+        }
+        output
+            .dispatch_bootstrap_control("bootstrapStarted", Some(self.inputs.len()))
+            .await;
+
+        let processing_lock = Arc::new(AsyncMutex::new(()));
+        let mut tasks = futures::stream::FuturesUnordered::new();
+        let mut aborts = PendingBootstrapTaskAborts::default();
+        for input in std::mem::take(&mut self.inputs) {
+            let source_id = input.source_id.clone();
+            let task = tokio::spawn(
+                process_bootstrap_source(
+                    query_id.to_string(),
+                    input,
+                    continuous_query.clone(),
+                    mode.clone(),
+                    output.clone(),
+                    processing_lock.clone(),
+                )
+                .instrument(tracing::info_span!(
+                    "query_bootstrap",
+                    instance_id = %instance_id,
+                    component_id = %query_id,
+                    component_type = "query",
+                    source_id = %source_id,
+                )),
+            );
+            aborts.push(task.abort_handle());
+            tasks.push(task);
+        }
+
+        let mut handoffs = Vec::new();
+        while let Some(joined) = tasks.next().await {
+            let handoff = joined
+                .context("query bootstrap task failed to join")?
+                .context("query bootstrap source failed")?;
+            handoffs.push(handoff);
+        }
+
+        let checkpoints: Vec<(&str, u64, Option<&Bytes>)> = handoffs
+            .iter()
+            .map(|handoff| {
+                (
+                    handoff.source_id.as_str(),
+                    0,
+                    handoff.source_position.as_ref(),
+                )
+            })
+            .chain(self.checkpoint_store.is_persistent().then_some((
+                QUERY_BOOTSTRAP_MARKER_V1,
+                1,
+                None,
+            )))
+            .collect();
+        self.persist_checkpoints(&checkpoints)
+            .await
+            .context("failed to persist the final bootstrap handoff")?;
+
+        output
+            .dispatch_bootstrap_control("bootstrapCompleted", None)
+            .await;
+        info!("[BOOTSTRAP] Query '{query_id}' bootstrap completed");
+
+        Ok(handoffs
+            .into_iter()
+            .map(|handoff| handoff.source_id)
+            .collect())
+    }
+
+    async fn persist_checkpoints(&self, checkpoints: &[(&str, u64, Option<&Bytes>)]) -> Result<()> {
+        let session = match &self.session_control {
+            Some(session_control) => Some(
+                SessionGuard::begin(session_control.clone())
+                    .await
+                    .context("failed to begin bootstrap checkpoint transaction")?,
+            ),
+            None => None,
+        };
+
+        for (source_id, sequence, source_position) in checkpoints {
+            self.checkpoint_store
+                .stage_checkpoint(source_id, *sequence, *source_position)
+                .await
+                .with_context(|| {
+                    format!("failed to stage bootstrap checkpoint for '{source_id}'")
+                })?;
+        }
+
+        if let Some(session) = session {
+            session
+                .commit()
+                .await
+                .context("failed to commit bootstrap checkpoints")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct PendingBootstrapTaskAborts {
+    handles: Vec<tokio::task::AbortHandle>,
+}
+
+impl PendingBootstrapTaskAborts {
+    fn push(&mut self, handle: tokio::task::AbortHandle) {
+        self.handles.push(handle);
+    }
+}
+
+impl Drop for PendingBootstrapTaskAborts {
+    fn drop(&mut self) {
+        for handle in &self.handles {
+            handle.abort();
+        }
+    }
+}
+
+struct BootstrapSourceHandoff {
+    source_id: String,
+    source_position: Option<Bytes>,
+}
+
+async fn process_bootstrap_source(
+    query_id: String,
+    mut input: QueryBootstrapInput,
+    continuous_query: Arc<ContinuousQuery>,
+    mode: QueryProcessingMode,
+    output: Arc<OutputPublicationStage>,
+    processing_lock: Arc<AsyncMutex<()>>,
+) -> Result<BootstrapSourceHandoff> {
+    let mut count = 0u64;
+    while let Some(event) = input.receiver.recv().await {
+        count = count.saturating_add(1);
+        let _processing = processing_lock.lock().await;
+        process_bootstrap_change(&continuous_query, &mode, &output, event.change)
+            .await
+            .with_context(|| {
+                format!(
+                    "query '{query_id}' failed bootstrap event {count} from source '{}'",
+                    input.source_id
+                )
+            })?;
+    }
+
+    let source_position = match input.result_receiver {
+        Some(receiver) => {
+            let result = receiver
+                .await
+                .with_context(|| {
+                    format!(
+                        "source '{}': bootstrap result channel dropped without a result",
+                        input.source_id
+                    )
+                })?
+                .with_context(|| {
+                    format!("source '{}' bootstrap provider failed", input.source_id)
+                })?;
+            if result.source_position.as_ref().is_some_and(|position| {
+                position.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
+            }) {
+                anyhow::bail!(
+                    "source '{}' bootstrap position exceeds the {} byte limit",
+                    input.source_id,
+                    crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
+                );
+            }
+            result.source_position
+        }
+        None => None,
+    };
+
+    info!(
+        "[BOOTSTRAP] Query '{query_id}' completed bootstrap from source '{}' ({count} events)",
+        input.source_id
+    );
+    Ok(BootstrapSourceHandoff {
+        source_id: input.source_id,
+        source_position,
+    })
+}
+
+async fn process_bootstrap_change(
+    continuous_query: &ContinuousQuery,
+    mode: &QueryProcessingMode,
+    output: &OutputPublicationStage,
+    change: SourceChange,
+) -> Result<()> {
+    let results = match mode {
+        QueryProcessingMode::Atomic(resources) => continuous_query
+            .process_source_change_with_result_hook(
+                change,
+                &resources.transaction,
+                |results| async move {
+                    output
+                        .stage_bootstrap_live_results(&resources.live_results_writer, &results)
+                        .await
+                },
+            )
+            .await
+            .context("atomic bootstrap envelope transaction failed")?,
+        QueryProcessingMode::Legacy => {
+            let results: Arc<[QueryPartEvaluationContext]> = continuous_query
+                .process_source_change(change)
+                .await
+                .context("legacy bootstrap envelope evaluation failed")?
+                .into();
+            output
+                .persist_bootstrap_live_results(&results)
+                .await
+                .context("legacy bootstrap live-result persistence failed")?;
+            results
+        }
+    };
+
+    output.apply_bootstrap_results(&results).await;
+    Ok(())
+}
+
 /// Static, query-specific host for the current fixed live pipeline.
 ///
 /// This intentionally has no generic pipeline traits. It gives each existing live
 /// responsibility one owner while preserving the current orchestration contract.
 pub(super) struct QueryCompositeHost {
     runtime: QueryHostRuntime,
+    bootstrap: QueryBootstrapScope,
     live_input: LiveInputStage,
     future_processing: FutureProcessingStage,
     source_acknowledgement: SourceAcknowledgement,
@@ -402,6 +727,7 @@ pub(super) struct QueryCompositeHost {
 impl QueryCompositeHost {
     pub(super) fn new(
         runtime: QueryHostRuntime,
+        bootstrap: QueryBootstrapScope,
         mode: QueryProcessingMode,
         live: QueryLiveDependencies,
         output: QueryOutputDependencies,
@@ -412,6 +738,7 @@ impl QueryCompositeHost {
 
         Self {
             runtime,
+            bootstrap,
             live_input: LiveInputStage {
                 continuous_query: continuous_query.clone(),
                 checkpoint_store: live.checkpoint_store,
@@ -451,33 +778,281 @@ impl QueryCompositeHost {
         base.stop_common().await
     }
 
+    /// Rebuild process-local output state from the authoritative durable bundle.
+    ///
+    /// This runs before source subscriptions are installed. Atomic bundles must
+    /// reconcile successfully; persistent legacy bundles are reconciled when all
+    /// three durable output resources are available.
+    pub(super) async fn reconcile_output_state(
+        mode: &QueryProcessingMode,
+        dependencies: &QueryOutputDependencies,
+    ) -> Result<()> {
+        let (checkpoint_store, outbox_writer, live_results_writer) = match mode {
+            QueryProcessingMode::Atomic(resources) => (
+                resources.checkpoint_store.clone(),
+                resources.outbox_writer.clone(),
+                resources.live_results_writer.clone(),
+            ),
+            QueryProcessingMode::Legacy => {
+                let (Some(checkpoint_store), Some(outbox_writer), Some(live_results_writer)) = (
+                    dependencies.checkpoint_store.clone(),
+                    dependencies.outbox_writer.clone(),
+                    dependencies.live_results_writer.clone(),
+                ) else {
+                    anyhow::ensure!(
+                        !dependencies.publication_recovery.is_required(),
+                        "atomic publication recovery requires a complete durable output bundle"
+                    );
+                    return Ok(());
+                };
+                if !checkpoint_store.is_persistent() {
+                    return Ok(());
+                }
+                (checkpoint_store, outbox_writer, live_results_writer)
+            }
+        };
+
+        let query_id = dependencies.query_id.as_str();
+        let previous_sequence = dependencies.output_state.read().await.as_of_sequence();
+        let recovery_required = dependencies.publication_recovery.is_required();
+        let pending_result = dependencies.publication_recovery.pending_result();
+        let (result_sequence, outbox_latest, durable_outbox, durable_rows) = tokio::try_join!(
+            checkpoint_store.read_result_sequence(query_id),
+            outbox_writer.read_latest_sequence(query_id),
+            outbox_writer.read_from(query_id, 0),
+            live_results_writer.read_snapshot(query_id),
+        )
+        .context("failed to read the durable query output bundle")?;
+        let durable_sequence = result_sequence.unwrap_or(0);
+        anyhow::ensure!(
+            durable_sequence < u64::MAX,
+            "durable result sequence is exhausted at u64::MAX"
+        );
+
+        if durable_sequence == 0 {
+            anyhow::ensure!(
+                outbox_latest.is_none() && durable_outbox.is_empty(),
+                "durable output is inconsistent: result sequence is 0 but the outbox is not empty"
+            );
+        } else {
+            anyhow::ensure!(
+                outbox_latest == Some(durable_sequence),
+                "durable output is inconsistent: result sequence is {durable_sequence}, \
+                 outbox latest is {outbox_latest:?}"
+            );
+            anyhow::ensure!(
+                !durable_outbox.is_empty(),
+                "durable output is inconsistent: result sequence is {durable_sequence}, \
+                 but the outbox has no retained entry"
+            );
+        }
+
+        let mut decoded_outbox = Vec::with_capacity(durable_outbox.len());
+        let mut prior = None;
+        for (stored_sequence, data) in durable_outbox {
+            if let Some(prior) = prior {
+                anyhow::ensure!(
+                    stored_sequence == prior + 1,
+                    "durable outbox gap between sequences {prior} and {stored_sequence}"
+                );
+            }
+            let result: QueryResult = rmp_serde::from_slice(&data).with_context(|| {
+                format!("failed to deserialize durable outbox sequence {stored_sequence}")
+            })?;
+            anyhow::ensure!(
+                result.query_id == query_id,
+                "durable outbox sequence {stored_sequence} belongs to query '{}', expected '{query_id}'",
+                result.query_id
+            );
+            anyhow::ensure!(
+                result.sequence == stored_sequence,
+                "durable outbox key {stored_sequence} contains result sequence {}",
+                result.sequence
+            );
+            let result = match pending_result
+                .as_ref()
+                .filter(|pending| pending.sequence == stored_sequence)
+            {
+                Some(pending) => {
+                    anyhow::ensure!(
+                        rmp_serde::to_vec(pending.as_ref())? == data,
+                        "process-local fenced result sequence {stored_sequence} does not match durable outbox bytes"
+                    );
+                    pending.clone()
+                }
+                None => Arc::new(result),
+            };
+            prior = Some(stored_sequence);
+            decoded_outbox.push(result);
+        }
+        anyhow::ensure!(
+            prior == outbox_latest,
+            "durable outbox latest metadata {outbox_latest:?} does not match retained entries ending at {prior:?}"
+        );
+
+        let mut results = im::HashMap::new();
+        for (row_signature, data) in durable_rows {
+            let value = rmp_serde::from_slice(&data).with_context(|| {
+                format!("failed to deserialize durable live-result row {row_signature}")
+            })?;
+            anyhow::ensure!(
+                results.insert(row_signature, value).is_none(),
+                "durable live-result snapshot contains duplicate row {row_signature}"
+            );
+        }
+
+        if let Some(latest) = decoded_outbox.last() {
+            let mut latest_mutations = HashMap::new();
+            for diff in &latest.results {
+                match diff {
+                    ResultDiff::Add {
+                        data,
+                        row_signature,
+                    } => {
+                        latest_mutations.insert(*row_signature, Some(data));
+                    }
+                    ResultDiff::Update {
+                        after,
+                        row_signature,
+                        ..
+                    }
+                    | ResultDiff::Aggregation {
+                        after,
+                        row_signature,
+                        ..
+                    } => {
+                        latest_mutations.insert(*row_signature, Some(after));
+                    }
+                    ResultDiff::Delete { row_signature, .. } => {
+                        latest_mutations.insert(*row_signature, None);
+                    }
+                    ResultDiff::Noop => {}
+                }
+            }
+            for (row_signature, expected) in latest_mutations {
+                match expected {
+                    Some(expected) => anyhow::ensure!(
+                        results.get(&row_signature) == Some(expected),
+                        "durable live-result row {row_signature} does not reflect outbox sequence {}",
+                        latest.sequence
+                    ),
+                    None => anyhow::ensure!(
+                        !results.contains_key(&row_signature),
+                        "durable live-result row {row_signature} survived delete in outbox sequence {}",
+                        latest.sequence
+                    ),
+                }
+            }
+        }
+
+        anyhow::ensure!(
+            previous_sequence <= durable_sequence,
+            "process-local output sequence {previous_sequence} is ahead of durable sequence {durable_sequence}"
+        );
+        let recovered = if recovery_required {
+            let pending_sequence = pending_result
+                .as_ref()
+                .map(|result| result.sequence)
+                .context("publication recovery was required without a pending result")?;
+            anyhow::ensure!(
+                pending_sequence == durable_sequence,
+                "fenced output sequence {pending_sequence} does not match durable sequence {durable_sequence}"
+            );
+            // The fence records the one commit that missed publication. Older
+            // retained outbox entries were already delivered and must not be rebroadcast.
+            let recovered: Vec<_> = decoded_outbox
+                .iter()
+                .filter(|result| result.sequence == pending_sequence)
+                .cloned()
+                .collect();
+            anyhow::ensure!(
+                recovered.len() == 1,
+                "durable outbox does not contain fenced output sequence {pending_sequence}"
+            );
+            recovered
+        } else {
+            Vec::new()
+        };
+
+        {
+            let mut state = dependencies.output_state.write().await;
+            state.hydrate(results, durable_sequence, decoded_outbox);
+            dependencies
+                .output_metrics
+                .record_live_results_count(state.results_len());
+            let earliest = state.outbox_earliest_seq().unwrap_or(0);
+            dependencies.output_metrics.update_outbox(
+                state.outbox_len(),
+                earliest,
+                state.as_of_sequence(),
+            );
+        }
+
+        dependencies.publication_recovery.reconcile_in_memory();
+        for result in recovered {
+            let dispatchers = dependencies.dispatchers.read().await;
+            for dispatcher in dispatchers.iter() {
+                if let Err(error) = dispatcher.dispatch_change(result.clone()).await {
+                    debug!(
+                        "Query '{query_id}' could not deliver recovered sequence {} to an existing subscriber: {error}",
+                        result.sequence
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn run(mut self, mut shutdown_rx: oneshot::Receiver<()>) {
         info!(
-            "Query '{}' waiting for bootstrap gate before processing events",
+            "Query '{}' starting host-owned bootstrap",
             self.runtime.query_id
         );
 
-        tokio::select! {
+        let bootstrap_result = tokio::select! {
             biased;
 
             _ = &mut shutdown_rx => {
                 info!(
-                    "Query '{}' received shutdown during bootstrap wait, exiting",
+                    "Query '{}' received shutdown during bootstrap, exiting",
                     self.runtime.query_id
                 );
                 return;
             }
 
-            _ = self.runtime.bootstrap_gate.notified() => {
-                info!(
-                    "Query '{}' bootstrap gate opened, starting event processing",
+            result = self.bootstrap.run(
+                &self.runtime.instance_id,
+                &self.runtime.query_id,
+                self.live_input.continuous_query.clone(),
+                self.live_input.mode.clone(),
+                self.live_input.output.clone(),
+            ) => result,
+        };
+
+        let bootstrapped_sources = match bootstrap_result {
+            Ok(sources) => sources,
+            Err(error) => {
+                let detail = format!("{error:#}");
+                error!(
+                    "[BOOTSTRAP] Query '{}' bootstrap failed: {detail}",
                     self.runtime.query_id
                 );
+                self.runtime.ingress_fence.close().await;
+                self.runtime.future_queue_source.stop().await;
+                self.runtime
+                    .status_handle
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Bootstrap failed: {detail}")),
+                    )
+                    .await;
+                return;
             }
+        };
+        for source_id in bootstrapped_sources {
+            self.source_acknowledgement.advance(&source_id, Some(0));
         }
 
-        // Bootstrap coordination remains in DrasiQuery for now. The host owns the
-        // post-gate transition without overriding a concurrent stop/error transition.
         let should_run = matches!(
             self.runtime.status_handle.get_status().await,
             ComponentStatus::Starting
@@ -493,10 +1068,11 @@ impl QueryCompositeHost {
         } else {
             let current = self.runtime.status_handle.get_status().await;
             warn!(
-                "Query '{}' bootstrap completed but status is {current:?}, \
-                 skipping transition to Running",
+                "Query '{}' bootstrap completed with status {current:?}; skipping live processing",
                 self.runtime.query_id
             );
+            self.runtime.ingress_fence.close().await;
+            return;
         }
 
         if let Err(e) = self.runtime.future_queue_source.start().await {
@@ -549,8 +1125,8 @@ impl QueryCompositeHost {
                         let status_detail = if self.publication_recovery.is_required() {
                             format!(
                                 "Atomic output committed before in-memory publication; \
-                                 ingress is fenced and in-process restart requires A7 \
-                                 output reconciliation: {detail}"
+                                 ingress is fenced and will be reconciled from durable \
+                                 output before restart: {detail}"
                             )
                         } else {
                             format!(
@@ -876,19 +1452,20 @@ impl LiveInputStage {
                             .await
                             .map_err(index_error)?;
                         output.stage_atomic(&staging_resources, &prepared).await?;
-                        let mut slot = hook_slot.lock().map_err(|_| {
-                            IndexError::other(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "prepared query output slot was poisoned",
-                            ))
-                        })?;
-                        *slot = Some(prepared);
-                    }
-
-                    output.observe_output_staged().await?;
-                    if has_query_output(&results) {
-                        // Arm before the cancellable backend commit begins.
-                        output.arm_publication_recovery();
+                        let recovery_result = prepared.result.clone();
+                        {
+                            let mut slot = hook_slot.lock().map_err(|_| {
+                                IndexError::other(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "prepared query output slot was poisoned",
+                                ))
+                            })?;
+                            *slot = Some(prepared);
+                        }
+                        output.observe_output_staged().await?;
+                        output.arm_publication_recovery(recovery_result);
+                    } else {
+                        output.observe_output_staged().await?;
                     }
                     Ok(())
                 },
@@ -1084,19 +1661,20 @@ impl FutureProcessingStage {
                                 .await
                                 .map_err(index_error)?;
                             output.stage_atomic(&staging_resources, &prepared).await?;
-                            let mut slot = hook_slot.lock().map_err(|_| {
-                                IndexError::other(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "prepared due-future output slot was poisoned",
-                                ))
-                            })?;
-                            *slot = Some(prepared);
-                        }
-
-                        output.observe_output_staged().await?;
-                        if has_query_output(&due_result.results) {
-                            // Arm before the cancellable backend commit begins.
-                            output.arm_publication_recovery();
+                            let recovery_result = prepared.result.clone();
+                            {
+                                let mut slot = hook_slot.lock().map_err(|_| {
+                                    IndexError::other(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        "prepared due-future output slot was poisoned",
+                                    ))
+                                })?;
+                                *slot = Some(prepared);
+                            }
+                            output.observe_output_staged().await?;
+                            output.arm_publication_recovery(recovery_result);
+                        } else {
+                            output.observe_output_staged().await?;
                         }
                         Ok(())
                     },
@@ -1191,6 +1769,76 @@ impl OutputPublicationStage {
             observer: dependencies.observer,
             publication_recovery: dependencies.publication_recovery,
         }
+    }
+
+    async fn dispatch_bootstrap_control(&self, signal: &str, source_count: Option<usize>) {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "control_signal".to_string(),
+            serde_json::Value::String(signal.to_string()),
+        );
+        if let Some(source_count) = source_count {
+            metadata.insert("source_count".to_string(), source_count.into());
+        }
+        let result = Arc::new(QueryResult::new(
+            self.query_id.clone(),
+            0,
+            chrono::Utc::now(),
+            Vec::new(),
+            metadata,
+        ));
+
+        let dispatchers = self.dispatchers.read().await;
+        for dispatcher in dispatchers.iter() {
+            if let Err(error) = dispatcher.dispatch_change(result.clone()).await {
+                debug!(
+                    "Query '{}' failed to dispatch {signal}: {error}",
+                    self.query_id
+                );
+            }
+        }
+    }
+
+    async fn reset_bootstrap_state(&self) {
+        self.output_state.write().await.reset();
+        self.output_metrics.record_live_results_count(0);
+        self.output_metrics.update_outbox(0, 0, 0);
+    }
+
+    async fn stage_bootstrap_live_results(
+        &self,
+        writer: &Arc<dyn LiveResultsWriter>,
+        results: &[QueryPartEvaluationContext],
+    ) -> std::result::Result<(), IndexError> {
+        let diffs = result_diffs_from_evaluation(results);
+        let serialized = materialize_live_result_data(&diffs).map_err(index_error)?;
+        apply_live_result_data(writer.as_ref(), &self.query_id, &serialized).await
+    }
+
+    async fn persist_bootstrap_live_results(
+        &self,
+        results: &[QueryPartEvaluationContext],
+    ) -> Result<()> {
+        let Some(writer) = &self.live_results_writer else {
+            return Ok(());
+        };
+        let diffs = result_diffs_from_evaluation(results);
+        let serialized = materialize_live_result_data(&diffs)?;
+        apply_live_result_data(writer.as_ref(), &self.query_id, &serialized)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn apply_bootstrap_results(&self, results: &[QueryPartEvaluationContext]) {
+        let diffs = result_diffs_from_evaluation(results);
+        if diffs.is_empty() {
+            return;
+        }
+
+        let mut state = self.output_state.write().await;
+        state.apply_diffs(&diffs);
+        self.output_metrics
+            .record_live_results_count(state.results_len());
     }
 
     async fn publish(
@@ -1298,8 +1946,8 @@ impl OutputPublicationStage {
         CommittedPublicationGuard::new(self.publication_recovery.clone(), has_output)
     }
 
-    fn arm_publication_recovery(&self) {
-        self.publication_recovery.require();
+    fn arm_publication_recovery(&self, result: Arc<QueryResult>) {
+        self.publication_recovery.require(result);
     }
 
     fn clear_publication_recovery(&self) {
@@ -1317,7 +1965,7 @@ impl OutputPublicationStage {
             result, started_at, ..
         } = prepared;
         let mut state = self.output_state.write().await;
-        let result = state.apply_committed_result(result)?;
+        let result = state.apply_committed_arc(result)?;
 
         let duration_ns = u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.output_metrics
@@ -1352,8 +2000,171 @@ impl OutputPublicationStage {
     }
 }
 
+fn result_diffs_from_evaluation(results: &[QueryPartEvaluationContext]) -> Vec<ResultDiff> {
+    results
+        .iter()
+        .map(|context| match context {
+            QueryPartEvaluationContext::Adding {
+                after,
+                row_signature,
+            } => ResultDiff::Add {
+                data: query_variables_to_json(after),
+                row_signature: *row_signature,
+            },
+            QueryPartEvaluationContext::Removing {
+                before,
+                row_signature,
+            } => ResultDiff::Delete {
+                data: query_variables_to_json(before),
+                row_signature: *row_signature,
+            },
+            QueryPartEvaluationContext::Updating {
+                before,
+                after,
+                row_signature,
+            } => {
+                let after = query_variables_to_json(after);
+                ResultDiff::Update {
+                    data: after.clone(),
+                    before: query_variables_to_json(before),
+                    after,
+                    grouping_keys: None,
+                    row_signature: *row_signature,
+                }
+            }
+            QueryPartEvaluationContext::Aggregation {
+                before,
+                after,
+                row_signature,
+                ..
+            } => ResultDiff::Aggregation {
+                before: before.as_ref().map(query_variables_to_json),
+                after: query_variables_to_json(after),
+                row_signature: *row_signature,
+            },
+            QueryPartEvaluationContext::Noop => ResultDiff::Noop,
+        })
+        .collect()
+}
+
+pub(super) fn query_variables_to_json(
+    variables: &drasi_core::evaluation::context::QueryVariables,
+) -> serde_json::Value {
+    let values = variables
+        .iter()
+        .map(|(key, value)| (key.to_string(), variable_value_to_json(value)))
+        .collect();
+    serde_json::Value::Object(values)
+}
+
+pub(super) fn variable_value_to_json(
+    value: &drasi_core::evaluation::variable_value::VariableValue,
+) -> serde_json::Value {
+    use drasi_core::evaluation::variable_value::VariableValue;
+
+    match value {
+        VariableValue::Null => serde_json::Value::Null,
+        VariableValue::Bool(value) => serde_json::Value::Bool(*value),
+        VariableValue::Float(value) => {
+            if value.is_f64() {
+                let value = value.to_string();
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or_else(|| serde_json::Value::String(value))
+            } else {
+                serde_json::Value::String(value.to_string())
+            }
+        }
+        VariableValue::Integer(value) => value
+            .as_i64()
+            .map(serde_json::Number::from)
+            .or_else(|| value.as_u64().map(serde_json::Number::from))
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| serde_json::Value::String(value.to_string())),
+        VariableValue::String(value) => serde_json::Value::String(value.clone()),
+        VariableValue::List(values) => {
+            serde_json::Value::Array(values.iter().map(variable_value_to_json).collect())
+        }
+        VariableValue::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), variable_value_to_json(value)))
+                .collect(),
+        ),
+        VariableValue::Date(value) => serde_json::Value::String(value.to_string()),
+        VariableValue::LocalTime(value) => serde_json::Value::String(value.to_string()),
+        VariableValue::ZonedTime(value) => serde_json::Value::String(value.to_string()),
+        VariableValue::LocalDateTime(value) => serde_json::Value::String(value.to_string()),
+        VariableValue::ZonedDateTime(value) => {
+            serde_json::Value::String(value.datetime().to_rfc3339())
+        }
+        VariableValue::Duration(value) => serde_json::Value::String(value.to_string()),
+        _ => serde_json::Value::String(format!("{value:?}")),
+    }
+}
+
+fn materialize_live_result_data(diffs: &[ResultDiff]) -> Result<Vec<(u64, Option<Vec<u8>>)>> {
+    let mut serialized = Vec::with_capacity(diffs.len());
+    for diff in diffs {
+        match diff {
+            ResultDiff::Add {
+                data,
+                row_signature,
+            } => serialized.push((
+                *row_signature,
+                Some(
+                    rmp_serde::to_vec(data)
+                        .with_context(|| format!("failed to serialize Add row {row_signature}"))?,
+                ),
+            )),
+            ResultDiff::Update {
+                after,
+                row_signature,
+                ..
+            }
+            | ResultDiff::Aggregation {
+                after,
+                row_signature,
+                ..
+            } => serialized.push((
+                *row_signature,
+                Some(
+                    rmp_serde::to_vec(after)
+                        .with_context(|| format!("failed to serialize row {row_signature}"))?,
+                ),
+            )),
+            ResultDiff::Delete { row_signature, .. } => {
+                serialized.push((*row_signature, None));
+            }
+            ResultDiff::Noop => {}
+        }
+    }
+    Ok(serialized)
+}
+
+async fn apply_live_result_data(
+    writer: &dyn LiveResultsWriter,
+    query_id: &str,
+    serialized: &[(u64, Option<Vec<u8>>)],
+) -> std::result::Result<(), IndexError> {
+    let mutations: Vec<_> = serialized
+        .iter()
+        .map(|(row_signature, data)| RowMutation {
+            row_signature: *row_signature,
+            data: data.as_deref(),
+        })
+        .collect();
+    if mutations.is_empty() {
+        return Ok(());
+    }
+    writer.apply_mutations(query_id, &mutations).await
+}
+
 struct PreparedQueryOutput {
-    result: QueryResult,
+    result: Arc<QueryResult>,
     started_at: Instant,
     outbox_data: Option<Vec<u8>>,
     live_result_data: Option<Vec<(u64, Option<Vec<u8>>)>>,
@@ -1403,7 +2214,7 @@ impl PreparedQueryOutput {
         .ok_or_else(|| anyhow::anyhow!("non-Noop query evaluation produced no change envelope"))?;
 
         Ok(Some(Self {
-            result: crate::change::query_result_from_envelope(&envelope)?,
+            result: Arc::new(crate::change::query_result_from_envelope(&envelope)?),
             started_at,
             outbox_data: None,
             live_result_data: None,
@@ -1412,48 +2223,10 @@ impl PreparedQueryOutput {
 
     fn materialize_atomic(&mut self) -> Result<()> {
         self.outbox_data = Some(
-            rmp_serde::to_vec(&self.result)
+            rmp_serde::to_vec(self.result.as_ref())
                 .context("failed to serialize prepared query result for the atomic outbox")?,
         );
-
-        let mut live_result_data = Vec::with_capacity(self.result.results.len());
-        for diff in &self.result.results {
-            match diff {
-                ResultDiff::Add {
-                    data,
-                    row_signature,
-                } => live_result_data.push((
-                    *row_signature,
-                    Some(rmp_serde::to_vec(data).with_context(|| {
-                        format!(
-                            "failed to serialize prepared Add row (sig={row_signature}) for atomic live results"
-                        )
-                    })?),
-                )),
-                ResultDiff::Update {
-                    after,
-                    row_signature,
-                    ..
-                }
-                | ResultDiff::Aggregation {
-                    after,
-                    row_signature,
-                    ..
-                } => live_result_data.push((
-                    *row_signature,
-                    Some(rmp_serde::to_vec(after).with_context(|| {
-                        format!(
-                            "failed to serialize prepared row (sig={row_signature}) for atomic live results"
-                        )
-                    })?),
-                )),
-                ResultDiff::Delete { row_signature, .. } => {
-                    live_result_data.push((*row_signature, None));
-                }
-                ResultDiff::Noop => {}
-            }
-        }
-        self.live_result_data = Some(live_result_data);
+        self.live_result_data = Some(materialize_live_result_data(&self.result.results)?);
         Ok(())
     }
 }
@@ -1493,7 +2266,7 @@ pub(super) async fn dispatch_query_results(
         let query_result = prepared.result;
 
         let mut state = output_state.write().await;
-        let result = match state.try_apply_prepared_result(query_result) {
+        let result = match state.try_apply_prepared_arc(query_result) {
             Some(result) => result,
             None => continue,
         };
@@ -1648,7 +2421,11 @@ mod tests {
 
     use async_trait::async_trait;
     use drasi_core::{
-        evaluation::functions::FunctionRegistry,
+        evaluation::{
+            functions::{Function, FunctionRegistry, ScalarFunction},
+            variable_value::VariableValue,
+            ExpressionEvaluationContext, FunctionError, FunctionEvaluationError,
+        },
         in_memory_index::{
             in_memory_checkpoint_store::InMemoryCheckpointStore,
             in_memory_future_queue::InMemoryFutureQueue,
@@ -1667,7 +2444,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        channels::{ChangeReceiver, ChannelChangeDispatcher, ControlOperation, SourceControl},
+        bootstrap::BootstrapResult,
+        channels::{
+            BootstrapEvent, ChangeReceiver, ChannelChangeDispatcher, ControlOperation,
+            SourceControl,
+        },
         config::{QueryConfig, QueryLanguage},
     };
 
@@ -1685,9 +2466,25 @@ mod tests {
         }
     }
 
+    struct FailingScalar;
+
+    #[async_trait]
+    impl ScalarFunction for FailingScalar {
+        async fn call(
+            &self,
+            _context: &ExpressionEvaluationContext,
+            expression: &drasi_query_ast::ast::FunctionExpression,
+            _args: Vec<VariableValue>,
+        ) -> std::result::Result<VariableValue, FunctionError> {
+            Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            })
+        }
+    }
+
     struct HostFixture {
         base: QueryBase,
-        bootstrap_gate: Arc<Notify>,
         priority_queue: PriorityQueue,
         output_state: Arc<RwLock<QueryOutputState>>,
         output_rx: Box<dyn ChangeReceiver<QueryResult>>,
@@ -1708,11 +2505,40 @@ mod tests {
         Arc::new(builder.build().await)
     }
 
+    async fn build_failing_query() -> Arc<ContinuousQuery> {
+        let functions = Arc::new(FunctionRegistry::new());
+        functions.register_function("fail", Function::Scalar(Arc::new(FailingScalar)));
+        let parser = Arc::new(CypherParser::new(functions.clone()));
+        Arc::new(
+            QueryBuilder::new("MATCH (n:Person) RETURN fail() AS value", parser)
+                .with_function_registry(functions)
+                .build()
+                .await,
+        )
+    }
+
     async fn build_host(
         continuous_query: Arc<ContinuousQuery>,
         checkpoint_store: Arc<dyn CheckpointStore>,
         checkpoint_sequences: HashMap<String, u64>,
         position_handles: HashMap<String, Arc<AtomicU64>>,
+    ) -> (QueryCompositeHost, HostFixture) {
+        build_host_with_bootstrap(
+            continuous_query,
+            checkpoint_store,
+            checkpoint_sequences,
+            position_handles,
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn build_host_with_bootstrap(
+        continuous_query: Arc<ContinuousQuery>,
+        checkpoint_store: Arc<dyn CheckpointStore>,
+        checkpoint_sequences: HashMap<String, u64>,
+        position_handles: HashMap<String, Arc<AtomicU64>>,
+        bootstrap_inputs: Vec<QueryBootstrapInput>,
     ) -> (QueryCompositeHost, HostFixture) {
         let base = QueryBase::new(QueryConfig {
             id: QUERY_ID.to_string(),
@@ -1741,7 +2567,6 @@ mod tests {
             Arc::new(RwLock::new(vec![Box::new(dispatcher)]));
         let output_state = Arc::new(RwLock::new(QueryOutputState::new(16)));
         let priority_queue = PriorityQueue::new(16);
-        let bootstrap_gate = Arc::new(Notify::new());
         let future_queue_source = Arc::new(FutureQueueSource::new(
             continuous_query.future_queue(),
             QUERY_ID.to_string(),
@@ -1752,11 +2577,11 @@ mod tests {
                 "host-test".to_string(),
                 QUERY_ID.to_string(),
                 priority_queue.clone(),
-                bootstrap_gate.clone(),
                 base.status_handle(),
                 future_queue_source.clone(),
                 QueryIngressFence::new(priority_queue.clone()),
             ),
+            QueryBootstrapScope::new(bootstrap_inputs, checkpoint_store.clone(), None),
             QueryProcessingMode::legacy(),
             QueryLiveDependencies::new(
                 continuous_query,
@@ -1780,7 +2605,6 @@ mod tests {
             host,
             HostFixture {
                 base,
-                bootstrap_gate,
                 priority_queue,
                 output_state,
                 output_rx,
@@ -1857,7 +2681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_gates_live_envelopes_and_terminates_through_query_base() {
+    async fn host_processes_live_envelopes_and_terminates_through_query_base() {
         let query = build_query("MATCH (n:Person) RETURN n.name AS name", None).await;
         let checkpoint_store = Arc::new(InMemoryCheckpointStore::new());
         let position_handle = Arc::new(AtomicU64::new(u64::MAX));
@@ -1884,12 +2708,6 @@ mod tests {
         );
 
         host.start(&fixture.base).await;
-        tokio::task::yield_now().await;
-        assert_eq!(fixture.base.get_status().await, ComponentStatus::Starting);
-        assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
-        assert_eq!(fixture.priority_queue.metrics().await.total_dequeued, 0);
-
-        fixture.bootstrap_gate.notify_one();
         wait_for_status(&fixture.base, ComponentStatus::Running).await;
         let result = receive_result(&mut fixture.output_rx).await;
 
@@ -1905,6 +2723,167 @@ mod tests {
         assert_eq!(fixture.priority_queue.metrics().await.total_dequeued, 1);
 
         stop_host(&fixture).await;
+    }
+
+    #[tokio::test]
+    async fn host_bootstrap_handoff_keeps_live_input_buffered_until_completion() {
+        let query = build_query("MATCH (n:Person) RETURN n.name AS name", None).await;
+        let checkpoint_store = Arc::new(InMemoryCheckpointStore::new());
+        let position_handle = Arc::new(AtomicU64::new(u64::MAX));
+        let (bootstrap_tx, bootstrap_rx) = mpsc::channel(4);
+        let (result_tx, result_rx) = oneshot::channel();
+        let (host, mut fixture) = build_host_with_bootstrap(
+            query,
+            checkpoint_store.clone(),
+            HashMap::new(),
+            HashMap::from([(SOURCE_ID.to_string(), position_handle.clone())]),
+            vec![QueryBootstrapInput::new(SOURCE_ID.to_string(), bootstrap_rx, Some(result_rx))],
+        )
+        .await;
+
+        assert!(
+            fixture
+                .priority_queue
+                .enqueue(sequenced_event(
+                    person_insert("person-live", "Live", 2_000),
+                    1,
+                    Bytes::from_static(b"live-position"),
+                ))
+                .await
+        );
+        host.start(&fixture.base).await;
+
+        let started = receive_result(&mut fixture.output_rx).await;
+        assert_eq!(started.sequence, 0);
+        assert_eq!(started.metadata["control_signal"], "bootstrapStarted");
+        bootstrap_tx
+            .send(BootstrapEvent {
+                source_id: SOURCE_ID.to_string(),
+                change: person_insert("person-bootstrap", "Bootstrap", 1_000),
+                timestamp: chrono::Utc::now(),
+                sequence: 0,
+            })
+            .await
+            .expect("send bootstrap event");
+        tokio::task::yield_now().await;
+        assert_eq!(fixture.base.get_status().await, ComponentStatus::Starting);
+        assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
+        assert_eq!(fixture.priority_queue.metrics().await.total_dequeued, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), fixture.output_rx.recv())
+                .await
+                .is_err(),
+            "live output must remain gated while bootstrap is open"
+        );
+
+        result_tx
+            .send(Ok(BootstrapResult {
+                event_count: 1,
+                source_position: Some(Bytes::from_static(b"bootstrap-boundary")),
+            }))
+            .expect("send bootstrap result");
+        drop(bootstrap_tx);
+
+        let completed = receive_result(&mut fixture.output_rx).await;
+        assert_eq!(completed.sequence, 0);
+        assert_eq!(completed.metadata["control_signal"], "bootstrapCompleted");
+        wait_for_status(&fixture.base, ComponentStatus::Running).await;
+        let live = receive_result(&mut fixture.output_rx).await;
+        assert_eq!(live.sequence, 1);
+        assert_eq!(fixture.output_state.read().await.results_len(), 2);
+        assert_eq!(
+            checkpoint_store
+                .read_checkpoint(SOURCE_ID)
+                .await
+                .expect("read live checkpoint"),
+            Some(SourceCheckpoint::new(
+                1,
+                Some(Bytes::from_static(b"live-position"))
+            ))
+        );
+        assert_eq!(position_handle.load(Ordering::Acquire), 1);
+
+        stop_host(&fixture).await;
+    }
+
+    #[tokio::test]
+    async fn bootstrap_evaluation_failure_fences_without_completion_and_can_rebootstrap() {
+        let checkpoint_store = Arc::new(InMemoryCheckpointStore::new());
+        let (bootstrap_tx, bootstrap_rx) = mpsc::channel(2);
+        let (result_tx, result_rx) = oneshot::channel();
+        let (host, mut failed_fixture) = build_host_with_bootstrap(
+            build_failing_query().await,
+            checkpoint_store.clone(),
+            HashMap::new(),
+            HashMap::new(),
+            vec![QueryBootstrapInput::new(SOURCE_ID.to_string(), bootstrap_rx, Some(result_rx))],
+        )
+        .await;
+        host.start(&failed_fixture.base).await;
+        let started = receive_result(&mut failed_fixture.output_rx).await;
+        assert_eq!(started.metadata["control_signal"], "bootstrapStarted");
+
+        bootstrap_tx
+            .send(BootstrapEvent {
+                source_id: SOURCE_ID.to_string(),
+                change: person_insert("person-fails", "Failure", 1_000),
+                timestamp: chrono::Utc::now(),
+                sequence: 0,
+            })
+            .await
+            .expect("send failing bootstrap event");
+        drop(bootstrap_tx);
+        let _ = result_tx.send(Ok(BootstrapResult::default()));
+        wait_for_status(&failed_fixture.base, ComponentStatus::Error).await;
+        assert_eq!(failed_fixture.output_state.read().await.results_len(), 0);
+        assert!(
+            checkpoint_store
+                .read_checkpoint(SOURCE_ID)
+                .await
+                .expect("read failed-bootstrap checkpoint")
+                .is_none(),
+            "a failed bootstrap must not publish its handoff checkpoint"
+        );
+        if let Ok(Ok(result)) =
+            tokio::time::timeout(Duration::from_millis(50), failed_fixture.output_rx.recv()).await
+        {
+            assert_ne!(
+                result.metadata["control_signal"], "bootstrapCompleted",
+                "a failed bootstrap must not emit bootstrapCompleted"
+            );
+        }
+        stop_host(&failed_fixture).await;
+
+        let (retry_tx, retry_rx) = mpsc::channel(2);
+        let (retry_result_tx, retry_result_rx) = oneshot::channel();
+        let (retry_host, mut retry_fixture) = build_host_with_bootstrap(
+            build_query("MATCH (n:Person) RETURN n.name AS name", None).await,
+            checkpoint_store.clone(),
+            HashMap::new(),
+            HashMap::new(),
+            vec![QueryBootstrapInput::new(SOURCE_ID.to_string(), retry_rx, Some(retry_result_rx))],
+        )
+        .await;
+        retry_host.start(&retry_fixture.base).await;
+        let _ = receive_result(&mut retry_fixture.output_rx).await;
+        retry_tx
+            .send(BootstrapEvent {
+                source_id: SOURCE_ID.to_string(),
+                change: person_insert("person-retry", "Recovered", 2_000),
+                timestamp: chrono::Utc::now(),
+                sequence: 0,
+            })
+            .await
+            .expect("send retry bootstrap event");
+        retry_result_tx
+            .send(Ok(BootstrapResult::default()))
+            .expect("send retry bootstrap result");
+        drop(retry_tx);
+        let completed = receive_result(&mut retry_fixture.output_rx).await;
+        assert_eq!(completed.metadata["control_signal"], "bootstrapCompleted");
+        wait_for_status(&retry_fixture.base, ComponentStatus::Running).await;
+        assert_eq!(retry_fixture.output_state.read().await.results_len(), 1);
+        stop_host(&retry_fixture).await;
     }
 
     #[tokio::test]
@@ -1943,7 +2922,6 @@ mod tests {
         let (host, mut fixture) =
             build_host(query, checkpoint_store, HashMap::new(), HashMap::new()).await;
         host.start(&fixture.base).await;
-        fixture.bootstrap_gate.notify_one();
         wait_for_status(&fixture.base, ComponentStatus::Running).await;
 
         let now = chrono::Utc::now();
@@ -2070,7 +3048,6 @@ mod tests {
         )
         .await;
         host.start(&fixture.base).await;
-        fixture.bootstrap_gate.notify_one();
         wait_for_status(&fixture.base, ComponentStatus::Running).await;
 
         let source_position = Bytes::from_static(b"retry-position");
@@ -2180,7 +3157,6 @@ mod tests {
         let (host, mut fixture) =
             build_host(query, checkpoint_store, HashMap::new(), HashMap::new()).await;
         host.start(&fixture.base).await;
-        fixture.bootstrap_gate.notify_one();
         wait_for_status(&fixture.base, ComponentStatus::Running).await;
 
         assert!(
@@ -2229,7 +3205,6 @@ mod tests {
 
         fixture.future_queue_source.start().await.unwrap();
         host.start(&fixture.base).await;
-        fixture.bootstrap_gate.notify_one();
         wait_for_status(&fixture.base, ComponentStatus::Error).await;
 
         fixture.future_queue_source.stop().await;

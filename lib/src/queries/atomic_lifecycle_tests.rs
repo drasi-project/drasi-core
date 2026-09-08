@@ -35,7 +35,7 @@ use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 
 use super::{
     manager::{DrasiQuery, Query, QueryManager},
-    query_composite_host::{QueryIngressFence, QueryProcessingObserver},
+    query_composite_host::{QueryIngressFence, QueryProcessingObserver, QUERY_BOOTSTRAP_MARKER_V1},
 };
 use crate::{
     channels::{
@@ -394,6 +394,15 @@ fn query_config(query_id: &str) -> QueryConfig {
     query_config_with_sources(query_id, &[SOURCE_ID])
 }
 
+fn query_config_with_policy(
+    query_id: &str,
+    recovery_policy: crate::recovery::RecoveryPolicy,
+) -> QueryConfig {
+    let mut config = query_config(query_id);
+    config.recovery_policy = Some(recovery_policy);
+    config
+}
+
 fn query_config_with_sources(query_id: &str, source_ids: &[&str]) -> QueryConfig {
     QueryConfig {
         id: query_id.to_string(),
@@ -606,10 +615,15 @@ async fn start_reaps_existing_forwarders_before_installing_replacements() {
 }
 
 #[tokio::test]
-async fn post_commit_fence_rejects_restart_without_reusing_durable_sequence() {
+async fn post_commit_fence_reconciles_and_replays_without_reusing_sequence() {
     let temp_dir = tempfile::TempDir::new().expect("create temp directory");
     let harness = LifecycleHarness::new(temp_dir.path()).await;
     let query = harness.add_query("atomic-post-commit").await;
+    let mut results = query
+        .subscribe("post-commit-recovery".to_string())
+        .await
+        .expect("subscribe before post-commit failure")
+        .receiver;
     concrete_query(&query)
         .set_processing_observer(Some(Arc::new(FailAfterCommit)))
         .await;
@@ -640,18 +654,7 @@ async fn post_commit_fence_rejects_restart_without_reusing_durable_sequence() {
         .expect("read committed outbox");
     assert_eq!(durable.len(), 1);
     assert_eq!(durable[0].0, 1);
-    let reconfigure = harness
-        .manager
-        .update_query(
-            "atomic-post-commit".to_string(),
-            query_config("atomic-post-commit"),
-        )
-        .await
-        .expect_err("reconfiguration must preserve the recovery fence");
-    assert!(
-        reconfigure.to_string().contains("A7 output reconciliation"),
-        "unexpected reconfiguration error: {reconfigure:#}"
-    );
+    drop(outbox);
 
     harness
         .manager
@@ -664,34 +667,48 @@ async fn post_commit_fence_rejects_restart_without_reusing_durable_sequence() {
         ComponentStatus::Stopped,
     )
     .await;
+    concrete.set_processing_observer(None).await;
 
-    let restart = harness
+    harness
         .manager
         .start_query("atomic-post-commit".to_string())
         .await
-        .expect_err("unsafe in-process restart must be rejected");
-    assert!(
-        restart.to_string().contains("A7 output reconciliation"),
-        "unexpected restart error: {restart:#}"
-    );
+        .expect("post-commit restart should reconcile durable output");
     wait_for_status(
         &harness.manager,
         "atomic-post-commit",
-        ComponentStatus::Error,
+        ComponentStatus::Running,
     )
     .await;
-    assert_eq!(query.subscription_count().await, 0);
-    assert_eq!(concrete.output_sequence_for_test().await, 0);
+    let recovered = receive_result(&mut results).await;
+    assert_eq!(recovered.sequence, 1);
     assert_eq!(
-        outbox
+        rmp_serde::to_vec(recovered.as_ref()).expect("serialize recovered result"),
+        durable[0].1,
+        "recovered and persisted QueryResult bytes must remain identical"
+    );
+    assert!(!concrete.publication_recovery_required());
+    assert_eq!(concrete.output_sequence_for_test().await, 1);
+
+    harness
+        .source
+        .inject(2, "after-recovery")
+        .await
+        .expect("inject after post-commit recovery");
+    assert_eq!(receive_result(&mut results).await.sequence, 2);
+    assert_eq!(
+        concrete
+            .get_outbox_writer()
+            .await
+            .expect("reopened atomic outbox writer")
             .read_from("atomic-post-commit", 0)
             .await
             .expect("reread committed outbox")
             .into_iter()
             .map(|(sequence, _)| sequence)
             .collect::<Vec<_>>(),
-        vec![1],
-        "rejected restart must not reuse or overwrite the durable sequence"
+        vec![1, 2],
+        "restart must continue after the durable sequence"
     );
 
     let first_stop = harness.manager.stop_query("atomic-post-commit".to_string());
@@ -707,6 +724,288 @@ async fn post_commit_fence_rejects_restart_without_reusing_durable_sequence() {
     .await;
     assert_eq!(query.subscription_count().await, 0);
 
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop lifecycle source");
+}
+
+#[tokio::test]
+async fn strict_recovery_rejects_missing_durable_outbox() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let harness = LifecycleHarness::new(temp_dir.path()).await;
+    let query = harness
+        .add_query_config(query_config_with_policy(
+            "atomic-strict-output",
+            crate::recovery::RecoveryPolicy::Strict,
+        ))
+        .await;
+    let mut results = query
+        .subscribe("strict-output".to_string())
+        .await
+        .expect("subscribe strict output")
+        .receiver;
+    harness.start_query("atomic-strict-output").await;
+    harness
+        .source
+        .inject(1, "durable")
+        .await
+        .expect("inject durable result");
+    assert_eq!(receive_result(&mut results).await.sequence, 1);
+    harness
+        .manager
+        .stop_query("atomic-strict-output".to_string())
+        .await
+        .expect("stop strict query");
+
+    let outbox = concrete_query(&query)
+        .get_outbox_writer()
+        .await
+        .expect("strict outbox");
+    outbox
+        .clear("atomic-strict-output")
+        .await
+        .expect("corrupt durable outbox");
+    drop(outbox);
+
+    let error = harness
+        .manager
+        .start_query("atomic-strict-output".to_string())
+        .await
+        .expect_err("Strict recovery must reject an incomplete durable bundle");
+    assert!(
+        format!("{error:#}").contains("outbox"),
+        "unexpected reconciliation error: {error:#}"
+    );
+    wait_for_status(
+        &harness.manager,
+        "atomic-strict-output",
+        ComponentStatus::Error,
+    )
+    .await;
+    assert_eq!(query.subscription_count().await, 0);
+
+    harness
+        .manager
+        .stop_query("atomic-strict-output".to_string())
+        .await
+        .expect("stop strict query from Error");
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop lifecycle source");
+}
+
+#[tokio::test]
+async fn auto_reset_clears_inconsistent_durable_output_before_live_processing() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let harness = LifecycleHarness::new(temp_dir.path()).await;
+    let query = harness
+        .add_query_config(query_config_with_policy(
+            "atomic-reset-output",
+            crate::recovery::RecoveryPolicy::AutoReset,
+        ))
+        .await;
+    let mut results = query
+        .subscribe("reset-output".to_string())
+        .await
+        .expect("subscribe reset output")
+        .receiver;
+    harness.start_query("atomic-reset-output").await;
+    harness
+        .source
+        .inject(1, "before-reset")
+        .await
+        .expect("inject result before reset");
+    assert_eq!(receive_result(&mut results).await.sequence, 1);
+    harness
+        .manager
+        .stop_query("atomic-reset-output".to_string())
+        .await
+        .expect("stop reset query");
+
+    let outbox = concrete_query(&query)
+        .get_outbox_writer()
+        .await
+        .expect("reset outbox");
+    outbox
+        .clear("atomic-reset-output")
+        .await
+        .expect("corrupt durable outbox");
+    drop(outbox);
+
+    harness
+        .manager
+        .start_query("atomic-reset-output".to_string())
+        .await
+        .expect("AutoReset should recover an incomplete durable bundle");
+    wait_for_status(
+        &harness.manager,
+        "atomic-reset-output",
+        ComponentStatus::Running,
+    )
+    .await;
+    assert_eq!(concrete_query(&query).output_sequence_for_test().await, 0);
+
+    harness
+        .source
+        .inject(2, "after-reset")
+        .await
+        .expect("inject after reset");
+    assert_eq!(receive_result(&mut results).await.sequence, 1);
+
+    harness
+        .manager
+        .stop_query("atomic-reset-output".to_string())
+        .await
+        .expect("stop reset query");
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop lifecycle source");
+}
+
+#[tokio::test]
+async fn reconfigure_after_post_commit_fence_hydrates_replacement_runtime() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let harness = LifecycleHarness::new(temp_dir.path()).await;
+    let query = harness.add_query("atomic-reconfigure").await;
+    concrete_query(&query)
+        .set_processing_observer(Some(Arc::new(FailAfterCommit)))
+        .await;
+    harness.start_query("atomic-reconfigure").await;
+    harness
+        .source
+        .inject(1, "committed")
+        .await
+        .expect("inject post-commit failure");
+    wait_for_status(
+        &harness.manager,
+        "atomic-reconfigure",
+        ComponentStatus::Error,
+    )
+    .await;
+
+    harness
+        .manager
+        .update_query(
+            "atomic-reconfigure".to_string(),
+            query_config("atomic-reconfigure"),
+        )
+        .await
+        .expect("reconfigure should replace the fenced runtime");
+    let replacement = harness
+        .manager
+        .get_query_instance("atomic-reconfigure")
+        .await
+        .expect("replacement query");
+    harness.start_query("atomic-reconfigure").await;
+    let recovered = replacement
+        .fetch_outbox(0)
+        .await
+        .expect("replacement should expose durable outbox");
+    assert_eq!(recovered.latest_sequence, 1);
+    assert_eq!(
+        recovered
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        concrete_query(&replacement)
+            .output_sequence_for_test()
+            .await,
+        1
+    );
+
+    harness
+        .manager
+        .stop_query("atomic-reconfigure".to_string())
+        .await
+        .expect("stop reconfigured query");
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop lifecycle source");
+}
+
+#[tokio::test]
+async fn incomplete_atomic_bootstrap_marker_clears_partial_state_before_restart() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let query_id = "atomic-bootstrap-recovery";
+    let config = query_config(query_id);
+    let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
+    let created = provider
+        .create_indexes(query_id)
+        .await
+        .expect("create bootstrap recovery indexes");
+    let checkpoint_store = created.checkpoint_store.clone().expect("checkpoint store");
+    let live_results = created
+        .live_results_writer
+        .clone()
+        .expect("live-results writer");
+    checkpoint_store
+        .write_config_hash(super::compute_config_hash(&config))
+        .await
+        .expect("seed config hash");
+    created
+        .set
+        .session_control
+        .begin()
+        .await
+        .expect("begin marker transaction");
+    checkpoint_store
+        .stage_checkpoint(QUERY_BOOTSTRAP_MARKER_V1, 0, None)
+        .await
+        .expect("seed in-progress marker");
+    created
+        .set
+        .session_control
+        .commit()
+        .await
+        .expect("commit marker transaction");
+    let partial_row =
+        rmp_serde::to_vec(&json!({ "name": "partial" })).expect("serialize partial bootstrap row");
+    live_results
+        .apply_mutations(
+            query_id,
+            &[drasi_core::interface::RowMutation {
+                row_signature: 99,
+                data: Some(&partial_row),
+            }],
+        )
+        .await
+        .expect("seed partial live row");
+    drop(live_results);
+    drop(checkpoint_store);
+    drop(created);
+
+    let harness = LifecycleHarness::new(temp_dir.path()).await;
+    let query = harness.add_query_config(config).await;
+    harness.start_query(query_id).await;
+    let concrete = concrete_query(&query);
+    assert_eq!(concrete.output_sequence_for_test().await, 0);
+    let checkpoint_store = concrete
+        .get_checkpoint_store()
+        .await
+        .expect("reopened checkpoint store");
+    assert!(checkpoint_store
+        .read_checkpoint(QUERY_BOOTSTRAP_MARKER_V1)
+        .await
+        .expect("read cleared bootstrap marker")
+        .is_none());
+
+    harness
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop recovered query");
     harness
         .source_manager
         .stop_source(SOURCE_ID.to_string())

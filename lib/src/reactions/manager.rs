@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -540,27 +540,18 @@ impl ReactionManager {
                             resp.results.len(),
                             resp.latest_sequence
                         );
-                        let mut last_ok_seq = 0u64;
                         for entry in &resp.results {
                             let result = (*entry).as_ref().clone();
-                            match reaction.enqueue_query_result(result).await {
-                                Ok(()) => last_ok_seq = entry.sequence,
-                                Err(e) => {
-                                    warn!(
-                                        "[{reaction_id}] Failed to replay outbox entry for query \
-                                         '{query_id}' seq={}: {e}",
+                            reaction
+                                .enqueue_query_result(result)
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "[{reaction_id}] failed to replay outbox entry for query \
+                                     '{query_id}' at sequence {}",
                                         entry.sequence
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                        if last_ok_seq != resp.latest_sequence {
-                            info!(
-                                "[{reaction_id}] Partial outbox replay for query '{query_id}' — \
-                                 replayed up to seq={last_ok_seq}, latest_seq={}",
-                                resp.latest_sequence
-                            );
+                                    )
+                                })?;
                         }
                     }
                     resp.latest_sequence
@@ -626,17 +617,17 @@ impl ReactionManager {
                 let mut last_ok_seq = checkpoint.sequence;
                 for entry in &outbox_resp.results {
                     let result = (*entry).as_ref().clone();
-                    match reaction.enqueue_query_result(result).await {
-                        Ok(()) => last_ok_seq = entry.sequence,
-                        Err(e) => {
-                            warn!(
-                                "[{reaction_id}] Failed to replay outbox entry for query \
-                                 '{query_id}' seq={}: {e}",
+                    reaction
+                        .enqueue_query_result(result)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "[{reaction_id}] failed to replay outbox entry for query \
+                             '{query_id}' at sequence {}",
                                 entry.sequence
-                            );
-                            break;
-                        }
-                    }
+                            )
+                        })?;
+                    last_ok_seq = entry.sequence;
                 }
 
                 // Update checkpoint to the latest SUCCESSFULLY replayed sequence.
@@ -1153,7 +1144,7 @@ impl ReactionManager {
                         match receiver.recv().await {
                             Ok(query_result) => {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
-                                if query_result.sequence <= initial_seq {
+                                if query_result.sequence <= last_forwarded_seq {
                                     forwarder_metrics.record_dedup_skip();
                                     log::debug!(
                                         "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
@@ -1213,7 +1204,6 @@ impl ReactionManager {
                                     }
                                 }
 
-                                last_forwarded_seq = query_result.sequence;
                                 let seq = query_result.sequence;
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
@@ -1221,7 +1211,9 @@ impl ReactionManager {
                                     log::error!(
                                         "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
                                     );
+                                    break;
                                 } else {
+                                    last_forwarded_seq = seq;
                                     // Advance in-memory checkpoint so forwarder tracks
                                     // position (skip stale events on reconnect).
                                     // NOTE: We do NOT persist to durable storage here.

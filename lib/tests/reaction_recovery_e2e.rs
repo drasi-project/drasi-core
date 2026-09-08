@@ -24,7 +24,9 @@ use anyhow::Result;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::ReactionCheckpoint;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
+use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
@@ -289,6 +291,27 @@ async fn insert_person(handle: &MockSourceHandle, id: &str, name: &str, age: i64
     handle.send_node_insert(id, vec!["Person"], props).await
 }
 
+async fn persist_reaction_checkpoint(
+    store: &dyn StateStoreProvider,
+    reaction_id: &str,
+    query_id: &str,
+    sequence: u64,
+    config_hash: u64,
+) -> Result<()> {
+    let checkpoint = ReactionCheckpoint {
+        sequence,
+        config_hash,
+    };
+    store
+        .set(
+            reaction_id,
+            &format!("checkpoint:{query_id}"),
+            bincode::serialize(&checkpoint)?,
+        )
+        .await?;
+    Ok(())
+}
+
 /// Wait for the reaction to finish stopping before trying to restart.
 async fn stop_reaction_and_wait(core: &DrasiLib, id: &str) -> Result<()> {
     core.stop_reaction(id).await?;
@@ -337,7 +360,7 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
             .with_source(mock_source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_state_store_provider(state_store)
+            .with_state_store_provider(state_store.clone())
             .build()
             .await?,
     );
@@ -349,6 +372,8 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
     insert_person(&handle, "p2", "Bob", 25).await?;
     let initial = receiver.wait_for_count(2, Duration::from_secs(5)).await;
     assert_eq!(initial.len(), 2, "Should receive 2 initial events");
+    let config_hash = drasi_lib::queries::compute_config_hash(&core.get_query_config("q1").await?);
+    persist_reaction_checkpoint(state_store.as_ref(), "rec", "q1", 2, config_hash).await?;
 
     // Stop the reaction — query keeps running, outbox accumulates
     stop_reaction_and_wait(&core, "rec").await?;
@@ -367,8 +392,8 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
     // Wait for the 3 missed events to arrive
     let replayed = receiver.wait_for_count(3, Duration::from_secs(5)).await;
     assert!(
-        replayed.len() >= 3,
-        "Should receive at least 3 replayed events, got {}",
+        replayed.len() == 3,
+        "Should receive exactly 3 replayed events, got {}",
         replayed.len()
     );
 
@@ -413,7 +438,7 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
             .with_source(mock_source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_state_store_provider(state_store)
+            .with_state_store_provider(state_store.clone())
             .build()
             .await?,
     );
@@ -425,21 +450,25 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
     insert_person(&handle, "p2", "Bob", 25).await?;
     let initial = receiver.wait_for_count(2, Duration::from_secs(5)).await;
     assert_eq!(initial.len(), 2);
+    let config_hash = drasi_lib::queries::compute_config_hash(&core.get_query_config("q1").await?);
+    persist_reaction_checkpoint(state_store.as_ref(), "rec", "q1", 2, config_hash).await?;
 
     // Stop and immediately restart — no events in between
     stop_reaction_and_wait(&core, "rec").await?;
     core.start_reaction("rec").await?;
 
-    // Drain any spurious replays (there should be none beyond what's in the outbox)
+    // A checkpoint already at the durable sequence must suppress replay.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let spurious = receiver.drain_available();
+    assert!(
+        spurious.is_empty(),
+        "checkpointed reaction received unnecessary replay: {spurious:?}"
+    );
 
     // Insert a new event to verify live delivery works
     insert_person(&handle, "p3", "Charlie", 35).await?;
     let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(live.len(), 1, "Should receive 1 live event after restart");
-
-    eprintln!("Spurious replays after clean restart: {}", spurious.len());
 
     core.stop().await?;
     Ok(())
