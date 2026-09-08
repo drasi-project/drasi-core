@@ -91,6 +91,8 @@ env:
 jobs:
   visibility-preflight:
     name: Validate Package Visibility Access
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -101,6 +103,39 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
         run: .github/scripts/package-visibility.sh check drasi-plugin-directory
+
+  list-plugin-packages:
+    name: List Plugin Packages
+    needs: visibility-preflight
+    if: ${{ !inputs.dry_run && !inputs.skip_visibility }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+    steps:
+      - name: Checkout build ref
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: List plugin packages
+        id: list
+        run: |
+          {
+            echo "drasi-plugin-directory"
+            cargo run -p xtask -- list-plugins \
+              | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
+              | awk '{print $1}'
+          } | sort -u > "$RUNNER_TEMP/plugin-packages"
+          {
+            echo "packages<<EOF"
+            cat "$RUNNER_TEMP/plugin-packages"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
   build-and-publish:
     name: Build & Publish (${{ matrix.arch_suffix }})
@@ -368,46 +403,24 @@ jobs:
 
   set-public-visibility:
     name: Set Package Visibility to Public
-    needs: build-and-publish
+    needs:
+      - build-and-publish
+      - list-plugin-packages
     # Skipped on dry runs and when skip_visibility is set (e.g. nightly test runs,
     # where the packages are already pullable and org-admin visibility isn't needed).
     if: ${{ !inputs.dry_run && !inputs.skip_visibility }}
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout trusted workflow code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: ${{ inputs.ref }}
-          fetch-depth: 0
-
-      - name: Install system dependencies
-        run: |
-          # The Microsoft apt repos preinstalled on GitHub runners intermittently
-          # serve a broken InRelease signature (NOSPLIT), failing apt-get update.
-          # We don't use them, so remove before updating.
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
-
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: List plugin packages
-        run: |
-          {
-            echo "drasi-plugin-directory"
-            cargo run -p xtask -- list-plugins \
-              | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
-              | awk '{print $1}'
-          } > "$RUNNER_TEMP/plugin-packages"
 
       - name: Set packages to public
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
+          PACKAGE_NAMES: ${{ needs.list-plugin-packages.outputs.packages }}
         run: |
           set -euo pipefail
-          mapfile -t packages < "$RUNNER_TEMP/plugin-packages"
+          mapfile -t packages <<< "$PACKAGE_NAMES"
           .github/scripts/package-visibility.sh set-public "${packages[@]}"
