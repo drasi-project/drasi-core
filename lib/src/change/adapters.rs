@@ -14,6 +14,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use drasi_core::{
     evaluation::{
@@ -24,7 +25,7 @@ use drasi_core::{
 };
 
 use crate::{
-    channels::{QueryResult, ResultDiff, SourceEvent, SourceEventWrapper},
+    channels::{QueryResult, ResultDiff, SourceEvent, SourceEventParts, SourceEventWrapper},
     profiling::ProfilingMetadata,
 };
 
@@ -104,12 +105,61 @@ pub(crate) fn source_event_to_envelope(
         return Err(ChangeAdapterError::UnsupportedSourceControl);
     };
 
+    source_change_to_envelope(
+        Arc::from(wrapper.source_id.as_str()),
+        change.clone(),
+        wrapper.timestamp,
+        wrapper.profiling.clone(),
+        wrapper.sequence,
+        wrapper.source_position.clone(),
+        extensions,
+    )
+}
+
+pub(crate) fn source_event_parts_to_envelope(
+    parts: SourceEventParts,
+    extensions: SystemMetadataExtensions,
+) -> Result<ChangeEnvelope, ChangeAdapterError> {
+    let SourceEventParts {
+        source_id,
+        event,
+        timestamp,
+        profiling,
+        sequence,
+        source_position,
+    } = parts;
+    let SourceEvent::Change(change) = event else {
+        return Err(ChangeAdapterError::UnsupportedSourceControl);
+    };
+
+    source_change_to_envelope(
+        Arc::from(source_id),
+        change,
+        timestamp,
+        profiling,
+        sequence,
+        source_position,
+        extensions,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_change_to_envelope(
+    source_id: Arc<str>,
+    change: SourceChange,
+    timestamp: DateTime<Utc>,
+    profiling: Option<ProfilingMetadata>,
+    sequence: Option<u64>,
+    source_position: Option<Bytes>,
+    extensions: SystemMetadataExtensions,
+) -> Result<ChangeEnvelope, ChangeAdapterError> {
+    let encoded_change = encode_source_change(&change)?;
     let (added, updated, deleted) = match change {
         SourceChange::Insert { element } => (
             vec![AddedRecord::new(
                 0,
                 RecordIdentity::GraphElement(element.get_reference().clone()),
-                RecordData::Graph(GraphRecord::Element(Arc::new(element.clone()))),
+                RecordData::Graph(GraphRecord::Element(Arc::new(element))),
             )],
             vec![],
             vec![],
@@ -120,7 +170,7 @@ pub(crate) fn source_event_to_envelope(
                 0,
                 RecordIdentity::GraphElement(element.get_reference().clone()),
                 None,
-                RecordData::Graph(GraphRecord::Element(Arc::new(element.clone()))),
+                RecordData::Graph(GraphRecord::Element(Arc::new(element))),
                 UpdateSemantics::Patch,
                 UpdateMetadata::None,
             )],
@@ -132,9 +182,7 @@ pub(crate) fn source_event_to_envelope(
             vec![DeletedRecord::new(
                 0,
                 RecordIdentity::GraphElement(metadata.reference.clone()),
-                Some(RecordData::Graph(GraphRecord::Metadata(Arc::new(
-                    metadata.clone(),
-                )))),
+                Some(RecordData::Graph(GraphRecord::Metadata(Arc::new(metadata)))),
             )],
         ),
         SourceChange::Future { future_ref } => (
@@ -143,7 +191,7 @@ pub(crate) fn source_event_to_envelope(
                 0,
                 RecordIdentity::GraphElement(future_ref.element_ref.clone()),
                 None,
-                RecordData::Graph(GraphRecord::Future(Arc::new(future_ref.clone()))),
+                RecordData::Graph(GraphRecord::Future(Arc::new(future_ref))),
                 UpdateSemantics::Patch,
                 UpdateMetadata::None,
             )],
@@ -151,13 +199,12 @@ pub(crate) fn source_event_to_envelope(
         ),
     };
 
-    let encoded_change = encode_source_change(change)?;
     let mut identity = StableIdBuilder::new("drasi.internal.graph-change-set/v1");
-    identity.string("source-id", &wrapper.source_id);
-    identity.optional_u64("sequence", wrapper.sequence);
+    identity.string("source-id", &source_id);
+    identity.optional_u64("sequence", sequence);
     identity.optional_bytes(
         "source-position",
-        wrapper.source_position.as_ref().map(bytes::Bytes::as_ref),
+        source_position.as_ref().map(Bytes::as_ref),
     );
     identity.bytes("source-change", &encoded_change);
     let change_set = ChangeSet::try_new(
@@ -168,12 +215,12 @@ pub(crate) fn source_event_to_envelope(
         deleted,
     )?;
     let system = SystemMetadata::new(
-        Some(Arc::from(wrapper.source_id.as_str())),
+        Some(source_id),
         None,
-        wrapper.sequence,
-        wrapper.source_position.clone(),
-        wrapper.timestamp,
-        wrapper.profiling.clone(),
+        sequence,
+        source_position,
+        timestamp,
+        profiling,
         extensions,
     );
 
@@ -208,7 +255,91 @@ pub(crate) fn source_change_from_envelope(
         });
     }
 
-    let change_set = envelope.change_set();
+    source_change_from_change_set(envelope.change_set())
+}
+
+pub(crate) fn source_change_from_envelope_owned(
+    envelope: ChangeEnvelope,
+) -> Result<SourceChange, ChangeAdapterError> {
+    if envelope.change_set().schema().kind() != super::ChangeSchemaKind::GraphChange {
+        return Err(ChangeAdapterError::WrongSchema {
+            expected: "graph-change",
+        });
+    }
+
+    let change_set = envelope.into_change_set();
+    let change_set = match Arc::try_unwrap(change_set) {
+        Ok(change_set) => change_set,
+        Err(shared) => return source_change_from_change_set(&shared),
+    };
+
+    // Clone only an Arc-backed record handle, then drop the sole-owned set so
+    // the graph payload itself can be unwrapped without a deep clone.
+    match (
+        change_set.added().len(),
+        change_set.updated().len(),
+        change_set.deleted().len(),
+    ) {
+        (1, 0, 0) => {
+            let after = change_set.added()[0].after().clone();
+            drop(change_set);
+            match after {
+                RecordData::Graph(GraphRecord::Element(element)) => Ok(SourceChange::Insert {
+                    element: unwrap_or_clone(element),
+                }),
+                _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+            }
+        }
+        (0, 1, 0) => {
+            let updated = &change_set.updated()[0];
+            let semantics = updated.semantics();
+            let after = updated.after().clone();
+            drop(change_set);
+            match (after, semantics) {
+                (RecordData::Graph(GraphRecord::Element(element)), UpdateSemantics::Patch) => {
+                    Ok(SourceChange::Update {
+                        element: unwrap_or_clone(element),
+                    })
+                }
+                (RecordData::Graph(GraphRecord::Future(future)), UpdateSemantics::Patch) => {
+                    Ok(SourceChange::Future {
+                        future_ref: unwrap_or_clone(future),
+                    })
+                }
+                _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+            }
+        }
+        (0, 0, 1) => {
+            let before = change_set.deleted()[0].before().cloned();
+            drop(change_set);
+            match before {
+                Some(RecordData::Graph(GraphRecord::Metadata(metadata))) => {
+                    Ok(SourceChange::Delete {
+                        metadata: unwrap_or_clone(metadata),
+                    })
+                }
+                Some(RecordData::Graph(GraphRecord::Element(element))) => {
+                    Ok(SourceChange::Delete {
+                        metadata: element.get_metadata().clone(),
+                    })
+                }
+                _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+            }
+        }
+        _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+    }
+}
+
+fn unwrap_or_clone<T: Clone>(value: Arc<T>) -> T {
+    match Arc::try_unwrap(value) {
+        Ok(value) => value,
+        Err(shared) => shared.as_ref().clone(),
+    }
+}
+
+fn source_change_from_change_set(
+    change_set: &ChangeSet,
+) -> Result<SourceChange, ChangeAdapterError> {
     match (
         change_set.added().first(),
         change_set.updated().first(),

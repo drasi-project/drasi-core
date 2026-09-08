@@ -267,6 +267,21 @@ impl ElementPropertyMap {
     ) -> impl Iterator<Item = T> + '_ {
         self.values.iter().map(move |(k, v)| f(k, v))
     }
+
+    /// Iterate over properties in their canonical key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Arc<str>, &ElementValue)> {
+        self.values.iter()
+    }
+
+    /// Return the number of properties.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Return whether the property map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
 }
 
 impl Index<&str> for ElementPropertyMap {

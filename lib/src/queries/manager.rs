@@ -288,46 +288,51 @@ async fn dispatch_query_results(
         .iter()
         .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
         .count();
+    if result_count == 0 {
+        return Ok(());
+    }
 
-    // Build the typed envelope and adapt it to the legacy output while holding the
-    // state lock so the envelope carries the exact sequence assigned to this result.
-    let arc_result = {
-        let tx_start = std::time::Instant::now();
-        let mut state = output_state.write().await;
-        let next_sequence = state.as_of_sequence().saturating_add(1);
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "source_id".to_string(),
-            serde_json::Value::String(source_id.to_string()),
-        );
-        metadata.insert(
-            "processed_by".to_string(),
-            serde_json::Value::String("drasi-core".to_string()),
-        );
-        metadata.insert(
-            "result_count".to_string(),
-            serde_json::Value::Number(result_count.into()),
-        );
+    let tx_start = std::time::Instant::now();
+    let query_identity = Arc::<str>::from(query_id);
+    let source_identity = Arc::<str>::from(source_id);
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "source_id".to_string(),
+        serde_json::Value::String(source_id.to_string()),
+    );
+    metadata.insert(
+        "processed_by".to_string(),
+        serde_json::Value::String("drasi-core".to_string()),
+    );
+    metadata.insert(
+        "result_count".to_string(),
+        serde_json::Value::Number(result_count.into()),
+    );
 
-        let Some(envelope) = crate::change::query_evaluation_to_envelope(
+    // Canonicalization and legacy JSON projection happen outside the write lock.
+    // If another writer advances the sequence before commit, rebuild against the
+    // new sequence and retry without changing state.
+    let arc_result = loop {
+        let expected_sequence = output_state.read().await.next_sequence();
+        let envelope = crate::change::query_evaluation_to_envelope(
             results,
             crate::change::QueryEnvelopeMetadata::new(
-                query_id,
-                Some(Arc::from(source_id)),
-                next_sequence,
+                query_identity.clone(),
+                Some(source_identity.clone()),
+                expected_sequence,
                 chrono::Utc::now(),
-                metadata,
-                Some(profiling),
+                metadata.clone(),
+                Some(profiling.clone()),
             ),
         )?
-        else {
-            return Ok(());
-        };
+        .ok_or_else(|| anyhow::anyhow!("non-Noop query evaluation produced no change envelope"))?;
         let query_result = crate::change::query_result_from_envelope(&envelope)?;
-        debug_assert_eq!(query_result.sequence, next_sequence);
-        state.apply_diffs(&query_result.results);
 
-        let result = state.advance_sequence_and_push(query_result);
+        let mut state = output_state.write().await;
+        let result = match state.try_apply_prepared_result(query_result) {
+            Some(result) => result,
+            None => continue,
+        };
 
         // Update query output metrics
         let duration_ns = u64::try_from(tx_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -337,7 +342,7 @@ async fn dispatch_query_results(
         let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
         output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
 
-        result
+        break result;
     };
 
     // Persist to outbox and live results writers if available (best-effort).
@@ -2138,11 +2143,22 @@ impl Query for DrasiQuery {
 
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
-                            let parts = if matches!(&arc_event.event, SourceEvent::Change(_)) {
-                                let envelope = match crate::change::source_event_to_envelope(
-                                    arc_event.as_ref(),
-                                    crate::change::SystemMetadataExtensions::default(),
-                                ) {
+                            let (source_id, event, profiling_opt, sequence, source_position) =
+                                if matches!(&arc_event.event, SourceEvent::Change(_)) {
+                                // Move sole-owned channel events through the envelope. Shared
+                                // broadcast events retain the existing single-clone fallback.
+                                let envelope_result =
+                                    match SourceEventWrapper::try_unwrap_arc(arc_event) {
+                                        Ok(parts) => crate::change::source_event_parts_to_envelope(
+                                            parts,
+                                            crate::change::SystemMetadataExtensions::default(),
+                                        ),
+                                        Err(shared) => crate::change::source_event_to_envelope(
+                                            shared.as_ref(),
+                                            crate::change::SystemMetadataExtensions::default(),
+                                        ),
+                                    };
+                                let envelope = match envelope_result {
                                     Ok(envelope) => envelope,
                                     Err(e) => {
                                         error!(
@@ -2151,36 +2167,41 @@ impl Query for DrasiQuery {
                                         continue;
                                     }
                                 };
-                                let source_change =
-                                    match crate::change::source_change_from_envelope(&envelope) {
-                                        Ok(change) => change,
-                                        Err(e) => {
-                                            error!(
-                                                "Query '{query_id}' failed to read graph change envelope: {e}"
-                                            );
-                                            continue;
-                                        }
+                                let (source_id, profiling, sequence, source_position) = {
+                                    let system = envelope.system();
+                                    let Some(source_id) = system.source_id_arc().cloned() else {
+                                        error!(
+                                            "Query '{query_id}' received a graph change envelope without a source ID"
+                                        );
+                                        continue;
                                     };
-                                let system = envelope.system();
-                                let Some(source_id) = system.source_id() else {
-                                    error!(
-                                        "Query '{query_id}' received a graph change envelope without a source ID"
-                                    );
-                                    continue;
+                                    (
+                                        source_id,
+                                        system.profiling().cloned(),
+                                        system.sequence(),
+                                        system.source_position().cloned(),
+                                    )
                                 };
-
-                                crate::channels::events::SourceEventParts {
-                                    source_id: source_id.to_string(),
-                                    event: SourceEvent::Change(source_change),
-                                    timestamp: system.timestamp(),
-                                    profiling: system.profiling().cloned(),
-                                    sequence: system.sequence(),
-                                    source_position: system.source_position().cloned(),
-                                }
+                                let source_change = match crate::change::source_change_from_envelope_owned(envelope) {
+                                    Ok(change) => change,
+                                    Err(e) => {
+                                        error!(
+                                            "Query '{query_id}' failed to read graph change envelope: {e}"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                (
+                                    source_id,
+                                    SourceEvent::Change(source_change),
+                                    profiling,
+                                    sequence,
+                                    source_position,
+                                )
                             } else {
                                 // Control events stay on the legacy path and retain their
                                 // priority-queue ordering.
-                                match SourceEventWrapper::try_unwrap_arc(arc_event) {
+                                let parts = match SourceEventWrapper::try_unwrap_arc(arc_event) {
                                     Ok(parts) => parts,
                                     Err(arc) => {
                                         crate::channels::events::SourceEventParts {
@@ -2192,22 +2213,24 @@ impl Query for DrasiQuery {
                                             source_position: arc.source_position.clone(),
                                         }
                                     }
-                                }
+                                };
+                                (
+                                    Arc::<str>::from(parts.source_id),
+                                    parts.event,
+                                    parts.profiling,
+                                    parts.sequence,
+                                    parts.source_position,
+                                )
                             };
-                            let source_id = parts.source_id;
-                            let event = parts.event;
-                            let profiling_opt = parts.profiling;
-                            let sequence = parts.sequence;
-                            let source_position = parts.source_position;
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
 
                             // Dedup: skip events already processed for this source
-                            if dedup.should_skip(&source_id, sequence) {
+                            if dedup.should_skip(source_id.as_ref(), sequence) {
                                 debug!(
                                     "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
                                     seq = sequence.unwrap_or(0),
-                                    cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
+                                    cp = dedup.checkpoint_for(source_id.as_ref()).unwrap_or(0)
                                 );
                                 continue;
                             }
@@ -2272,7 +2295,7 @@ impl Query for DrasiQuery {
                                                     _ => None,
                                                 };
                                                 cp_store
-                                                    .stage_checkpoint(&cp_source_id, seq, pos_ref)
+                                                    .stage_checkpoint(cp_source_id.as_ref(), seq, pos_ref)
                                                     .await?;
                                             }
                                             Ok(())
@@ -2288,9 +2311,9 @@ impl Query for DrasiQuery {
 
                                             // Advance dedup and notify source on successful commit
                                             if let Some(seq) = sequence {
-                                                dedup.advance(&source_id, seq);
+                                                dedup.advance(source_id.as_ref(), seq);
 
-                                                if let Some(handle) = position_handles_for_processor.get(&source_id) {
+                                                if let Some(handle) = position_handles_for_processor.get(source_id.as_ref()) {
                                                     handle.store(seq, std::sync::atomic::Ordering::Release);
                                                 }
                                             }
@@ -2299,7 +2322,7 @@ impl Query for DrasiQuery {
                                                 profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
                                                 if let Err(e) = dispatch_query_results(
                                                     &results,
-                                                    &source_id,
+                                                    source_id.as_ref(),
                                                     &query_id,
                                                     &output_state,
                                                     &base_dispatchers,

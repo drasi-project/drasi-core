@@ -154,6 +154,90 @@ fn append_only_inputs_use_only_added_records() {
 }
 
 #[test]
+fn owned_graph_envelope_path_moves_the_element_without_fallback_cloning() {
+    let input = Arc::new(wrapper(SourceChange::Insert {
+        element: element(
+            ElementPropertyMap::from(json!({
+                "payload": {
+                    "name": "Alice",
+                    "tags": ["one", "two", "three"],
+                }
+            })),
+            1_000,
+        ),
+    }));
+    let original_property_address = match &input.event {
+        SourceEvent::Change(SourceChange::Insert { element }) => {
+            std::ptr::from_ref(element.get_property("payload")).addr()
+        }
+        _ => unreachable!("test input is an insert"),
+    };
+
+    let parts = SourceEventWrapper::try_unwrap_arc(input)
+        .expect("the sole-owned source wrapper should move into parts");
+    let envelope =
+        source_event_parts_to_envelope(parts, SystemMetadataExtensions::default()).unwrap();
+    assert_eq!(Arc::strong_count(envelope.change_set()), 1);
+    let RecordData::Graph(GraphRecord::Element(stored)) = envelope.change_set().added()[0].after()
+    else {
+        panic!("owned insert should remain a typed element");
+    };
+    assert_eq!(Arc::strong_count(stored), 1);
+    assert_eq!(
+        std::ptr::from_ref(stored.get_property("payload")).addr(),
+        original_property_address,
+        "moving SourceEventParts into the envelope must retain the property allocation"
+    );
+
+    let recovered = source_change_from_envelope_owned(envelope).unwrap();
+    let SourceChange::Insert { element } = recovered else {
+        panic!("owned graph envelope should recover the insert");
+    };
+    assert_eq!(
+        std::ptr::from_ref(element.get_property("payload")).addr(),
+        original_property_address,
+        "the sole-owned envelope must unwrap its element instead of deep-cloning it"
+    );
+}
+
+#[test]
+fn owned_graph_envelope_path_roundtrips_every_change_variant() {
+    let metadata = ElementMetadata {
+        reference: ElementReference::new("source-a", "person-1"),
+        labels: vec!["Person".into()].into(),
+        effective_from: 3_000,
+    };
+    let changes = [
+        SourceChange::Update {
+            element: element(ElementPropertyMap::from(json!({ "name": "Alicia" })), 2_000),
+        },
+        SourceChange::Delete {
+            metadata: metadata.clone(),
+        },
+        SourceChange::Future {
+            future_ref: FutureElementRef {
+                element_ref: metadata.reference,
+                original_time: 3_000,
+                due_time: 4_000,
+                group_signature: 55,
+            },
+        },
+    ];
+
+    for expected in changes {
+        let envelope = source_event_parts_to_envelope(
+            wrapper(expected.clone()).into_parts(),
+            SystemMetadataExtensions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            source_change_from_envelope_owned(envelope).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn graph_updates_and_deletes_roundtrip_with_explicit_semantics() {
     let update_input = wrapper(SourceChange::Update {
         element: element(ElementPropertyMap::from(json!({ "name": "Alicia" })), 2_000),

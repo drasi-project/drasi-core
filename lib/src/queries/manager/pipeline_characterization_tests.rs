@@ -1002,6 +1002,31 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
+
+    dispatch_query_results(
+        &[QueryPartEvaluationContext::Noop],
+        "source-c",
+        "query-a",
+        &output_state,
+        &dispatchers,
+        &outbox_writer,
+        &live_results_writer,
+        &checkpoint_writer,
+        16,
+        ProfilingMetadata::default(),
+        &output_metrics,
+    )
+    .await
+    .unwrap();
+
+    let state = output_state.read().await;
+    assert_eq!(state.as_of_sequence(), 2);
+    assert_eq!(state.outbox_len(), 2);
+    drop(state);
+    assert!(matches!(
+        result_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]

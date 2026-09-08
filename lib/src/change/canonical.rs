@@ -330,13 +330,10 @@ impl CanonicalEncoder {
         &mut self,
         value: &ElementPropertyMap,
     ) -> Result<(), CanonicalEncodingError> {
-        let entries: Vec<_> = value
-            .map_iter(|key, value| (key.clone(), value.clone()))
-            .collect();
-        self.length(entries.len());
-        for (key, value) in entries {
-            self.string(&key);
-            self.element_value(&value)?;
+        self.length(value.len());
+        for (key, value) in value.iter() {
+            self.string(key);
+            self.element_value(value)?;
         }
         Ok(())
     }

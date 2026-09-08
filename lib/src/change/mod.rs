@@ -22,8 +22,8 @@ mod canonical;
 
 pub(crate) use adapters::{
     query_evaluation_to_envelope, query_result_from_envelope, source_change_from_envelope,
-    source_event_from_envelope, source_event_to_envelope, ChangeAdapterError,
-    QueryEnvelopeMetadata,
+    source_change_from_envelope_owned, source_event_from_envelope, source_event_parts_to_envelope,
+    source_event_to_envelope, ChangeAdapterError, QueryEnvelopeMetadata,
 };
 #[cfg(test)]
 pub(crate) use canonical::{encode_query_variables, encode_source_change};
@@ -634,6 +634,10 @@ impl SystemMetadata {
         self.source_id.as_deref()
     }
 
+    pub(crate) fn source_id_arc(&self) -> Option<&Arc<str>> {
+        self.source_id.as_ref()
+    }
+
     pub(crate) fn query_id(&self) -> Option<&str> {
         self.query_id.as_deref()
     }
@@ -859,6 +863,10 @@ impl ChangeEnvelope {
 
     pub(crate) fn change_set(&self) -> &ChangeSetRef {
         &self.change_set
+    }
+
+    pub(crate) fn into_change_set(self) -> ChangeSetRef {
+        self.change_set
     }
 
     pub(crate) fn context(&self) -> &ProcessingContext {
