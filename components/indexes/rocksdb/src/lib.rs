@@ -78,6 +78,9 @@ mod session_state;
 mod sizing;
 mod storage_models;
 
+#[cfg(feature = "computation")]
+pub mod computation;
+
 // Re-export the plugin provider and unified DB opener for easy access
 pub use checkpoint::RocksDbCheckpointStore;
 pub use live_results::RocksDbLiveResultsWriter;

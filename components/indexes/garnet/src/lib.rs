@@ -46,6 +46,9 @@ pub mod result_index;
 pub(crate) mod session_state;
 mod storage_models;
 
+#[cfg(feature = "computation")]
+pub mod computation;
+
 // Re-export the plugin provider for easy access
 pub use checkpoint::GarnetCheckpointStore;
 pub use live_results::GarnetLiveResultsWriter;
