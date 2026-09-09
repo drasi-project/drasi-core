@@ -32,10 +32,10 @@ use super::{
     data::{validate_identifier, validate_schema},
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentGeneration,
     ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender,
-    EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, LifecyclePolicy, ObservedGraph,
-    OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError, PipeProvider,
-    PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy, ResourceId,
-    SendFailure, SinkCompletion, StreamId, Transformer,
+    EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy,
+    ObservedGraph, OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError,
+    PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy,
+    ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
 };
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
@@ -104,7 +104,7 @@ pub enum GraphError {
         component: ComponentId,
         reason: String,
     },
-    #[error("edge {edge} rejected emission after {accepted_branches} accepted branches: {source}")]
+    #[error("edge {edge} could not confirm acceptance after {accepted_branches} accepted branches: {source}")]
     Forward {
         edge: usize,
         accepted_branches: usize,
@@ -185,6 +185,7 @@ pub struct NodeSnapshot {
     pub role: ComponentRole,
     pub completion: Option<SinkCompletion>,
     pub output_streams: BTreeMap<PortId, StreamId>,
+    pub input_merge: InputMergePolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +193,7 @@ pub struct EdgeSnapshot {
     pub definition: EdgeDefinition,
     pub capabilities: PipeCapabilities,
     pub policy: RelationshipPolicy,
+    pub resources: BTreeMap<ResourceId, ResourceRole>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,9 +291,15 @@ pub struct ComputationGraphBuilder {
     relationship_policies: BTreeMap<EdgeDefinition, RelationshipPolicy>,
     resources: BTreeMap<ResourceId, ResourceSpecification>,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    input_merge: BTreeMap<ComponentId, InputMergePolicy>,
 }
 
 impl ComputationGraphBuilder {
+    pub fn input_merge(mut self, component: ComponentId, policy: InputMergePolicy) -> Self {
+        self.input_merge.insert(component, policy);
+        self
+    }
+
     pub fn component(
         mut self,
         specification: ComponentSpecification,
@@ -444,6 +452,11 @@ impl ComputationGraphBuilder {
                 role: component.role(),
                 completion: component.completion(),
                 output_streams: BTreeMap::new(),
+                input_merge: self
+                    .input_merge
+                    .get(descriptor.id())
+                    .copied()
+                    .unwrap_or_default(),
             });
         }
         let mut streams = BTreeSet::new();
@@ -467,7 +480,37 @@ impl ComputationGraphBuilder {
         let mut successors = vec![Vec::new(); nodes.len()];
         let mut indegree = vec![0; nodes.len()];
         let mut edges = Vec::new();
+        let mut used_resources = BTreeMap::new();
         for (edge_index, (edge, provider)) in self.edges.iter().enumerate() {
+            let resources = provider.resource_dependencies();
+            let exclusive = provider.exclusive_resources();
+            for (id, role) in &resources {
+                let declaration = self
+                    .resources
+                    .get(id)
+                    .ok_or_else(|| topology(format!("pipe requires undeclared resource {id}")))?;
+                if declaration.role != *role {
+                    return Err(topology(format!(
+                        "pipe resource {id} has an incompatible role"
+                    )));
+                }
+                let exclusive = exclusive.contains(id);
+                if used_resources
+                    .get(id)
+                    .is_some_and(|prior| *prior || exclusive)
+                {
+                    return Err(topology(format!(
+                        "pipe resource {id} requires exclusive binding ownership"
+                    )));
+                }
+                used_resources.insert(id.clone(), exclusive);
+            }
+            provider
+                .validate_resources(&self.resource_handles)
+                .map_err(|source| GraphError::Pipe {
+                    edge: edge_index,
+                    source,
+                })?;
             if !unique_edges.insert(edge.clone()) {
                 return Err(topology("duplicate edge"));
             }
@@ -488,14 +531,29 @@ impl ComputationGraphBuilder {
                 {
                     validate_sink_completion(completion, requirements)?;
                 }
+                if capabilities
+                    .supported()
+                    .contains(&PipeCapability::ExplicitAcknowledgement)
+                {
+                    validate_sink_completion(
+                        completion,
+                        &PipeRequirements::new([PipeCapability::ExplicitAcknowledgement]),
+                    )?;
+                }
             }
             validate_connection(output, input, &capabilities)?;
             capabilities.validate(&self.requirements)?;
-            // B2 has no acknowledgement/transaction/recovery host protocol.
+            // Cross-component transaction/exactly-once scope is not inferred
+            // from a provider's declaration.
             for capability in capabilities.supported() {
                 if !matches!(
                     capability,
-                    PipeCapability::FifoPerStream | PipeCapability::Backpressure
+                    PipeCapability::FifoPerStream
+                        | PipeCapability::Backpressure
+                        | PipeCapability::DurableAcceptance
+                        | PipeCapability::ExplicitAcknowledgement
+                        | PipeCapability::Replay
+                        | PipeCapability::RetainedHistory
                 ) {
                     return Err(ContractError::UnsupportedCapability {
                         capability: *capability,
@@ -503,7 +561,6 @@ impl ComputationGraphBuilder {
                     .into());
                 }
             }
-            capabilities.validate(&PipeRequirements::new([PipeCapability::Backpressure]))?;
             if capabilities.capacity().is_none() {
                 return Err(topology(
                     "every edge must declare a finite nonzero capacity",
@@ -521,6 +578,7 @@ impl ComputationGraphBuilder {
                     .get(edge)
                     .cloned()
                     .unwrap_or_default(),
+                resources,
             });
         }
         for node in &nodes {
@@ -564,6 +622,7 @@ impl ComputationGraphBuilder {
                 .relationship_policies
                 .keys()
                 .any(|edge| !unique_edges.contains(edge))
+            || self.input_merge.keys().any(|id| !ids.contains_key(id))
         {
             return Err(topology(
                 "lifecycle policy names an undeclared component or relationship",
@@ -736,6 +795,7 @@ impl ComputationGraph {
             relationship_policies: BTreeMap::new(),
             resources: BTreeMap::new(),
             resource_handles: BTreeMap::new(),
+            input_merge: BTreeMap::new(),
         }
     }
 
@@ -924,6 +984,7 @@ struct Incoming {
     edge: usize,
     port: PortId,
     receiver: Box<dyn EnvelopeReceiver>,
+    acknowledgement_required: bool,
 }
 
 struct Outgoing {
@@ -971,6 +1032,17 @@ fn check_descriptor(component: &Component, node: &NodeSnapshot) -> GraphResult<(
     Ok(())
 }
 
+fn event_time_selection(
+    times: impl Iterator<Item = Option<chrono::DateTime<chrono::Utc>>>,
+) -> usize {
+    times
+        .enumerate()
+        .take_while(|(_, time)| time.is_some())
+        .min_by_key(|(index, time)| (*time, *index))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
 async fn run_node(
     component: &mut Component,
     node: &NodeSnapshot,
@@ -982,7 +1054,9 @@ async fn run_node(
         return std::future::pending().await;
     }
     let mut receivers: FuturesUnordered<_> = inputs.iter_mut().map(receive).collect();
+    let mut ready = Vec::new();
     loop {
+        let mut acknowledgement = None;
         let emissions = match component {
             Component::Source(source) => {
                 match source
@@ -998,22 +1072,59 @@ async fn run_node(
                 }
             }
             _ => {
-                let Some((incoming, delivery)) = receivers.next().await else {
-                    return Ok(());
+                if ready.is_empty() {
+                    let Some((incoming, delivery)) = receivers.next().await else {
+                        return Ok(());
+                    };
+                    let delivery = delivery.map_err(|source| GraphError::Pipe {
+                        edge: incoming.edge,
+                        source,
+                    })?;
+                    let Some(delivery) = delivery else {
+                        continue;
+                    };
+                    ready.push((incoming, delivery));
+                }
+                if node.input_merge == InputMergePolicy::EventTimeAcrossStreams {
+                    while let Some(Some((incoming, delivery))) = receivers.next().now_or_never() {
+                        let delivery = delivery.map_err(|source| GraphError::Pipe {
+                            edge: incoming.edge,
+                            source,
+                        })?;
+                        if let Some(delivery) = delivery {
+                            ready.push((incoming, delivery));
+                        }
+                    }
+                }
+                let chosen = if node.input_merge == InputMergePolicy::EventTimeAcrossStreams {
+                    event_time_selection(
+                        ready
+                            .iter()
+                            .map(|(_, delivery)| delivery.envelope().system().timestamp()),
+                    )
+                } else {
+                    0
                 };
-                let delivery = delivery.map_err(|source| GraphError::Pipe {
-                    edge: incoming.edge,
-                    source,
-                })?;
-                let Some(delivery) = delivery else {
-                    continue;
-                };
-                let (envelope, acknowledgement) = delivery.into_parts();
-                if acknowledgement.is_some() {
+                let (incoming, delivery) = ready.remove(chosen);
+                let (envelope, completion) = delivery.into_parts();
+                if completion.is_some() != incoming.acknowledgement_required {
                     return Err(topology(
-                        "volatile graph received an unsupported acknowledgement",
+                        "pipe delivery acknowledgement differs from its negotiated capability",
                     ));
                 }
+                let port = node
+                    .descriptor
+                    .ports()
+                    .iter()
+                    .find(|port| port.id() == &incoming.port)
+                    .ok_or_else(|| topology("delivery targets an undeclared input port"))?;
+                validate_schema(port.schema(), envelope.changes().schema())?;
+                if completion.is_some() && node.completion == Some(SinkCompletion::Accepted) {
+                    return Err(topology(
+                        "acceptance-only sink cannot acknowledge completed handling",
+                    ));
+                }
+                acknowledgement = completion.map(|completion| (incoming.edge, completion));
                 let input = InputEnvelope {
                     port: incoming.port.clone(),
                     envelope,
@@ -1064,6 +1175,12 @@ async fn run_node(
                         source: Box::new(source),
                     })?;
             }
+        }
+        if let Some((edge, acknowledgement)) = acknowledgement {
+            acknowledgement
+                .complete(super::HandlingOutcome::Handled)
+                .await
+                .map_err(|source| GraphError::Pipe { edge, source })?;
         }
     }
 }
@@ -1123,4 +1240,18 @@ pub fn emission_id(stream: &StreamId, sequence: u64) -> super::Result<EnvelopeId
         stream.as_str(),
         bytes::Bytes::copy_from_slice(&sequence.to_be_bytes()),
     )
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::event_time_selection;
+
+    #[test]
+    fn untimed_heads_keep_their_arrival_position() {
+        let early = chrono::DateTime::from_timestamp(10, 0);
+        let late = chrono::DateTime::from_timestamp(50, 0);
+        assert_eq!(event_time_selection([late, None, early].into_iter()), 0);
+        assert_eq!(event_time_selection([None, early, late].into_iter()), 0);
+        assert_eq!(event_time_selection([late, early, None].into_iter()), 1);
+    }
 }

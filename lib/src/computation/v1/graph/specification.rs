@@ -171,6 +171,10 @@ impl ResourceHandle {
         self.role
     }
 
+    pub fn has_cleanup(&self) -> bool {
+        self.cleanup.is_some()
+    }
+
     pub fn get<T: Any + Send + Sync>(&self) -> GraphResult<Arc<T>> {
         self.value
             .clone()
@@ -275,6 +279,14 @@ pub trait ComponentFactory: Send + Sync {
     fn descriptor(&self) -> &FactoryDescriptor;
     /// Additional pure definition validation, after generic schema/dependency checks.
     fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()>;
+    fn validate_resources(
+        &self,
+        specification: &ComponentSpecification,
+        _declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        _resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<()> {
+        self.validate(specification)
+    }
     async fn create(
         &self,
         context: ConstructionContext,
@@ -494,6 +506,6 @@ pub(super) fn validate_specification(
         return Err(super::topology("undeclared factory dependency slot"));
     }
     factory
-        .validate(spec)
+        .validate_resources(spec, declarations, resources)
         .map_err(|error| super::topology(format!("invalid component definition: {error:#}")))
 }

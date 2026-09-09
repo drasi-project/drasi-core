@@ -995,7 +995,8 @@ fn whole_topology_preflight_rejects_invalid_structure_before_any_side_effects() 
                 [
                     PipeCapability::FifoPerStream,
                     PipeCapability::Backpressure,
-                    PipeCapability::DurableAcceptance,
+                    PipeCapability::ExplicitAcknowledgement,
+                    PipeCapability::Transactions,
                 ],
                 std::num::NonZeroUsize::new(1),
             )
@@ -1037,6 +1038,9 @@ fn whole_topology_preflight_rejects_invalid_structure_before_any_side_effects() 
         }
         if case == "duplicate-edge" {
             builder = builder.connect(definition, Box::new(BoundedPipeConfig { capacity: 1 }));
+        }
+        if case == "missing-backpressure" {
+            builder = builder.requirements(PipeRequirements::new([PipeCapability::Backpressure]));
         }
         if matches!(case, "cycle" | "self-loop") {
             let second = Fixture::new(

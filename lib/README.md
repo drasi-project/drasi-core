@@ -84,6 +84,27 @@ cargo run -p drasi-lib --features computation --example computation_graph
 The example includes inputs and expected outputs. Its source, transforms and sink
 implement the public traits directly; no legacy adapter or query is hidden inside.
 
+**Pipe profiles:** `BoundedPipeConfig` provides FIFO/backpressure.
+`BroadcastPipeConfig` provides exact bounded retention with an explicit report-or-skip
+lag policy and no backpressure claim. `RetainedPipeConfig` names a declared
+`RetainedStoreResource`; `MemoryEnvelopeStore` retains history within the process,
+while `IndexedEnvelopeStore` uses a complete persistent computation index bundle
+and `EnvelopeCodec` for durable acceptance/replay. The versioned codec requires
+registered schema validators on decode and preserves event metadata, lineage and
+immutable annotations; it does not change any legacy serializer.
+
+Retained deliveries use separate one-shot acknowledgements. Dropping or failing
+a delivery does not advance its consumer position. The graph acknowledges only
+after local handling and output forwarding succeed; it rejects acknowledging
+pipes into acceptance-only sinks. These boundaries do not make external effects
+exactly-once. Store dependencies participate in graph preflight/ownership, and
+retained journals require exclusive binding ownership.
+
+`send_batch` preserves accepted receipts and the exact failed/unattempted suffix.
+For a durable commit error, inspect `SendFailure::acceptance()` before deciding
+what to retry: `Unknown` is not definite rejection. Explicit event-time input
+merging compares available stream heads without reordering any producer's stream.
+
 **Lifecycle:** `let run = graph.start()?; run.await?;` drives a caller-owned future.
 Every eligible created component is attempted; data relationships are
 activation-independent unless explicitly configured otherwise. A failed Source
@@ -113,8 +134,8 @@ shared deadline; failed/timed-out hooks remain visibly incomplete. Dropping a gr
 cannot await cleanup for resources a component itself spawned.
 
 This is an incremental parallel in-process runtime, not the entire composable framework.
-There are no legacy adapters, persistence/serialization formats, server configuration,
-or new plugin ABI. Enabling it does not migrate or change existing Sources, Queries,
+Legacy adapters, server configuration, and a new plugin ABI are not supplied by
+these pipe profiles. Enabling computation does not migrate or change existing Sources, Queries,
 Reactions, or `DrasiLib`. Immutable topology snapshots contain no live provider handles
 or resolved secrets. Future legacy codecs must preserve typed values; internal
 canonical identity bytes are not a proven reversible wire codec.
@@ -123,9 +144,9 @@ Enqueue receipts mean **acceptance only**, not handling or acknowledgement.
 Sinks declare a fixed `Accepted` or `Handled` completion boundary; legacy reaction
 queue acceptance must never be advertised as completed handling. Local
 acknowledgement handles remain outside envelopes and contexts. The volatile bounded
-pipe advertises only per-stream FIFO and backpressure, rejecting
-requirements for durability, replay, explicit acknowledgement, transactions, or
-exactly-once. Sequence is authoritative; equal/backward timestamps do not reorder
+pipe advertises only per-stream FIFO and backpressure; stronger requirements need
+an explicitly capable provider. Cross-component transactions and exactly-once
+effects are not inferred from a pipe. Sequence is authoritative; equal/backward timestamps do not reorder
 a stream. Opaque logical IDs remain producer-owned; `emission_id` is an optional
 stream/sequence identity helper, not a global arbitrary-ID deduplication service.
 

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{ChangeEnvelope, ContractError, EnvelopeId, PipeCapabilities};
+use super::{ChangeEnvelope, ContractError, EnvelopeId, PipeCapabilities, PipeMetricsSnapshot};
 
 /// Enqueue acceptance ONLY. Not downstream handling, acknowledgement, checkpoint
 /// advancement, or durability (unless DurableAcceptance was explicitly negotiated).
@@ -54,17 +54,69 @@ pub enum PipeError {
     Closed,
     #[error("pipe receiver has already been taken")]
     ReceiverTaken,
+    #[error("broadcast receiver lagged by {skipped} envelopes")]
+    Lagged { skipped: u64 },
+    #[error("retained pipe capacity is exhausted")]
+    CapacityExhausted,
+    #[error("retained position {requested} is unavailable; oldest retained position is {oldest}")]
+    PositionUnavailable { requested: u64, oldest: u64 },
+    #[error("durable acceptance could not be determined: {source}")]
+    AcceptanceUnknown {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("durable acknowledgement could not be determined: {source}")]
+    AcknowledgementUnknown {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error(transparent)]
     Backend(#[from] anyhow::Error),
 }
 
-/// A definite nonacceptance, returning the immutable event to its caller.
+/// Failure to confirm acceptance, returning the immutable event. Volatile failures
+/// are definite nonacceptance; durable commit ambiguity is explicitly distinguished.
 #[derive(Debug, thiserror::Error)]
-#[error("envelope was not accepted: {error}")]
+#[error("no acceptance receipt: {error}")]
 pub struct SendFailure {
     pub envelope: ChangeEnvelope,
     #[source]
     pub error: PipeError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptanceState {
+    NotAccepted,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMergePolicy {
+    #[default]
+    Arrival,
+    /// Choose the earliest currently available stream head, never reorder within
+    /// a producer stream or wait for an unavailable source. Untimed heads retain
+    /// arrival position and delimit groups of timed heads; this is not a watermark.
+    EventTimeAcrossStreams,
+}
+
+impl SendFailure {
+    pub fn acceptance(&self) -> AcceptanceState {
+        if matches!(self.error, PipeError::AcceptanceUnknown { .. }) {
+            AcceptanceState::Unknown
+        } else {
+            AcceptanceState::NotAccepted
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("batch stopped after {} accepted envelopes: {failed}", accepted.len())]
+pub struct BatchSendFailure {
+    pub accepted: Vec<EnqueueReceipt>,
+    #[source]
+    pub failed: SendFailure,
+    pub not_attempted: Vec<ChangeEnvelope>,
 }
 
 /// One-shot, local-only handling acknowledgement, NOT part of a ChangeEnvelope.
@@ -113,8 +165,32 @@ impl Delivery {
 /// A host serializes sends for a single producer stream in sequence order.
 #[async_trait]
 pub trait EnvelopeSender: Send + Sync {
-    /// Success is acceptance only. Err means definitely not accepted. Cancellation
-    /// before a result can be ambiguous and MUST NOT be interpreted as nonacceptance.
+    /// Sequential batch acceptance. On error, accepted receipts and the exact
+    /// failed/not-attempted envelopes are retained; no batch atomicity is implied.
+    async fn send_batch(
+        &self,
+        envelopes: Vec<ChangeEnvelope>,
+    ) -> std::result::Result<Vec<EnqueueReceipt>, BatchSendFailure> {
+        let mut pending = envelopes.into_iter();
+        let mut accepted = Vec::new();
+        for envelope in pending.by_ref() {
+            match self.send(envelope).await {
+                Ok(receipt) => accepted.push(receipt),
+                Err(failed) => {
+                    return Err(BatchSendFailure {
+                        accepted,
+                        failed,
+                        not_attempted: pending.collect(),
+                    })
+                }
+            }
+        }
+        Ok(accepted)
+    }
+
+    /// Success is acceptance only. Inspect SendFailure::acceptance before retrying:
+    /// durable commit failure can be Unknown, never falsely reported as rejected.
+    /// Cancellation before a result is also ambiguous.
     /// Receiver drop or runtime closure must wake blocked capacity waiters and
     /// return Closed with their unaccepted envelope, rather than hang indefinitely.
     async fn send(
@@ -138,6 +214,9 @@ pub trait EnvelopeReceiver: Send + Sync {
 /// In-process pipe interface. The graph validates capabilities/requirements
 /// before starting components; [`super::BoundedPipe`] supplies volatile delivery.
 pub trait Pipe: Send + Sync {
+    fn metrics(&self) -> Option<PipeMetricsSnapshot> {
+        None
+    }
     fn capabilities(&self) -> &PipeCapabilities;
     fn sender(&self) -> Arc<dyn EnvelopeSender>;
     /// Transfer the single receiver to its owning task; subsequent calls fail.

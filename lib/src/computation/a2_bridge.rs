@@ -30,6 +30,14 @@ pub(crate) fn append_context<T: Clone>(
     context.append(contribution)
 }
 
+pub(crate) fn context_identity<T: Clone>(context: &ProcessingContext<T>) -> u64 {
+    *context.root
+}
+
+pub(crate) fn restored_context<T: Clone>(root: u64) -> ProcessingContext<T> {
+    ProcessingContext::new(root)
+}
+
 pub(crate) fn schema_fingerprint(id: &str, version: u32, encoding: &str, definition: &[u8]) -> u64 {
     let mut hash = StableIdBuilder::new("drasi.computation.schema/v1");
     hash.string("schema-id", id);

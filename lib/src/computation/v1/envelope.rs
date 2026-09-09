@@ -164,6 +164,18 @@ pub struct Lineage {
 }
 
 impl Lineage {
+    pub(super) fn restore(
+        envelope_id: EnvelopeId,
+        system: SystemMetadata,
+        parent: Option<Arc<Lineage>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            envelope_id,
+            system: Arc::new(system),
+            parent,
+        })
+    }
+
     pub fn envelope_id(&self) -> &EnvelopeId {
         &self.envelope_id
     }
@@ -231,6 +243,35 @@ pub struct ChangeEnvelope {
 pub type Envelope = ChangeEnvelope;
 
 impl ChangeEnvelope {
+    pub(super) fn context_identity(&self) -> u64 {
+        computation_bridge::context_identity(&self.context.inner)
+    }
+
+    pub(super) fn restore(
+        id: EnvelopeId,
+        changes: ChangeSetRef,
+        system: SystemMetadata,
+        lineage: Option<Arc<Lineage>>,
+        context_identity: u64,
+        annotations: Vec<ContextEntry>,
+    ) -> Result<Self> {
+        let mut envelope = Self {
+            event: Arc::new(ChangeEvent {
+                id,
+                changes,
+                system: Arc::new(system),
+                lineage,
+            }),
+            context: ProcessingContext {
+                inner: computation_bridge::restored_context(context_identity),
+            },
+        };
+        for entry in annotations {
+            envelope.append_annotation(entry)?;
+        }
+        Ok(envelope)
+    }
+
     /// Construct a new root event. Producers must not reuse an identity for
     /// different events. IDs are supplied identities, not content fingerprints.
     pub fn new(id: EnvelopeId, changes: ChangeSetRef, system: SystemMetadata) -> Self {

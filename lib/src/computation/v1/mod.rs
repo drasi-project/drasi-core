@@ -33,10 +33,11 @@
 //! image roles, and cross-image identity. Providers are responsible for the truth
 //! of their validators and capability declarations.
 //!
-//! None of these types implements automatic serialization. Record encoding is
-//! schema-specific, not a Drasi wire standard. Lossless legacy codecs/adapters,
-//! durable delivery, replay, and SDK/ABI integration are separate
-//! work. Internal canonical identity bytes are not a proven reversible codec.
+//! Records/envelopes do not implement automatic serialization. [`EnvelopeCodec`]
+//! explicitly encodes versioned computation storage and validates registered
+//! schemas when decoding. Record payload encoding is schema-specific, not a
+//! legacy Drasi wire standard. Legacy adapters and SDK/ABI integration are separate
+//! work; canonical identity bytes are not used as a reversible codec.
 //!
 //! ```
 //! use drasi_lib::computation::v1::{
@@ -70,6 +71,11 @@
 //! [`ComputationGraph::run`] separates deployment from activation and accepts live
 //! revision-checked lifecycle/policy commands through [`GraphControl`].
 //! Component generations and operation epochs reject stale health observations.
+//! [`ComponentSpecification`] and [`ComponentFactory`] separate desired definitions
+//! from constructed instances. Configuration, reference, role, implementation and
+//! resource-cardinality checks run before construction. [`ResourceSpecification`]
+//! describes scoped ownership; [`ResourceHandle`] holds an actual instance outside
+//! desired snapshots. [`ComputationGraph::dispose`] awaits owned-resource cleanup.
 //! Cancellation is not rollback. Cleanup errors preserve their causes and leave
 //! `CleanupRequired`.
 //!
@@ -93,14 +99,18 @@
 //! Every declared port must connect; sources have outputs only, sinks inputs only,
 //! and transformers both. Complete disconnected pipelines are allowed. Graph IDs
 //! are local, not registered process-wide. Exact duplicate edges, cycles,
-//! unbounded pipes and unsupported delivery capabilities are errors.
+//! unbounded pipes and unsupported delivery capabilities are errors. Broadcast
+//! lag is explicit. Retained providers name their actual registered store resource
+//! and acknowledge local handling separately from enqueue acceptance.
 //! A producer output may not route through multiple input ports of the same
 //! component; independent queues for that one stream could violate its FIFO.
 //!
 //! Fanout sends sequentially in edge declaration order, shares immutable payloads,
 //! and preserves branch-local context. A slow branch applies backpressure to its
 //! producer (not isolation from other branches). Fanin preserves each stream's
-//! FIFO, not a global order. Only actual finite exhaustion closes outgoing pipes,
+//! FIFO, not a global order. [`InputMergePolicy::EventTimeAcrossStreams`] orders
+//! currently available stream heads without violating that FIFO or waiting on an
+//! unavailable source. Only actual finite exhaustion closes outgoing pipes,
 //! so filters and fanin drain naturally even if providers retained sender clones.
 //! Failed or stopped producers leave their bindings idle, not falsely exhausted.
 //! Queue capacity counts queued envelopes, not bytes, component-local state,
@@ -112,25 +122,44 @@
 //! A forwarding error reports prior branch acceptances;
 //! cancellation can also leave partial fanout or external effects. Neither is
 //! retried or rolled back. Explicit pipe close drains accepted events; cancellation
-//! may discard queued/in-flight events. B2 does not implement durable delivery,
-//! checkpointing, replay, transactions, exactly-once, or legacy adapters.
+//! may discard volatile queued/in-flight events. [`RetainedPipe`] preserves
+//! unacknowledged stored work; durable providers distinguish uncertain commit
+//! outcomes rather than claiming definite rejection. Generic cross-component
+//! transactions, exactly-once external effects, and legacy adapters are not
+//! inferred from these profiles.
 
 mod bounded_pipe;
+mod broadcast_pipe;
+mod codec;
 mod component;
 mod data;
 mod envelope;
 mod error;
 mod graph;
+mod graph_codec;
+mod legacy_source;
 mod lifecycle;
 mod pipe;
+mod pipe_metrics;
 mod ports;
+mod query_codec;
+mod retained_pipe;
+mod retained_store;
 
 pub use bounded_pipe::*;
+pub use broadcast_pipe::*;
+pub use codec::*;
 pub use component::*;
 pub use data::*;
 pub use envelope::*;
 pub use error::{ContractError, Result};
 pub use graph::*;
+pub use graph_codec::*;
+pub use legacy_source::*;
 pub use lifecycle::*;
 pub use pipe::*;
+pub use pipe_metrics::PipeMetricsSnapshot;
 pub use ports::*;
+pub use query_codec::*;
+pub use retained_pipe::*;
+pub use retained_store::*;

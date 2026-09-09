@@ -48,6 +48,7 @@ const LEGACY_SOURCE: &str = "legacy-source";
 const LEGACY_QUERY: &str = "legacy-query";
 const LEGACY_REACTION: &str = "legacy-reaction";
 
+#[derive(Clone)]
 struct InjectableSource {
     base: Arc<SourceBase>,
 }
@@ -316,11 +317,12 @@ async fn assert_coexistence(instance_id: &str) {
     );
     let (results_tx, mut results_rx) = mpsc::channel(4);
     let legacy_loop_stops = Arc::new(AtomicUsize::new(0));
+    let source = InjectableSource {
+        base: injector.clone(),
+    };
     let drasi = DrasiLib::builder()
         .with_id(instance_id)
-        .with_source(InjectableSource {
-            base: injector.clone(),
-        })
+        .with_source(source.clone())
         .with_query(
             Query::cypher(LEGACY_QUERY)
                 .query("MATCH (i:Item) RETURN i.name AS name")
@@ -449,6 +451,129 @@ async fn assert_coexistence(instance_id: &str) {
     assert!(after > during);
     assert_legacy_running(&drasi).await;
     assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 0);
+
+    {
+        use drasi_lib::computation::v1::{
+            ComponentFactory, ComponentRole, ComponentSpecification, ConfigurationValue,
+            GraphChangeCodec, LegacySourceFactory, LegacySourceResource, ResourceHandle,
+            ResourceId, ResourceOwnership, ResourceRole, ResourceSpecification,
+        };
+        use std::collections::BTreeMap;
+
+        let factory = Arc::new(LegacySourceFactory::default());
+        let wrapped_id = ComponentId::try_new("wrapped-source").expect("id");
+        let wrapped_stream = StreamId::try_new("wrapped-source/out").expect("stream");
+        let source_resource = ResourceId::try_new("borrowed-source").expect("resource");
+        let graph_schema = GraphChangeCodec::schema();
+        let output = Endpoint::new(wrapped_id.clone(), PortId::try_new("out").expect("port"));
+        let input = Endpoint::new(
+            ComponentId::try_new("wrapped-sink").expect("id"),
+            PortId::try_new("in").expect("port"),
+        );
+        let source_descriptor = ComponentDescriptor::try_new(
+            wrapped_id,
+            vec![PortDescriptor::new(
+                output.port.clone(),
+                PortDirection::Output,
+                graph_schema.descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )
+        .expect("source descriptor");
+        let (wrapped_tx, mut wrapped_rx) = mpsc::channel(1);
+        let wrapped_stops = Arc::new(AtomicUsize::new(0));
+        let mut wrapped_graph = ComputationGraph::builder("wrapped-coexistence")
+            .component(
+                ComponentSpecification {
+                    descriptor: source_descriptor,
+                    role: ComponentRole::Source,
+                    completion: None,
+                    implementation: factory.descriptor().implementation.clone(),
+                    configuration_version: 1,
+                    configuration: BTreeMap::from([(
+                        Arc::from("stream"),
+                        ConfigurationValue::Literal(serde_json::json!(wrapped_stream.as_str())),
+                    )]),
+                    dependencies: BTreeMap::from([(
+                        Arc::from("source"),
+                        vec![source_resource.clone()],
+                    )]),
+                },
+                factory,
+            )
+            .declare_resource(ResourceSpecification {
+                id: source_resource.clone(),
+                role: ResourceRole::LegacySource,
+                ownership: ResourceOwnership::Borrowed,
+                binding: Arc::from(LEGACY_SOURCE),
+            })
+            .expect("resource declaration")
+            .provide_resource(
+                source_resource,
+                ResourceHandle::new(
+                    ResourceRole::LegacySource,
+                    Arc::new(LegacySourceResource::borrowed(Arc::new(source))),
+                ),
+            )
+            .expect("borrow actual running source")
+            .sink(Box::new(NativeSink {
+                descriptor: ComponentDescriptor::try_new(
+                    input.component.clone(),
+                    vec![PortDescriptor::new(
+                        input.port.clone(),
+                        PortDirection::Input,
+                        graph_schema.descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .expect("sink descriptor"),
+                handled: wrapped_tx,
+                stops: wrapped_stops.clone(),
+            }))
+            .bind_stream(output.clone(), wrapped_stream.clone())
+            .connect(
+                EdgeDefinition::new(output, input),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .build()
+            .expect("wrapped graph");
+        let run = wrapped_graph.start().expect("wrapped scope");
+        let control = run.control();
+        let (outcome, ()) = tokio::join!(run, async {
+            control.startup_report().await.expect("wrapped startup");
+            assert_legacy_running(&drasi).await;
+            inject_and_assert_result(&injector, &mut results_rx, "wrapped", 4000).await;
+            let wrapped = wrapped_rx.recv().await.expect("wrapped source change");
+            assert_eq!(wrapped.envelope.system().stream(), &wrapped_stream);
+            assert_eq!(
+                wrapped.envelope.system().sequence(),
+                1,
+                "adapter has its own producer sequence"
+            );
+            let metadata = GraphChangeCodec::source_metadata(&wrapped.envelope)
+                .expect("raw metadata")
+                .expect("source metadata retained");
+            assert_eq!(metadata.source_id, LEGACY_SOURCE);
+            assert!(metadata.sequence.expect("raw source sequence") > 1);
+            assert_eq!(
+                GraphChangeCodec::decode_changes(&wrapped.envelope)
+                    .expect("typed graph change")
+                    .len(),
+                1
+            );
+            control.cancel();
+        });
+        assert!(matches!(outcome, Err(GraphError::Cancelled)));
+        wrapped_graph
+            .dispose()
+            .await
+            .expect("borrowed source not deprovisioned");
+        assert_eq!(wrapped_stops.load(Ordering::SeqCst), 1);
+        assert_legacy_running(&drasi).await;
+        inject_and_assert_result(&injector, &mut results_rx, "after-wrapper", 5000).await;
+        assert_legacy_running(&drasi).await;
+        assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 0);
+    }
     drasi.stop().await.expect("stop legacy pipeline");
     assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 1);
 }

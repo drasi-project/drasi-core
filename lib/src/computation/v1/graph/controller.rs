@@ -577,10 +577,12 @@ async fn deploy(
             observed.transition_time = Utc::now();
         });
         let provided = (|| {
-            let mut provided = provider.create().map_err(|source| GraphError::Pipe {
-                edge: edge_index,
-                source,
-            })?;
+            let mut provided = provider
+                .create_with_resources(&graph.resource_handles)
+                .map_err(|source| GraphError::Pipe {
+                    edge: edge_index,
+                    source,
+                })?;
             controls.0.insert(edge_index, provided.control.clone());
             if provided.pipe.capabilities() != &edge.capabilities {
                 return Err(topology(
@@ -605,6 +607,10 @@ async fn deploy(
                 edge: edge_index,
                 port: edge.definition.to.port.clone(),
                 receiver,
+                acknowledgement_required: edge
+                    .capabilities
+                    .supported()
+                    .contains(&crate::computation::v1::PipeCapability::ExplicitAcknowledgement),
             });
             Ok(())
         })();

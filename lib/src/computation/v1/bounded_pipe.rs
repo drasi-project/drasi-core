@@ -17,6 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 
+use super::{pipe_metrics::PipeMetrics, PipeMetricsSnapshot};
 use super::{
     ChangeEnvelope, Delivery, EnqueueReceipt, EnvelopeReceiver, EnvelopeSender, Pipe,
     PipeCapabilities, PipeError, SendFailure,
@@ -28,6 +29,9 @@ use super::{
 pub trait PipeControl: Send + Sync {
     fn close(&self);
     fn cancel(&self);
+    fn metrics(&self) -> Option<PipeMetricsSnapshot> {
+        None
+    }
 }
 
 /// A fresh pipe and its sender-independent lifecycle handle.
@@ -43,6 +47,27 @@ pub struct ProvidedPipe {
 /// clones are not supported by the graph (they can prevent finite completion).
 /// The graph requires cancellation-safe receive and synchronous control closure.
 pub trait PipeProvider: Send + Sync {
+    fn resource_dependencies(
+        &self,
+    ) -> std::collections::BTreeMap<super::ResourceId, super::ResourceRole> {
+        std::collections::BTreeMap::new()
+    }
+    fn exclusive_resources(&self) -> Vec<super::ResourceId> {
+        Vec::new()
+    }
+    fn validate_resources(
+        &self,
+        _resources: &std::collections::BTreeMap<super::ResourceId, super::ResourceHandle>,
+    ) -> std::result::Result<(), PipeError> {
+        Ok(())
+    }
+    fn create_with_resources(
+        &self,
+        _resources: &std::collections::BTreeMap<super::ResourceId, super::ResourceHandle>,
+    ) -> std::result::Result<ProvidedPipe, PipeError> {
+        self.create()
+    }
+
     fn capabilities(&self) -> std::result::Result<PipeCapabilities, PipeError>;
     fn create(&self) -> std::result::Result<ProvidedPipe, PipeError>;
 }
@@ -80,9 +105,12 @@ enum Closure {
     Cancelled,
 }
 
-struct Control(watch::Sender<Closure>);
+struct Control(watch::Sender<Closure>, PipeMetrics);
 
 impl PipeControl for Control {
+    fn metrics(&self) -> Option<PipeMetricsSnapshot> {
+        Some(self.1.snapshot())
+    }
     fn close(&self) {
         self.0.send_if_modified(|state| {
             if *state == Closure::Open {
@@ -111,6 +139,9 @@ impl EnvelopeSender for Sender {
         envelope: ChangeEnvelope,
     ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         let mut closure = self.control.0.subscribe();
+        if self.sender.capacity() == 0 && *self.control.0.borrow() == Closure::Open {
+            self.control.1.blocked();
+        }
         let permit = tokio::select! {
             biased;
             _ = closure.wait_for(|state| *state != Closure::Open) => None,
@@ -122,6 +153,7 @@ impl EnvelopeSender for Sender {
         match permit {
             Some(permit) if *state == Closure::Open => {
                 let receipt = EnqueueReceipt::new(envelope.id().clone());
+                self.control.1.accepted();
                 permit.send(envelope);
                 Ok(receipt)
             }
@@ -150,7 +182,11 @@ impl EnvelopeReceiver for Receiver {
                 Closure::Cancelled => {
                     self.receiver.close();
                     // Cancellation is the documented immediate-loss boundary.
-                    while self.receiver.try_recv().is_ok() {}
+                    let mut discarded = 0;
+                    while self.receiver.try_recv().is_ok() {
+                        discarded += 1;
+                    }
+                    self.control.1.discarded(discarded);
                     return Ok(None);
                 }
             }
@@ -158,7 +194,10 @@ impl EnvelopeReceiver for Receiver {
                 biased;
                 _ = closure.changed() => continue,
                 envelope = self.receiver.recv() => {
-                    return Ok(envelope.map(|envelope| Delivery::new(envelope, None)));
+                    return Ok(envelope.map(|envelope| {
+                        self.control.1.delivered();
+                        Delivery::new(envelope, None)
+                    }));
                 }
             }
         }
@@ -168,6 +207,7 @@ impl EnvelopeReceiver for Receiver {
 impl Drop for Receiver {
     fn drop(&mut self) {
         self.control.cancel();
+        self.control.1.discarded(self.receiver.len());
     }
 }
 
@@ -195,7 +235,7 @@ impl BoundedPipe {
         let capabilities = BoundedPipeConfig { capacity }.capabilities()?;
         let (sender, receiver) = mpsc::channel(capacity);
         let (closure, _) = watch::channel(Closure::Open);
-        let control = Arc::new(Control(closure));
+        let control = Arc::new(Control(closure, PipeMetrics::default()));
         Ok(Self {
             capabilities,
             sender: Arc::new(Sender {
@@ -212,6 +252,9 @@ impl BoundedPipe {
 }
 
 impl Pipe for BoundedPipe {
+    fn metrics(&self) -> Option<PipeMetricsSnapshot> {
+        self.control().metrics()
+    }
     fn capabilities(&self) -> &PipeCapabilities {
         &self.capabilities
     }

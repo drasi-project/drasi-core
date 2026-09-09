@@ -39,6 +39,8 @@ pub enum PipeCapability {
     ExplicitAcknowledgement,
     /// Provider can replay retained data from a supported position.
     Replay,
+    /// Retained history within the declared storage lifetime; not crash durability.
+    RetainedHistory,
     /// Provider supports atomic delivery/ack operations in a negotiated scope.
     Transactions,
     /// Exactly-once within the transport's negotiated scope, NOT arbitrary
