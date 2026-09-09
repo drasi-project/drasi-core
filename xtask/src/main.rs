@@ -157,7 +157,7 @@ fn load_cargo_metadata(no_deps: bool) -> CargoMetadata {
     serde_json::from_slice(&output.stdout).expect("failed to parse cargo metadata")
 }
 
-fn discover_dynamic_plugins() -> DiscoveryResult {
+fn discover_dynamic_plugins(plugin_filter: Option<&str>) -> DiscoveryResult {
     let metadata = load_cargo_metadata(false);
 
     let sdk_version = metadata
@@ -179,27 +179,32 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .map(|p| p.version.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let plugin_names: BTreeSet<String> = metadata
+    let mut plugins: Vec<PluginInfo> = metadata
         .packages
         .iter()
         .filter(|p| is_dynamic_plugin(p))
-        .map(|p| p.name.clone())
-        .collect();
-    let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
-
-    let plugins = metadata
-        .packages
-        .into_iter()
-        .filter(is_dynamic_plugin)
         .filter_map(|p| {
             let (plugin_type, kind) = parse_plugin_type_kind(&p.name)?;
             Some(PluginInfo {
-                package: p,
+                package: p.clone(),
                 plugin_type,
                 kind,
             })
         })
         .collect();
+
+    if let Some(filter) = plugin_filter {
+        plugins.retain(|p| {
+            p.package.name == filter || format!("{}/{}", p.plugin_type, p.kind) == filter
+        });
+        if plugins.is_empty() {
+            eprintln!("Error: no plugin matched filter '{filter}'");
+            std::process::exit(1);
+        }
+    }
+
+    let plugin_names: BTreeSet<String> = plugins.iter().map(|p| p.package.name.clone()).collect();
+    let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
 
     DiscoveryResult {
         plugins,
@@ -381,7 +386,7 @@ fn main() {
     match subcommand {
         Some("build-plugins") => build_plugins(&args[2..]),
         Some("check-publish-dependency-cycles") => check_publish_dependency_cycles(),
-        Some("list-plugins") => list_plugins(),
+        Some("list-plugins") => list_plugins(&args[2..]),
         Some("publish-plugins") => publish_plugins(&args[2..]),
         _ => {
             eprintln!("Usage: cargo xtask <command>");
@@ -393,8 +398,11 @@ fn main() {
             eprintln!(
                 "  check-publish-dependency-cycles  Check publishable packages for dev-dependency cycles"
             );
-            eprintln!("  list-plugins               List all discovered dynamic plugin crates");
-            eprintln!("  publish-plugins [OPTIONS]   Publish built plugins as OCI artifacts");
+            eprintln!("  list-plugins [OPTIONS]     List discovered dynamic plugin crates");
+            eprintln!("  publish-plugins [OPTIONS]  Publish built plugins as OCI artifacts");
+            eprintln!();
+            eprintln!("Common options (for build, list, and publish):");
+            eprintln!("  --plugin <ID>         Filter to a single plugin (e.g. 'source/otel' or 'drasi-source-otel')");
             eprintln!();
             eprintln!("build-plugins options:");
             eprintln!("  --release             Build in release mode");
@@ -420,8 +428,9 @@ fn main() {
     }
 }
 
-fn list_plugins() {
-    let result = discover_dynamic_plugins();
+fn list_plugins(args: &[String]) {
+    let plugin_filter = parse_flag_value(args, "--plugin");
+    let result = discover_dynamic_plugins(plugin_filter.as_deref());
     if result.plugins.is_empty() {
         println!("No dynamic plugins found.");
         return;
@@ -607,7 +616,8 @@ fn build_plugins(args: &[String]) {
         .as_deref()
         .map(has_glibc_suffix)
         .unwrap_or(false);
-    let result = discover_dynamic_plugins();
+    let plugin_filter = parse_flag_value(args, "--plugin");
+    let result = discover_dynamic_plugins(plugin_filter.as_deref());
 
     if result.plugins.is_empty() {
         println!("No dynamic plugins found.");
@@ -952,7 +962,20 @@ fn publish_plugins(args: &[String]) {
         std::process::exit(1);
     }
 
-    let plugins = discover_publishable_plugins(&plugins_dir);
+    let mut plugins = discover_publishable_plugins(&plugins_dir);
+    if let Some(filter) = parse_flag_value(args, "--plugin") {
+        plugins.retain(|p| {
+            p.metadata.name == filter
+                || format!("{}/{}", p.metadata.plugin_type, p.metadata.kind) == filter
+        });
+        if plugins.is_empty() {
+            eprintln!(
+                "Error: no plugin matched filter '{filter}' in {}",
+                plugins_dir.display()
+            );
+            std::process::exit(1);
+        }
+    }
     if plugins.is_empty() {
         eprintln!("No publishable plugins found in {}", plugins_dir.display());
         std::process::exit(1);
