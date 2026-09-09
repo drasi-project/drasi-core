@@ -54,9 +54,10 @@
 //!
 //! Build validates the *entire* DAG before pipe creation or lifecycle hooks.
 //! [`ComputationGraph::start`] exclusively borrows the graph and returns a
-//! caller-polled [`GraphRun`]; constructing it alone runs nothing. Consumers start
-//! before producers and no `next`, `transform`, or `handle` runs until all starts
-//! succeed. Futures for different nodes run concurrently, with no detached tasks.
+//! caller-polled [`GraphRun`]; constructing it alone runs nothing. Consumers are
+//! considered before producers, but activation is independent unless a relationship
+//! explicitly requires a running dependency. Every eligible component is attempted.
+//! Futures for different nodes run concurrently, with no detached graph tasks.
 //! Each component's mutable operations remain serialized. Components/providers
 //! must be cooperative, and must not block the runtime thread.
 //!
@@ -64,9 +65,13 @@
 //! Only `Completed` can restart with retained component ownership, retained
 //! sequence high-watermarks and fresh pipes. A native component's start hook may
 //! reset its finite input cursor, but must not regress its output stream sequence.
-//! Failure/cancellation is terminal, never automatic rollback or retry. Failed
-//! starts stop every *attempted* component, including the one whose start failed.
-//! Cleanup errors preserve original errors and leave `CleanupRequired`.
+//! Startup reports retain per-component successes and failures. Failed activation
+//! does not erase desired nodes, stop independent components, or close bound pipes.
+//! [`ComputationGraph::run`] separates deployment from activation and accepts live
+//! revision-checked lifecycle/policy commands through [`GraphControl`].
+//! Component generations and operation epochs reject stale health observations.
+//! Cancellation is not rollback. Cleanup errors preserve their causes and leave
+//! `CleanupRequired`.
 //!
 //! For prompt cancellation, call [`GraphControl::cancel`] and keep awaiting the
 //! run. It drops pending data operations before awaiting stop hooks, without a
@@ -95,13 +100,16 @@
 //! Fanout sends sequentially in edge declaration order, shares immutable payloads,
 //! and preserves branch-local context. A slow branch applies backpressure to its
 //! producer (not isolation from other branches). Fanin preserves each stream's
-//! FIFO, not a global order. Finite sources drop their outgoing senders, so filters
-//! and fanin drain naturally. The host retains no sender clones past a node's end.
+//! FIFO, not a global order. Only actual finite exhaustion closes outgoing pipes,
+//! so filters and fanin drain naturally even if providers retained sender clones.
+//! Failed or stopped producers leave their bindings idle, not falsely exhausted.
 //! Queue capacity counts queued envelopes, not bytes, component-local state,
 //! in-flight processing, or a transform's caller-allocated result vector.
 //!
-//! Acceptance is not handling, acknowledgement or durability. Handling errors
-//! fail the whole graph. A forwarding error reports prior branch acceptances;
+//! Acceptance is not handling, acknowledgement or durability. Operational errors
+//! remain visible on their component; independent components remain activated.
+//! Contract violations and forwarding errors terminate the run with their causes.
+//! A forwarding error reports prior branch acceptances;
 //! cancellation can also leave partial fanout or external effects. Neither is
 //! retried or rolled back. Explicit pipe close drains accepted events; cancellation
 //! may discard queued/in-flight events. B2 does not implement durable delivery,
@@ -113,6 +121,7 @@ mod data;
 mod envelope;
 mod error;
 mod graph;
+mod lifecycle;
 mod pipe;
 mod ports;
 
@@ -122,5 +131,6 @@ pub use data::*;
 pub use envelope::*;
 pub use error::{ContractError, Result};
 pub use graph::*;
+pub use lifecycle::*;
 pub use pipe::*;
 pub use ports::*;

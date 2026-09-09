@@ -456,29 +456,37 @@ async fn startup_failures() {
             _ => sink.behavior = Behavior::FailStart,
         }
         let mut graph = chain(source, transform, sink);
-        assert!(matches!(
-            graph.start().expect("start valid graph").await,
-            Err(GraphError::Component {
-                operation: "start",
-                ..
-            })
-        ));
+        let run = graph.run().expect("run valid graph");
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            control
+                .deployment_report()
+                .await
+                .expect("deploy before activation");
+            let report = control
+                .start_components(GraphRevision(1), GraphSelection::All)
+                .await
+                .expect("all startup outcomes");
+            assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+            assert_eq!(report.components.len(), 3);
+            assert!(matches!(
+                report.components[&component(failing)],
+                StartOutcome::StartFailed(_)
+            ));
+            assert!(signals.stops.lock().expect("stop log").is_empty());
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)));
         let started = signals.starts.lock().expect("start log lock").clone();
         let stopped = signals.stops.lock().expect("stop log lock").clone();
-        let expected = match failing {
-            "sink" => vec!["sink"],
-            "transform" => vec!["sink", "transform"],
-            _ => vec!["sink", "transform", "source"],
-        };
-        assert_eq!(started, expected);
+        assert_eq!(started, ["sink", "transform", "source"]);
         assert_eq!(stopped, started.into_iter().rev().collect::<Vec<_>>());
-        assert_eq!(signals.produced.load(Ordering::SeqCst), 0, "startup gate");
         assert_eq!(signals.active.load(Ordering::SeqCst), 0);
-        assert_eq!(graph.state(), GraphState::Failed);
+        assert_eq!(graph.state(), GraphState::Cancelled);
         assert!(matches!(
             graph.start(),
             Err(GraphError::InvalidState {
-                state: GraphState::Failed
+                state: GraphState::Cancelled
             })
         ));
         graph.shutdown().await.expect("no remaining cleanup");
@@ -486,13 +494,29 @@ async fn startup_failures() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn failed_start_is_terminal_and_cleans_every_attempted_resource() {
+async fn failed_start_is_local_and_cleanup_preserves_every_attempted_resource() {
     startup_failures().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_start_multi_thread() {
     startup_failures().await;
+}
+
+async fn wait_for_pending_operation(run: &mut std::pin::Pin<Box<GraphRun<'_>>>, signals: &Signals) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                result = run.as_mut() => panic!("scope ended before pending operation: {result:?}"),
+                _ = signals.entered.notified() => {}
+            }
+            if signals.active.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("component operation did not become pending");
 }
 
 async fn cancel_operations() {
@@ -516,8 +540,7 @@ async fn cancel_operations() {
             let mut graph = chain(source, transform, sink);
             let mut run = Box::pin(graph.start().expect("start valid graph"));
             let control = run.control();
-            assert!(poll!(&mut run).is_pending());
-            assert_eq!(signals.active.load(Ordering::SeqCst), 1);
+            wait_for_pending_operation(&mut run, &signals).await;
             control.cancel();
             control.cancel();
             assert!(matches!(run.await, Err(GraphError::Cancelled)));
@@ -561,8 +584,7 @@ async fn drop_retains_cleanup_ownership_without_detached_operations() {
             .unwrap();
         let mut run = Box::pin(graph.start().unwrap());
         let control = run.control();
-        assert!(poll!(&mut run).is_pending());
-        assert_eq!(signals.active.load(Ordering::SeqCst), 1);
+        wait_for_pending_operation(&mut run, &signals).await;
         drop(run);
         assert_eq!(signals.active.load(Ordering::SeqCst), 0);
         assert_eq!(control.state(), GraphState::CleanupRequired);
@@ -624,7 +646,7 @@ async fn precancellation_does_not_create_pipes_or_stop_unstarted_components() {
 }
 
 #[tokio::test]
-async fn processing_errors_at_each_role_fail_visibly_and_stop_everyone() {
+async fn processing_errors_are_visible_without_stopping_independent_components() {
     for position in ["source", "transform", "sink"] {
         let signals = Signals::default();
         let mut source = Fixture::source(&signals);
@@ -638,11 +660,29 @@ async fn processing_errors_at_each_role_fail_visibly_and_stop_everyone() {
         };
         target.behavior = Behavior::FailProcessing;
         let mut graph = chain(source, transform, sink);
-        assert!(matches!(
-            graph.start().unwrap().await,
-            Err(GraphError::Component { .. })
-        ));
-        assert_eq!(graph.state(), GraphState::Failed);
+        let run = graph.run().unwrap();
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            control.deployment_report().await.unwrap();
+            control
+                .start_components(GraphRevision(1), GraphSelection::All)
+                .await
+                .unwrap();
+            let mut observed = control.subscribe_observed();
+            observed
+                .wait_for(|state| {
+                    state.components[&component(position)]
+                        .failure
+                        .as_ref()
+                        .is_some_and(|failure| failure.phase == FailurePhase::Processing)
+                })
+                .await
+                .unwrap();
+            assert!(signals.stops.lock().unwrap().is_empty());
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        assert_eq!(graph.state(), GraphState::Cancelled);
         assert_eq!(
             &*signals.stops.lock().unwrap(),
             &["source", "transform", "sink"]
@@ -842,7 +882,21 @@ async fn provider_failure_before_start_is_visible_and_terminal() {
     assert_eq!(creates.load(Ordering::SeqCst), 0);
     assert!(matches!(
         graph.start().unwrap().await,
-        Err(GraphError::Pipe { .. })
+        Err(GraphError::StartupIncomplete)
+    ));
+    assert!(matches!(
+        graph
+            .observed()
+            .relationships
+            .values()
+            .next()
+            .unwrap()
+            .failure
+            .as_ref()
+            .unwrap()
+            .cause
+            .underlying(),
+        GraphError::Pipe { .. }
     ));
     assert!(signals.starts.lock().unwrap().is_empty());
     assert_eq!(graph.state(), GraphState::Failed);
@@ -1173,7 +1227,7 @@ impl PipeProvider for WrappedProvider {
 }
 
 #[tokio::test]
-async fn failed_provider_setup_cancels_all_previously_acquired_pipes() {
+async fn partial_provider_setup_retains_good_bindings_until_scoped_cleanup() {
     for failure in ["create", "receiver", "capabilities"] {
         let signals = Signals::default();
         let retained = Arc::new(Mutex::new(Vec::new()));
@@ -1199,7 +1253,18 @@ async fn failed_provider_setup_cancels_all_previously_acquired_pipes() {
                 }),
             );
         let mut graph = builder.build().unwrap();
-        assert!(graph.start().unwrap().await.is_err());
+        let run = graph.run().unwrap();
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            let report = control.deployment_report().await.unwrap();
+            assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+            let good = retained.lock().unwrap()[0].clone();
+            good.send(envelope(1))
+                .await
+                .expect("independent binding stays open");
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)));
         assert!(signals.starts.lock().unwrap().is_empty());
         let old = retained.lock().unwrap()[0].clone();
         assert!(matches!(
@@ -1282,14 +1347,14 @@ async fn fanout_send_failure_reports_prior_branch_acceptance_without_retry() {
     .build()
     .unwrap();
     let error = graph.start().unwrap().await.unwrap_err();
-    match error {
+    match error.underlying() {
         GraphError::Forward {
             accepted_branches,
             source,
             edge,
         } => {
-            assert_eq!(accepted_branches, 1);
-            assert_eq!(edge, 1);
+            assert_eq!(*accepted_branches, 1);
+            assert_eq!(*edge, 1);
             assert_eq!(source.envelope.system().sequence(), 1);
             assert!(matches!(source.error, PipeError::Closed));
         }
@@ -1320,8 +1385,7 @@ async fn one_slow_fanout_branch_does_not_prevent_whole_graph_cancellation() {
     .unwrap();
     let mut run = Box::pin(graph.start().unwrap());
     let control = run.control();
-    assert!(poll!(&mut run).is_pending());
-    assert_eq!(signals.active.load(Ordering::SeqCst), 1);
+    wait_for_pending_operation(&mut run, &signals).await;
     assert!(signals.produced.load(Ordering::SeqCst) <= 3);
     control.cancel();
     assert!(matches!(run.await, Err(GraphError::Cancelled)));
@@ -1348,7 +1412,10 @@ async fn clean_restart_retains_sequence_state_and_rejects_regression() {
             result.unwrap();
             assert_eq!(signals.handled.load(Ordering::SeqCst), 2);
         } else {
-            assert!(matches!(result, Err(GraphError::Emission { .. })));
+            assert!(matches!(
+                result.as_ref().err().map(GraphError::underlying),
+                Some(GraphError::Emission { .. })
+            ));
             assert_eq!(signals.handled.load(Ordering::SeqCst), 1);
         }
         assert_eq!(signals.starts.lock().unwrap().len(), 4);
@@ -1394,23 +1461,28 @@ async fn stale_senders_stay_closed_across_clean_restart() {
     )
     .build()
     .unwrap();
-    let mut run = Box::pin(graph.start().unwrap());
-    assert!(poll!(&mut run).is_pending());
+    graph.start().unwrap().await.unwrap();
     let (old_sender, old_control) = epochs.lock().unwrap()[0].clone();
-    old_control.close();
-    run.await.unwrap();
-    let mut run = Box::pin(graph.start().unwrap());
-    assert!(poll!(&mut run).is_pending());
-    let (new_sender, new_control) = epochs.lock().unwrap()[1].clone();
-    assert!(!Arc::ptr_eq(&old_sender, &new_sender));
+    graph.start().unwrap().await.unwrap();
     assert!(matches!(
         old_sender.send(envelope(100)).await.unwrap_err().error,
         PipeError::Closed
     ));
-    old_control.cancel();
-    new_control.close();
-    run.await.unwrap();
-    assert_eq!(graph.state(), GraphState::Completed);
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let (new_sender, _) = epochs.lock().unwrap()[2].clone();
+        assert!(!Arc::ptr_eq(&old_sender, &new_sender));
+        old_control.cancel();
+        new_sender
+            .send(envelope(100))
+            .await
+            .expect("old control cannot close a new binding");
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    assert_eq!(graph.state(), GraphState::Cancelled);
     assert_eq!(signals.handled.load(Ordering::SeqCst), 2);
 }
 

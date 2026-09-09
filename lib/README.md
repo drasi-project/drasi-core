@@ -76,21 +76,29 @@ The example includes inputs and expected outputs. Its source, transforms and sin
 implement the public traits directly; no legacy adapter or query is hidden inside.
 
 **Lifecycle:** `let run = graph.start()?; run.await?;` drives a caller-owned future.
-Consumers start before producers, with processing gated until all starts succeed.
-There are no detached graph workers. `run.control()` supplies a generation-specific
+Every eligible created component is attempted; data relationships are
+activation-independent unless explicitly configured otherwise. A failed Source
+does not prevent its consumers from starting, and its bound pipes do not turn
+into false EOF. There are no detached graph workers. `run.control()` supplies a generation-specific
 cancel/status handle; call `control.cancel()` and **keep awaiting the run** to
 cancel pending operations and await asynchronous stop hooks. Mutable component
-calls are serialized, but cancellation never waits for their locks.
+calls use exclusive instance leases, but cancellation never waits for their locks.
+`graph.run()` drives deployment without automatic activation and keeps a live
+controller open. The control handle exposes deployment/start reports, immutable
+desired/observed snapshots, revision-checked lifecycle-policy changes and scoped
+start/stop commands, plus generation/operation-bound health reporting.
 
 Only a fully drained, successfully stopped `Completed` graph can restart.
 Components and sequence high-watermarks are retained; each new generation gets
-fresh pipes. Failure/cancellation is terminal, not rollback. Dropping a run closes
+fresh pipes. No automatic failure retry or rollback is implied. While the
+controller is open, a failed activation may be explicitly stopped and retried
+without restarting its independent consumers. Dropping a run closes
 its pipes and drops all scoped operations, but leaves `CleanupRequired`: explicitly
 call `graph.shutdown().await` to await remaining stop hooks. Cleanup has a bounded
 shared deadline; failed/timed-out hooks remain visibly incomplete. Dropping a graph
 cannot await cleanup for resources a component itself spawned.
 
-This is the additive **B2 in-process runtime**, not the entire composable framework.
+This is an incremental parallel in-process runtime, not the entire composable framework.
 There are no legacy adapters, persistence/serialization formats, server configuration,
 or new plugin ABI. Enabling it does not migrate or change existing Sources, Queries,
 Reactions, or `DrasiLib`. Immutable topology snapshots contain no live provider handles

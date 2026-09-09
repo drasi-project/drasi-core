@@ -22,14 +22,17 @@ use std::{
 };
 
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+
+mod controller;
 
 use super::{
     data::{validate_identifier, validate_schema},
-    validate_connection, validate_sink_completion, ComponentDescriptor, ComponentId, ContractError,
-    Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender, EnvelopeSink, EnvelopeSource,
-    InputEnvelope, OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError,
-    PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, SendFailure,
+    validate_connection, validate_sink_completion, ComponentDescriptor, ComponentGeneration,
+    ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender,
+    EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, LifecyclePolicy, ObservedGraph,
+    OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError, PipeProvider,
+    PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy, SendFailure,
     SinkCompletion, StreamId, Transformer,
 };
 
@@ -45,6 +48,29 @@ pub enum GraphError {
     Topology { reason: String },
     #[error("cannot start graph in state {state:?}")]
     InvalidState { state: GraphState },
+    #[error("graph revision changed: expected {expected:?}, actual {actual:?}")]
+    StaleRevision {
+        expected: GraphRevision,
+        actual: GraphRevision,
+    },
+    #[error("observation or command targets an obsolete component generation or operation")]
+    StaleGeneration,
+    #[error("the graph controller is closed")]
+    ControllerClosed,
+    #[error("a conflicting component lifecycle operation is still in progress")]
+    OperationInProgress,
+    #[error("no selected component could be activated; inspect the per-component startup report")]
+    StartupIncomplete,
+    #[error("component {component} lost its explicit lifecycle dependency {dependency}")]
+    DependencyUnavailable {
+        component: ComponentId,
+        dependency: ComponentId,
+    },
+    #[error("{cause}")]
+    Reported {
+        #[source]
+        cause: Arc<GraphError>,
+    },
     #[error("pipe for edge {edge} failed: {source}")]
     Pipe {
         edge: usize,
@@ -82,7 +108,16 @@ pub enum GraphError {
     },
 }
 
-/// Per-instance state. Cancellation/failure is terminal, not a rollback.
+impl GraphError {
+    pub fn underlying(&self) -> &GraphError {
+        match self {
+            Self::Reported { cause } => cause.underlying(),
+            error => error,
+        }
+    }
+}
+
+/// Controller scope state, not a synthetic running graph-root component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphState {
     Ready,
@@ -140,14 +175,17 @@ pub struct NodeSnapshot {
 pub struct EdgeSnapshot {
     pub definition: EdgeDefinition,
     pub capabilities: PipeCapabilities,
+    pub policy: RelationshipPolicy,
 }
 
 #[derive(Debug, Clone)]
 pub struct GraphSnapshot {
     pub id: Arc<str>,
+    pub revision: GraphRevision,
     pub nodes: Arc<[NodeSnapshot]>,
     pub edges: Arc<[EdgeSnapshot]>,
     pub requirements: PipeRequirements,
+    pub lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
 }
 
 enum Component {
@@ -214,6 +252,8 @@ pub struct ComputationGraphBuilder {
     streams: Vec<(Endpoint, StreamId)>,
     requirements: PipeRequirements,
     cleanup_timeout: Duration,
+    lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
+    relationship_policies: BTreeMap<EdgeDefinition, RelationshipPolicy>,
 }
 
 impl ComputationGraphBuilder {
@@ -239,6 +279,16 @@ impl ComputationGraphBuilder {
 
     pub fn bind_stream(mut self, output: Endpoint, stream: StreamId) -> Self {
         self.streams.push((output, stream));
+        self
+    }
+
+    pub fn lifecycle_policy(mut self, component: ComponentId, policy: LifecyclePolicy) -> Self {
+        self.lifecycle_policies.insert(component, policy);
+        self
+    }
+
+    pub fn relationship_policy(mut self, edge: EdgeDefinition, policy: RelationshipPolicy) -> Self {
+        self.relationship_policies.insert(edge, policy);
         self
     }
 
@@ -370,6 +420,11 @@ impl ComputationGraphBuilder {
             edges.push(EdgeSnapshot {
                 definition: edge.clone(),
                 capabilities,
+                policy: self
+                    .relationship_policies
+                    .get(edge)
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
         for node in &nodes {
@@ -405,15 +460,52 @@ impl ComputationGraphBuilder {
         if order.len() != nodes.len() {
             return Err(topology("cycles (including self-loops) are not supported"));
         }
-        let node_count = nodes.len();
+        if self
+            .lifecycle_policies
+            .keys()
+            .any(|id| !ids.contains_key(id))
+            || self
+                .relationship_policies
+                .keys()
+                .any(|edge| !unique_edges.contains(edge))
+        {
+            return Err(topology(
+                "lifecycle policy names an undeclared component or relationship",
+            ));
+        }
+        let lifecycle_policies = nodes
+            .iter()
+            .map(|node| {
+                let id = node.descriptor.id().clone();
+                let policy = self
+                    .lifecycle_policies
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
+                (id, policy)
+            })
+            .collect();
+        let snapshot = GraphSnapshot {
+            id: self.id,
+            revision: GraphRevision(1),
+            nodes: nodes.into(),
+            edges: edges.into(),
+            requirements: self.requirements,
+            lifecycle_policies,
+        };
+        let observed = controller::initial_observations(&snapshot);
         Ok(ComputationGraph {
-            snapshot: GraphSnapshot {
-                id: self.id,
-                nodes: nodes.into(),
-                edges: edges.into(),
-                requirements: self.requirements,
-            },
-            components: self.components,
+            desired: watch::channel(Arc::new(snapshot.clone())).0,
+            snapshot,
+            observed: watch::channel(Arc::new(observed)).0,
+            components: self
+                .components
+                .into_iter()
+                .enumerate()
+                .map(|(index, component)| {
+                    controller::InstanceSlot::new(component, ComponentGeneration(index as u64 + 1))
+                })
+                .collect(),
             providers: self
                 .edges
                 .into_iter()
@@ -421,8 +513,6 @@ impl ComputationGraphBuilder {
                 .collect(),
             order,
             ids,
-            attempted: vec![false; node_count],
-            sequences: vec![BTreeMap::new(); node_count],
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
         })
@@ -458,6 +548,9 @@ fn resolve<'a>(
 pub struct GraphControl {
     cancel: watch::Sender<bool>,
     state: watch::Receiver<GraphState>,
+    commands: mpsc::Sender<controller::Command>,
+    observed: watch::Receiver<Arc<ObservedGraph>>,
+    desired: watch::Receiver<Arc<GraphSnapshot>>,
 }
 
 impl GraphControl {
@@ -476,26 +569,29 @@ impl GraphControl {
 
 /// Standalone opt-in DAG, unrelated to legacy `ComponentGraph`/`DrasiLib`.
 ///
-/// `start` returns a caller-polled, exclusively borrowed run. No worker is
-/// spawned: per-node futures are scoped to that run. Drive it with `.await`,
-/// `join!`, or `select!`; merely constructing it does not run components.
-/// Reverse-topological startup is gated before processing. Mutable component
-/// calls are serialized. Components must yield cooperatively (like Tokio tasks).
+/// `start` deploys and requests automatic startup in a caller-polled run; `run`
+/// deploys without automatic activation and keeps its command controller open.
+/// No graph worker is spawned. Drive the scope with `.await`, `join!`, or
+/// `select!`; merely constructing it does not run components.
+/// A failed start does not stop independently activated components or turn its
+/// bound outgoing pipes into EOF. The control handle exposes per-item outcomes.
+/// Instance leases serialize mutable calls without holding a mutex across await.
 ///
-/// Only natural drain followed by successful stop permits restart. Boxes and
+/// Only natural drain followed by successful stop permits a new run. Boxes and
 /// stream high-watermarks are retained; a fresh generation creates fresh pipes.
-/// A cancelled/failed component is never silently restarted. Dropping a run
+/// Failed component activation can be explicitly stopped and retried through the
+/// controller; no automatic retry or rollback is implied. Dropping a run
 /// cancels its scoped futures/pipes immediately but cannot call async hooks;
 /// `shutdown().await` must then be used to finish cleanup before dropping the
 /// graph. Components owning their own external workers must stop them in hooks.
 pub struct ComputationGraph {
     snapshot: GraphSnapshot,
-    components: Vec<Component>,
+    components: Vec<Arc<controller::InstanceSlot>>,
     providers: Vec<Box<dyn PipeProvider>>,
     order: Vec<usize>,
     ids: BTreeMap<ComponentId, usize>,
-    attempted: Vec<bool>,
-    sequences: Vec<BTreeMap<PortId, u64>>,
+    observed: watch::Sender<Arc<ObservedGraph>>,
+    desired: watch::Sender<Arc<GraphSnapshot>>,
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
 }
@@ -509,6 +605,8 @@ impl ComputationGraph {
             streams: Vec::new(),
             requirements: PipeRequirements::default(),
             cleanup_timeout: Duration::from_secs(5),
+            lifecycle_policies: BTreeMap::new(),
+            relationship_policies: BTreeMap::new(),
         }
     }
 
@@ -518,6 +616,10 @@ impl ComputationGraph {
 
     pub fn state(&self) -> GraphState {
         *self.state.borrow()
+    }
+
+    pub fn observed(&self) -> Arc<ObservedGraph> {
+        self.observed.borrow().clone()
     }
 
     /// Exclusive borrowing prevents duplicate concurrent starts at compile time.
@@ -532,22 +634,47 @@ impl ComputationGraph {
     /// }
     /// ```
     pub fn start(&mut self) -> GraphResult<GraphRun<'_>> {
+        self.open_run(true)
+    }
+
+    /// Drive deployment and live commands without automatically starting components.
+    /// The controller remains available until explicitly cancelled.
+    pub fn run(&mut self) -> GraphResult<GraphRun<'_>> {
+        self.open_run(false)
+    }
+
+    fn open_run(&mut self, auto_start: bool) -> GraphResult<GraphRun<'_>> {
         let state = self.state();
         if !matches!(state, GraphState::Ready | GraphState::Completed) {
             return Err(GraphError::InvalidState { state });
         }
         self.state = watch::channel(GraphState::Starting).0;
+        let mut observed = (*self.observed()).clone();
+        observed.run_epoch = observed
+            .run_epoch
+            .checked_add(1)
+            .ok_or_else(|| topology("graph run epoch exhausted"))?;
+        observed.startup = None;
+        observed.deployment = None;
+        self.observed = watch::channel(Arc::new(observed)).0;
+        self.desired = watch::channel(Arc::new(self.snapshot.clone())).0;
         let (cancel, cancellation) = watch::channel(false);
+        let (commands, receiver) = mpsc::channel(64);
         let control = GraphControl {
             cancel,
             state: self.state.subscribe(),
+            commands,
+            observed: self.observed.subscribe(),
+            desired: self.desired.subscribe(),
         };
         let state = self.state.clone();
+        let observed = self.observed.clone();
         Ok(GraphRun {
-            future: self.execute(cancellation).boxed(),
+            future: self.execute(cancellation, receiver, auto_start).boxed(),
             control,
             state,
             finished: false,
+            observed,
         })
     }
 
@@ -556,14 +683,14 @@ impl ComputationGraph {
     /// calls after successful cleanup do not call stop twice. Retrying a failed
     /// stop explicitly asks the implementor to finish its incomplete cleanup.
     pub async fn shutdown(&mut self) -> GraphResult<()> {
-        if !self.attempted.iter().any(|attempted| *attempted) {
+        if !controller::needs_cleanup(self)? {
             if self.state() == GraphState::CleanupRequired {
                 self.state.send_replace(GraphState::Cancelled);
             }
             return Ok(());
         }
         self.state.send_replace(GraphState::CleanupRequired);
-        let errors = self.cleanup().await;
+        let errors = controller::cleanup(self).await;
         if errors.is_empty() {
             self.state.send_replace(GraphState::Cancelled);
             Ok(())
@@ -575,10 +702,15 @@ impl ComputationGraph {
         }
     }
 
-    async fn execute(&mut self, mut cancel: watch::Receiver<bool>) -> GraphResult<()> {
-        let result = self.process(&mut cancel).await;
+    async fn execute(
+        &mut self,
+        mut cancel: watch::Receiver<bool>,
+        commands: mpsc::Receiver<controller::Command>,
+        auto_start: bool,
+    ) -> GraphResult<()> {
+        let result = controller::run(self, &mut cancel, commands, auto_start).await;
         self.state.send_replace(GraphState::Stopping);
-        let errors = self.cleanup().await;
+        let errors = controller::cleanup(self).await;
         if !errors.is_empty() {
             self.state.send_replace(GraphState::CleanupRequired);
             return Err(GraphError::Cleanup {
@@ -593,117 +725,6 @@ impl ComputationGraph {
         });
         result
     }
-
-    async fn process(&mut self, cancel: &mut watch::Receiver<bool>) -> GraphResult<()> {
-        if *cancel.borrow() {
-            return Err(GraphError::Cancelled);
-        }
-        for (component, node) in self.components.iter().zip(self.snapshot.nodes.iter()) {
-            check_descriptor(component, node)?;
-        }
-        let mut controls = PipeGuard(Vec::new());
-        let mut inputs: Vec<Vec<Incoming>> =
-            (0..self.components.len()).map(|_| Vec::new()).collect();
-        let mut outputs: Vec<Vec<Outgoing>> =
-            (0..self.components.len()).map(|_| Vec::new()).collect();
-        for (edge, (provider, snapshot)) in self
-            .providers
-            .iter()
-            .zip(self.snapshot.edges.iter())
-            .enumerate()
-        {
-            let mut provided = provider
-                .create()
-                .map_err(|source| GraphError::Pipe { edge, source })?;
-            controls.0.push(provided.control);
-            if provided.pipe.capabilities() != &snapshot.capabilities {
-                return Err(topology(
-                    "created pipe differs from preflight capability declaration",
-                ));
-            }
-            let from = self.ids[&snapshot.definition.from.component];
-            let to = self.ids[&snapshot.definition.to.component];
-            let sender = provided.pipe.sender();
-            let receiver = provided
-                .pipe
-                .take_receiver()
-                .map_err(|source| GraphError::Pipe { edge, source })?;
-            outputs[from].push(Outgoing {
-                edge,
-                port: snapshot.definition.from.port.clone(),
-                sender,
-            });
-            inputs[to].push(Incoming {
-                edge,
-                port: snapshot.definition.to.port.clone(),
-                receiver,
-            });
-            // Drop the provider's seed sender now; only upstream futures retain senders.
-        }
-        for index in self.order.iter().rev().copied() {
-            check_descriptor(&self.components[index], &self.snapshot.nodes[index])?;
-            tokio::select! {
-                biased;
-                _ = cancelled(cancel) => return Err(GraphError::Cancelled),
-                result = async {
-                    self.attempted[index] = true;
-                    self.components[index].start().await
-                } => {
-                    result.map_err(|source| component_error(&self.snapshot.nodes[index], "start", source))?;
-                }
-            }
-            check_descriptor(&self.components[index], &self.snapshot.nodes[index])?;
-        }
-        self.state.send_replace(GraphState::Running);
-        let mut workers = FuturesUnordered::new();
-        for ((((component, node), sequences), input), output) in self
-            .components
-            .iter_mut()
-            .zip(self.snapshot.nodes.iter())
-            .zip(self.sequences.iter_mut())
-            .zip(inputs)
-            .zip(outputs)
-        {
-            workers.push(run_node(component, node, sequences, input, output));
-        }
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancelled(cancel) => return Err(GraphError::Cancelled),
-                result = workers.next() => match result {
-                    Some(result) => result?,
-                    None => return Ok(()),
-                }
-            }
-        }
-    }
-
-    async fn cleanup(&mut self) -> Vec<GraphError> {
-        let mut errors = Vec::new();
-        let now = tokio::time::Instant::now();
-        let deadline = match now.checked_add(self.cleanup_timeout) {
-            Some(deadline) => deadline,
-            None => {
-                errors.push(topology("cleanup deadline is no longer representable"));
-                now
-            }
-        };
-        // Reverse start order: producers first, then downstream resources.
-        for index in self.order.iter().copied() {
-            if self.attempted[index] {
-                let node = &self.snapshot.nodes[index];
-                let result = tokio::time::timeout_at(deadline, self.components[index].stop()).await;
-                match result {
-                    Ok(Ok(())) => self.attempted[index] = false,
-                    Ok(Err(source)) => errors.push(component_error(node, "stop", source)),
-                    Err(_) => errors.push(GraphError::StopTimeout {
-                        component: node.descriptor.id().clone(),
-                    }),
-                }
-            }
-        }
-        errors
-    }
 }
 
 /// Future owning every scoped operation for one generation. Drop cancels, but
@@ -714,6 +735,7 @@ pub struct GraphRun<'a> {
     control: GraphControl,
     state: watch::Sender<GraphState>,
     finished: bool,
+    observed: watch::Sender<Arc<ObservedGraph>>,
 }
 
 impl GraphRun<'_> {
@@ -739,15 +761,16 @@ impl Drop for GraphRun<'_> {
         if !self.finished {
             self.control.cancel();
             self.state.send_replace(GraphState::CleanupRequired);
+            controller::mark_cleanup_required(&self.observed);
         }
     }
 }
 
-struct PipeGuard(Vec<Arc<dyn PipeControl>>);
+struct PipeGuard(BTreeMap<usize, Arc<dyn PipeControl>>);
 
 impl Drop for PipeGuard {
     fn drop(&mut self) {
-        for control in &self.0 {
+        for control in self.0.values() {
             control.cancel();
         }
     }
@@ -770,8 +793,11 @@ struct Outgoing {
 }
 
 async fn receive(
-    mut input: Incoming,
-) -> (Incoming, std::result::Result<Option<Delivery>, PipeError>) {
+    input: &mut Incoming,
+) -> (
+    &mut Incoming,
+    std::result::Result<Option<Delivery>, PipeError>,
+) {
     let result = input.receiver.receive().await;
     (input, result)
 }
@@ -809,10 +835,13 @@ async fn run_node(
     component: &mut Component,
     node: &NodeSnapshot,
     sequences: &mut BTreeMap<PortId, u64>,
-    inputs: Vec<Incoming>,
-    outputs: Vec<Outgoing>,
+    inputs: &mut [Incoming],
+    outputs: &[Outgoing],
 ) -> GraphResult<()> {
-    let mut receivers: FuturesUnordered<_> = inputs.into_iter().map(receive).collect();
+    if inputs.is_empty() && !matches!(component, Component::Source(_)) {
+        return std::future::pending().await;
+    }
+    let mut receivers: FuturesUnordered<_> = inputs.iter_mut().map(receive).collect();
     loop {
         let emissions = match component {
             Component::Source(source) => {
@@ -869,6 +898,12 @@ async fn run_node(
         check_descriptor(component, node)?;
         validate_emissions(node, sequences, &emissions)?;
         for emission in emissions {
+            if !outputs.iter().any(|output| output.port == emission.port) {
+                return Err(emission_error(
+                    node,
+                    "output port has no bound relationship",
+                ));
+            }
             for (accepted_branches, output) in outputs
                 .iter()
                 .filter(|output| output.port == emission.port)

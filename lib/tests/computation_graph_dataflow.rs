@@ -560,13 +560,13 @@ fn invalid_emission(producer: &str, fault: Fault, input: &Envelope) -> OutputEnv
 }
 
 fn assert_fault(error: GraphError, producer: &str, fault: Fault) {
-    match (error, fault) {
+    match (error.underlying(), fault) {
         (
             GraphError::Contract(ContractError::SchemaMismatch { expected, actual }),
             Fault::Schema,
         ) => {
-            assert_eq!(*expected, schema_descriptor());
-            assert_eq!(*actual, named_schema("test.other-reading"));
+            assert_eq!(**expected, schema_descriptor());
+            assert_eq!(**actual, named_schema("test.other-reading"));
         }
         (
             GraphError::Emission {
@@ -575,7 +575,7 @@ fn assert_fault(error: GraphError, producer: &str, fault: Fault) {
             },
             fault,
         ) => {
-            assert_eq!(actual, component(producer));
+            assert_eq!(actual, &component(producer));
             let expected = match fault {
                 Fault::UnknownPort => "unknown output port",
                 Fault::InputPort => "emission targets an input port",
