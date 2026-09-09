@@ -17,6 +17,7 @@ workspace = true
 [features]
 default = []
 parallel_solver = []
+computation = []
 
 [dependencies]
 async-trait = "0.1.68"

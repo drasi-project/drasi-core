@@ -21,6 +21,11 @@ use std::{
     time::Duration,
 };
 
+// The parallel adapter reuses private evaluation without widening the legacy API.
+#[cfg(feature = "computation")]
+#[path = "../computation/query_adapter.rs"]
+pub(crate) mod computation_adapter;
+
 use drasi_query_ast::ast::Query;
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use tokio::{

@@ -21,5 +21,10 @@ pub use auto_future_queue_consumer::AutoFutureQueueConsumer;
 pub use continuous_query::{ContinuousQuery, DueFutureResult};
 pub use query_builder::QueryBuilder;
 
+#[cfg(feature = "computation")]
+pub(crate) mod computation_exports {
+    pub use super::continuous_query::computation_adapter::ComputationQuery;
+}
+
 #[cfg(test)]
 mod tests;

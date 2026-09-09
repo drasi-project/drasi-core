@@ -20,3 +20,6 @@ pub mod middleware;
 pub mod models;
 pub mod path_solver;
 pub mod query;
+
+#[cfg(feature = "computation")]
+pub mod computation;

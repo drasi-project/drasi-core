@@ -31,7 +31,7 @@ workspace = true
 default = []
 
 # Experimental, additive in-process computation contracts and runtime.
-computation = []
+computation = ["drasi-core/computation"]
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
