@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Experimental computation contracts, enabled by the default-off `computation`
+//! Experimental computation contracts and runtime, enabled by the default-off `computation`
 //! Cargo feature. These sit beside, and do not modify, the existing
 //! [`crate::Source`], [`crate::Reaction`], or [`crate::DrasiLib`] APIs.
 //!
-//! Only versioned namespaces are public. This module provides no graph runner,
-//! concrete pipe, legacy adapter, persistence format, or plugin ABI.
+//! Only versioned namespaces are public. [`v1::ComputationGraph`] runs native
+//! components over bounded volatile pipes. Legacy adapters, durable delivery,
+//! persistence formats, and plugin ABIs are separate work.
 
 pub mod v1;

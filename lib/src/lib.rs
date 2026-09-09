@@ -52,7 +52,7 @@ pub mod wal;
 /// Error types for drasi-lib
 pub mod error;
 
-/// Experimental, opt-in computation contracts (not a graph runtime).
+/// Experimental, opt-in computation contracts and standalone DAG runtime.
 #[cfg(feature = "computation")]
 pub mod computation;
 

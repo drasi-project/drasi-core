@@ -1,0 +1,946 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
+
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use tokio::sync::watch;
+
+use super::{
+    data::{validate_identifier, validate_schema},
+    validate_connection, validate_sink_completion, ComponentDescriptor, ComponentId, ContractError,
+    Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender, EnvelopeSink, EnvelopeSource,
+    InputEnvelope, OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError,
+    PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, SendFailure,
+    SinkCompletion, StreamId, Transformer,
+};
+
+pub type GraphResult<T> = std::result::Result<T, GraphError>;
+
+/// Errors retain the original component/provider cause. A send failure may follow
+/// successful delivery to other branches; no rollback or retry is implied.
+#[derive(Debug, thiserror::Error)]
+pub enum GraphError {
+    #[error(transparent)]
+    Contract(#[from] ContractError),
+    #[error("invalid graph topology: {reason}")]
+    Topology { reason: String },
+    #[error("cannot start graph in state {state:?}")]
+    InvalidState { state: GraphState },
+    #[error("pipe for edge {edge} failed: {source}")]
+    Pipe {
+        edge: usize,
+        #[source]
+        source: PipeError,
+    },
+    #[error("component {component} failed during {operation}: {source}")]
+    Component {
+        component: ComponentId,
+        operation: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("component {component} violated its emission/descriptor contract: {reason}")]
+    Emission {
+        component: ComponentId,
+        reason: String,
+    },
+    #[error("edge {edge} rejected emission after {accepted_branches} accepted branches: {source}")]
+    Forward {
+        edge: usize,
+        accepted_branches: usize,
+        #[source]
+        source: Box<SendFailure>,
+    },
+    #[error("graph cancelled; accepted/delivered events and effects are not rolled back")]
+    Cancelled,
+    #[error("component {component} stop exceeded the cleanup deadline")]
+    StopTimeout { component: ComponentId },
+    #[error("graph cleanup failed (original failure: {primary:?}): {errors:?}")]
+    Cleanup {
+        #[source]
+        primary: Option<Box<GraphError>>,
+        errors: Vec<GraphError>,
+    },
+}
+
+/// Per-instance state. Cancellation/failure is terminal, not a rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphState {
+    Ready,
+    Starting,
+    Running,
+    Stopping,
+    Completed,
+    Cancelled,
+    Failed,
+    /// Run dropped or stop failed: call `ComputationGraph::shutdown` to await hooks.
+    CleanupRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentRole {
+    Source,
+    Transformer,
+    Sink,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Endpoint {
+    pub component: ComponentId,
+    pub port: PortId,
+}
+
+impl Endpoint {
+    pub fn new(component: ComponentId, port: PortId) -> Self {
+        Self { component, port }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EdgeDefinition {
+    pub from: Endpoint,
+    pub to: Endpoint,
+}
+
+impl EdgeDefinition {
+    pub fn new(from: Endpoint, to: Endpoint) -> Self {
+        Self { from, to }
+    }
+}
+
+/// Descriptive data only: no providers, resolved secrets, or live endpoints.
+#[derive(Debug, Clone)]
+pub struct NodeSnapshot {
+    pub descriptor: ComponentDescriptor,
+    pub role: ComponentRole,
+    pub completion: Option<SinkCompletion>,
+    pub output_streams: BTreeMap<PortId, StreamId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EdgeSnapshot {
+    pub definition: EdgeDefinition,
+    pub capabilities: PipeCapabilities,
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphSnapshot {
+    pub id: Arc<str>,
+    pub nodes: Arc<[NodeSnapshot]>,
+    pub edges: Arc<[EdgeSnapshot]>,
+    pub requirements: PipeRequirements,
+}
+
+enum Component {
+    Source(Box<dyn EnvelopeSource>),
+    Transformer(Box<dyn Transformer>),
+    Sink(Box<dyn EnvelopeSink>),
+}
+
+impl Component {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        match self {
+            Self::Source(component) => component.descriptor(),
+            Self::Transformer(component) => component.descriptor(),
+            Self::Sink(component) => component.descriptor(),
+        }
+    }
+
+    fn role(&self) -> ComponentRole {
+        match self {
+            Self::Source(_) => ComponentRole::Source,
+            Self::Transformer(_) => ComponentRole::Transformer,
+            Self::Sink(_) => ComponentRole::Sink,
+        }
+    }
+
+    fn completion(&self) -> Option<SinkCompletion> {
+        match self {
+            Self::Sink(component) => Some(component.completion()),
+            _ => None,
+        }
+    }
+
+    async fn start(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.start().await,
+            Self::Transformer(component) => component.start().await,
+            Self::Sink(component) => component.start().await,
+        }
+    }
+
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.stop().await,
+            Self::Transformer(component) => component.stop().await,
+            Self::Sink(component) => component.stop().await,
+        }
+    }
+}
+
+/// Entire topology is validated by `build` before any provider creation or start.
+///
+/// Policy: nonempty DAG; unique component IDs within this graph, port IDs within
+/// each component, edges and output stream IDs within the graph. Every port must
+/// be connected and every output port must bind exactly one stream. Sources have
+/// only outputs, sinks only inputs, transformers both. Disconnected *complete*
+/// pipelines are permitted; isolated nodes/unconnected ports are not. Graph IDs
+/// are local descriptive IDs (there is no process-wide graph registry).
+/// One producer output cannot route to multiple input ports of the same component:
+/// independent queues would not preserve component-wide FIFO for that stream.
+pub struct ComputationGraphBuilder {
+    id: Arc<str>,
+    components: Vec<Component>,
+    edges: Vec<(EdgeDefinition, Box<dyn PipeProvider>)>,
+    streams: Vec<(Endpoint, StreamId)>,
+    requirements: PipeRequirements,
+    cleanup_timeout: Duration,
+}
+
+impl ComputationGraphBuilder {
+    pub fn source(mut self, source: Box<dyn EnvelopeSource>) -> Self {
+        self.components.push(Component::Source(source));
+        self
+    }
+
+    pub fn transformer(mut self, transformer: Box<dyn Transformer>) -> Self {
+        self.components.push(Component::Transformer(transformer));
+        self
+    }
+
+    pub fn sink(mut self, sink: Box<dyn EnvelopeSink>) -> Self {
+        self.components.push(Component::Sink(sink));
+        self
+    }
+
+    pub fn connect(mut self, edge: EdgeDefinition, provider: Box<dyn PipeProvider>) -> Self {
+        self.edges.push((edge, provider));
+        self
+    }
+
+    pub fn bind_stream(mut self, output: Endpoint, stream: StreamId) -> Self {
+        self.streams.push((output, stream));
+        self
+    }
+
+    pub fn requirements(mut self, requirements: PipeRequirements) -> Self {
+        self.requirements = requirements;
+        self
+    }
+
+    /// Shared deadline for each cleanup pass. Every attempted component's stop
+    /// is polled, even if an earlier hook exhausts the deadline. Timeouts/errors
+    /// leave CleanupRequired; caller drop cannot await asynchronous cleanup.
+    pub fn cleanup_timeout(mut self, timeout: Duration) -> Self {
+        self.cleanup_timeout = timeout;
+        self
+    }
+
+    pub fn build(self) -> GraphResult<ComputationGraph> {
+        validate_identifier("graph", &self.id)?;
+        if self.components.is_empty() {
+            return Err(topology("graph must be nonempty"));
+        }
+        if self.cleanup_timeout.is_zero()
+            || std::time::Instant::now()
+                .checked_add(self.cleanup_timeout)
+                .is_none()
+        {
+            return Err(topology(
+                "cleanup timeout must be nonzero and representable",
+            ));
+        }
+        let mut ids = BTreeMap::new();
+        let mut nodes = Vec::new();
+        for (index, component) in self.components.iter().enumerate() {
+            let descriptor = component.descriptor();
+            if ids.insert(descriptor.id().clone(), index).is_some() {
+                return Err(topology(format!("duplicate component {}", descriptor.id())));
+            }
+            let inputs = descriptor
+                .ports()
+                .iter()
+                .filter(|port| port.direction() == PortDirection::Input)
+                .count();
+            let outputs = descriptor.ports().len() - inputs;
+            let valid = match component.role() {
+                ComponentRole::Source => inputs == 0 && outputs > 0,
+                ComponentRole::Transformer => inputs > 0 && outputs > 0,
+                ComponentRole::Sink => inputs > 0 && outputs == 0,
+            };
+            if !valid {
+                return Err(topology(format!(
+                    "invalid role/ports for {}",
+                    descriptor.id()
+                )));
+            }
+            nodes.push(NodeSnapshot {
+                descriptor: descriptor.clone(),
+                role: component.role(),
+                completion: component.completion(),
+                output_streams: BTreeMap::new(),
+            });
+        }
+        let mut streams = BTreeSet::new();
+        for (endpoint, stream) in self.streams {
+            let (index, port) = resolve(&ids, &nodes, &endpoint)?;
+            if port.direction() != PortDirection::Output {
+                return Err(topology("stream binding must name an output port"));
+            }
+            if !streams.insert(stream.clone())
+                || nodes[index]
+                    .output_streams
+                    .insert(endpoint.port, stream)
+                    .is_some()
+            {
+                return Err(topology("duplicate stream identity or output binding"));
+            }
+        }
+        let mut connected = BTreeSet::new();
+        let mut unique_edges = BTreeSet::new();
+        let mut stream_destinations = BTreeSet::new();
+        let mut successors = vec![Vec::new(); nodes.len()];
+        let mut indegree = vec![0; nodes.len()];
+        let mut edges = Vec::new();
+        for (edge_index, (edge, provider)) in self.edges.iter().enumerate() {
+            if !unique_edges.insert(edge.clone()) {
+                return Err(topology("duplicate edge"));
+            }
+            let (from, output) = resolve(&ids, &nodes, &edge.from)?;
+            let (to, input) = resolve(&ids, &nodes, &edge.to)?;
+            if !stream_destinations.insert((edge.from.clone(), edge.to.component.clone())) {
+                return Err(topology(
+                    "one producer output cannot feed multiple input ports on the same component",
+                ));
+            }
+            let capabilities = provider.capabilities().map_err(|source| GraphError::Pipe {
+                edge: edge_index,
+                source,
+            })?;
+            if let Some(completion) = nodes[to].completion {
+                for requirements in
+                    [&self.requirements, output.requirements(), input.requirements()]
+                {
+                    validate_sink_completion(completion, requirements)?;
+                }
+            }
+            validate_connection(output, input, &capabilities)?;
+            capabilities.validate(&self.requirements)?;
+            // B2 has no acknowledgement/transaction/recovery host protocol.
+            for capability in capabilities.supported() {
+                if !matches!(
+                    capability,
+                    PipeCapability::FifoPerStream | PipeCapability::Backpressure
+                ) {
+                    return Err(ContractError::UnsupportedCapability {
+                        capability: *capability,
+                    }
+                    .into());
+                }
+            }
+            capabilities.validate(&PipeRequirements::new([PipeCapability::Backpressure]))?;
+            if capabilities.capacity().is_none() {
+                return Err(topology(
+                    "every edge must declare a finite nonzero capacity",
+                ));
+            }
+            connected.insert(edge.from.clone());
+            connected.insert(edge.to.clone());
+            successors[from].push(to);
+            indegree[to] += 1;
+            edges.push(EdgeSnapshot {
+                definition: edge.clone(),
+                capabilities,
+            });
+        }
+        for node in &nodes {
+            for port in node.descriptor.ports() {
+                if !connected.contains(&Endpoint::new(
+                    node.descriptor.id().clone(),
+                    port.id().clone(),
+                )) {
+                    return Err(topology("every declared port must be connected"));
+                }
+                if port.direction() == PortDirection::Output
+                    && !node.output_streams.contains_key(port.id())
+                {
+                    return Err(topology("every output port must bind a stream"));
+                }
+            }
+        }
+        let mut ready: VecDeque<_> = indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(index, degree)| (*degree == 0).then_some(index))
+            .collect();
+        let mut order = Vec::new();
+        while let Some(index) = ready.pop_front() {
+            order.push(index);
+            for successor in &successors[index] {
+                indegree[*successor] -= 1;
+                if indegree[*successor] == 0 {
+                    ready.push_back(*successor);
+                }
+            }
+        }
+        if order.len() != nodes.len() {
+            return Err(topology("cycles (including self-loops) are not supported"));
+        }
+        let node_count = nodes.len();
+        Ok(ComputationGraph {
+            snapshot: GraphSnapshot {
+                id: self.id,
+                nodes: nodes.into(),
+                edges: edges.into(),
+                requirements: self.requirements,
+            },
+            components: self.components,
+            providers: self
+                .edges
+                .into_iter()
+                .map(|(_, provider)| provider)
+                .collect(),
+            order,
+            ids,
+            attempted: vec![false; node_count],
+            sequences: vec![BTreeMap::new(); node_count],
+            state: watch::channel(GraphState::Ready).0,
+            cleanup_timeout: self.cleanup_timeout,
+        })
+    }
+}
+
+fn topology(reason: impl Into<String>) -> GraphError {
+    GraphError::Topology {
+        reason: reason.into(),
+    }
+}
+
+fn resolve<'a>(
+    ids: &BTreeMap<ComponentId, usize>,
+    nodes: &'a [NodeSnapshot],
+    endpoint: &Endpoint,
+) -> GraphResult<(usize, &'a PortDescriptor)> {
+    let index = *ids
+        .get(&endpoint.component)
+        .ok_or_else(|| topology(format!("unknown component {}", endpoint.component)))?;
+    let port = nodes[index]
+        .descriptor
+        .ports()
+        .iter()
+        .find(|port| port.id() == &endpoint.port)
+        .ok_or_else(|| topology(format!("unknown port {endpoint:?}")))?;
+    Ok((index, port))
+}
+
+/// Cloneable, generation-specific stop/status handle. It never owns data senders.
+/// Cancellation is idempotent. Await the run to actually finish cleanup.
+#[derive(Clone)]
+pub struct GraphControl {
+    cancel: watch::Sender<bool>,
+    state: watch::Receiver<GraphState>,
+}
+
+impl GraphControl {
+    pub fn cancel(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    pub fn state(&self) -> GraphState {
+        *self.state.borrow()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<GraphState> {
+        self.state.clone()
+    }
+}
+
+/// Standalone opt-in DAG, unrelated to legacy `ComponentGraph`/`DrasiLib`.
+///
+/// `start` returns a caller-polled, exclusively borrowed run. No worker is
+/// spawned: per-node futures are scoped to that run. Drive it with `.await`,
+/// `join!`, or `select!`; merely constructing it does not run components.
+/// Reverse-topological startup is gated before processing. Mutable component
+/// calls are serialized. Components must yield cooperatively (like Tokio tasks).
+///
+/// Only natural drain followed by successful stop permits restart. Boxes and
+/// stream high-watermarks are retained; a fresh generation creates fresh pipes.
+/// A cancelled/failed component is never silently restarted. Dropping a run
+/// cancels its scoped futures/pipes immediately but cannot call async hooks;
+/// `shutdown().await` must then be used to finish cleanup before dropping the
+/// graph. Components owning their own external workers must stop them in hooks.
+pub struct ComputationGraph {
+    snapshot: GraphSnapshot,
+    components: Vec<Component>,
+    providers: Vec<Box<dyn PipeProvider>>,
+    order: Vec<usize>,
+    ids: BTreeMap<ComponentId, usize>,
+    attempted: Vec<bool>,
+    sequences: Vec<BTreeMap<PortId, u64>>,
+    state: watch::Sender<GraphState>,
+    cleanup_timeout: Duration,
+}
+
+impl ComputationGraph {
+    pub fn builder(id: impl Into<Arc<str>>) -> ComputationGraphBuilder {
+        ComputationGraphBuilder {
+            id: id.into(),
+            components: Vec::new(),
+            edges: Vec::new(),
+            streams: Vec::new(),
+            requirements: PipeRequirements::default(),
+            cleanup_timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn snapshot(&self) -> &GraphSnapshot {
+        &self.snapshot
+    }
+
+    pub fn state(&self) -> GraphState {
+        *self.state.borrow()
+    }
+
+    /// Exclusive borrowing prevents duplicate concurrent starts at compile time.
+    /// Terminal states also reject starts at runtime without altering resources.
+    ///
+    /// ```compile_fail
+    /// # use drasi_lib::computation::v1::ComputationGraph;
+    /// fn duplicate(graph: &mut ComputationGraph) {
+    ///     let first = graph.start().unwrap();
+    ///     let second = graph.start(); // cannot borrow graph twice
+    ///     drop(first);
+    /// }
+    /// ```
+    pub fn start(&mut self) -> GraphResult<GraphRun<'_>> {
+        let state = self.state();
+        if !matches!(state, GraphState::Ready | GraphState::Completed) {
+            return Err(GraphError::InvalidState { state });
+        }
+        self.state = watch::channel(GraphState::Starting).0;
+        let (cancel, cancellation) = watch::channel(false);
+        let control = GraphControl {
+            cancel,
+            state: self.state.subscribe(),
+        };
+        let state = self.state.clone();
+        Ok(GraphRun {
+            future: self.execute(cancellation).boxed(),
+            control,
+            state,
+            finished: false,
+        })
+    }
+
+    /// Await remaining async stop hooks after a dropped run/failed cleanup.
+    /// This does not roll back state or make the graph restartable. Repeated
+    /// calls after successful cleanup do not call stop twice. Retrying a failed
+    /// stop explicitly asks the implementor to finish its incomplete cleanup.
+    pub async fn shutdown(&mut self) -> GraphResult<()> {
+        if !self.attempted.iter().any(|attempted| *attempted) {
+            if self.state() == GraphState::CleanupRequired {
+                self.state.send_replace(GraphState::Cancelled);
+            }
+            return Ok(());
+        }
+        self.state.send_replace(GraphState::CleanupRequired);
+        let errors = self.cleanup().await;
+        if errors.is_empty() {
+            self.state.send_replace(GraphState::Cancelled);
+            Ok(())
+        } else {
+            Err(GraphError::Cleanup {
+                primary: None,
+                errors,
+            })
+        }
+    }
+
+    async fn execute(&mut self, mut cancel: watch::Receiver<bool>) -> GraphResult<()> {
+        let result = self.process(&mut cancel).await;
+        self.state.send_replace(GraphState::Stopping);
+        let errors = self.cleanup().await;
+        if !errors.is_empty() {
+            self.state.send_replace(GraphState::CleanupRequired);
+            return Err(GraphError::Cleanup {
+                primary: result.err().map(Box::new),
+                errors,
+            });
+        }
+        self.state.send_replace(match &result {
+            Ok(()) => GraphState::Completed,
+            Err(GraphError::Cancelled) => GraphState::Cancelled,
+            Err(_) => GraphState::Failed,
+        });
+        result
+    }
+
+    async fn process(&mut self, cancel: &mut watch::Receiver<bool>) -> GraphResult<()> {
+        if *cancel.borrow() {
+            return Err(GraphError::Cancelled);
+        }
+        for (component, node) in self.components.iter().zip(self.snapshot.nodes.iter()) {
+            check_descriptor(component, node)?;
+        }
+        let mut controls = PipeGuard(Vec::new());
+        let mut inputs: Vec<Vec<Incoming>> =
+            (0..self.components.len()).map(|_| Vec::new()).collect();
+        let mut outputs: Vec<Vec<Outgoing>> =
+            (0..self.components.len()).map(|_| Vec::new()).collect();
+        for (edge, (provider, snapshot)) in self
+            .providers
+            .iter()
+            .zip(self.snapshot.edges.iter())
+            .enumerate()
+        {
+            let mut provided = provider
+                .create()
+                .map_err(|source| GraphError::Pipe { edge, source })?;
+            controls.0.push(provided.control);
+            if provided.pipe.capabilities() != &snapshot.capabilities {
+                return Err(topology(
+                    "created pipe differs from preflight capability declaration",
+                ));
+            }
+            let from = self.ids[&snapshot.definition.from.component];
+            let to = self.ids[&snapshot.definition.to.component];
+            let sender = provided.pipe.sender();
+            let receiver = provided
+                .pipe
+                .take_receiver()
+                .map_err(|source| GraphError::Pipe { edge, source })?;
+            outputs[from].push(Outgoing {
+                edge,
+                port: snapshot.definition.from.port.clone(),
+                sender,
+            });
+            inputs[to].push(Incoming {
+                edge,
+                port: snapshot.definition.to.port.clone(),
+                receiver,
+            });
+            // Drop the provider's seed sender now; only upstream futures retain senders.
+        }
+        for index in self.order.iter().rev().copied() {
+            check_descriptor(&self.components[index], &self.snapshot.nodes[index])?;
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+                result = async {
+                    self.attempted[index] = true;
+                    self.components[index].start().await
+                } => {
+                    result.map_err(|source| component_error(&self.snapshot.nodes[index], "start", source))?;
+                }
+            }
+            check_descriptor(&self.components[index], &self.snapshot.nodes[index])?;
+        }
+        self.state.send_replace(GraphState::Running);
+        let mut workers = FuturesUnordered::new();
+        for ((((component, node), sequences), input), output) in self
+            .components
+            .iter_mut()
+            .zip(self.snapshot.nodes.iter())
+            .zip(self.sequences.iter_mut())
+            .zip(inputs)
+            .zip(outputs)
+        {
+            workers.push(run_node(component, node, sequences, input, output));
+        }
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+                result = workers.next() => match result {
+                    Some(result) => result?,
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
+
+    async fn cleanup(&mut self) -> Vec<GraphError> {
+        let mut errors = Vec::new();
+        let now = tokio::time::Instant::now();
+        let deadline = match now.checked_add(self.cleanup_timeout) {
+            Some(deadline) => deadline,
+            None => {
+                errors.push(topology("cleanup deadline is no longer representable"));
+                now
+            }
+        };
+        // Reverse start order: producers first, then downstream resources.
+        for index in self.order.iter().copied() {
+            if self.attempted[index] {
+                let node = &self.snapshot.nodes[index];
+                let result = tokio::time::timeout_at(deadline, self.components[index].stop()).await;
+                match result {
+                    Ok(Ok(())) => self.attempted[index] = false,
+                    Ok(Err(source)) => errors.push(component_error(node, "stop", source)),
+                    Err(_) => errors.push(GraphError::StopTimeout {
+                        component: node.descriptor.id().clone(),
+                    }),
+                }
+            }
+        }
+        errors
+    }
+}
+
+/// Future owning every scoped operation for one generation. Drop cancels, but
+/// never claims asynchronous stop hooks have run. See `ComputationGraph::shutdown`.
+#[must_use = "a computation run must be polled; await it to drive and clean up the graph"]
+pub struct GraphRun<'a> {
+    future: BoxFuture<'a, GraphResult<()>>,
+    control: GraphControl,
+    state: watch::Sender<GraphState>,
+    finished: bool,
+}
+
+impl GraphRun<'_> {
+    pub fn control(&self) -> GraphControl {
+        self.control.clone()
+    }
+}
+
+impl Future for GraphRun<'_> {
+    type Output = GraphResult<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let result = self.future.as_mut().poll(cx);
+        if result.is_ready() {
+            self.finished = true;
+        }
+        result
+    }
+}
+
+impl Drop for GraphRun<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.control.cancel();
+            self.state.send_replace(GraphState::CleanupRequired);
+        }
+    }
+}
+
+struct PipeGuard(Vec<Arc<dyn PipeControl>>);
+
+impl Drop for PipeGuard {
+    fn drop(&mut self) {
+        for control in &self.0 {
+            control.cancel();
+        }
+    }
+}
+
+async fn cancelled(cancel: &mut watch::Receiver<bool>) {
+    let _ = cancel.wait_for(|value| *value).await;
+}
+
+struct Incoming {
+    edge: usize,
+    port: PortId,
+    receiver: Box<dyn EnvelopeReceiver>,
+}
+
+struct Outgoing {
+    edge: usize,
+    port: PortId,
+    sender: Arc<dyn EnvelopeSender>,
+}
+
+async fn receive(
+    mut input: Incoming,
+) -> (Incoming, std::result::Result<Option<Delivery>, PipeError>) {
+    let result = input.receiver.receive().await;
+    (input, result)
+}
+
+fn component_error(
+    node: &NodeSnapshot,
+    operation: &'static str,
+    source: anyhow::Error,
+) -> GraphError {
+    GraphError::Component {
+        component: node.descriptor.id().clone(),
+        operation,
+        source,
+    }
+}
+
+fn emission_error(node: &NodeSnapshot, reason: impl Into<String>) -> GraphError {
+    GraphError::Emission {
+        component: node.descriptor.id().clone(),
+        reason: reason.into(),
+    }
+}
+
+fn check_descriptor(component: &Component, node: &NodeSnapshot) -> GraphResult<()> {
+    if component.descriptor() != &node.descriptor || component.completion() != node.completion {
+        return Err(emission_error(
+            node,
+            "descriptor or sink completion changed",
+        ));
+    }
+    Ok(())
+}
+
+async fn run_node(
+    component: &mut Component,
+    node: &NodeSnapshot,
+    sequences: &mut BTreeMap<PortId, u64>,
+    inputs: Vec<Incoming>,
+    outputs: Vec<Outgoing>,
+) -> GraphResult<()> {
+    let mut receivers: FuturesUnordered<_> = inputs.into_iter().map(receive).collect();
+    loop {
+        let emissions = match component {
+            Component::Source(source) => {
+                match source
+                    .next()
+                    .await
+                    .map_err(|source| component_error(node, "next", source))?
+                {
+                    Some(output) => vec![output],
+                    None => {
+                        check_descriptor(component, node)?;
+                        return Ok(());
+                    }
+                }
+            }
+            _ => {
+                let Some((incoming, delivery)) = receivers.next().await else {
+                    return Ok(());
+                };
+                let delivery = delivery.map_err(|source| GraphError::Pipe {
+                    edge: incoming.edge,
+                    source,
+                })?;
+                let Some(delivery) = delivery else {
+                    continue;
+                };
+                let (envelope, acknowledgement) = delivery.into_parts();
+                if acknowledgement.is_some() {
+                    return Err(topology(
+                        "volatile graph received an unsupported acknowledgement",
+                    ));
+                }
+                let input = InputEnvelope {
+                    port: incoming.port.clone(),
+                    envelope,
+                };
+                // At most one pending receive per edge, no forwarding tasks or hidden queues.
+                receivers.push(receive(incoming));
+                match component {
+                    Component::Transformer(transformer) => transformer
+                        .transform(input)
+                        .await
+                        .map_err(|source| component_error(node, "transform", source))?,
+                    Component::Sink(sink) => {
+                        sink.handle(input)
+                            .await
+                            .map_err(|source| component_error(node, "handle", source))?;
+                        Vec::new()
+                    }
+                    Component::Source(_) => unreachable!(),
+                }
+            }
+        };
+        check_descriptor(component, node)?;
+        validate_emissions(node, sequences, &emissions)?;
+        for emission in emissions {
+            for (accepted_branches, output) in outputs
+                .iter()
+                .filter(|output| output.port == emission.port)
+                .enumerate()
+            {
+                output
+                    .sender
+                    .send(emission.envelope.clone())
+                    .await
+                    .map_err(|source| GraphError::Forward {
+                        edge: output.edge,
+                        accepted_branches,
+                        source: Box::new(source),
+                    })?;
+            }
+        }
+    }
+}
+
+fn validate_emissions(
+    node: &NodeSnapshot,
+    sequences: &mut BTreeMap<PortId, u64>,
+    emissions: &[OutputEnvelope],
+) -> GraphResult<()> {
+    let mut pending = sequences.clone();
+    let mut identities = std::collections::HashSet::new();
+    for emission in emissions {
+        let port = node
+            .descriptor
+            .ports()
+            .iter()
+            .find(|port| port.id() == &emission.port)
+            .ok_or_else(|| emission_error(node, "unknown output port"))?;
+        if port.direction() != PortDirection::Output {
+            return Err(emission_error(node, "emission targets an input port"));
+        }
+        validate_schema(port.schema(), emission.envelope.changes().schema())?;
+        if node.output_streams.get(&emission.port) != Some(emission.envelope.system().stream()) {
+            return Err(emission_error(
+                node,
+                "stream is not owned by this producer/output port",
+            ));
+        }
+        let sequence = emission.envelope.system().sequence();
+        if pending
+            .get(&emission.port)
+            .is_some_and(|previous| sequence <= *previous)
+        {
+            return Err(emission_error(
+                node,
+                "output sequence must strictly increase",
+            ));
+        }
+        if !identities.insert(emission.envelope.id()) {
+            return Err(emission_error(
+                node,
+                "duplicate logical envelope ID in transform result",
+            ));
+        }
+        pending.insert(emission.port.clone(), sequence);
+    }
+    *sequences = pending;
+    Ok(())
+}
+
+/// Optional collision-free ID convention for producers: stream namespace plus
+/// big-endian sequence bytes. Opaque caller IDs are also accepted; callers retain
+/// their uniqueness obligation. The runtime checks authoritative (stream, sequence)
+/// with bounded per-port state, not an unbounded global logical-ID deduplication set.
+pub fn emission_id(stream: &StreamId, sequence: u64) -> super::Result<EnvelopeId> {
+    EnvelopeId::try_new(
+        stream.as_str(),
+        bytes::Bytes::copy_from_slice(&sequence.to_be_bytes()),
+    )
+}

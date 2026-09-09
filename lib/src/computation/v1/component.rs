@@ -45,12 +45,12 @@ pub struct OutputEnvelope {
 
 /// Host-owned component lifecycle, independent of legacy Source/Reaction contexts.
 ///
-/// The future DAG host owns `Box<dyn ...>` instances, validates roles/ports before
+/// The DAG host owns `Box<dyn ...>` instances, validates roles/ports before
 /// starting, serializes all mutable calls, and owns cancellation and error policy.
 /// Call processing methods only after successful start; drain/cancel processing
 /// before stop. Dropping a cancelled future does not imply rollback of component
-/// state or external effects. Restart, recovery, and transactional lifecycle are
-/// not supplied by these contracts or by Drasi Server.
+/// state or external effects. These traits do not promise restart, recovery, or
+/// transactional lifecycle; see [`super::ComputationGraph`] for host policy.
 ///
 /// The descriptor must remain unchanged throughout the owned component's life.
 /// No default success methods conceal missing implementation.

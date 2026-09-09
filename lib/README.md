@@ -35,9 +35,9 @@ tokio = { version = "1", features = ["full"] }
 
 **Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
 
-## Experimental computation contracts
+## Experimental computation graphs
 
-The **default-off** `computation` feature exposes additive, versioned contracts at
+The **default-off** `computation` feature exposes additive, versioned contracts and a runtime at
 `drasi_lib::computation::v1`:
 
 ```toml
@@ -51,20 +51,64 @@ branch-local context, and input lineage. They also define host-owned
 pipe capability negotiation. A transformer can emit zero, one, or many outputs,
 using its own producer stream and sequence while retaining input lineage.
 
-**This is not yet a composable graph runtime.** There is no concrete pipe, graph
-runner, legacy adapter, serialization format, server configuration, or plugin ABI
-in this feature. Enabling it does not migrate or change existing Sources, Queries,
-Reactions, or `DrasiLib` behavior. Future legacy codecs must preserve typed values;
-internal canonical identity bytes are not a proven reversible wire codec.
+`ComputationGraph::builder` accepts owned native components, explicit named-port
+edges with `PipeProvider` instances (normally `BoundedPipeConfig { capacity }`),
+and one unique stream binding per output port. Build validates the entire DAG
+before provider creation or component starts: roles, endpoints, every connected
+port, full schemas, stream identities, finite capacities, capabilities and cycles.
+Direct Source -> Sink and arbitrary acyclic transformer chains require **no
+Continuous Query**. Fanout shares payloads; fanin preserves per-stream FIFO.
+One output stream cannot feed multiple input ports on the same component:
+independent queues for that stream would not preserve component-wide FIFO.
+
+Run the native custom-schema example (direct graph and two-transformer chain):
+
+```bash
+cargo run -p drasi-lib --features computation --example computation_graph
+```
+
+The example includes inputs and expected outputs. Its source, transforms and sink
+implement the public traits directly; no legacy adapter or query is hidden inside.
+
+**Lifecycle:** `let run = graph.start()?; run.await?;` drives a caller-owned future.
+Consumers start before producers, with processing gated until all starts succeed.
+There are no detached graph workers. `run.control()` supplies a generation-specific
+cancel/status handle; call `control.cancel()` and **keep awaiting the run** to
+cancel pending operations and await asynchronous stop hooks. Mutable component
+calls are serialized, but cancellation never waits for their locks.
+
+Only a fully drained, successfully stopped `Completed` graph can restart.
+Components and sequence high-watermarks are retained; each new generation gets
+fresh pipes. Failure/cancellation is terminal, not rollback. Dropping a run closes
+its pipes and drops all scoped operations, but leaves `CleanupRequired`: explicitly
+call `graph.shutdown().await` to await remaining stop hooks. Cleanup has a bounded
+shared deadline; failed/timed-out hooks remain visibly incomplete. Dropping a graph
+cannot await cleanup for resources a component itself spawned.
+
+This is the additive **B2 in-process runtime**, not the entire composable framework.
+There are no legacy adapters, persistence/serialization formats, server configuration,
+or new plugin ABI. Enabling it does not migrate or change existing Sources, Queries,
+Reactions, or `DrasiLib`. Immutable topology snapshots contain no live provider handles
+or resolved secrets. Future legacy codecs must preserve typed values; internal
+canonical identity bytes are not a proven reversible wire codec.
 
 Enqueue receipts mean **acceptance only**, not handling or acknowledgement.
 Sinks declare a fixed `Accepted` or `Handled` completion boundary; legacy reaction
 queue acceptance must never be advertised as completed handling. Local
 acknowledgement handles remain outside envelopes and contexts. The volatile bounded
-pipe descriptor advertises only per-stream FIFO and backpressure, rejecting
+pipe advertises only per-stream FIFO and backpressure, rejecting
 requirements for durability, replay, explicit acknowledgement, transactions, or
-exactly-once. Sequence is authoritative; timestamps do not reorder a stream.
-See the v1 rustdocs for validation, lifecycle, and capability contracts.
+exactly-once. Sequence is authoritative; equal/backward timestamps do not reorder
+a stream. Opaque logical IDs remain producer-owned; `emission_id` is an optional
+stream/sequence identity helper, not a global arbitrary-ID deduplication service.
+
+Explicit pipe close rejects sends and drains accepted events. Runtime cancellation
+may discard queued/in-flight events and cannot roll back effects. Sequential fanout
+is **not atomic**: failure reports prior branch acceptances, cancellation can also
+leave partial delivery, and a slow branch backpressures its producer. No failed
+branch is automatically retried. Queue capacity bounds envelopes per edge, not
+bytes, component state or transformer result vectors. See the v1 rustdocs for the
+complete lifecycle, provider and delivery contracts.
 
 ## Identity Providers
 

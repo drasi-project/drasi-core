@@ -30,7 +30,7 @@ workspace = true
 [features]
 default = []
 
-# Experimental, additive in-process computation contracts.
+# Experimental, additive in-process computation contracts and runtime.
 computation = []
 
 # Middleware features (passed through to drasi-middleware)
@@ -63,6 +63,10 @@ features = [
 [lib]
 name = "drasi_lib"
 path = "src/lib.rs"
+
+[[example]]
+name = "computation_graph"
+required-features = ["computation"]
 
 [dependencies]
 drasi-core.workspace = true

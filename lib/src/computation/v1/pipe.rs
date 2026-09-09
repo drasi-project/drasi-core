@@ -46,6 +46,8 @@ pub enum HandlingOutcome {
 /// Typed in-process pipe errors; provider errors retain their source chain.
 #[derive(Debug, thiserror::Error)]
 pub enum PipeError {
+    #[error("bounded pipe capacity is outside the supported nonzero range")]
+    InvalidCapacity,
     #[error(transparent)]
     Contract(#[from] ContractError),
     #[error("pipe is closed")]
@@ -127,8 +129,8 @@ pub trait EnvelopeReceiver: Send + Sync {
     async fn receive(&mut self) -> std::result::Result<Option<Delivery>, PipeError>;
 }
 
-/// In-process pipe interface, with no concrete implementation in this phase.
-/// A future host validates capabilities/requirements before starting components.
+/// In-process pipe interface. The graph validates capabilities/requirements
+/// before starting components; [`super::BoundedPipe`] supplies volatile delivery.
 pub trait Pipe: Send + Sync {
     fn capabilities(&self) -> &PipeCapabilities;
     fn sender(&self) -> Arc<dyn EnvelopeSender>;
