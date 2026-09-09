@@ -109,6 +109,7 @@ jobs:
             --exclude drasi-source-platform --exclude drasi-source-application --exclude drasi-source-mock \
             --exclude drasi-source-mssql \
             --exclude drasi-reaction-http \
+            --exclude drasi-reaction-a2a \
             --exclude drasi-reaction-grpc \
             --exclude drasi-reaction-sse --exclude drasi-reaction-platform \
             --exclude drasi-reaction-profiler --exclude drasi-reaction-application \
@@ -206,6 +207,7 @@ jobs:
             -p drasi-source-mssql \
             -p drasi-source-application \
             -p drasi-reaction-http \
+            -p drasi-reaction-a2a \
             -p drasi-reaction-grpc \
             -p drasi-reaction-log \
             -p drasi-reaction-sse \
