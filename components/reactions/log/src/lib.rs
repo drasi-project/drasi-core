@@ -14,42 +14,43 @@
 
 #![allow(unexpected_cfgs)]
 
-//! Log Reaction Plugin for drasi-lib
+//! Log Reaction Plugin for Drasi.
 //!
-//! This plugin provides console logging of query results.
+//! This reaction writes continuous query results to the console (stdout),
+//! which makes it well suited to development, debugging, and low-volume
+//! monitoring. Output is emitted in timestamp order and can be customised with
+//! per-query or default Handlebars templates; when no template applies, a
+//! human-readable line is printed for every change.
 //!
-//! ## Instance-based Usage
+//! # Example
 //!
-//! ```rust,ignore
-//! use drasi_reaction_log::LogReaction;
-//! use drasi_lib::config::{ReactionConfig, ReactionSpecificConfig};
-//! use std::sync::Arc;
+//! ```rust
+//! use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
 //!
-//! // Create configuration
-//! let config = ReactionConfig {
-//!     id: "my-log".to_string(),
-//!     queries: vec!["query1".to_string()],
-//!     config: ReactionSpecificConfig::Log(props),
-//!     ..Default::default()
-//! };
+//! let reaction = LogReaction::builder("my-log")
+//!     .with_query("query1")
+//!     .with_default_template(QueryConfig {
+//!         added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
+//!         updated: Some(TemplateSpec::new("[UPD] {{after.id}}")),
+//!         deleted: Some(TemplateSpec::new("[DEL] {{before.id}}")),
+//!     })
+//!     .build()
+//!     .unwrap();
 //!
-//! // Create instance and add to DrasiLib
-//! let reaction = Arc::new(LogReaction::new(config, event_tx));
-//! drasi.add_reaction(reaction).await?;
+//! // `reaction` is then registered with `DrasiLib` via `add_reaction()`.
+//! # let _ = reaction;
 //! ```
 
 mod config;
 pub mod descriptor;
 mod log;
+mod render;
 
 #[cfg(test)]
 mod tests;
 
 pub use config::{LogReactionConfig, QueryConfig, TemplateSpec};
 pub use log::{LogReaction, LogReactionBuilder};
-
-/// Dynamic plugin entry point (legacy dylib).
-///
 
 /// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]

@@ -136,7 +136,7 @@ impl ReactionPluginDescriptor for LogReactionDescriptor {
         }
 
         let mut reaction = builder.build()?;
-        reaction.base.set_raw_config(config_json.clone());
+        reaction.base_mut().set_raw_config(config_json.clone());
 
         Ok(Box::new(reaction))
     }
