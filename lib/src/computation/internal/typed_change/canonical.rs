@@ -330,10 +330,15 @@ impl CanonicalEncoder {
         &mut self,
         value: &ElementPropertyMap,
     ) -> Result<(), CanonicalEncodingError> {
-        self.length(value.len());
-        for (key, value) in value.iter() {
-            self.string(key);
-            self.element_value(value)?;
+        self.length(value.map_iter(|_, _| ()).count());
+        // The legacy map exposes owned projections, not a borrowing iterator.
+        for bytes in value.map_iter(|key, value| {
+            let mut field = CanonicalEncoder::default();
+            field.string(key);
+            field.element_value(value)?;
+            Ok::<_, CanonicalEncodingError>(field.into_bytes())
+        }) {
+            self.raw(&bytes?);
         }
         Ok(())
     }

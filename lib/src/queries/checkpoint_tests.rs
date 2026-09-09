@@ -1350,47 +1350,18 @@ mod tests {
     /// Used for testing config hash check logic which only runs for persistent backends.
     struct PersistentInMemoryCheckpointStore {
         inner: drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
-        transaction_domain: drasi_core::interface::TransactionDomain,
     }
 
     impl PersistentInMemoryCheckpointStore {
         fn new() -> Self {
             Self {
                 inner: drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore::new(),
-                transaction_domain: drasi_core::interface::TransactionDomain::new(),
             }
-        }
-    }
-
-    struct DomainNoOpSessionControl {
-        transaction_domain: drasi_core::interface::TransactionDomain,
-    }
-
-    #[async_trait::async_trait]
-    impl drasi_core::interface::SessionControl for DomainNoOpSessionControl {
-        fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
-            Some(self.transaction_domain.clone())
-        }
-
-        async fn begin(&self) -> Result<(), drasi_core::interface::IndexError> {
-            Ok(())
-        }
-
-        async fn commit(&self) -> Result<(), drasi_core::interface::IndexError> {
-            Ok(())
-        }
-
-        fn rollback(&self) -> Result<(), drasi_core::interface::IndexError> {
-            Ok(())
         }
     }
 
     #[async_trait::async_trait]
     impl CheckpointStore for PersistentInMemoryCheckpointStore {
-        fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
-            Some(self.transaction_domain.clone())
-        }
-
         fn is_persistent(&self) -> bool {
             true
         }
@@ -1439,21 +1410,6 @@ mod tests {
         async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_config_hash().await
         }
-
-        async fn write_result_sequence(
-            &self,
-            query_id: &str,
-            sequence: u64,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.write_result_sequence(query_id, sequence).await
-        }
-
-        async fn read_result_sequence(
-            &self,
-            query_id: &str,
-        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
-            self.inner.read_result_sequence(query_id).await
-        }
     }
 
     /// Mock persistent plugin that gives each query its own
@@ -1482,7 +1438,7 @@ mod tests {
             use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
             use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
             use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-            use drasi_core::interface::IndexSet;
+            use drasi_core::interface::{IndexSet, NoOpSessionControl};
 
             let checkpoint_store = {
                 let mut map = self.stores.write().await;
@@ -1498,9 +1454,7 @@ mod tests {
                     archive_index: element_index,
                     result_index: Arc::new(InMemoryResultIndex::new()),
                     future_queue: Arc::new(InMemoryFutureQueue::new()),
-                    session_control: Arc::new(DomainNoOpSessionControl {
-                        transaction_domain: checkpoint_store.transaction_domain.clone(),
-                    }),
+                    session_control: Arc::new(NoOpSessionControl),
                 },
                 checkpoint_store: Some(checkpoint_store),
                 live_results_writer: None,
@@ -1934,15 +1888,8 @@ mod tests {
             .expect("Should have checkpoint store");
         let all_cp = cp_store.read_all_checkpoints().await.unwrap();
         assert!(
-            !all_cp.contains_key("mismatch-src"),
-            "Source checkpoints should be cleared after config change"
-        );
-        assert_eq!(
-            all_cp
-                .get(crate::queries::query_composite_host::QUERY_OUTPUT_RESET_MARKER_V1)
-                .map(|marker| marker.sequence),
-            Some(1),
-            "Config reset should preserve the public output high-water"
+            all_cp.is_empty(),
+            "Checkpoints should be cleared after config change"
         );
 
         // Verify the new config hash was written
@@ -2169,10 +2116,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CheckpointStore for FailableCheckpointStore {
-        fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
-            self.inner.transaction_domain()
-        }
-
         fn is_persistent(&self) -> bool {
             true
         }
@@ -2243,21 +2186,6 @@ mod tests {
             }
             self.inner.read_config_hash().await
         }
-
-        async fn write_result_sequence(
-            &self,
-            query_id: &str,
-            sequence: u64,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.write_result_sequence(query_id, sequence).await
-        }
-
-        async fn read_result_sequence(
-            &self,
-            query_id: &str,
-        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
-            self.inner.read_result_sequence(query_id).await
-        }
     }
 
     /// Mock plugin that uses a pre-created FailableCheckpointStore.
@@ -2290,7 +2218,7 @@ mod tests {
             use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
             use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
             use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-            use drasi_core::interface::IndexSet;
+            use drasi_core::interface::{IndexSet, NoOpSessionControl};
 
             let checkpoint_store = self.get_store(query_id).await;
 
@@ -2301,9 +2229,7 @@ mod tests {
                     archive_index: element_index,
                     result_index: Arc::new(InMemoryResultIndex::new()),
                     future_queue: Arc::new(InMemoryFutureQueue::new()),
-                    session_control: Arc::new(DomainNoOpSessionControl {
-                        transaction_domain: checkpoint_store.inner.transaction_domain.clone(),
-                    }),
+                    session_control: Arc::new(NoOpSessionControl),
                 },
                 checkpoint_store: Some(checkpoint_store),
                 live_results_writer: None,
@@ -2703,47 +2629,18 @@ mod orchestration_tests {
 
     struct PersistentInMemoryCheckpointStore {
         inner: InMemoryCheckpointStore,
-        transaction_domain: drasi_core::interface::TransactionDomain,
     }
 
     impl PersistentInMemoryCheckpointStore {
         fn new() -> Self {
             Self {
                 inner: InMemoryCheckpointStore::new(),
-                transaction_domain: drasi_core::interface::TransactionDomain::new(),
             }
-        }
-    }
-
-    struct DomainNoOpSessionControl {
-        transaction_domain: drasi_core::interface::TransactionDomain,
-    }
-
-    #[async_trait::async_trait]
-    impl drasi_core::interface::SessionControl for DomainNoOpSessionControl {
-        fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
-            Some(self.transaction_domain.clone())
-        }
-
-        async fn begin(&self) -> Result<(), drasi_core::interface::IndexError> {
-            Ok(())
-        }
-
-        async fn commit(&self) -> Result<(), drasi_core::interface::IndexError> {
-            Ok(())
-        }
-
-        fn rollback(&self) -> Result<(), drasi_core::interface::IndexError> {
-            Ok(())
         }
     }
 
     #[async_trait::async_trait]
     impl CheckpointStore for PersistentInMemoryCheckpointStore {
-        fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
-            Some(self.transaction_domain.clone())
-        }
-
         fn is_persistent(&self) -> bool {
             true
         }
@@ -2786,21 +2683,6 @@ mod orchestration_tests {
         async fn clear_checkpoints(&self) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.clear_checkpoints().await
         }
-
-        async fn write_result_sequence(
-            &self,
-            query_id: &str,
-            sequence: u64,
-        ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.write_result_sequence(query_id, sequence).await
-        }
-
-        async fn read_result_sequence(
-            &self,
-            query_id: &str,
-        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
-            self.inner.read_result_sequence(query_id).await
-        }
     }
 
     struct MockPersistentPlugin {
@@ -2825,7 +2707,7 @@ mod orchestration_tests {
             use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
             use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
             use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-            use drasi_core::interface::IndexSet;
+            use drasi_core::interface::{IndexSet, NoOpSessionControl};
 
             let checkpoint_store = {
                 let mut stores = self.stores.write().await;
@@ -2841,9 +2723,7 @@ mod orchestration_tests {
                     archive_index: element_index,
                     result_index: Arc::new(InMemoryResultIndex::new()),
                     future_queue: Arc::new(InMemoryFutureQueue::new()),
-                    session_control: Arc::new(DomainNoOpSessionControl {
-                        transaction_domain: checkpoint_store.transaction_domain.clone(),
-                    }),
+                    session_control: Arc::new(NoOpSessionControl),
                 },
                 checkpoint_store: Some(checkpoint_store),
                 live_results_writer: None,

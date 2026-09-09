@@ -31,9 +31,8 @@
 
 use anyhow::Result;
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
@@ -44,22 +43,6 @@ use crate::identity::IdentityProvider;
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
-
-#[derive(Debug, Default)]
-struct QueryOrderingCursor {
-    last_sequence: Option<u64>,
-    last_ordering_timestamp: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "query result sequence inversion for query '{query_id}': received sequence {received} after {last_enqueued}"
-)]
-struct QueryResultSequenceInversion {
-    query_id: String,
-    received: u64,
-    last_enqueued: u64,
-}
 
 /// Parameters for creating a ReactionBase instance.
 ///
@@ -138,10 +121,8 @@ pub struct ReactionBase {
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
-    /// Priority queue for result processing
+    /// Priority queue for timestamp-ordered result processing
     pub priority_queue: PriorityQueue<QueryResult>,
-    /// Per-query cursor used to derive monotonic internal ordering keys.
-    result_ordering: Arc<Mutex<HashMap<String, QueryOrderingCursor>>>,
     /// Handles to subscription forwarder tasks
     pub subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Handle to the main processing task
@@ -165,7 +146,6 @@ impl ReactionBase {
     pub fn new(params: ReactionBaseParams) -> Self {
         Self {
             priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
-            result_ordering: Arc::new(Mutex::new(HashMap::new())),
             id: params.id.clone(),
             queries: params.queries,
             auto_start: params.auto_start,
@@ -292,7 +272,6 @@ impl ReactionBase {
             context: self.context.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
-            result_ordering: self.result_ordering.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
@@ -308,20 +287,6 @@ impl ReactionBase {
     ///
     /// This should be called before spawning the processing task.
     pub async fn create_shutdown_channel(&self) -> tokio::sync::oneshot::Receiver<()> {
-        // Every start owns a fresh queue generation. Closing first prevents a
-        // producer from crossing the drain/reopen boundary.
-        self.priority_queue.close().await;
-        let stale_events = self.priority_queue.drain().await;
-        if !stale_events.is_empty() {
-            warn!(
-                "[{}] Discarded {} stale results before starting a new generation",
-                self.id,
-                stale_events.len()
-            );
-        }
-        self.result_ordering.lock().await.clear();
-        self.priority_queue.reopen().await;
-
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.shutdown_tx.write().await = Some(tx);
         rx
@@ -360,42 +325,9 @@ impl ReactionBase {
     /// Enqueue a query result for processing.
     ///
     /// The host calls this to forward query results to the reaction's priority queue.
-    /// Each query retains FIFO sequence order. Across queries, wall-clock timestamps
-    /// remain the primary ordering key.
+    /// Results are processed in timestamp order by the reaction's processing task.
     pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
-        let query_id = result.query_id.clone();
-        let sequence = result.sequence;
-        let timestamp = result.timestamp;
-        let mut ordering = self.result_ordering.lock().await;
-        let cursor = ordering.entry(query_id.clone()).or_default();
-
-        if sequence != 0 {
-            if let Some(last_enqueued) = cursor.last_sequence {
-                if sequence < last_enqueued {
-                    return Err(QueryResultSequenceInversion {
-                        query_id,
-                        received: sequence,
-                        last_enqueued,
-                    }
-                    .into());
-                }
-            }
-        }
-
-        // Clamping each partition's timestamp makes its ordering key monotonic.
-        // The queue adds a stable ordinal, so (timestamp, ordinal) is a
-        // transitive total order while preserving FIFO within this query.
-        let ordering_timestamp = cursor
-            .last_ordering_timestamp
-            .map_or(timestamp, |last| last.max(timestamp));
-        self.priority_queue
-            .enqueue_wait_with_ordering_timestamp(Arc::new(result), ordering_timestamp)
-            .await?;
-
-        cursor.last_ordering_timestamp = Some(ordering_timestamp);
-        if sequence != 0 {
-            cursor.last_sequence = Some(sequence);
-        }
+        self.priority_queue.enqueue_wait(Arc::new(result)).await;
         Ok(())
     }
 
@@ -470,10 +402,6 @@ impl ReactionBase {
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping reaction: {}", self.id);
 
-        // Reject and wake producers before stopping the consumer. A producer
-        // may hold the per-query ordering lock while waiting for queue space.
-        self.priority_queue.close().await;
-
         // Send shutdown signal to processing task (if it's using tokio::select!)
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -519,7 +447,6 @@ impl ReactionBase {
                 drained_events.len()
             );
         }
-        self.result_ordering.lock().await.clear();
 
         self.set_status(
             ComponentStatus::Stopped,
@@ -653,20 +580,6 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
-    fn query_result(
-        query_id: &str,
-        sequence: u64,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> QueryResult {
-        QueryResult::new(
-            query_id.to_string(),
-            sequence,
-            timestamp,
-            vec![],
-            Default::default(),
-        )
-    }
-
     #[tokio::test]
     async fn test_reaction_base_creation() {
         let params = ReactionBaseParams::new("test-reaction", vec!["query1".to_string()])
@@ -731,177 +644,6 @@ mod tests {
         // Drain queue
         let drained = base.priority_queue.drain().await;
         assert_eq!(drained.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn same_query_equal_timestamps_preserve_sequence_order() {
-        let base = ReactionBase::new(ReactionBaseParams::new(
-            "equal-timestamps",
-            vec!["q1".to_string()],
-        ));
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-
-        for sequence in 1..=8 {
-            base.enqueue_query_result(query_result("q1", sequence, timestamp))
-                .await
-                .unwrap();
-        }
-
-        for expected in 1..=8 {
-            assert_eq!(base.priority_queue.dequeue().await.sequence, expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn same_query_backwards_timestamps_preserve_sequence_order() {
-        let base = ReactionBase::new(ReactionBaseParams::new(
-            "backwards-timestamps",
-            vec!["q1".to_string()],
-        ));
-        let later = chrono::DateTime::from_timestamp(1_700_000_010, 0).unwrap();
-        let earlier = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-
-        base.enqueue_query_result(query_result("q1", 6, later))
-            .await
-            .unwrap();
-        base.enqueue_query_result(query_result("q1", 7, earlier))
-            .await
-            .unwrap();
-
-        assert_eq!(base.priority_queue.dequeue().await.sequence, 6);
-        assert_eq!(base.priority_queue.dequeue().await.sequence, 7);
-    }
-
-    #[tokio::test]
-    async fn multiple_queries_merge_deterministically_without_sequence_inversion() {
-        let base = ReactionBase::new(ReactionBaseParams::new(
-            "multiple-queries",
-            vec!["q1".to_string(), "q2".to_string(), "q3".to_string()],
-        ));
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-
-        base.enqueue_query_result(query_result(
-            "q1",
-            1,
-            timestamp + chrono::Duration::seconds(30),
-        ))
-        .await
-        .unwrap();
-        base.enqueue_query_result(query_result(
-            "q2",
-            1,
-            timestamp + chrono::Duration::seconds(20),
-        ))
-        .await
-        .unwrap();
-        base.enqueue_query_result(query_result(
-            "q1",
-            2,
-            timestamp + chrono::Duration::seconds(10),
-        ))
-        .await
-        .unwrap();
-        base.enqueue_query_result(query_result(
-            "q2",
-            2,
-            timestamp + chrono::Duration::seconds(30),
-        ))
-        .await
-        .unwrap();
-        base.enqueue_query_result(query_result(
-            "q3",
-            1,
-            timestamp + chrono::Duration::seconds(30),
-        ))
-        .await
-        .unwrap();
-
-        let mut actual = Vec::new();
-        for _ in 0..5 {
-            let result = base.priority_queue.dequeue().await;
-            actual.push((result.query_id.clone(), result.sequence));
-        }
-        assert_eq!(
-            actual,
-            vec![
-                ("q2".to_string(), 1),
-                ("q1".to_string(), 1),
-                ("q1".to_string(), 2),
-                ("q2".to_string(), 2),
-                ("q3".to_string(), 1),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn enqueue_rejects_same_query_sequence_inversion() {
-        let base = ReactionBase::new(ReactionBaseParams::new(
-            "sequence-inversion",
-            vec!["q1".to_string()],
-        ));
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-
-        base.enqueue_query_result(query_result("q1", 7, timestamp))
-            .await
-            .unwrap();
-        let error = base
-            .enqueue_query_result(query_result("q1", 6, timestamp))
-            .await
-            .expect_err("a newly arriving sequence inversion must be surfaced");
-
-        assert!(
-            error
-                .downcast_ref::<QueryResultSequenceInversion>()
-                .is_some(),
-            "unexpected error: {error:#}"
-        );
-        assert_eq!(base.priority_queue.depth().await, 1);
-    }
-
-    #[tokio::test]
-    async fn stop_cancels_blocked_enqueue_and_next_start_reopens_queue() {
-        let base = ReactionBase::new(
-            ReactionBaseParams::new("stop-blocked-enqueue", vec!["q1".to_string()])
-                .with_priority_queue_capacity(1),
-        );
-        let _shutdown_rx = base.create_shutdown_channel().await;
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        base.enqueue_query_result(query_result("q1", 1, timestamp))
-            .await
-            .unwrap();
-
-        let producer_base = base.clone_shared();
-        let producer = tokio::spawn(async move {
-            producer_base
-                .enqueue_query_result(query_result("q1", 2, timestamp))
-                .await
-        });
-        while base.priority_queue.metrics().await.blocked_enqueue_count == 0 {
-            tokio::task::yield_now().await;
-        }
-
-        tokio::time::timeout(Duration::from_secs(1), base.stop_common())
-            .await
-            .expect("stop deadlocked behind blocked producer")
-            .expect("stop failed");
-        let error = tokio::time::timeout(Duration::from_secs(1), producer)
-            .await
-            .expect("producer did not exit after stop")
-            .expect("producer task panicked")
-            .expect_err("closed queue must reject the blocked result");
-        assert!(
-            error
-                .downcast_ref::<crate::channels::priority_queue::PriorityQueueClosed>()
-                .is_some(),
-            "unexpected producer error: {error:#}"
-        );
-        assert_eq!(base.priority_queue.depth().await, 0);
-
-        let _next_shutdown_rx = base.create_shutdown_channel().await;
-        base.enqueue_query_result(query_result("q1", 1, timestamp))
-            .await
-            .expect("new start generation should accept results");
-        assert_eq!(base.priority_queue.dequeue().await.sequence, 1);
     }
 
     #[tokio::test]
@@ -1287,81 +1029,94 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_dedup_and_checkpoint() {
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        use std::sync::atomic::{AtomicU64, Ordering};
 
-        for iteration in 0..100 {
-            let reaction_id = format!("loop-reaction-{iteration}");
-            let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-            let base = ReactionBase::new(ReactionBaseParams::new(
-                reaction_id.clone(),
-                vec!["q1".to_string()],
-            ));
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
 
-            let store: Arc<dyn StateStoreProvider> =
-                Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-            let context = crate::context::ReactionRuntimeContext::new(
-                "test-instance",
-                reaction_id,
-                Some(store),
-                graph.update_sender(),
-                None,
-            );
-            base.initialize(context).await;
+        let params = ReactionBaseParams::new("loop-reaction", vec!["q1".to_string()]);
+        let base = ReactionBase::new(params);
 
-            let initial_checkpoints = HashMap::from([(
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "loop-reaction",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        // Initial checkpoints: seq=5 with config_hash=42
+        let initial_checkpoints = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
                 "q1".to_string(),
                 ReactionCheckpoint {
                     sequence: 5,
                     config_hash: 42,
                 },
-            )]);
-            let shutdown_rx = base.create_shutdown_channel().await;
+            );
+            m
+        };
 
-            // Equal timestamps exercise the old heap tie that could put 7 before 6.
-            // Sequences 3 and 5 are legitimate replay duplicates.
-            for sequence in [3, 5, 6, 7] {
-                base.enqueue_query_result(query_result("q1", sequence, timestamp))
-                    .await
-                    .unwrap();
-            }
-
-            let processed = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
-            let completed = Arc::new(tokio::sync::Notify::new());
-            let processed_clone = processed.clone();
-            let completed_clone = completed.clone();
-            let base_clone = base.clone_shared();
-
-            let loop_handle = tokio::spawn(async move {
-                base_clone
-                    .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
-                        let processed = processed_clone.clone();
-                        let completed = completed_clone.clone();
-                        async move {
-                            let mut processed = processed.lock().await;
-                            processed.push(event.sequence);
-                            if processed.len() == 2 {
-                                completed.notify_one();
-                            }
-                            Ok(())
-                        }
-                    })
-                    .await
-                    .unwrap();
-            });
-
-            tokio::time::timeout(Duration::from_secs(2), completed.notified())
-                .await
-                .expect("standard loop did not process both new results");
-            base.stop_common().await.unwrap();
-            tokio::time::timeout(Duration::from_secs(2), loop_handle)
-                .await
-                .expect("standard loop did not stop")
-                .expect("standard loop task panicked");
-
-            assert_eq!(*processed.lock().await, vec![6, 7]);
-            let checkpoint = base.read_checkpoint("q1").await.unwrap().unwrap();
-            assert_eq!(checkpoint.sequence, 7);
-            assert_eq!(checkpoint.config_hash, 42);
+        // Enqueue events: seq 3 (dup), seq 5 (dup), seq 6, seq 7
+        for seq in [3u64, 5, 6, 7] {
+            let result = crate::channels::QueryResult {
+                query_id: "q1".to_string(),
+                sequence: seq,
+                timestamp: chrono::Utc::now(),
+                results: vec![],
+                metadata: Default::default(),
+                profiling: None,
+            };
+            base.enqueue_query_result(result).await.unwrap();
         }
+
+        // Track which sequences the handler actually processes
+        let processed = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
+        let processed_clone = processed.clone();
+        let handler_count = Arc::new(AtomicU64::new(0));
+        let handler_count_clone = handler_count.clone();
+
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let base_clone = base.clone_shared();
+
+        let loop_handle = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
+                    let processed = processed_clone.clone();
+                    let count = handler_count_clone.clone();
+                    async move {
+                        processed.lock().await.push(event.sequence);
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+        });
+
+        // Wait for all non-dup events to be processed (seq 6 and 7)
+        for _ in 0..50 {
+            if handler_count.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Signal shutdown via stop_common (the standard path)
+        let _ = base.stop_common().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        // Verify only seq 6 and 7 were processed (3 and 5 were deduped)
+        let processed = processed.lock().await;
+        assert_eq!(*processed, vec![6, 7]);
+
+        // Checkpoint should now be at seq=7, preserving config_hash=42
+        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(cp.sequence, 7);
+        assert_eq!(cp.config_hash, 42);
     }
 }

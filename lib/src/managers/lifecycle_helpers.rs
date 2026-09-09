@@ -143,35 +143,16 @@ pub async fn start_component<R: ComponentRuntime>(
     component_type: &str,
     runtime: &R,
 ) -> Result<()> {
-    claim_component_start(graph, id, component_type).await?;
-    start_claimed_component(graph, id, runtime).await
-}
+    // Validate and apply Starting transition atomically through the graph
+    {
+        let mut g = graph.write().await;
+        g.validate_and_transition(
+            id,
+            ComponentStatus::Starting,
+            Some(format!("Starting {component_type}")),
+        )?;
+    }
 
-/// Atomically validate and claim a component start, returning its prior status.
-pub(crate) async fn claim_component_start(
-    graph: &Arc<RwLock<ComponentGraph>>,
-    id: &str,
-    component_type: &str,
-) -> Result<ComponentStatus> {
-    let mut graph = graph.write().await;
-    let prior_status = graph
-        .get_component(id)
-        .map(|node| node.status)
-        .ok_or_else(|| anyhow::anyhow!("{component_type} '{id}' not found"))?;
-    graph.validate_and_transition(
-        id,
-        ComponentStatus::Starting,
-        Some(format!("Starting {component_type}")),
-    )?;
-    Ok(prior_status)
-}
-
-/// Start a runtime after its `Starting` transition has already been claimed.
-pub(crate) async fn start_claimed_component<R: ComponentRuntime>(
-    graph: &Arc<RwLock<ComponentGraph>>,
-    id: &str,
-    runtime: &R,
-) -> Result<()> {
     if let Err(e) = runtime.start().await {
         // Revert graph status so the component isn't stuck at Starting
         let mut g = graph.write().await;
@@ -204,8 +185,9 @@ pub async fn stop_component<R: ComponentRuntime>(
             id,
             ComponentStatus::Stopping,
             Some(format!("Stopping {component_type}")),
-        )?
-    };
+        )?;
+    }
+
     if let Err(e) = runtime.stop().await {
         // Revert graph status so the component isn't stuck at Stopping
         let mut g = graph.write().await;
@@ -277,10 +259,7 @@ where
             ));
         }
 
-        if matches!(
-            status,
-            ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error
-        ) {
+        if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
             g.validate_and_transition(
                 id,
                 ComponentStatus::Stopping,
@@ -505,7 +484,7 @@ where
 
 /// Stop all active components of a given kind (best-effort).
 ///
-/// Components in Running, Starting, or Error state are stopped via the provided `stop_fn`.
+/// Components in Running or Starting state are stopped via the provided `stop_fn`.
 /// Errors are logged but do not prevent stopping other components.
 pub async fn stop_all_components<F, Fut>(
     graph: &Arc<RwLock<ComponentGraph>>,
@@ -532,9 +511,7 @@ where
                 .map(|n| {
                     matches!(
                         n.status,
-                        ComponentStatus::Running
-                            | ComponentStatus::Starting
-                            | ComponentStatus::Error
+                        ComponentStatus::Running | ComponentStatus::Starting
                     )
                 })
                 .unwrap_or(false)

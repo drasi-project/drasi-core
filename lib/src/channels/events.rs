@@ -446,7 +446,7 @@ pub struct QueryResult {
     pub results: Vec<ResultDiff>,
     pub metadata: HashMap<String, serde_json::Value>,
     /// Optional profiling metadata for performance tracking
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub profiling: Option<ProfilingMetadata>,
 }
 
@@ -647,19 +647,6 @@ mod tests {
         );
         let source_position = Bytes::from_static(b"offset-42");
         wrapper.set_source_position(source_position.clone());
-
-        let envelope = crate::change::source_event_to_envelope(
-            &wrapper,
-            crate::change::SystemMetadataExtensions::default(),
-        )
-        .unwrap();
-        let adapted = crate::change::source_event_from_envelope(&envelope).unwrap();
-        assert_eq!(adapted.source_id, wrapper.source_id);
-        assert_eq!(adapted.event, wrapper.event);
-        assert_eq!(adapted.timestamp, wrapper.timestamp);
-        assert_eq!(adapted.profiling, wrapper.profiling);
-        assert_eq!(adapted.sequence, wrapper.sequence);
-        assert_eq!(adapted.source_position, wrapper.source_position);
 
         let parts = wrapper.into_parts();
 

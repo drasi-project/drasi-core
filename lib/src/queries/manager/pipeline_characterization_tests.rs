@@ -14,9 +14,10 @@
 
 //! Characterization tests for the fixed Source -> Continuous Query -> Reaction pipeline.
 //!
-//! These tests intentionally pin the legacy transaction and output boundaries. Their
-//! output writers remain outside the core transaction, while the checkpoint store
-//! shares the core domain so the Legacy pending-publication marker is load-bearing.
+//! These tests intentionally pin the current transaction and output boundaries. In
+//! particular, they document the known durability gap where source progress commits
+//! before query output is persisted. A later stack layer will intentionally invert
+//! that behavior by staging output inside the core transaction.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -39,7 +40,6 @@ use drasi_core::{
     interface::{
         CheckpointStore, CreatedIndexes, ElementIndex, FutureQueue, IndexBackendPlugin, IndexError,
         IndexSet, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SourceCheckpoint,
-        TransactionDomain,
     },
     middleware::MiddlewareTypeRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -123,15 +123,10 @@ struct TransactionState {
 struct RecordingSessionControl {
     state: Arc<Mutex<TransactionState>>,
     trace: EventTrace,
-    transaction_domain: TransactionDomain,
 }
 
 #[async_trait]
 impl SessionControl for RecordingSessionControl {
-    fn transaction_domain(&self) -> Option<TransactionDomain> {
-        Some(self.transaction_domain.clone())
-    }
-
     async fn begin(&self) -> Result<(), IndexError> {
         let mut state = self.state.lock().unwrap();
         if state.active {
@@ -170,15 +165,10 @@ impl SessionControl for RecordingSessionControl {
 struct TransactionalCheckpointStore {
     state: Arc<Mutex<TransactionState>>,
     trace: EventTrace,
-    transaction_domain: TransactionDomain,
 }
 
 #[async_trait]
 impl CheckpointStore for TransactionalCheckpointStore {
-    fn transaction_domain(&self) -> Option<TransactionDomain> {
-        Some(self.transaction_domain.clone())
-    }
-
     fn is_persistent(&self) -> bool {
         true
     }
@@ -450,7 +440,6 @@ impl CharacterizationBackend {
     fn new(fail_output_writes: bool) -> Self {
         let trace = EventTrace::default();
         let state = Arc::new(Mutex::new(TransactionState::default()));
-        let transaction_domain = TransactionDomain::new();
         Self {
             trace: trace.clone(),
             element_index: Arc::new(InMemoryElementIndex::new()),
@@ -459,12 +448,10 @@ impl CharacterizationBackend {
             session_control: Arc::new(RecordingSessionControl {
                 state: state.clone(),
                 trace: trace.clone(),
-                transaction_domain: transaction_domain.clone(),
             }),
             checkpoint_store: Arc::new(TransactionalCheckpointStore {
                 state,
                 trace: trace.clone(),
-                transaction_domain,
             }),
             output_store: Arc::new(RecordingOutputStore::new(fail_output_writes, trace)),
         }
@@ -509,12 +496,11 @@ impl CharacterizationSource {
         }
     }
 
-    async fn inject_with_profiling(
+    async fn inject(
         &self,
         change: SourceChange,
         sequence: u64,
         source_position: Bytes,
-        profiling: ProfilingMetadata,
     ) -> anyhow::Result<()> {
         let timestamp =
             chrono::DateTime::from_timestamp_millis(change.get_realtime() as i64).unwrap();
@@ -523,7 +509,7 @@ impl CharacterizationSource {
             SourceEvent::Change(change),
             timestamp,
             sequence,
-            Some(profiling),
+            Some(ProfilingMetadata::default()),
         );
         event.set_source_position(source_position);
         self.base.dispatch_event(event).await
@@ -710,22 +696,6 @@ impl PipelineHarness {
     }
 
     async fn inject(&self, change: SourceChange, sequence: u64, source_position: Bytes) {
-        self.inject_with_profiling(
-            change,
-            sequence,
-            source_position,
-            ProfilingMetadata::default(),
-        )
-        .await;
-    }
-
-    async fn inject_with_profiling(
-        &self,
-        change: SourceChange,
-        sequence: u64,
-        source_position: Bytes,
-        profiling: ProfilingMetadata,
-    ) {
         let source = self
             .source_manager
             .get_source_instance(SOURCE_ID)
@@ -735,7 +705,7 @@ impl PipelineHarness {
             .as_any()
             .downcast_ref::<CharacterizationSource>()
             .unwrap()
-            .inject_with_profiling(change, sequence, source_position, profiling)
+            .inject(change, sequence, source_position)
             .await
             .unwrap();
     }
@@ -787,53 +757,6 @@ fn variables(entries: &[(&str, VariableValue)]) -> QueryVariables {
         .collect()
 }
 
-fn legacy_result_diffs(results: &[QueryPartEvaluationContext]) -> Vec<ResultDiff> {
-    results
-        .iter()
-        .filter_map(|context| match context {
-            QueryPartEvaluationContext::Adding {
-                after,
-                row_signature,
-            } => Some(ResultDiff::Add {
-                data: convert_query_variables_to_json(after),
-                row_signature: *row_signature,
-            }),
-            QueryPartEvaluationContext::Updating {
-                before,
-                after,
-                row_signature,
-            } => {
-                let after = convert_query_variables_to_json(after);
-                Some(ResultDiff::Update {
-                    data: after.clone(),
-                    before: convert_query_variables_to_json(before),
-                    after,
-                    grouping_keys: None,
-                    row_signature: *row_signature,
-                })
-            }
-            QueryPartEvaluationContext::Removing {
-                before,
-                row_signature,
-            } => Some(ResultDiff::Delete {
-                data: convert_query_variables_to_json(before),
-                row_signature: *row_signature,
-            }),
-            QueryPartEvaluationContext::Aggregation {
-                before,
-                after,
-                row_signature,
-                ..
-            } => Some(ResultDiff::Aggregation {
-                before: before.as_ref().map(convert_query_variables_to_json),
-                after: convert_query_variables_to_json(after),
-                row_signature: *row_signature,
-            }),
-            QueryPartEvaluationContext::Noop => None,
-        })
-        .collect()
-}
-
 async fn next_result(receiver: &mut mpsc::UnboundedReceiver<Arc<QueryResult>>) -> Arc<QueryResult> {
     tokio::time::timeout(Duration::from_secs(5), receiver.recv())
         .await
@@ -849,7 +772,6 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
     let checkpoint_store = Arc::new(TransactionalCheckpointStore {
         state: checkpoint_state,
         trace: trace.clone(),
-        transaction_domain: TransactionDomain::new(),
     });
     let output_state = RwLock::new(QueryOutputState::new(16));
     let output_metrics = Arc::new(QueryOutputMetrics::new());
@@ -900,10 +822,8 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         16,
         ProfilingMetadata::default(),
         &output_metrics,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
 
     let result = next_result(&mut result_rx).await;
     assert_eq!(result.query_id, "query-a");
@@ -937,27 +857,6 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
     assert_eq!(result.metadata["processed_by"], json!("drasi-core"));
     assert_eq!(result.metadata["result_count"], json!(4));
     assert_eq!(result.profiling, Some(ProfilingMetadata::default()));
-
-    let envelope = crate::change::query_evaluation_to_envelope(
-        &contexts,
-        crate::change::QueryEnvelopeMetadata::new(
-            result.query_id.clone(),
-            Some(Arc::from("source-a")),
-            result.sequence,
-            result.timestamp,
-            result.metadata.clone(),
-            result.profiling.clone(),
-        ),
-    )
-    .unwrap()
-    .expect("non-Noop evaluation results should produce an envelope");
-    let adapted = crate::change::query_result_from_envelope(&envelope).unwrap();
-    assert_eq!(adapted.query_id, result.query_id);
-    assert_eq!(adapted.sequence, result.sequence);
-    assert_eq!(adapted.timestamp, result.timestamp);
-    assert_eq!(adapted.results, result.results);
-    assert_eq!(adapted.metadata, result.metadata);
-    assert_eq!(adapted.profiling, result.profiling);
 
     let state = output_state.read().await;
     assert_eq!(state.as_of_sequence(), 1);
@@ -1000,10 +899,8 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         16,
         ProfilingMetadata::default(),
         &output_metrics,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
 
     let second = next_result(&mut result_rx).await;
     assert_eq!(second.sequence, 2);
@@ -1018,158 +915,10 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-
-    dispatch_query_results(
-        &[QueryPartEvaluationContext::Noop],
-        "source-c",
-        "query-a",
-        &output_state,
-        &dispatchers,
-        &outbox_writer,
-        &live_results_writer,
-        &checkpoint_writer,
-        16,
-        ProfilingMetadata::default(),
-        &output_metrics,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let state = output_state.read().await;
-    assert_eq!(state.as_of_sequence(), 2);
-    assert_eq!(state.outbox_len(), 2);
-    drop(state);
-    assert!(matches!(
-        result_rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
 }
 
 #[tokio::test]
-async fn live_source_change_envelope_path_preserves_legacy_result_metadata() {
-    let backend = Arc::new(CharacterizationBackend::new(false));
-    let mut harness = PipelineHarness::new(backend.clone()).await;
-    let (query, mut result_rx) = harness.start_query(backend.trace.clone()).await;
-    let subscription = harness.next_subscription().await;
-    assert_eq!(subscription.resume_sequence, None);
-    assert_eq!(subscription.resume_from, None);
-    backend.trace.clear();
-
-    let source_position = Bytes::from_static(b"envelope-position-7");
-    let source_profiling = ProfilingMetadata {
-        source_ns: Some(10),
-        reactivator_start_ns: Some(20),
-        reactivator_end_ns: Some(30),
-        source_receive_ns: Some(40),
-        source_send_ns: Some(50),
-        ..Default::default()
-    };
-    harness
-        .inject_with_profiling(
-            person_insert("person-envelope", "Envelope", 1_000),
-            7,
-            source_position.clone(),
-            source_profiling.clone(),
-        )
-        .await;
-
-    let delivered = next_result(&mut result_rx).await;
-    assert_eq!(delivered.query_id, QUERY_ID);
-    assert_eq!(delivered.sequence, 1);
-    assert_eq!(delivered.results.len(), 1);
-    assert!(matches!(
-        &delivered.results[0],
-        ResultDiff::Add { data, .. } if data == &json!({ "name": "Envelope" })
-    ));
-    assert_eq!(
-        delivered.metadata,
-        HashMap::from([
-            ("source_id".to_string(), json!(SOURCE_ID)),
-            ("processed_by".to_string(), json!("drasi-core")),
-            ("result_count".to_string(), json!(1)),
-        ])
-    );
-
-    let delivered_profiling = delivered
-        .profiling
-        .as_ref()
-        .expect("live results retain source profiling");
-    assert_eq!(delivered_profiling.source_ns, source_profiling.source_ns);
-    assert_eq!(
-        delivered_profiling.reactivator_start_ns,
-        source_profiling.reactivator_start_ns
-    );
-    assert_eq!(
-        delivered_profiling.reactivator_end_ns,
-        source_profiling.reactivator_end_ns
-    );
-    assert_eq!(
-        delivered_profiling.source_receive_ns,
-        source_profiling.source_receive_ns
-    );
-    assert_eq!(
-        delivered_profiling.source_send_ns,
-        source_profiling.source_send_ns
-    );
-    assert!(delivered_profiling.query_receive_ns.is_some());
-    assert!(delivered_profiling.query_core_call_ns.is_some());
-    assert!(delivered_profiling.query_core_return_ns.is_some());
-    assert!(delivered_profiling.query_send_ns.is_some());
-
-    assert_eq!(
-        backend.trace.snapshot(),
-        vec![
-            TraceEvent::SessionBegin,
-            TraceEvent::CheckpointStaged {
-                source_id: LEGACY_OUTPUT_PENDING_MARKER_V1.to_string(),
-                sequence: 1,
-                source_position: Some(Bytes::from_static(b"\x91\x01")),
-            },
-            TraceEvent::CheckpointStaged {
-                source_id: SOURCE_ID.to_string(),
-                sequence: 7,
-                source_position: Some(source_position),
-            },
-            TraceEvent::SessionCommit,
-            TraceEvent::OutboxAppendAttempt {
-                query_id: QUERY_ID.to_string(),
-                sequence: 1,
-            },
-            TraceEvent::LiveResultsApplyAttempt {
-                query_id: QUERY_ID.to_string(),
-                mutation_count: 1,
-            },
-            TraceEvent::ResultSequenceWritten {
-                query_id: QUERY_ID.to_string(),
-                sequence: 1,
-            },
-            TraceEvent::ReactionDispatch { sequence: 1 },
-            TraceEvent::SessionBegin,
-            TraceEvent::CheckpointStaged {
-                source_id: LEGACY_OUTPUT_PENDING_MARKER_V1.to_string(),
-                sequence: 0,
-                source_position: None,
-            },
-            TraceEvent::SessionCommit,
-        ]
-    );
-    assert_eq!(
-        backend.output_store.read_from(QUERY_ID, 0).await.unwrap()[0].1,
-        rmp_serde::to_vec(delivered.as_ref()).unwrap()
-    );
-
-    query.stop().await.unwrap();
-    harness
-        .source_manager
-        .stop_source(SOURCE_ID.to_string())
-        .await
-        .unwrap();
-    drop(harness.graph);
-}
-
-#[tokio::test]
-async fn persistent_legacy_output_failure_fences_before_delivery() {
+async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     let backend = Arc::new(CharacterizationBackend::new(true));
     let mut harness = PipelineHarness::new(backend.clone()).await;
 
@@ -1187,29 +936,21 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
             first_position.clone(),
         )
         .await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while query.status().await != ComponentStatus::Error {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("persistent Legacy write failure should fence the query");
+    let delivered = next_result(&mut result_rx).await;
+    assert_eq!(delivered.sequence, 1);
+    assert_eq!(delivered.results.len(), 1);
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), result_rx.recv())
-            .await
-            .is_err(),
-        "a persistent Legacy write failure must not be delivered"
+        matches!(
+            &delivered.results[0],
+            ResultDiff::Add { data, .. } if data == &json!({ "name": "Alice" })
+        ),
+        "the committed input should produce Alice's Add result"
     );
 
     assert_eq!(
         backend.trace.snapshot(),
         vec![
             TraceEvent::SessionBegin,
-            TraceEvent::CheckpointStaged {
-                source_id: LEGACY_OUTPUT_PENDING_MARKER_V1.to_string(),
-                sequence: 1,
-                source_position: Some(Bytes::from_static(b"\x91\x01")),
-            },
             TraceEvent::CheckpointStaged {
                 source_id: SOURCE_ID.to_string(),
                 sequence: 1,
@@ -1220,9 +961,13 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
                 query_id: QUERY_ID.to_string(),
                 sequence: 1,
             },
+            TraceEvent::LiveResultsApplyAttempt {
+                query_id: QUERY_ID.to_string(),
+                mutation_count: 1,
+            },
+            TraceEvent::ReactionDispatch { sequence: 1 },
         ],
-        "the pending marker and source checkpoint commit together before persistent \
-         output failure fences later persistence and dispatch"
+        "current DrasiQuery commits input progress before best-effort output persistence and dispatch"
     );
 
     assert!(
@@ -1268,10 +1013,74 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
             .await
             .unwrap(),
         None,
-        "result sequence remains the committed output high-water, not an error marker"
+        "failed output writes must not claim a durable result sequence"
     );
-    assert!(query.publication_recovery_required());
+
     query.stop().await.unwrap();
+
+    let (restarted_query, mut restarted_result_rx) =
+        harness.start_query(backend.trace.clone()).await;
+    let resumed_subscription = harness.next_subscription().await;
+    assert_eq!(resumed_subscription.resume_sequence, Some(1));
+    assert_eq!(resumed_subscription.resume_from, Some(first_position));
+
+    let recovered_snapshot = restarted_query.fetch_snapshot().await.unwrap();
+    assert_eq!(recovered_snapshot.as_of_sequence, 0);
+    assert!(
+        recovered_snapshot.is_empty(),
+        "after a fresh host starts from committed input position 1, output 1 cannot be recovered"
+    );
+
+    backend.trace.clear();
+    harness
+        .inject(
+            person_insert("person-1", "Alice", 1_000),
+            1,
+            Bytes::from_static(b"position-2"),
+        )
+        .await;
+    harness
+        .inject(
+            person_insert("person-2", "Bob", 2_000),
+            2,
+            Bytes::from_static(b"position-3"),
+        )
+        .await;
+
+    let after_restart = next_result(&mut restarted_result_rx).await;
+    assert_eq!(after_restart.sequence, 1);
+    assert_eq!(after_restart.results.len(), 1);
+    assert!(
+        matches!(
+            &after_restart.results[0],
+            ResultDiff::Add { data, .. } if data == &json!({ "name": "Bob" })
+        ),
+        "checkpoint-seeded dedup must suppress replayed source sequence 1",
+    );
+    assert_eq!(
+        backend.trace.snapshot(),
+        vec![
+            TraceEvent::SessionBegin,
+            TraceEvent::CheckpointStaged {
+                source_id: SOURCE_ID.to_string(),
+                sequence: 2,
+                source_position: Some(Bytes::from_static(b"position-3")),
+            },
+            TraceEvent::SessionCommit,
+            TraceEvent::OutboxAppendAttempt {
+                query_id: QUERY_ID.to_string(),
+                sequence: 1,
+            },
+            TraceEvent::LiveResultsApplyAttempt {
+                query_id: QUERY_ID.to_string(),
+                mutation_count: 1,
+            },
+            TraceEvent::ReactionDispatch { sequence: 1 },
+        ],
+        "the replayed sequence is skipped before a core session begins"
+    );
+
+    restarted_query.stop().await.unwrap();
     harness
         .source_manager
         .stop_source(SOURCE_ID.to_string())
@@ -1284,16 +1093,13 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
 async fn due_future_output_is_dispatched_after_core_commit() {
     let trace = EventTrace::default();
     let state = Arc::new(Mutex::new(TransactionState::default()));
-    let transaction_domain = TransactionDomain::new();
     let session_control = Arc::new(RecordingSessionControl {
         state: state.clone(),
         trace: trace.clone(),
-        transaction_domain: transaction_domain.clone(),
     });
     let checkpoint_store = Arc::new(TransactionalCheckpointStore {
         state,
         trace: trace.clone(),
-        transaction_domain,
     });
     let output_store = Arc::new(RecordingOutputStore::new(false, trace.clone()));
     let element_index = Arc::new(InMemoryElementIndex::new());
@@ -1364,13 +1170,6 @@ async fn due_future_output_is_dispatched_after_core_commit() {
     let live_results_writer: Option<Arc<dyn LiveResultsWriter>> = Some(output_store);
     let checkpoint_writer: Option<Arc<dyn CheckpointStore>> = Some(checkpoint_store);
 
-    let profiling = ProfilingMetadata {
-        source_ns: Some(101),
-        source_receive_ns: Some(202),
-        source_send_ns: Some(303),
-        ..Default::default()
-    };
-    let expected_results = legacy_result_diffs(&due.results);
     dispatch_query_results(
         &due.results,
         &due.source_id,
@@ -1381,25 +1180,12 @@ async fn due_future_output_is_dispatched_after_core_commit() {
         &live_results_writer,
         &checkpoint_writer,
         16,
-        profiling.clone(),
+        ProfilingMetadata::default(),
         &output_metrics,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let dispatched = next_result(&mut result_rx).await;
-    assert_eq!(dispatched.query_id, "future-query");
-    assert_eq!(dispatched.sequence, 1);
-    assert_eq!(dispatched.results, expected_results);
-    assert_eq!(
-        dispatched.metadata,
-        HashMap::from([
-            ("source_id".to_string(), json!("future-source")),
-            ("processed_by".to_string(), json!("drasi-core")),
-            ("result_count".to_string(), json!(dispatched.results.len()),),
-        ])
-    );
-    assert_eq!(dispatched.profiling, Some(profiling));
+    assert_eq!(dispatched.metadata["source_id"], json!("future-source"));
     assert_eq!(
         trace.snapshot(),
         vec![

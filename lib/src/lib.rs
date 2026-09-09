@@ -66,8 +66,6 @@ pub mod recovery;
 // Internal Modules (crate-private, but visible to integration tests)
 // ============================================================================
 
-pub(crate) mod change;
-
 // These modules are internal but need to be accessible to integration tests
 // that test platform-specific components
 #[cfg_attr(not(test), doc(hidden))]

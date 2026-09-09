@@ -30,7 +30,7 @@
 
 use async_trait::async_trait;
 
-use super::{IndexError, TransactionDomain};
+use super::IndexError;
 
 /// Persistent outbox storage for query result replay.
 ///
@@ -38,18 +38,9 @@ use super::{IndexError, TransactionDomain};
 /// The `lib` layer handles serialization/deserialization.
 #[async_trait]
 pub trait OutboxWriter: Send + Sync {
-    /// Transaction domain used by append and capacity-trim mutations.
-    ///
-    /// Returns `None` when these writes cannot join a query's active session.
-    fn transaction_domain(&self) -> Option<TransactionDomain> {
-        None
-    }
-
     /// Append a serialized query result entry.
     ///
     /// If the outbox already contains an entry at this sequence, it is overwritten.
-    /// Domain-aware implementations stage the mutation in an active matching
-    /// session and retain standalone behavior outside a session.
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError>;
 
     /// Read all entries with sequence strictly greater than `after_sequence`.
@@ -76,6 +67,5 @@ pub trait OutboxWriter: Send + Sync {
     ///
     /// Returns the number of entries removed. If the outbox has ≤ `capacity`
     /// entries, this is a no-op returning 0.
-    /// Domain-aware implementations stage removals in the active session.
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError>;
 }

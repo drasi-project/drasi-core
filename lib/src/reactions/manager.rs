@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::{error, info, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::Instrument;
@@ -62,51 +62,6 @@ struct BroadcastGapContext<'a> {
     checkpoints: &'a Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
     bootstrap_mutex: &'a Arc<tokio::sync::Mutex<()>>,
     metrics: &'a Arc<ReactionMetrics>,
-    /// Highest sequence already enqueued in this query's current generation.
-    last_forwarded_sequence: u64,
-    /// The live event that exposed a sequence gap. `None` when the receiver
-    /// reported lag before yielding the next retained event.
-    received_sequence: Option<u64>,
-}
-
-#[derive(Clone)]
-struct StartupQueryProgress {
-    checkpoint: ReactionCheckpoint,
-    forwarded_sequence: u64,
-    persist_after_bootstrap: bool,
-}
-
-impl StartupQueryProgress {
-    fn new(
-        checkpoint: ReactionCheckpoint,
-        forwarded_sequence: u64,
-        persist_after_bootstrap: bool,
-    ) -> Self {
-        Self {
-            checkpoint,
-            forwarded_sequence,
-            persist_after_bootstrap,
-        }
-    }
-}
-
-struct ReactionSubscriptionTasks {
-    forwarder_abort_handles: Vec<tokio::task::AbortHandle>,
-    supervisor: tokio::task::JoinHandle<()>,
-}
-
-struct ReactionStartReservation {
-    reaction_id: String,
-    active_starts: Arc<std::sync::Mutex<HashSet<String>>>,
-}
-
-impl Drop for ReactionStartReservation {
-    fn drop(&mut self) {
-        self.active_starts
-            .lock()
-            .expect("reaction start reservation lock poisoned")
-            .remove(&self.reaction_id);
-    }
 }
 
 pub struct ReactionManager {
@@ -119,8 +74,8 @@ pub struct ReactionManager {
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
-    /// Subscription forwarders and their reaping supervisor per reaction.
-    subscription_tasks: Arc<RwLock<HashMap<String, ReactionSubscriptionTasks>>>,
+    /// Abort handles to subscription forwarder + supervisor tasks per reaction
+    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
     graph: Arc<RwLock<ComponentGraph>>,
@@ -132,9 +87,6 @@ pub struct ReactionManager {
     reaction_metrics: Arc<RwLock<HashMap<MetricsKey, Arc<ReactionMetrics>>>>,
     /// Global lifecycle metrics shared across all reactions.
     lifecycle_metrics: Arc<LifecycleMetrics>,
-    /// Prevents concurrent starts from observing an Error retry's intermediate
-    /// cleanup states.
-    active_starts: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 impl ReactionManager {
@@ -161,7 +113,6 @@ impl ReactionManager {
             update_tx,
             reaction_metrics: Arc::new(RwLock::new(HashMap::new())),
             lifecycle_metrics: Arc::new(LifecycleMetrics::new()),
-            active_starts: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -249,7 +200,6 @@ impl ReactionManager {
     /// # Parameters
     /// - `id`: The reaction ID to start
     pub async fn start_reaction(&self, id: String) -> Result<()> {
-        let _reservation = self.reserve_start(&id)?;
         let reaction =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Reaction>>(&self.graph, &id)
                 .await
@@ -262,195 +212,40 @@ impl ReactionManager {
         // --- §3 Startup validation ---
         self.validate_startup_config(&reaction).await?;
 
-        let prior_status =
-            crate::managers::lifecycle_helpers::claim_component_start(&self.graph, &id, "reaction")
-                .await?;
-        anyhow::ensure!(
-            prior_status != ComponentStatus::Starting,
-            "Component '{id}' is already starting"
-        );
-
-        if let Err(error) = self
-            .prepare_start_generation(&id, &reaction, prior_status)
-            .await
-        {
-            self.cleanup_failed_start(&id, &reaction, format!("Start failed: {error}"))
-                .await;
-            return Err(error);
-        }
-
-        let existing_checkpoints = match self
-            .capture_and_seed_start_checkpoints(&id, &reaction)
-            .await
-        {
-            Ok(checkpoints) => checkpoints,
-            Err(error) => {
-                self.cleanup_failed_start(&id, &reaction, format!("Start failed: {error}"))
-                    .await;
-                return Err(error);
-            }
-        };
-
-        if let Err(error) =
-            crate::managers::lifecycle_helpers::start_claimed_component(&self.graph, &id, &reaction)
-                .await
-        {
-            self.cleanup_failed_start(&id, &reaction, format!("Start failed: {error}"))
-                .await;
-            return Err(error);
-        }
+        crate::managers::lifecycle_helpers::start_component(
+            &self.graph,
+            &id,
+            "reaction",
+            &reaction,
+        )
+        .await?;
 
         // Create the bootstrap gate — forwarders wait on this before processing.
         // Using a watch channel (not Notify) so late subscribers see the current value
         // and cannot miss the notification.
         let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
 
-        if let Err(error) = self
-            .subscribe_and_bootstrap(&id, reaction.clone(), existing_checkpoints, gate_rx)
+        if let Err(e) = self
+            .subscribe_and_bootstrap(&id, reaction.clone(), gate_rx)
             .await
         {
-            self.cleanup_failed_start(&id, &reaction, format!("Bootstrap failed: {error}"))
-                .await;
-            return Err(error);
+            // Abort any forwarder/supervisor tasks spawned during wire_subscriptions.
+            Self::abort_subscription_tasks_static(&self.subscription_tasks, &id).await;
+
+            // Revert to Error since the reaction can't receive data without subscriptions
+            let mut graph = self.graph.write().await;
+            let _ = graph.validate_and_transition(
+                &id,
+                ComponentStatus::Error,
+                Some(format!("Bootstrap failed: {e}")),
+            );
+            return Err(e);
         }
 
         // Open the gate — forwarders begin draining buffered events.
         let _ = gate_tx.send(true);
 
         Ok(())
-    }
-
-    async fn capture_and_seed_start_checkpoints(
-        &self,
-        reaction_id: &str,
-        reaction: &Arc<dyn Reaction>,
-    ) -> Result<HashMap<String, ReactionCheckpoint>> {
-        let query_ids = reaction.query_ids();
-        let Some(store) = self.state_store.read().await.clone() else {
-            return Ok(HashMap::new());
-        };
-        let existing = crate::reactions::checkpoint::read_checkpoints_batch(
-            store.as_ref(),
-            reaction_id,
-            &query_ids,
-        )
-        .await?;
-
-        if !reaction.needs_snapshot_on_fresh_start() {
-            let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "QueryProvider not injected - was ReactionManager initialized properly?"
-                )
-            })?;
-            for query_id in &query_ids {
-                if existing.contains_key(query_id) {
-                    continue;
-                }
-                let query = query_provider.get_query_instance(query_id).await?;
-                crate::reactions::checkpoint::write_checkpoint(
-                    store.as_ref(),
-                    reaction_id,
-                    query_id,
-                    &ReactionCheckpoint {
-                        sequence: 0,
-                        config_hash: crate::queries::compute_config_hash(query.get_config()),
-                    },
-                )
-                .await?;
-            }
-        }
-
-        Ok(existing)
-    }
-
-    fn reserve_start(&self, reaction_id: &str) -> Result<ReactionStartReservation> {
-        let mut active_starts = self
-            .active_starts
-            .lock()
-            .expect("reaction start reservation lock poisoned");
-        anyhow::ensure!(
-            active_starts.insert(reaction_id.to_string()),
-            "Component '{reaction_id}' is already starting"
-        );
-        drop(active_starts);
-        Ok(ReactionStartReservation {
-            reaction_id: reaction_id.to_string(),
-            active_starts: self.active_starts.clone(),
-        })
-    }
-
-    async fn prepare_start_generation(
-        &self,
-        reaction_id: &str,
-        reaction: &Arc<dyn Reaction>,
-        prior_status: ComponentStatus,
-    ) -> Result<()> {
-        Self::abort_subscription_tasks_static(&self.subscription_tasks, reaction_id).await;
-
-        if prior_status != ComponentStatus::Error {
-            return Ok(());
-        }
-
-        reaction
-            .stop()
-            .await
-            .with_context(|| format!("Failed to clean prior generation for '{reaction_id}'"))?;
-        crate::component_graph::wait_for_status(
-            &self.graph,
-            reaction_id,
-            &[ComponentStatus::Stopped],
-            std::time::Duration::from_secs(2),
-        )
-        .await
-        .with_context(|| {
-            format!("Reaction '{reaction_id}' did not stop before retrying its start")
-        })?;
-        crate::managers::lifecycle_helpers::claim_component_start(
-            &self.graph,
-            reaction_id,
-            "reaction",
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn cleanup_failed_start(
-        &self,
-        reaction_id: &str,
-        reaction: &Arc<dyn Reaction>,
-        message: String,
-    ) {
-        {
-            let mut graph = self.graph.write().await;
-            let _ = graph.validate_and_transition(
-                reaction_id,
-                ComponentStatus::Error,
-                Some(message.clone()),
-            );
-        }
-
-        Self::abort_subscription_tasks_static(&self.subscription_tasks, reaction_id).await;
-        if let Err(cleanup_error) = reaction.stop().await {
-            log::error!(
-                "[{reaction_id}] Failed to clean reaction after start failure: {cleanup_error}"
-            );
-            return;
-        }
-
-        if let Err(wait_error) = crate::component_graph::wait_for_status(
-            &self.graph,
-            reaction_id,
-            &[ComponentStatus::Stopped],
-            std::time::Duration::from_secs(2),
-        )
-        .await
-        {
-            log::error!("[{reaction_id}] Failed-start cleanup did not reach Stopped: {wait_error}");
-            return;
-        }
-
-        let mut graph = self.graph.write().await;
-        let _ = graph.validate_and_transition(reaction_id, ComponentStatus::Error, Some(message));
     }
 
     /// Validate the reaction's startup configuration (§3 compatibility rules).
@@ -527,7 +322,6 @@ impl ReactionManager {
         &self,
         reaction_id: &str,
         reaction: Arc<dyn Reaction>,
-        existing_checkpoints: HashMap<String, ReactionCheckpoint>,
         gate: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
         let query_ids = reaction.query_ids();
@@ -545,11 +339,8 @@ impl ReactionManager {
         let state_store = self.state_store.read().await.clone();
         let policy = reaction.default_recovery_policy();
 
-        // Authoritative handled/bootstrap checkpoints and generation-local
-        // enqueued high-water are intentionally separate.
+        // Shared checkpoint map — populated during bootstrap, read by forwarders after gate opens.
         let shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-        let shared_forwarded_sequences: Arc<RwLock<HashMap<String, u64>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
         // 1. Wire subscriptions FIRST so events buffer in broadcast channels
@@ -560,15 +351,26 @@ impl ReactionManager {
             &query_provider,
             &query_ids,
             shared_checkpoints.clone(),
-            shared_forwarded_sequences.clone(),
             gate,
         )
         .await?;
 
-        // 2. Per-query bootstrap: stage authoritative checkpoint baselines and
-        // generation-local replay high-water separately.
+        // 2. Read existing checkpoints from the state store (batch).
+        let existing_checkpoints = match state_store.as_ref() {
+            Some(store) => {
+                crate::reactions::checkpoint::read_checkpoints_batch(
+                    store.as_ref(),
+                    reaction_id,
+                    &query_ids,
+                )
+                .await?
+            }
+            None => HashMap::new(),
+        };
+
+        // 3. Per-query bootstrap: build the initial checkpoint map and collect
         //    any queries that need a full bootstrap hook call.
-        let mut startup_progress: HashMap<String, StartupQueryProgress> = HashMap::new();
+        let mut initial_checkpoints: HashMap<String, ReactionCheckpoint> = HashMap::new();
         let mut bootstrap_queries: Vec<(String, Arc<dyn Query>)> = Vec::new();
 
         for query_id in &query_ids {
@@ -588,17 +390,18 @@ impl ReactionManager {
             match existing_checkpoints.get(query_id) {
                 None => {
                     // No checkpoint — fresh start for this query.
-                    let progress = self
+                    let cp = self
                         .handle_fresh_start(
                             reaction_id,
                             query_id,
                             &reaction,
                             &query,
+                            &state_store,
                             &mut bootstrap_queries,
                             &per_query_metrics,
                         )
                         .await?;
-                    startup_progress.insert(query_id.clone(), progress);
+                    initial_checkpoints.insert(query_id.clone(), cp);
                 }
                 Some(cp) => {
                     // Checkpoint exists — check config hash.
@@ -612,20 +415,22 @@ impl ReactionManager {
                              checkpoint={}, current={}",
                             cp.config_hash, current_config_hash
                         );
-                        let progress = self
+                        let new_cp = self
                             .apply_recovery_policy(
                                 reaction_id,
                                 query_id,
+                                &reaction,
                                 &query,
                                 policy,
+                                &state_store,
                                 &mut bootstrap_queries,
                                 &per_query_metrics,
                             )
                             .await?;
-                        startup_progress.insert(query_id.clone(), progress);
+                        initial_checkpoints.insert(query_id.clone(), new_cp);
                     } else {
                         // Hash matches — try to catch up via outbox.
-                        let progress = self
+                        let new_cp = self
                             .handle_outbox_catchup(
                                 reaction_id,
                                 query_id,
@@ -638,13 +443,13 @@ impl ReactionManager {
                                 &per_query_metrics,
                             )
                             .await?;
-                        startup_progress.insert(query_id.clone(), progress);
+                        initial_checkpoints.insert(query_id.clone(), new_cp);
                     }
                 }
             }
         }
 
-        // 3. Invoke the bootstrap hook if any queries triggered a reset.
+        // 4. Invoke the bootstrap hook if any queries triggered a reset.
         if !bootstrap_queries.is_empty() {
             for (query_id, query) in &bootstrap_queries {
                 let is_reset = existing_checkpoints.contains_key(query_id);
@@ -659,53 +464,29 @@ impl ReactionManager {
             }
         }
 
-        // 4. Persist only baselines established by delivered snapshots or
-        // explicit recovery skips. Replayed QueryResults advance exclusively in
-        // the reaction's successful handler/ack path.
+        // 5. Persist checkpoints AFTER bootstrap succeeds — a crash before this
+        //    point will re-trigger bootstrap on next start (safe).
         if let Some(store) = state_store.as_ref() {
-            for (query_id, progress) in &startup_progress {
-                if !progress.persist_after_bootstrap {
-                    continue;
-                }
-                crate::reactions::checkpoint::write_checkpoint(
+            for (query_id, cp) in &initial_checkpoints {
+                if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
                     store.as_ref(),
                     reaction_id,
                     query_id,
-                    &progress.checkpoint,
+                    cp,
                 )
                 .await
-                .with_context(|| {
-                    format!(
-                        "[{reaction_id}] failed to persist startup checkpoint for query \
-                         '{query_id}' at sequence {}",
-                        progress.checkpoint.sequence
-                    )
-                })?;
+                {
+                    log::warn!(
+                        "[{reaction_id}] Failed to persist checkpoint for query '{query_id}' \
+                         at seq={}: {e}",
+                        cp.sequence
+                    );
+                }
             }
         }
 
-        let mut authoritative_checkpoints = startup_progress
-            .iter()
-            .map(|(query_id, progress)| (query_id.clone(), progress.checkpoint.clone()))
-            .collect::<HashMap<_, _>>();
-        if let Some(store) = state_store.as_ref() {
-            let durable = crate::reactions::checkpoint::read_checkpoints_batch(
-                store.as_ref(),
-                reaction_id,
-                &query_ids,
-            )
-            .await?;
-            for (query_id, checkpoint) in durable {
-                authoritative_checkpoints.insert(query_id, checkpoint);
-            }
-        }
-        let forwarded_sequences = startup_progress
-            .into_iter()
-            .map(|(query_id, progress)| (query_id, progress.forwarded_sequence))
-            .collect();
-
-        *shared_checkpoints.write().await = authoritative_checkpoints;
-        *shared_forwarded_sequences.write().await = forwarded_sequences;
+        // Publish the computed checkpoints so forwarders can filter stale events.
+        *shared_checkpoints.write().await = initial_checkpoints;
 
         Ok(())
     }
@@ -720,9 +501,10 @@ impl ReactionManager {
         query_id: &str,
         reaction: &Arc<dyn Reaction>,
         query: &Arc<dyn Query>,
+        state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
-    ) -> Result<StartupQueryProgress> {
+    ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
         if reaction.needs_snapshot_on_fresh_start() {
@@ -738,19 +520,15 @@ impl ReactionManager {
             };
 
             bootstrap_queries.push((query_id.to_string(), query.clone()));
-            Ok(StartupQueryProgress::new(cp.clone(), cp.sequence, true))
+            Ok(cp)
         } else {
-            // Seed the config hash at sequence zero before replay so a handler
-            // cannot persist a replayed sequence with an unknown hash.
+            // No snapshot needed — replay any outbox entries produced during this
+            // startup cycle (e.g., from source replay) and record the checkpoint.
+            // Without this replay, results produced before the reaction subscribes
+            // to the broadcast channel would be silently skipped.
             metrics.record_fetch_outbox();
-            match query.fetch_outbox(0).await {
+            let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
-                    let checkpoint = ReactionCheckpoint {
-                        sequence: 0,
-                        config_hash,
-                    };
-
-                    let mut forwarded_sequence = checkpoint.sequence;
                     if resp.results.is_empty() {
                         info!(
                             "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
@@ -762,54 +540,63 @@ impl ReactionManager {
                             resp.results.len(),
                             resp.latest_sequence
                         );
+                        let mut last_ok_seq = 0u64;
                         for entry in &resp.results {
                             let result = (*entry).as_ref().clone();
-                            reaction
-                                .enqueue_query_result(result)
-                                .await
-                                .with_context(|| {
-                                    format!(
-                                        "[{reaction_id}] failed to replay outbox entry for query \
-                                     '{query_id}' at sequence {}",
+                            match reaction.enqueue_query_result(result).await {
+                                Ok(()) => last_ok_seq = entry.sequence,
+                                Err(e) => {
+                                    warn!(
+                                        "[{reaction_id}] Failed to replay outbox entry for query \
+                                         '{query_id}' seq={}: {e}",
                                         entry.sequence
-                                    )
-                                })?;
-                            forwarded_sequence = entry.sequence;
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        if last_ok_seq != resp.latest_sequence {
+                            info!(
+                                "[{reaction_id}] Partial outbox replay for query '{query_id}' — \
+                                 replayed up to seq={last_ok_seq}, latest_seq={}",
+                                resp.latest_sequence
+                            );
                         }
                     }
-                    Ok(StartupQueryProgress::new(
-                        checkpoint,
-                        forwarded_sequence,
-                        false,
-                    ))
+                    resp.latest_sequence
                 }
                 Err(FetchError::OutboxGap(gap)) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — outbox gap, latest_seq={}",
                         gap.latest_sequence
                     );
-                    let checkpoint = ReactionCheckpoint {
-                        sequence: gap.latest_sequence,
-                        config_hash,
-                    };
-                    Ok(StartupQueryProgress::new(
-                        checkpoint.clone(),
-                        checkpoint.sequence,
-                        true,
-                    ))
+                    gap.latest_sequence
                 }
                 Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — \
                          query not yet running, starting from sequence 0"
                     );
-                    let checkpoint = ReactionCheckpoint {
-                        sequence: 0,
-                        config_hash,
-                    };
-                    Ok(StartupQueryProgress::new(checkpoint, 0, false))
+                    0
                 }
+            };
+
+            let cp = ReactionCheckpoint {
+                sequence: seq,
+                config_hash,
+            };
+
+            if let Some(store) = state_store.as_ref() {
+                crate::reactions::checkpoint::write_checkpoint(
+                    store.as_ref(),
+                    reaction_id,
+                    query_id,
+                    &cp,
+                )
+                .await?;
             }
+
+            Ok(cp)
         }
     }
 
@@ -829,62 +616,66 @@ impl ReactionManager {
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
-    ) -> Result<StartupQueryProgress> {
+    ) -> Result<ReactionCheckpoint> {
         metrics.record_fetch_outbox();
         match query.fetch_outbox(checkpoint.sequence).await {
             Ok(outbox_resp) => {
-                let mut forwarded_sequence = checkpoint.sequence;
+                // Replay outbox entries by enqueuing them.
+                // Track the last successfully enqueued sequence to avoid
+                // advancing the checkpoint past failed entries.
+                let mut last_ok_seq = checkpoint.sequence;
                 for entry in &outbox_resp.results {
                     let result = (*entry).as_ref().clone();
-                    reaction
-                        .enqueue_query_result(result)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "[{reaction_id}] failed to replay outbox entry for query \
-                             '{query_id}' at sequence {}",
+                    match reaction.enqueue_query_result(result).await {
+                        Ok(()) => last_ok_seq = entry.sequence,
+                        Err(e) => {
+                            warn!(
+                                "[{reaction_id}] Failed to replay outbox entry for query \
+                                 '{query_id}' seq={}: {e}",
                                 entry.sequence
-                            )
-                        })?;
-                    forwarded_sequence = entry.sequence;
+                            );
+                            break;
+                        }
+                    }
                 }
 
-                Ok(StartupQueryProgress::new(
-                    checkpoint.clone(),
-                    forwarded_sequence,
-                    false,
-                ))
+                // Update checkpoint to the latest SUCCESSFULLY replayed sequence.
+                let new_seq = last_ok_seq;
+
+                let cp = ReactionCheckpoint {
+                    sequence: new_seq,
+                    config_hash: checkpoint.config_hash,
+                };
+
+                if new_seq != checkpoint.sequence {
+                    if let Some(store) = state_store.as_ref() {
+                        crate::reactions::checkpoint::write_checkpoint(
+                            store.as_ref(),
+                            reaction_id,
+                            query_id,
+                            &cp,
+                        )
+                        .await?;
+                    }
+                }
+
+                Ok(cp)
             }
-            Err(FetchError::OutboxGap(gap)) => {
+            Err(FetchError::OutboxGap(_gap)) => {
                 info!(
                     "[{reaction_id}] Outbox gap for query '{query_id}' — applying recovery policy"
                 );
-                match policy {
-                    ReactionRecoveryPolicy::AutoSkipGap => {
-                        Self::replay_retained_outbox_after_gap(
-                            reaction_id,
-                            query_id,
-                            checkpoint,
-                            reaction,
-                            query,
-                            state_store,
-                            metrics,
-                            &gap,
-                        )
-                        .await
-                    }
-                    ReactionRecoveryPolicy::Strict | ReactionRecoveryPolicy::AutoReset => {
-                        self.apply_recovery_policy(
-                            reaction_id,
-                            query_id,
-                            query,
-                            policy,
-                            bootstrap_queries,
-                            metrics,
-                        )
-                        .await
-                    }
-                }
+                self.apply_recovery_policy(
+                    reaction_id,
+                    query_id,
+                    reaction,
+                    query,
+                    policy,
+                    state_store,
+                    bootstrap_queries,
+                    metrics,
+                )
+                .await
             }
             Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                 // Query not running — keep the existing checkpoint as-is.
@@ -894,129 +685,9 @@ impl ReactionManager {
                      keeping existing checkpoint at seq={}",
                     checkpoint.sequence
                 );
-                Ok(StartupQueryProgress::new(
-                    checkpoint.clone(),
-                    checkpoint.sequence,
-                    false,
-                ))
+                Ok(checkpoint.clone())
             }
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn replay_retained_outbox_after_gap(
-        reaction_id: &str,
-        query_id: &str,
-        checkpoint: &ReactionCheckpoint,
-        reaction: &Arc<dyn Reaction>,
-        query: &Arc<dyn Query>,
-        state_store: &Option<Arc<dyn StateStoreProvider>>,
-        metrics: &Arc<ReactionMetrics>,
-        gap: &crate::queries::OutboxGap,
-    ) -> Result<StartupQueryProgress> {
-        let mut skipped_floor = gap
-            .earliest_available
-            .saturating_sub(1)
-            .max(checkpoint.sequence);
-        let mut authoritative_checkpoint = ReactionCheckpoint {
-            sequence: skipped_floor,
-            config_hash: checkpoint.config_hash,
-        };
-        let mut previous_sequence = checkpoint.sequence;
-
-        let retained = loop {
-            Self::persist_reaction_checkpoint(
-                state_store,
-                reaction_id,
-                query_id,
-                previous_sequence,
-                &authoritative_checkpoint,
-            )
-            .await?;
-            previous_sequence = authoritative_checkpoint.sequence;
-
-            metrics.record_fetch_outbox();
-            match query.fetch_outbox(skipped_floor).await {
-                Ok(retained) => break retained,
-                Err(FetchError::OutboxGap(next_gap)) => {
-                    let next_floor = next_gap
-                        .earliest_available
-                        .saturating_sub(1)
-                        .max(authoritative_checkpoint.sequence);
-                    anyhow::ensure!(
-                        next_floor > skipped_floor,
-                        "[{reaction_id}] query '{query_id}' returned a non-advancing \
-                             outbox gap at floor {skipped_floor}"
-                    );
-                    skipped_floor = next_floor;
-                    authoritative_checkpoint.sequence = next_floor;
-                }
-                Err(error) => {
-                    return Err(anyhow::anyhow!(
-                        "[{reaction_id}] failed to fetch retained outbox suffix for query \
-                             '{query_id}' after skipped floor {skipped_floor}: {error}"
-                    ));
-                }
-            }
-        };
-
-        let mut expected = skipped_floor.saturating_add(1);
-        let mut forwarded_sequence = authoritative_checkpoint.sequence;
-        for entry in retained.results {
-            anyhow::ensure!(
-                entry.sequence == expected,
-                "[{reaction_id}] retained outbox suffix for query '{query_id}' is not \
-                     contiguous: expected {expected}, got {}",
-                entry.sequence
-            );
-            reaction
-                .enqueue_query_result(entry.as_ref().clone())
-                .await
-                .with_context(|| {
-                    format!(
-                        "[{reaction_id}] failed to replay retained outbox entry for query \
-                             '{query_id}' at sequence {}",
-                        entry.sequence
-                    )
-                })?;
-            forwarded_sequence = entry.sequence;
-            expected = entry.sequence.saturating_add(1);
-        }
-        anyhow::ensure!(
-            forwarded_sequence == retained.latest_sequence,
-            "[{reaction_id}] retained outbox replay for query '{query_id}' ended at {}, \
-                 expected latest {}",
-            forwarded_sequence,
-            retained.latest_sequence
-        );
-
-        Ok(StartupQueryProgress::new(
-            authoritative_checkpoint,
-            forwarded_sequence,
-            false,
-        ))
-    }
-
-    async fn persist_reaction_checkpoint(
-        state_store: &Option<Arc<dyn StateStoreProvider>>,
-        reaction_id: &str,
-        query_id: &str,
-        previous_sequence: u64,
-        checkpoint: &ReactionCheckpoint,
-    ) -> Result<()> {
-        if checkpoint.sequence == previous_sequence {
-            return Ok(());
-        }
-        if let Some(store) = state_store.as_ref() {
-            crate::reactions::checkpoint::write_checkpoint(
-                store.as_ref(),
-                reaction_id,
-                query_id,
-                checkpoint,
-            )
-            .await?;
-        }
-        Ok(())
     }
 
     /// Apply the recovery policy when a gap or hash mismatch is detected.
@@ -1025,11 +696,13 @@ impl ReactionManager {
         &self,
         reaction_id: &str,
         query_id: &str,
+        _reaction: &Arc<dyn Reaction>,
         query: &Arc<dyn Query>,
         policy: ReactionRecoveryPolicy,
+        state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
-    ) -> Result<StartupQueryProgress> {
+    ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
         match policy {
@@ -1058,7 +731,7 @@ impl ReactionManager {
                 self.lifecycle_metrics.record_auto_reset_completion();
 
                 bootstrap_queries.push((query_id.to_string(), query.clone()));
-                Ok(StartupQueryProgress::new(cp.clone(), cp.sequence, true))
+                Ok(cp)
             }
             ReactionRecoveryPolicy::AutoSkipGap => {
                 info!(
@@ -1084,7 +757,17 @@ impl ReactionManager {
                     config_hash,
                 };
 
-                Ok(StartupQueryProgress::new(cp.clone(), cp.sequence, true))
+                if let Some(store) = state_store.as_ref() {
+                    crate::reactions::checkpoint::write_checkpoint(
+                        store.as_ref(),
+                        reaction_id,
+                        query_id,
+                        &cp,
+                    )
+                    .await?;
+                }
+
+                Ok(cp)
             }
         }
     }
@@ -1394,7 +1077,6 @@ impl ReactionManager {
         query_provider: &Arc<dyn QueryProvider>,
         query_ids: &[String],
         shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
-        shared_forwarded_sequences: Arc<RwLock<HashMap<String, u64>>>,
         gate: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
         let instance_id = self.instance_id.clone();
@@ -1407,21 +1089,9 @@ impl ReactionManager {
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
         for query_id in query_ids {
-            let query = match query_provider.get_query_instance(query_id).await {
-                Ok(query) => query,
-                Err(error) => {
-                    Self::abort_and_reap_forwarders(abort_handles, join_handles).await;
-                    return Err(error);
-                }
-            };
+            let query = query_provider.get_query_instance(query_id).await?;
 
-            let subscription = match query.subscribe(reaction_id.to_string()).await {
-                Ok(subscription) => subscription,
-                Err(error) => {
-                    Self::abort_and_reap_forwarders(abort_handles, join_handles).await;
-                    return Err(error);
-                }
-            };
+            let subscription = query.subscribe(reaction_id.to_string()).await?;
             let mut receiver = subscription.receiver;
 
             // Create or retrieve per-(reaction, query) metrics
@@ -1441,7 +1111,6 @@ impl ReactionManager {
             let query_clone = query.clone();
             let state_store_clone = state_store.clone();
             let checkpoints = shared_checkpoints.clone();
-            let forwarded_sequences = shared_forwarded_sequences.clone();
             let bootstrap_mutex = bootstrap_mutex.clone();
             let lifecycle_metrics = self.lifecycle_metrics.clone();
 
@@ -1465,11 +1134,11 @@ impl ReactionManager {
                         return;
                     }
 
-                    // The generation-local high-water includes replayed results
-                    // that have been enqueued but not necessarily handled yet.
+                    // Read the initial checkpoint sequence so we can skip stale events
+                    // that were buffered in the broadcast channel during bootstrap.
                     let initial_seq = {
-                        let forwarded = forwarded_sequences.read().await;
-                        forwarded.get(&query_id_clone).copied().unwrap_or(0)
+                        let cps = checkpoints.read().await;
+                        cps.get(&query_id_clone).map(|cp| cp.sequence).unwrap_or(0)
                     };
 
                     // Track the last forwarded sequence for gap detection.
@@ -1483,34 +1152,8 @@ impl ReactionManager {
                     loop {
                         match receiver.recv().await {
                             Ok(query_result) => {
-                                if query_result.sequence == 0
-                                    && query_result
-                                        .metadata
-                                        .get("control_signal")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|signal| {
-                                            matches!(
-                                                signal,
-                                                "bootstrapStarted" | "bootstrapCompleted"
-                                            )
-                                        })
-                                {
-                                    let result = Arc::try_unwrap(query_result)
-                                        .unwrap_or_else(|arc| (*arc).clone());
-                                    if let Err(error) =
-                                        reaction.enqueue_query_result(result).await
-                                    {
-                                        log::error!(
-                                            "[{reaction_id_owned}] Failed to enqueue bootstrap control \
-                                             from query '{query_id_clone}': {error}"
-                                        );
-                                        break;
-                                    }
-                                    continue;
-                                }
-
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
-                                if query_result.sequence <= last_forwarded_seq {
+                                if query_result.sequence <= initial_seq {
                                     forwarder_metrics.record_dedup_skip();
                                     log::debug!(
                                         "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
@@ -1522,8 +1165,8 @@ impl ReactionManager {
                                 // §6: Detect sequence gaps (incoming seq > expected next).
                                 // This catches drops that don't manifest as broadcast lag
                                 // (e.g., outbox overflow while reaction was stopping).
-                                if query_result.sequence
-                                    > last_forwarded_seq.saturating_add(1)
+                                if last_forwarded_seq > 0
+                                    && query_result.sequence > last_forwarded_seq.saturating_add(1)
                                 {
                                     forwarder_metrics.record_gap_detection();
                                     forwarder_metrics.record_recovery_trigger(to_policy_kind(&policy));
@@ -1533,20 +1176,6 @@ impl ReactionManager {
                                         last_forwarded_seq.saturating_add(1),
                                         query_result.sequence
                                     );
-                                    if let Err(error) = Self::refresh_shared_checkpoint(
-                                        &state_store_clone,
-                                        &reaction_id_owned,
-                                        &query_id_clone,
-                                        &checkpoints,
-                                    )
-                                    .await
-                                    {
-                                        log::error!(
-                                            "[{reaction_id_owned}] Failed to refresh checkpoint for \
-                                             query '{query_id_clone}' before gap recovery: {error}"
-                                        );
-                                        break;
-                                    }
                                     let gap_ctx = BroadcastGapContext {
                                         reaction_id: &reaction_id_owned,
                                         query_id: &query_id_clone,
@@ -1557,8 +1186,6 @@ impl ReactionManager {
                                         checkpoints: &checkpoints,
                                         bootstrap_mutex: &bootstrap_mutex,
                                         metrics: &forwarder_metrics,
-                                        last_forwarded_sequence: last_forwarded_seq,
-                                        received_sequence: Some(query_result.sequence),
                                     };
                                     match Self::handle_broadcast_gap(&gap_ctx)
                                     .await
@@ -1567,12 +1194,10 @@ impl ReactionManager {
                                             // After gap recovery, update checkpoint from the shared map
                                             // (handle_broadcast_gap updates it).
                                             let cps = checkpoints.read().await;
-                                            last_forwarded_seq = last_forwarded_seq.max(
-                                                cps
+                                            last_forwarded_seq = cps
                                                 .get(&query_id_clone)
                                                 .map(|cp| cp.sequence)
-                                                .unwrap_or(0),
-                                            );
+                                                .unwrap_or(last_forwarded_seq);
                                             // Re-evaluate this event against the updated checkpoint.
                                             if query_result.sequence <= last_forwarded_seq {
                                                 continue;
@@ -1588,26 +1213,35 @@ impl ReactionManager {
                                     }
                                 }
 
-                                match Self::enqueue_forwarded_result(
-                                    &reaction,
-                                    &query_clone,
-                                    &query_id_clone,
-                                    &checkpoints,
-                                    &forwarder_metrics,
-                                    query_result,
-                                )
-                                .await
-                                {
-                                   Ok(sequence) => {
-                                       last_forwarded_seq = sequence;
-                                   }
-                                    Err(error) => {
-                                        log::error!(
-                                            "[{reaction_id_owned}] Failed to enqueue result from query \
-                                             '{query_id_clone}': {error}"
-                                        );
-                                        break;
-                                    }
+                                last_forwarded_seq = query_result.sequence;
+                                let seq = query_result.sequence;
+                                let result = Arc::try_unwrap(query_result)
+                                    .unwrap_or_else(|arc| (*arc).clone());
+                                if let Err(e) = reaction.enqueue_query_result(result).await {
+                                    log::error!(
+                                        "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
+                                    );
+                                } else {
+                                    // Advance in-memory checkpoint so forwarder tracks
+                                    // position (skip stale events on reconnect).
+                                    // NOTE: We do NOT persist to durable storage here.
+                                    // The reaction should persist its checkpoint after
+                                    // successfully processing the event. This prevents
+                                    // permanent skipping if the process crashes between
+                                    // enqueue and handler processing.
+                                    let config_hash = {
+                                        let cps = checkpoints.read().await;
+                                        cps.get(&query_id_clone).map(|cp| cp.config_hash).unwrap_or(0)
+                                    };
+                                    let cp = ReactionCheckpoint { sequence: seq, config_hash };
+                                    checkpoints.write().await.insert(query_id_clone.clone(), cp);
+
+                                    // Update reaction metrics: checkpoint position
+                                    let query_latest = query_clone
+                                        .output_metrics()
+                                        .map(|m| m.load_outbox_latest_seq())
+                                        .unwrap_or(seq);
+                                    forwarder_metrics.record_checkpoint(seq, query_latest);
                                 }
                             }
                             Err(e) => {
@@ -1619,20 +1253,6 @@ impl ReactionManager {
                                     log::warn!(
                                         "[{reaction_id_owned}] Broadcast lag for query '{query_id_clone}': {error_str}"
                                     );
-                                    if let Err(error) = Self::refresh_shared_checkpoint(
-                                        &state_store_clone,
-                                        &reaction_id_owned,
-                                        &query_id_clone,
-                                        &checkpoints,
-                                    )
-                                    .await
-                                    {
-                                        log::error!(
-                                            "[{reaction_id_owned}] Failed to refresh checkpoint for \
-                                             query '{query_id_clone}' before lag recovery: {error}"
-                                        );
-                                        break;
-                                    }
                                     let gap_ctx = BroadcastGapContext {
                                         reaction_id: &reaction_id_owned,
                                         query_id: &query_id_clone,
@@ -1643,8 +1263,6 @@ impl ReactionManager {
                                         checkpoints: &checkpoints,
                                         bootstrap_mutex: &bootstrap_mutex,
                                         metrics: &forwarder_metrics,
-                                        last_forwarded_sequence: last_forwarded_seq,
-                                        received_sequence: None,
                                     };
                                     match Self::handle_broadcast_gap(&gap_ctx)
                                     .await
@@ -1712,62 +1330,14 @@ impl ReactionManager {
             }
         });
 
-        // Store the forwarder abort handles with the supervisor that reaps them.
-        self.subscription_tasks.write().await.insert(
-            reaction_id.to_string(),
-            ReactionSubscriptionTasks {
-                forwarder_abort_handles: abort_handles,
-                supervisor,
-            },
-        );
+        abort_handles.push(supervisor.abort_handle());
 
-        Ok(())
-    }
-
-    async fn enqueue_forwarded_result(
-        reaction: &Arc<dyn Reaction>,
-        query: &Arc<dyn Query>,
-        query_id: &str,
-        checkpoints: &Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
-        metrics: &Arc<ReactionMetrics>,
-        query_result: Arc<QueryResult>,
-    ) -> Result<u64> {
-        let sequence = query_result.sequence;
-        let result = Arc::try_unwrap(query_result).unwrap_or_else(|result| (*result).clone());
-        reaction.enqueue_query_result(result).await?;
-
-        let checkpoint_sequence = checkpoints
-            .read()
+        // Store abort handles so stop_reaction/teardown can cancel everything.
+        self.subscription_tasks
+            .write()
             .await
-            .get(query_id)
-            .map(|checkpoint| checkpoint.sequence)
-            .unwrap_or(0);
-        let query_latest = query
-            .output_metrics()
-            .map(|metrics| metrics.load_outbox_latest_seq())
-            .unwrap_or(sequence);
-        metrics.record_checkpoint(checkpoint_sequence, query_latest);
-        Ok(sequence)
-    }
+            .insert(reaction_id.to_string(), abort_handles);
 
-    async fn refresh_shared_checkpoint(
-        state_store: &Option<Arc<dyn StateStoreProvider>>,
-        reaction_id: &str,
-        query_id: &str,
-        checkpoints: &Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
-    ) -> Result<()> {
-        let Some(store) = state_store.as_ref() else {
-            return Ok(());
-        };
-        if let Some(checkpoint) =
-            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, query_id)
-                .await?
-        {
-            checkpoints
-                .write()
-                .await
-                .insert(query_id.to_string(), checkpoint);
-        }
         Ok(())
     }
 
@@ -1776,7 +1346,7 @@ impl ReactionManager {
     /// Applies the reaction's recovery policy:
     /// - `Strict`: return error (forwarder will break)
     /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint (serialized via mutex)
-    /// - `AutoSkipGap`: persist only the missing floor before the triggering event
+    /// - `AutoSkipGap`: jump to current sequence, update checkpoint
     async fn handle_broadcast_gap(ctx: &BroadcastGapContext<'_>) -> Result<()> {
         let config_hash = crate::queries::compute_config_hash(ctx.query.get_config());
 
@@ -1843,38 +1413,31 @@ impl ReactionManager {
                     ctx.reaction_id,
                     ctx.query_id
                 );
-                let Some(received_sequence) = ctx.received_sequence else {
-                    log::debug!(
-                        "[{}] AutoSkipGap for query '{}' is waiting for the next retained \
-                         event to determine the exact missing range",
-                        ctx.reaction_id,
-                        ctx.query_id
-                    );
-                    return Ok(());
+                ctx.metrics.record_fetch_outbox();
+                let current_seq = match ctx.query.fetch_outbox(0).await {
+                    Ok(resp) => resp.latest_sequence,
+                    Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
+                    Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
+                        // Query not running — fall back to existing checkpoint sequence.
+                        let existing_seq = ctx
+                            .checkpoints
+                            .read()
+                            .await
+                            .get(ctx.query_id)
+                            .map(|cp| cp.sequence)
+                            .unwrap_or(0);
+                        log::info!(
+                            "[{}] AutoSkipGap: query '{}' not running, \
+                             keeping checkpoint at seq={existing_seq}",
+                            ctx.reaction_id,
+                            ctx.query_id
+                        );
+                        existing_seq
+                    }
                 };
-                let skipped_floor = received_sequence.saturating_sub(1);
-                let existing_sequence = ctx
-                    .checkpoints
-                    .read()
-                    .await
-                    .get(ctx.query_id)
-                    .map(|checkpoint| checkpoint.sequence)
-                    .unwrap_or(0);
-                if existing_sequence < ctx.last_forwarded_sequence {
-                    log::debug!(
-                        "[{}] Deferring AutoSkipGap checkpoint for query '{}' because \
-                         sequences {}..={} are forwarded but not yet acknowledged",
-                        ctx.reaction_id,
-                        ctx.query_id,
-                        existing_sequence.saturating_add(1),
-                        ctx.last_forwarded_sequence
-                    );
-                    return Ok(());
-                }
-                let skipped_floor = skipped_floor.max(existing_sequence);
 
                 let cp = ReactionCheckpoint {
-                    sequence: skipped_floor,
+                    sequence: current_seq,
                     config_hash,
                 };
 
@@ -1904,31 +1467,13 @@ impl ReactionManager {
     }
 
     async fn abort_subscription_tasks_static(
-        tasks: &Arc<RwLock<HashMap<String, ReactionSubscriptionTasks>>>,
+        tasks: &Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
         reaction_id: &str,
     ) {
-        let task_set = { tasks.write().await.remove(reaction_id) };
-        if let Some(task_set) = task_set {
-            for handle in task_set.forwarder_abort_handles {
+        if let Some(handles) = tasks.write().await.remove(reaction_id) {
+            for handle in handles {
                 handle.abort();
             }
-            if let Err(error) = task_set.supervisor.await {
-                log::debug!(
-                    "[{reaction_id}] Subscription supervisor ended during cleanup: {error}"
-                );
-            }
-        }
-    }
-
-    async fn abort_and_reap_forwarders(
-        abort_handles: Vec<tokio::task::AbortHandle>,
-        join_handles: Vec<tokio::task::JoinHandle<()>>,
-    ) {
-        for handle in abort_handles {
-            handle.abort();
-        }
-        for handle in join_handles {
-            let _ = handle.await;
         }
     }
 
@@ -1952,42 +1497,12 @@ impl ReactionManager {
         }
         drop(graph);
 
-        let metrics = self
-            .reaction_metrics
-            .read()
-            .await
+        let metrics = self.reaction_metrics.read().await;
+        Ok(metrics
             .iter()
             .filter(|((rid, _), _)| rid == reaction_id)
-            .map(|((_, qid), metrics)| (qid.clone(), metrics.clone()))
-            .collect::<Vec<_>>();
-        let state_store = self.state_store.read().await.clone();
-        let query_provider = self.query_provider.read().await.clone();
-        let mut snapshots = HashMap::with_capacity(metrics.len());
-        for (query_id, metrics) in metrics {
-            if let Some(store) = state_store.as_ref() {
-                if let Some(checkpoint) = crate::reactions::checkpoint::read_checkpoint(
-                    store.as_ref(),
-                    reaction_id,
-                    &query_id,
-                )
-                .await?
-                {
-                    let query_latest = if let Some(provider) = query_provider.as_ref() {
-                        provider
-                            .get_query_instance(&query_id)
-                            .await?
-                            .output_metrics()
-                            .map(|query_metrics| query_metrics.load_outbox_latest_seq())
-                            .unwrap_or(checkpoint.sequence)
-                    } else {
-                        checkpoint.sequence
-                    };
-                    metrics.record_checkpoint(checkpoint.sequence, query_latest);
-                }
-            }
-            snapshots.insert(query_id, metrics.snapshot());
-        }
-        Ok(snapshots)
+            .map(|((_, qid), m)| (qid.clone(), m.snapshot()))
+            .collect())
     }
 
     /// Get the global lifecycle metrics.
@@ -2006,7 +1521,7 @@ mod tests {
     use crate::sources::tests::TestMockSource;
     use async_trait::async_trait;
     use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     // ========================================================================
@@ -2018,17 +1533,12 @@ mod tests {
         config: QueryConfig,
         snapshot: tokio::sync::RwLock<SnapshotResponse>,
         outbox_response: tokio::sync::RwLock<Result<OutboxResponse, FetchError>>,
-        subscriptions: Mutex<Vec<tokio::sync::mpsc::Sender<Arc<QueryResult>>>>,
     }
 
     impl MockQuery {
         fn new(config_hash: u64, snapshot_seq: u64) -> Self {
-            Self::with_id("q1", config_hash, snapshot_seq)
-        }
-
-        fn with_id(id: &str, config_hash: u64, snapshot_seq: u64) -> Self {
             let config = QueryConfig {
-                id: id.to_string(),
+                id: "q1".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 query_language: crate::config::schema::QueryLanguage::Cypher,
                 middleware: vec![],
@@ -2054,19 +1564,7 @@ mod tests {
                     latest_sequence: snapshot_seq,
                     config_hash,
                 })),
-                subscriptions: Mutex::new(Vec::new()),
             }
-        }
-
-        async fn send(&self, result: QueryResult) {
-            let senders = self.subscriptions.lock().await.clone();
-            for sender in senders {
-                let _ = sender.send(Arc::new(result.clone())).await;
-            }
-        }
-
-        async fn subscription_count(&self) -> usize {
-            self.subscriptions.lock().await.len()
         }
     }
 
@@ -2088,152 +1586,13 @@ mod tests {
             self
         }
         async fn subscribe(&self, _reaction_id: String) -> Result<QuerySubscriptionResponse> {
-            let (sender, receiver) = tokio::sync::mpsc::channel(16);
-            self.subscriptions.lock().await.push(sender);
-            Ok(QuerySubscriptionResponse {
-                query_id: self.config.id.clone(),
-                receiver: Box::new(crate::channels::ChannelChangeReceiver::new(receiver)),
-            })
+            Err(anyhow::anyhow!("MockQuery does not support subscribe"))
         }
         async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
             Ok(self.snapshot.read().await.clone())
         }
         async fn fetch_outbox(&self, _after_sequence: u64) -> Result<OutboxResponse, FetchError> {
             self.outbox_response.read().await.clone()
-        }
-    }
-
-    struct MockQueryProvider {
-        queries: HashMap<String, Arc<dyn crate::queries::Query>>,
-    }
-
-    #[async_trait]
-    impl QueryProvider for MockQueryProvider {
-        async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn crate::queries::Query>> {
-            self.queries
-                .get(id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Query '{id}' not found"))
-        }
-    }
-
-    struct FailingCheckpointStore {
-        inner: crate::state_store::MemoryStateStoreProvider,
-        target_reaction: String,
-        target_query: String,
-        target_sequence: u64,
-        remaining_failures: AtomicUsize,
-    }
-
-    impl FailingCheckpointStore {
-        fn new(
-            target_reaction: &str,
-            target_query: &str,
-            target_sequence: u64,
-            failures: usize,
-        ) -> Self {
-            Self {
-                inner: crate::state_store::MemoryStateStoreProvider::new(),
-                target_reaction: target_reaction.to_string(),
-                target_query: target_query.to_string(),
-                target_sequence,
-                remaining_failures: AtomicUsize::new(failures),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl StateStoreProvider for FailingCheckpointStore {
-        async fn get(
-            &self,
-            store_id: &str,
-            key: &str,
-        ) -> crate::state_store::StateStoreResult<Option<Vec<u8>>> {
-            self.inner.get(store_id, key).await
-        }
-
-        async fn set(
-            &self,
-            store_id: &str,
-            key: &str,
-            value: Vec<u8>,
-        ) -> crate::state_store::StateStoreResult<()> {
-            let target_key = format!("checkpoint:{}", self.target_query);
-            let should_fail = store_id == self.target_reaction
-                && key == target_key
-                && bincode::deserialize::<ReactionCheckpoint>(&value)
-                    .is_ok_and(|checkpoint| checkpoint.sequence == self.target_sequence)
-                && self
-                    .remaining_failures
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                        remaining.checked_sub(1)
-                    })
-                    .is_ok();
-            if should_fail {
-                return Err(crate::state_store::StateStoreError::StorageError(
-                    "injected checkpoint write failure".to_string(),
-                ));
-            }
-            self.inner.set(store_id, key, value).await
-        }
-
-        async fn delete(
-            &self,
-            store_id: &str,
-            key: &str,
-        ) -> crate::state_store::StateStoreResult<bool> {
-            self.inner.delete(store_id, key).await
-        }
-
-        async fn contains_key(
-            &self,
-            store_id: &str,
-            key: &str,
-        ) -> crate::state_store::StateStoreResult<bool> {
-            self.inner.contains_key(store_id, key).await
-        }
-
-        async fn get_many(
-            &self,
-            store_id: &str,
-            keys: &[&str],
-        ) -> crate::state_store::StateStoreResult<HashMap<String, Vec<u8>>> {
-            self.inner.get_many(store_id, keys).await
-        }
-
-        async fn set_many(
-            &self,
-            store_id: &str,
-            entries: &[(&str, &[u8])],
-        ) -> crate::state_store::StateStoreResult<()> {
-            self.inner.set_many(store_id, entries).await
-        }
-
-        async fn delete_many(
-            &self,
-            store_id: &str,
-            keys: &[&str],
-        ) -> crate::state_store::StateStoreResult<usize> {
-            self.inner.delete_many(store_id, keys).await
-        }
-
-        async fn clear_store(&self, store_id: &str) -> crate::state_store::StateStoreResult<usize> {
-            self.inner.clear_store(store_id).await
-        }
-
-        async fn list_keys(
-            &self,
-            store_id: &str,
-        ) -> crate::state_store::StateStoreResult<Vec<String>> {
-            self.inner.list_keys(store_id).await
-        }
-
-        async fn store_exists(&self, store_id: &str) -> crate::state_store::StateStoreResult<bool> {
-            self.inner.store_exists(store_id).await
-        }
-
-        async fn key_count(&self, store_id: &str) -> crate::state_store::StateStoreResult<usize> {
-            self.inner.key_count(store_id).await
         }
     }
 
@@ -2250,7 +1609,6 @@ mod tests {
         status_handle: ComponentStatusHandle,
         enqueued: Arc<Mutex<Vec<QueryResult>>>,
         bootstrap_count: Arc<AtomicUsize>,
-        enqueue_failures: AtomicUsize,
     }
 
     impl MockReaction {
@@ -2264,7 +1622,6 @@ mod tests {
                 status_handle: ComponentStatusHandle::new(id),
                 enqueued: Arc::new(Mutex::new(Vec::new())),
                 bootstrap_count: Arc::new(AtomicUsize::new(0)),
-                enqueue_failures: AtomicUsize::new(0),
             }
         }
 
@@ -2281,10 +1638,6 @@ mod tests {
         fn with_policy(mut self, p: ReactionRecoveryPolicy) -> Self {
             self.policy = p;
             self
-        }
-
-        fn fail_next_enqueue(&self) {
-            self.enqueue_failures.store(1, Ordering::Release);
         }
     }
 
@@ -2333,15 +1686,6 @@ mod tests {
             self.policy
         }
         async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-            if self
-                .enqueue_failures
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                anyhow::bail!("injected reaction enqueue failure");
-            }
             self.enqueued.lock().await.push(result);
             Ok(())
         }
@@ -2351,280 +1695,6 @@ mod tests {
         ) -> Result<()> {
             self.bootstrap_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
-        }
-    }
-
-    struct QueueBackedReaction {
-        base: crate::reactions::common::base::ReactionBase,
-        auto_start: bool,
-    }
-
-    struct ProcessingQueueReaction {
-        base: crate::reactions::common::base::ReactionBase,
-        processing_enabled: Arc<AtomicBool>,
-        block_handler: Arc<AtomicBool>,
-        handler_released: Arc<AtomicBool>,
-        handler_gate: Arc<tokio::sync::Notify>,
-        handler_started: Arc<tokio::sync::Notify>,
-        processed: Arc<Mutex<Vec<(String, u64)>>>,
-        processed_notify: Arc<tokio::sync::Notify>,
-    }
-
-    impl ProcessingQueueReaction {
-        fn new(id: &str, queries: Vec<String>) -> Self {
-            Self {
-                base: crate::reactions::common::base::ReactionBase::new(
-                    crate::reactions::common::base::ReactionBaseParams::new(id, queries),
-                ),
-                processing_enabled: Arc::new(AtomicBool::new(false)),
-                block_handler: Arc::new(AtomicBool::new(true)),
-                handler_released: Arc::new(AtomicBool::new(false)),
-                handler_gate: Arc::new(tokio::sync::Notify::new()),
-                handler_started: Arc::new(tokio::sync::Notify::new()),
-                processed: Arc::new(Mutex::new(Vec::new())),
-                processed_notify: Arc::new(tokio::sync::Notify::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Reaction for ProcessingQueueReaction {
-        fn id(&self) -> &str {
-            self.base.get_id()
-        }
-
-        fn type_name(&self) -> &str {
-            "processing-queue-test"
-        }
-
-        fn properties(&self) -> HashMap<String, serde_json::Value> {
-            HashMap::new()
-        }
-
-        fn query_ids(&self) -> Vec<String> {
-            self.base.get_queries().to_vec()
-        }
-
-        fn auto_start(&self) -> bool {
-            false
-        }
-
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
-            self.base.initialize(context).await;
-        }
-
-        async fn start(&self) -> Result<()> {
-            let shutdown_rx = self.base.create_shutdown_channel().await;
-            if self.processing_enabled.load(Ordering::Acquire) {
-                self.handler_released.store(
-                    !self.block_handler.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
-                let checkpoints = self.base.read_all_checkpoints().await?;
-                let base = self.base.clone_shared();
-                let status_handle = self.base.status_handle();
-                let handler_released = self.handler_released.clone();
-                let handler_gate = self.handler_gate.clone();
-                let handler_started = self.handler_started.clone();
-                let processed = self.processed.clone();
-                let processed_notify = self.processed_notify.clone();
-                let task = tokio::spawn(async move {
-                    let result = base
-                        .run_standard_loop(shutdown_rx, checkpoints, move |result| {
-                            let handler_released = handler_released.clone();
-                            let handler_gate = handler_gate.clone();
-                            let handler_started = handler_started.clone();
-                            let processed = processed.clone();
-                            let processed_notify = processed_notify.clone();
-                            async move {
-                                handler_started.notify_one();
-                                while !handler_released.load(Ordering::Acquire) {
-                                    let notified = handler_gate.notified();
-                                    if handler_released.load(Ordering::Acquire) {
-                                        break;
-                                    }
-                                    notified.await;
-                                }
-                                processed
-                                    .lock()
-                                    .await
-                                    .push((result.query_id.clone(), result.sequence));
-                                processed_notify.notify_waiters();
-                                Ok(())
-                            }
-                        })
-                        .await;
-                    if let Err(error) = result {
-                        status_handle
-                            .set_status(
-                                ComponentStatus::Error,
-                                Some(format!("processing failed: {error:#}")),
-                            )
-                            .await;
-                    }
-                });
-                self.base.set_processing_task(task).await;
-            }
-            self.base.set_status(ComponentStatus::Running, None).await;
-            Ok(())
-        }
-
-        async fn stop(&self) -> Result<()> {
-            self.handler_released.store(true, Ordering::Release);
-            self.handler_gate.notify_waiters();
-            self.base.stop_common().await
-        }
-
-        async fn status(&self) -> ComponentStatus {
-            self.base.get_status().await
-        }
-
-        async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-            self.base.enqueue_query_result(result).await
-        }
-    }
-
-    struct BlockingStartReaction {
-        base: crate::reactions::common::base::ReactionBase,
-        start_entered: Arc<tokio::sync::Notify>,
-        release_start: Arc<AtomicBool>,
-        start_gate: Arc<tokio::sync::Notify>,
-        report_running: bool,
-    }
-
-    impl BlockingStartReaction {
-        fn new(id: &str, queries: Vec<String>) -> Self {
-            Self {
-                base: crate::reactions::common::base::ReactionBase::new(
-                    crate::reactions::common::base::ReactionBaseParams::new(id, queries),
-                ),
-                start_entered: Arc::new(tokio::sync::Notify::new()),
-                release_start: Arc::new(AtomicBool::new(false)),
-                start_gate: Arc::new(tokio::sync::Notify::new()),
-                report_running: true,
-            }
-        }
-
-        fn without_running_update(mut self) -> Self {
-            self.report_running = false;
-            self
-        }
-    }
-
-    #[async_trait]
-    impl Reaction for BlockingStartReaction {
-        fn id(&self) -> &str {
-            self.base.get_id()
-        }
-
-        fn type_name(&self) -> &str {
-            "blocking-start-test"
-        }
-
-        fn properties(&self) -> HashMap<String, serde_json::Value> {
-            HashMap::new()
-        }
-
-        fn query_ids(&self) -> Vec<String> {
-            self.base.get_queries().to_vec()
-        }
-
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
-            self.base.initialize(context).await;
-        }
-
-        async fn start(&self) -> Result<()> {
-            self.start_entered.notify_one();
-            while !self.release_start.load(Ordering::Acquire) {
-                let notified = self.start_gate.notified();
-                if self.release_start.load(Ordering::Acquire) {
-                    break;
-                }
-                notified.await;
-            }
-            let _shutdown_rx = self.base.create_shutdown_channel().await;
-            if self.report_running {
-                self.base.set_status(ComponentStatus::Running, None).await;
-            }
-            Ok(())
-        }
-
-        async fn stop(&self) -> Result<()> {
-            self.base.stop_common().await
-        }
-
-        async fn status(&self) -> ComponentStatus {
-            self.base.get_status().await
-        }
-
-        async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-            self.base.enqueue_query_result(result).await
-        }
-    }
-
-    impl QueueBackedReaction {
-        fn new(id: &str, queries: Vec<String>) -> Self {
-            Self::with_capacity(id, queries, 10_000)
-        }
-
-        fn with_capacity(id: &str, queries: Vec<String>, capacity: usize) -> Self {
-            Self {
-                base: crate::reactions::common::base::ReactionBase::new(
-                    crate::reactions::common::base::ReactionBaseParams::new(id, queries)
-                        .with_priority_queue_capacity(capacity),
-                ),
-                auto_start: false,
-            }
-        }
-
-        fn with_auto_start(mut self) -> Self {
-            self.auto_start = true;
-            self
-        }
-    }
-
-    #[async_trait]
-    impl Reaction for QueueBackedReaction {
-        fn id(&self) -> &str {
-            self.base.get_id()
-        }
-
-        fn type_name(&self) -> &str {
-            "queue-backed-test"
-        }
-
-        fn properties(&self) -> HashMap<String, serde_json::Value> {
-            HashMap::new()
-        }
-
-        fn query_ids(&self) -> Vec<String> {
-            self.base.get_queries().to_vec()
-        }
-
-        fn auto_start(&self) -> bool {
-            self.auto_start
-        }
-
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
-            self.base.initialize(context).await;
-        }
-
-        async fn start(&self) -> Result<()> {
-            let _shutdown_rx = self.base.create_shutdown_channel().await;
-            self.base.set_status(ComponentStatus::Running, None).await;
-            Ok(())
-        }
-
-        async fn stop(&self) -> Result<()> {
-            self.base.stop_common().await
-        }
-
-        async fn status(&self) -> ComponentStatus {
-            self.base.get_status().await
-        }
-
-        async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-            self.base.enqueue_query_result(result).await
         }
     }
 
@@ -2707,348 +1777,6 @@ mod tests {
         }
         // Give the query time to process events.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    }
-
-    async fn provision_queue_backed_manager(
-        queries: HashMap<String, Arc<dyn crate::queries::Query>>,
-        state_store: Arc<dyn StateStoreProvider>,
-        reaction: impl Reaction + 'static,
-    ) -> (
-        Arc<ReactionManager>,
-        Arc<RwLock<crate::component_graph::ComponentGraph>>,
-    ) {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (mut graph, mut update_rx) =
-            crate::component_graph::ComponentGraph::new("ordering-tests");
-        let update_tx = graph.update_sender();
-        for query_id in queries.keys() {
-            graph.register_query(query_id, HashMap::new(), &[]).unwrap();
-        }
-        graph
-            .register_reaction(reaction.id(), HashMap::new(), &reaction.query_ids())
-            .unwrap();
-        let graph = Arc::new(RwLock::new(graph));
-        let update_graph = graph.clone();
-        tokio::spawn(async move {
-            while let Some(update) = update_rx.recv().await {
-                update_graph.write().await.apply_update(update);
-            }
-        });
-
-        let manager = Arc::new(ReactionManager::new(
-            "ordering-tests",
-            log_registry,
-            graph.clone(),
-            update_tx,
-        ));
-        manager
-            .inject_query_provider(Arc::new(MockQueryProvider { queries }))
-            .await;
-        manager.inject_state_store(state_store).await;
-        manager.provision_reaction(reaction).await.unwrap();
-        (manager, graph)
-    }
-
-    #[tokio::test]
-    async fn duplicate_start_does_not_disturb_running_reaction() {
-        let reaction_id = "duplicate-start";
-        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let query = Arc::new(MockQuery::with_id("q1", 0, 0));
-        let reaction =
-            QueueBackedReaction::new(reaction_id, vec!["q1".to_string()]).with_auto_start();
-        let base = reaction.base.clone_shared();
-        let queries: HashMap<String, Arc<dyn crate::queries::Query>> = HashMap::from([(
-            "q1".to_string(),
-            query.clone() as Arc<dyn crate::queries::Query>,
-        )]);
-        let (manager, graph) =
-            provision_queue_backed_manager(queries, store.clone(), reaction).await;
-
-        manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .unwrap();
-        crate::component_graph::wait_for_status(
-            &graph,
-            reaction_id,
-            &[ComponentStatus::Running],
-            std::time::Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
-        query
-            .send(QueryResult::new(
-                "q1".to_string(),
-                1,
-                chrono::Utc::now(),
-                Vec::new(),
-                HashMap::new(),
-            ))
-            .await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while base.priority_queue.depth().await != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("original forwarder did not enqueue a result");
-        let checkpoint_before =
-            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                .await
-                .unwrap();
-
-        let duplicate_error = manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect_err("a running reaction cannot be started again");
-        assert!(format!("{duplicate_error:#}").contains("already running"));
-        assert_eq!(
-            graph
-                .read()
-                .await
-                .get_component(reaction_id)
-                .unwrap()
-                .status,
-            ComponentStatus::Running
-        );
-        assert_eq!(query.subscription_count().await, 1);
-        assert_eq!(base.priority_queue.depth().await, 1);
-        assert_eq!(
-            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                .await
-                .unwrap(),
-            checkpoint_before
-        );
-
-        let start_all_error = manager
-            .start_all()
-            .await
-            .expect_err("start_all should preserve the existing duplicate-start error");
-        assert!(format!("{start_all_error:#}").contains("already running"));
-        assert_eq!(query.subscription_count().await, 1);
-        assert_eq!(base.priority_queue.depth().await, 1);
-
-        query
-            .send(QueryResult::new(
-                "q1".to_string(),
-                2,
-                chrono::Utc::now(),
-                Vec::new(),
-                HashMap::new(),
-            ))
-            .await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while base.priority_queue.depth().await != 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("original forwarder stopped after duplicate start");
-        assert_eq!(base.priority_queue.try_dequeue().await.unwrap().sequence, 1);
-        assert_eq!(base.priority_queue.try_dequeue().await.unwrap().sequence, 2);
-    }
-
-    #[tokio::test]
-    async fn concurrent_start_rejection_leaves_starting_generation_intact() {
-        let reaction_id = "concurrent-start";
-        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let query = Arc::new(MockQuery::with_id("q1", 0, 0));
-        let reaction = BlockingStartReaction::new(reaction_id, vec!["q1".to_string()]);
-        let base = reaction.base.clone_shared();
-        let start_entered = reaction.start_entered.clone();
-        let release_start = reaction.release_start.clone();
-        let start_gate = reaction.start_gate.clone();
-        let queries: HashMap<String, Arc<dyn crate::queries::Query>> = HashMap::from([(
-            "q1".to_string(),
-            query.clone() as Arc<dyn crate::queries::Query>,
-        )]);
-        let (manager, graph) = provision_queue_backed_manager(queries, store, reaction).await;
-
-        let first_manager = manager.clone();
-        let first_start =
-            tokio::spawn(
-                async move { first_manager.start_reaction(reaction_id.to_string()).await },
-            );
-        tokio::time::timeout(std::time::Duration::from_secs(1), start_entered.notified())
-            .await
-            .expect("first start did not enter the runtime");
-        assert_eq!(
-            graph
-                .read()
-                .await
-                .get_component(reaction_id)
-                .unwrap()
-                .status,
-            ComponentStatus::Starting
-        );
-
-        let second_error = manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect_err("concurrent start must be rejected");
-        assert!(format!("{second_error:#}").contains("already starting"));
-        assert_eq!(
-            graph
-                .read()
-                .await
-                .get_component(reaction_id)
-                .unwrap()
-                .status,
-            ComponentStatus::Starting
-        );
-        assert_eq!(query.subscription_count().await, 0);
-
-        release_start.store(true, Ordering::Release);
-        start_gate.notify_waiters();
-        first_start
-            .await
-            .expect("first start task panicked")
-            .expect("first start failed");
-        query
-            .send(QueryResult::new(
-                "q1".to_string(),
-                1,
-                chrono::Utc::now(),
-                Vec::new(),
-                HashMap::new(),
-            ))
-            .await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while base.priority_queue.depth().await != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first generation forwarder was not preserved");
-        assert_eq!(
-            graph
-                .read()
-                .await
-                .get_component(reaction_id)
-                .unwrap()
-                .status,
-            ComponentStatus::Running
-        );
-        assert_eq!(query.subscription_count().await, 1);
-    }
-
-    #[tokio::test]
-    async fn duplicate_start_after_runtime_returns_starting_is_non_destructive() {
-        let reaction_id = "still-starting";
-        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let query = Arc::new(MockQuery::with_id("q1", 0, 0));
-        let reaction = BlockingStartReaction::new(reaction_id, vec!["q1".to_string()])
-            .without_running_update();
-        reaction.release_start.store(true, Ordering::Release);
-        let base = reaction.base.clone_shared();
-        let queries: HashMap<String, Arc<dyn crate::queries::Query>> = HashMap::from([(
-            "q1".to_string(),
-            query.clone() as Arc<dyn crate::queries::Query>,
-        )]);
-        let (manager, graph) = provision_queue_backed_manager(queries, store, reaction).await;
-
-        manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect("first start should complete while runtime remains Starting");
-        assert_eq!(
-            graph
-                .read()
-                .await
-                .get_component(reaction_id)
-                .unwrap()
-                .status,
-            ComponentStatus::Starting
-        );
-        query
-            .send(QueryResult::new(
-                "q1".to_string(),
-                1,
-                chrono::Utc::now(),
-                Vec::new(),
-                HashMap::new(),
-            ))
-            .await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while base.priority_queue.depth().await != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first generation did not retain its live forwarder");
-
-        let error = manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect_err("a Starting reaction cannot be started twice");
-        assert!(format!("{error:#}").contains("already starting"));
-        assert_eq!(query.subscription_count().await, 1);
-        assert_eq!(base.priority_queue.depth().await, 1);
-        assert_eq!(
-            graph
-                .read()
-                .await
-                .get_component(reaction_id)
-                .unwrap()
-                .status,
-            ComponentStatus::Starting
-        );
-    }
-
-    #[tokio::test]
-    async fn fresh_replay_seeds_config_before_eager_handler_start() {
-        let reaction_id = "fresh-eager-handler";
-        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let query = Arc::new(MockQuery::with_id("q1", 0, 1));
-        let config_hash = crate::queries::compute_config_hash(query.get_config());
-        *query.outbox_response.write().await = Ok(OutboxResponse {
-            results: vec![Arc::new(QueryResult::new(
-                "q1".to_string(),
-                1,
-                chrono::Utc::now(),
-                Vec::new(),
-                HashMap::new(),
-            ))],
-            latest_sequence: 1,
-            config_hash,
-        });
-        let reaction = ProcessingQueueReaction::new(reaction_id, vec!["q1".to_string()]);
-        reaction.processing_enabled.store(true, Ordering::Release);
-        reaction.block_handler.store(false, Ordering::Release);
-        let processed = reaction.processed.clone();
-        let processed_notify = reaction.processed_notify.clone();
-        let queries: HashMap<String, Arc<dyn crate::queries::Query>> =
-            HashMap::from([("q1".to_string(), query as Arc<dyn crate::queries::Query>)]);
-        let (manager, _graph) =
-            provision_queue_backed_manager(queries, store.clone(), reaction).await;
-
-        manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while processed.lock().await.is_empty() {
-                processed_notify.notified().await;
-            }
-        })
-        .await
-        .expect("fresh replay was not handled");
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                    .await
-                    .unwrap()
-                    .is_some_and(|checkpoint| {
-                        checkpoint.sequence == 1 && checkpoint.config_hash == config_hash
-                    })
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("eager checkpoint cache did not retain the seeded config hash");
     }
 
     // ========================================================================
@@ -3311,12 +2039,16 @@ mod tests {
             results.len()
         );
 
-        // Enqueue alone must not claim durable handling progress.
+        // Verify: checkpoint should have advanced.
         let cp = crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_catchup", "q1")
             .await
             .unwrap()
             .expect("Checkpoint should exist");
-        assert_eq!(cp.sequence, 0);
+        assert!(
+            cp.sequence > 0,
+            "Checkpoint sequence should have advanced from 0, got {}",
+            cp.sequence
+        );
     }
 
     // ========================================================================
@@ -3340,8 +2072,6 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
-            last_forwarded_sequence: 0,
-            received_sequence: None,
         })
         .await;
 
@@ -3376,8 +2106,6 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
-            last_forwarded_sequence: 0,
-            received_sequence: None,
         })
         .await;
 
@@ -3408,7 +2136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_gap_auto_skip_gap_skips_only_missing_range() {
+    async fn broadcast_gap_auto_skip_gap_jumps_to_current_seq() {
         let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 50));
         let reaction = Arc::new(
             MockReaction::new("r1", vec!["q1".into()])
@@ -3428,8 +2156,6 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
-            last_forwarded_sequence: 0,
-            received_sequence: Some(42),
         })
         .await;
 
@@ -3439,792 +2165,16 @@ mod tests {
             result.err()
         );
 
-        // The triggering event (42) is still deliverable, so only its missing
-        // predecessor range may be checkpointed as skipped.
+        // Checkpoint should jump to current sequence.
         let cps = checkpoints.read().await;
         let cp = cps.get("q1").expect("Checkpoint for q1 should exist");
-        assert_eq!(cp.sequence, 41);
+        assert_eq!(cp.sequence, 50, "Checkpoint should jump to latest sequence");
 
         // bootstrap() should NOT be called for AutoSkipGap.
         assert_eq!(
             reaction.bootstrap_count.load(Ordering::SeqCst),
             0,
             "bootstrap() should not be called for AutoSkipGap"
-        );
-    }
-
-    #[tokio::test]
-    async fn startup_auto_skip_gap_handles_empty_and_saturated_bounds() {
-        let empty_query = Arc::new(MockQuery::new(42, 0));
-        let empty_query_trait: Arc<dyn crate::queries::Query> = empty_query.clone();
-        let reaction: Arc<dyn Reaction> = Arc::new(MockReaction::new("r1", vec!["q1".into()]));
-        let checkpoint = ReactionCheckpoint {
-            sequence: 0,
-            config_hash: 42,
-        };
-        let metrics = Arc::new(ReactionMetrics::new());
-        let empty = ReactionManager::replay_retained_outbox_after_gap(
-            "r1",
-            "q1",
-            &checkpoint,
-            &reaction,
-            &empty_query_trait,
-            &None,
-            &metrics,
-            &crate::queries::OutboxGap {
-                requested: 0,
-                earliest_available: 0,
-                latest_sequence: 0,
-                config_hash: 42,
-            },
-        )
-        .await
-        .expect("empty outbox bounds should not underflow");
-        assert_eq!(empty.checkpoint.sequence, 0);
-        assert_eq!(empty.forwarded_sequence, 0);
-
-        let saturated_query = Arc::new(MockQuery::new(42, u64::MAX));
-        *saturated_query.outbox_response.write().await = Ok(OutboxResponse {
-            results: vec![Arc::new(QueryResult::new(
-                "q1".to_string(),
-                u64::MAX,
-                chrono::Utc::now(),
-                Vec::new(),
-                HashMap::new(),
-            ))],
-            latest_sequence: u64::MAX,
-            config_hash: 42,
-        });
-        let saturated_query_trait: Arc<dyn crate::queries::Query> = saturated_query;
-        let saturated = ReactionManager::replay_retained_outbox_after_gap(
-            "r1",
-            "q1",
-            &ReactionCheckpoint {
-                sequence: u64::MAX - 2,
-                config_hash: 42,
-            },
-            &reaction,
-            &saturated_query_trait,
-            &None,
-            &metrics,
-            &crate::queries::OutboxGap {
-                requested: u64::MAX - 2,
-                earliest_available: u64::MAX,
-                latest_sequence: u64::MAX,
-                config_hash: 42,
-            },
-        )
-        .await
-        .expect("saturated outbox bounds should not overflow");
-        assert_eq!(saturated.checkpoint.sequence, u64::MAX - 1);
-        assert_eq!(saturated.forwarded_sequence, u64::MAX);
-    }
-
-    #[tokio::test]
-    async fn retained_outbox_then_live_is_ordered_by_reaction_base() {
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let query = Arc::new(MockQuery::new(42, 6));
-        *query.outbox_response.write().await = Ok(OutboxResponse {
-            results: vec![
-                Arc::new(QueryResult::new(
-                    "q1".to_string(),
-                    5,
-                    timestamp + chrono::Duration::seconds(10),
-                    Vec::new(),
-                    HashMap::new(),
-                )),
-                Arc::new(QueryResult::new(
-                    "q1".to_string(),
-                    6,
-                    timestamp,
-                    Vec::new(),
-                    HashMap::new(),
-                )),
-            ],
-            latest_sequence: 6,
-            config_hash: 42,
-        });
-        let query_trait: Arc<dyn crate::queries::Query> = query;
-        let reaction = Arc::new(QueueBackedReaction::new("r1", vec!["q1".to_string()]));
-        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
-        let metrics = Arc::new(ReactionMetrics::new());
-
-        let recovered = ReactionManager::replay_retained_outbox_after_gap(
-            "r1",
-            "q1",
-            &ReactionCheckpoint {
-                sequence: 4,
-                config_hash: 42,
-            },
-            &reaction_trait,
-            &query_trait,
-            &None,
-            &metrics,
-            &crate::queries::OutboxGap {
-                requested: 4,
-                earliest_available: 5,
-                latest_sequence: 6,
-                config_hash: 42,
-            },
-        )
-        .await
-        .expect("retained outbox replay should enqueue sequences 5 and 6");
-        assert_eq!(recovered.checkpoint.sequence, 4);
-        assert_eq!(recovered.forwarded_sequence, 6);
-
-        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
-            "q1".to_string(),
-            recovered.checkpoint,
-        )])));
-        ReactionManager::enqueue_forwarded_result(
-            &reaction_trait,
-            &query_trait,
-            "q1",
-            &checkpoints,
-            &metrics,
-            Arc::new(QueryResult::new(
-                "q1".to_string(),
-                7,
-                timestamp - chrono::Duration::seconds(10),
-                Vec::new(),
-                HashMap::new(),
-            )),
-        )
-        .await
-        .expect("buffered live result should enqueue after retained replay");
-
-        let mut sequences = Vec::new();
-        for _ in 0..3 {
-            sequences.push(reaction.base.priority_queue.dequeue().await.sequence);
-        }
-        assert_eq!(sequences, vec![5, 6, 7]);
-    }
-
-    #[tokio::test]
-    async fn failed_catchup_generations_are_clean_and_retryable() {
-        let reaction_id = "retry-ordering";
-        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let q1 = Arc::new(MockQuery::with_id("q1", 0, 10));
-        let q2 = Arc::new(MockQuery::with_id("q2", 0, 4));
-        let q1_hash = crate::queries::compute_config_hash(q1.get_config());
-        let q2_hash = crate::queries::compute_config_hash(q2.get_config());
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-
-        *q1.outbox_response.write().await = Ok(OutboxResponse {
-            results: (5..=10)
-                .map(|sequence| {
-                    Arc::new(QueryResult::new(
-                        "q1".to_string(),
-                        sequence,
-                        timestamp - chrono::Duration::seconds(sequence as i64),
-                        Vec::new(),
-                        HashMap::new(),
-                    ))
-                })
-                .collect(),
-            latest_sequence: 10,
-            config_hash: q1_hash,
-        });
-        *q2.outbox_response.write().await = Ok(OutboxResponse {
-            results: (1..=4)
-                .map(|sequence| {
-                    Arc::new(QueryResult::new(
-                        "q2".to_string(),
-                        sequence,
-                        timestamp + chrono::Duration::seconds(sequence as i64),
-                        Vec::new(),
-                        HashMap::new(),
-                    ))
-                })
-                .collect(),
-            latest_sequence: 4,
-            config_hash: q2_hash,
-        });
-        crate::reactions::checkpoint::write_checkpoint(
-            store.as_ref(),
-            reaction_id,
-            "q1",
-            &ReactionCheckpoint {
-                sequence: 4,
-                config_hash: q1_hash,
-            },
-        )
-        .await
-        .unwrap();
-        crate::reactions::checkpoint::write_checkpoint(
-            store.as_ref(),
-            reaction_id,
-            "q2",
-            &ReactionCheckpoint {
-                sequence: 0,
-                config_hash: q2_hash.wrapping_add(1),
-            },
-        )
-        .await
-        .unwrap();
-
-        let reaction =
-            ProcessingQueueReaction::new(reaction_id, vec!["q1".to_string(), "q2".to_string()]);
-        let base = reaction.base.clone_shared();
-        let processing_enabled = reaction.processing_enabled.clone();
-        let handler_released = reaction.handler_released.clone();
-        let handler_gate = reaction.handler_gate.clone();
-        let handler_started = reaction.handler_started.clone();
-        let processed = reaction.processed.clone();
-        let processed_notify = reaction.processed_notify.clone();
-        let queries: HashMap<String, Arc<dyn crate::queries::Query>> = HashMap::from([
-            ("q1".to_string(), q1 as Arc<dyn crate::queries::Query>),
-            ("q2".to_string(), q2 as Arc<dyn crate::queries::Query>),
-        ]);
-        let (manager, graph) =
-            provision_queue_backed_manager(queries, store.clone(), reaction).await;
-
-        for _ in 0..2 {
-            let error = manager
-                .start_reaction(reaction_id.to_string())
-                .await
-                .expect_err("q2 config mismatch should fail after q1 replay");
-            assert!(
-                format!("{error:#}").contains("Strict recovery policy"),
-                "unexpected startup error: {error:#}"
-            );
-            assert_eq!(
-                graph
-                    .read()
-                    .await
-                    .get_component(reaction_id)
-                    .unwrap()
-                    .status,
-                ComponentStatus::Error
-            );
-            assert_eq!(base.priority_queue.depth().await, 0);
-            assert_eq!(
-                crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .sequence,
-                4,
-                "failed generation must not advance the durable checkpoint"
-            );
-            assert!(
-                processed.lock().await.is_empty(),
-                "the disabled handler must not consume failed-generation replay"
-            );
-        }
-
-        crate::reactions::checkpoint::write_checkpoint(
-            store.as_ref(),
-            reaction_id,
-            "q2",
-            &ReactionCheckpoint {
-                sequence: 0,
-                config_hash: q2_hash,
-            },
-        )
-        .await
-        .unwrap();
-        processing_enabled.store(true, Ordering::Release);
-
-        manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect("retry should replay from the original durable checkpoints");
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            if processed.lock().await.is_empty() {
-                handler_started.notified().await;
-            }
-        })
-        .await
-        .expect("slow handler never received the replay");
-        assert_eq!(
-            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                .await
-                .unwrap()
-                .unwrap()
-                .sequence,
-            4,
-            "dequeued but unhandled replay must not advance the checkpoint"
-        );
-        handler_released.store(true, Ordering::Release);
-        handler_gate.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while processed.lock().await.len() < 10 {
-                processed_notify.notified().await;
-            }
-        })
-        .await
-        .expect("handler did not consume the complete multi-query replay");
-
-        let mut by_query: HashMap<String, Vec<u64>> = HashMap::new();
-        for (query_id, sequence) in processed.lock().await.iter() {
-            by_query
-                .entry(query_id.clone())
-                .or_default()
-                .push(*sequence);
-        }
-        assert_eq!(by_query["q1"], vec![5, 6, 7, 8, 9, 10]);
-        assert_eq!(by_query["q2"], vec![1, 2, 3, 4]);
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                let checkpoints = crate::reactions::checkpoint::read_checkpoints_batch(
-                    store.as_ref(),
-                    reaction_id,
-                    &["q1".to_string(), "q2".to_string()],
-                )
-                .await
-                .unwrap();
-                if checkpoints.get("q1").map(|cp| cp.sequence) == Some(10)
-                    && checkpoints.get("q2").map(|cp| cp.sequence) == Some(4)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("successful handlers did not persist final checkpoints");
-        assert_eq!(base.priority_queue.depth().await, 0);
-    }
-
-    #[tokio::test]
-    async fn handler_checkpoint_failure_replays_from_last_acknowledged_sequence() {
-        let reaction_id = "handler-checkpoint-failure";
-        let store = Arc::new(FailingCheckpointStore::new(reaction_id, "q1", 7, 1));
-        let query = Arc::new(MockQuery::with_id("q1", 0, 10));
-        let config_hash = crate::queries::compute_config_hash(query.get_config());
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        *query.outbox_response.write().await = Ok(OutboxResponse {
-            results: (5..=10)
-                .map(|sequence| {
-                    Arc::new(QueryResult::new(
-                        "q1".to_string(),
-                        sequence,
-                        timestamp,
-                        Vec::new(),
-                        HashMap::new(),
-                    ))
-                })
-                .collect(),
-            latest_sequence: 10,
-            config_hash,
-        });
-        crate::reactions::checkpoint::write_checkpoint(
-            store.as_ref(),
-            reaction_id,
-            "q1",
-            &ReactionCheckpoint {
-                sequence: 4,
-                config_hash,
-            },
-        )
-        .await
-        .unwrap();
-
-        let reaction = ProcessingQueueReaction::new(reaction_id, vec!["q1".to_string()]);
-        reaction.processing_enabled.store(true, Ordering::Release);
-        reaction.block_handler.store(false, Ordering::Release);
-        let processed = reaction.processed.clone();
-        let processed_notify = reaction.processed_notify.clone();
-        let queries: HashMap<String, Arc<dyn crate::queries::Query>> =
-            HashMap::from([("q1".to_string(), query as Arc<dyn crate::queries::Query>)]);
-        let (manager, graph) =
-            provision_queue_backed_manager(queries, store.clone(), reaction).await;
-
-        manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect("startup replay should enqueue before the handler checkpoint fails");
-        crate::component_graph::wait_for_status(
-            &graph,
-            reaction_id,
-            &[ComponentStatus::Error],
-            std::time::Duration::from_secs(1),
-        )
-        .await
-        .expect("checkpoint failure did not fail the processing generation");
-        assert_eq!(
-            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                .await
-                .unwrap()
-                .unwrap()
-                .sequence,
-            6
-        );
-
-        manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect("retry should replay from the last acknowledged sequence");
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while processed.lock().await.len() < 7 {
-                processed_notify.notified().await;
-            }
-        })
-        .await
-        .expect("retry did not finish replay after checkpoint recovery");
-        assert_eq!(
-            processed
-                .lock()
-                .await
-                .iter()
-                .map(|(_, sequence)| *sequence)
-                .collect::<Vec<_>>(),
-            vec![5, 6, 7, 7, 8, 9, 10],
-            "only the unacknowledged sequence may be delivered again"
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                    .await
-                    .unwrap()
-                    .is_some_and(|checkpoint| checkpoint.sequence == 10)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("retry did not persist the final acknowledged checkpoint");
-    }
-
-    #[tokio::test]
-    async fn stop_cancels_full_queue_bootstrap_and_restart_succeeds() {
-        let reaction_id = "stop-full-bootstrap";
-        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let query = Arc::new(MockQuery::with_id("q1", 0, 6));
-        let config_hash = crate::queries::compute_config_hash(query.get_config());
-        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        *query.outbox_response.write().await = Ok(OutboxResponse {
-            results: vec![
-                Arc::new(QueryResult::new(
-                    "q1".to_string(),
-                    5,
-                    timestamp,
-                    Vec::new(),
-                    HashMap::new(),
-                )),
-                Arc::new(QueryResult::new(
-                    "q1".to_string(),
-                    6,
-                    timestamp,
-                    Vec::new(),
-                    HashMap::new(),
-                )),
-            ],
-            latest_sequence: 6,
-            config_hash,
-        });
-        crate::reactions::checkpoint::write_checkpoint(
-            store.as_ref(),
-            reaction_id,
-            "q1",
-            &ReactionCheckpoint {
-                sequence: 4,
-                config_hash,
-            },
-        )
-        .await
-        .unwrap();
-
-        let reaction = QueueBackedReaction::with_capacity(reaction_id, vec!["q1".to_string()], 1);
-        let base = reaction.base.clone_shared();
-        let queries: HashMap<String, Arc<dyn crate::queries::Query>> = HashMap::from([(
-            "q1".to_string(),
-            query.clone() as Arc<dyn crate::queries::Query>,
-        )]);
-        let (manager, _graph) =
-            provision_queue_backed_manager(queries, store.clone(), reaction).await;
-
-        let start_manager = manager.clone();
-        let start_task =
-            tokio::spawn(
-                async move { start_manager.start_reaction(reaction_id.to_string()).await },
-            );
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while base.priority_queue.metrics().await.blocked_enqueue_count == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("bootstrap did not block on the full reaction queue");
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            manager.stop_reaction(reaction_id.to_string()),
-        )
-        .await
-        .expect("stop deadlocked with a blocked bootstrap enqueue")
-        .expect("stop failed");
-        let start_error = tokio::time::timeout(std::time::Duration::from_secs(1), start_task)
-            .await
-            .expect("bootstrap producer did not exit after stop")
-            .expect("start task panicked")
-            .expect_err("stopped bootstrap generation must not report success");
-        assert!(
-            format!("{start_error:#}").contains("priority queue is closed"),
-            "unexpected start error: {start_error:#}"
-        );
-        assert_eq!(base.priority_queue.depth().await, 0);
-        assert_eq!(
-            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
-                .await
-                .unwrap()
-                .unwrap()
-                .sequence,
-            4
-        );
-
-        *query.outbox_response.write().await = Ok(OutboxResponse {
-            results: vec![Arc::new(QueryResult::new(
-                "q1".to_string(),
-                5,
-                timestamp,
-                Vec::new(),
-                HashMap::new(),
-            ))],
-            latest_sequence: 5,
-            config_hash,
-        });
-        manager
-            .start_reaction(reaction_id.to_string())
-            .await
-            .expect("restart should reopen a clean reaction queue generation");
-        assert_eq!(base.priority_queue.depth().await, 1);
-        assert_eq!(base.priority_queue.try_dequeue().await.unwrap().sequence, 5);
-    }
-
-    #[tokio::test]
-    async fn auto_skip_gap_persists_missing_floor_not_moving_query_latest() {
-        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
-        let reaction: Arc<dyn Reaction> = Arc::new(
-            MockReaction::new("r1", vec!["q1".into()])
-                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
-        );
-        let store: Arc<dyn StateStoreProvider> =
-            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let state_store = Some(store.clone());
-        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
-            "q1".to_string(),
-            ReactionCheckpoint {
-                sequence: 10,
-                config_hash: 42,
-            },
-        )])));
-        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
-
-        ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
-            reaction_id: "r1",
-            query_id: "q1",
-            reaction: &reaction,
-            query: &query,
-            policy: ReactionRecoveryPolicy::AutoSkipGap,
-            state_store: &state_store,
-            checkpoints: &checkpoints,
-            bootstrap_mutex: &bootstrap_mutex,
-            metrics: &Arc::new(ReactionMetrics::new()),
-            last_forwarded_sequence: 10,
-            received_sequence: Some(42),
-        })
-        .await
-        .expect("AutoSkipGap should persist the missing floor");
-
-        assert_eq!(checkpoints.read().await["q1"].sequence, 41);
-        assert_eq!(
-            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r1", "q1")
-                .await
-                .expect("read persisted skipped floor")
-                .expect("persisted skipped floor")
-                .sequence,
-            41,
-            "query latest 100 must not checkpoint deliverable results 42..=100"
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_skip_gap_waits_for_retained_event_before_advancing() {
-        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
-        let reaction: Arc<dyn Reaction> = Arc::new(
-            MockReaction::new("r1", vec!["q1".into()])
-                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
-        );
-        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
-            "q1".to_string(),
-            ReactionCheckpoint {
-                sequence: 10,
-                config_hash: 42,
-            },
-        )])));
-        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
-
-        ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
-            reaction_id: "r1",
-            query_id: "q1",
-            reaction: &reaction,
-            query: &query,
-            policy: ReactionRecoveryPolicy::AutoSkipGap,
-            state_store: &None,
-            checkpoints: &checkpoints,
-            bootstrap_mutex: &bootstrap_mutex,
-            metrics: &Arc::new(ReactionMetrics::new()),
-            last_forwarded_sequence: 10,
-            received_sequence: None,
-        })
-        .await
-        .expect("lag notification alone should not advance a checkpoint");
-
-        assert_eq!(checkpoints.read().await["q1"].sequence, 10);
-    }
-
-    #[tokio::test]
-    async fn auto_skip_gap_enqueue_failure_keeps_current_event_recoverable() {
-        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
-        let reaction = Arc::new(
-            MockReaction::new("r1", vec!["q1".into()])
-                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
-        );
-        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
-        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
-            "q1".to_string(),
-            ReactionCheckpoint {
-                sequence: 10,
-                config_hash: 42,
-            },
-        )])));
-        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
-        let metrics = Arc::new(ReactionMetrics::new());
-
-        ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
-            reaction_id: "r1",
-            query_id: "q1",
-            reaction: &reaction_trait,
-            query: &query,
-            policy: ReactionRecoveryPolicy::AutoSkipGap,
-            state_store: &None,
-            checkpoints: &checkpoints,
-            bootstrap_mutex: &bootstrap_mutex,
-            metrics: &metrics,
-            last_forwarded_sequence: 10,
-            received_sequence: Some(42),
-        })
-        .await
-        .expect("skip missing range");
-        reaction.fail_next_enqueue();
-        let current = Arc::new(QueryResult::new(
-            "q1".to_string(),
-            42,
-            chrono::Utc::now(),
-            Vec::new(),
-            HashMap::new(),
-        ));
-        assert!(ReactionManager::enqueue_forwarded_result(
-            &reaction_trait,
-            &query,
-            "q1",
-            &checkpoints,
-            &metrics,
-            current.clone(),
-        )
-        .await
-        .is_err());
-        assert_eq!(
-            checkpoints.read().await["q1"].sequence,
-            41,
-            "failed enqueue must leave the current event above the checkpoint"
-        );
-        assert!(reaction.enqueued.lock().await.is_empty());
-
-        ReactionManager::enqueue_forwarded_result(
-            &reaction_trait,
-            &query,
-            "q1",
-            &checkpoints,
-            &metrics,
-            current,
-        )
-        .await
-        .expect("restart/retry should deliver the current event");
-        assert_eq!(
-            checkpoints.read().await["q1"].sequence,
-            41,
-            "successful enqueue is not a handler acknowledgement"
-        );
-        assert_eq!(reaction.enqueued.lock().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn auto_skip_gap_does_not_skip_past_unacknowledged_forwarded_results() {
-        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
-        let reaction = Arc::new(
-            MockReaction::new("r1", vec!["q1".into()])
-                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
-        );
-        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
-        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
-            "q1".to_string(),
-            ReactionCheckpoint {
-                sequence: 1,
-                config_hash: 42,
-            },
-        )])));
-        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
-        let metrics = Arc::new(ReactionMetrics::new());
-
-        for received_sequence in [10, 20] {
-            ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
-                reaction_id: "r1",
-                query_id: "q1",
-                reaction: &reaction_trait,
-                query: &query,
-                policy: ReactionRecoveryPolicy::AutoSkipGap,
-                state_store: &None,
-                checkpoints: &checkpoints,
-                bootstrap_mutex: &bootstrap_mutex,
-                metrics: &metrics,
-                last_forwarded_sequence: if received_sequence == 10 { 1 } else { 10 },
-                received_sequence: Some(received_sequence),
-            })
-            .await
-            .expect("skip one missing range");
-            let expected_checkpoint = 9;
-            assert_eq!(
-                checkpoints.read().await["q1"].sequence,
-                expected_checkpoint,
-                "a later gap must not checkpoint past the unacknowledged sequence 10"
-            );
-            ReactionManager::enqueue_forwarded_result(
-                &reaction_trait,
-                &query,
-                "q1",
-                &checkpoints,
-                &metrics,
-                Arc::new(QueryResult::new(
-                    "q1".to_string(),
-                    received_sequence,
-                    chrono::Utc::now(),
-                    Vec::new(),
-                    HashMap::new(),
-                )),
-            )
-            .await
-            .expect("deliver retained gap-triggering event");
-            assert_eq!(
-                checkpoints.read().await["q1"].sequence,
-                expected_checkpoint,
-                "forwarding must not advance the authoritative checkpoint"
-            );
-        }
-        assert_eq!(
-            reaction
-                .enqueued
-                .lock()
-                .await
-                .iter()
-                .map(|result| result.sequence)
-                .collect::<Vec<_>>(),
-            vec![10, 20]
         );
     }
 
@@ -4376,8 +2326,6 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
-            last_forwarded_sequence: 0,
-            received_sequence: None,
         })
         .await;
 
@@ -4506,8 +2454,6 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
-            last_forwarded_sequence: 0,
-            received_sequence: None,
         })
         .await;
 
@@ -4560,8 +2506,6 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &metrics_q1,
-            last_forwarded_sequence: 0,
-            received_sequence: None,
         };
         let ctx_q2 = BroadcastGapContext {
             reaction_id: "r1",
@@ -4573,8 +2517,6 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &metrics_q2,
-            last_forwarded_sequence: 0,
-            received_sequence: None,
         };
         let (r1, r2) = tokio::join!(
             ReactionManager::handle_broadcast_gap(&ctx_q1),

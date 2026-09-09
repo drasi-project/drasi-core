@@ -31,8 +31,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{
-    AtomicResultTransaction, CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue,
-    IndexError, LiveResultsWriter, OutboxWriter, ResultIndex, SessionControl,
+    CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, LiveResultsWriter,
+    OutboxWriter, ResultIndex, SessionControl,
 };
 
 /// Set of indexes for a query.
@@ -72,12 +72,14 @@ impl fmt::Debug for IndexSet {
 /// that shares the same underlying session state. Persistent backends return
 /// `Some(store)`; volatile (in-memory) backends return `None`.
 ///
-/// Call [`Self::atomic_result_transaction`] to verify that every
-/// persistent result resource joins the same transaction as the core indexes.
+/// The store's `stage_checkpoint` calls land in the same database transaction
+/// as index updates because both are derived from the same `SessionControl` /
+/// session state instance — that is why the plugin returns them together
+/// rather than via two separate calls.
 pub struct CreatedIndexes {
     /// The set of indexes for the query.
     pub set: IndexSet,
-    /// Checkpoint store paired with the index set.
+    /// Atomic checkpoint store paired with the set's session state.
     /// `None` for volatile backends (no persistent storage to checkpoint into).
     pub checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     /// Outbox writer for persisting query results for reaction replay.
@@ -86,44 +88,6 @@ pub struct CreatedIndexes {
     /// Live results writer for persisting the current result snapshot.
     /// `None` for volatile backends or when live result persistence is not needed.
     pub live_results_writer: Option<Arc<dyn LiveResultsWriter>>,
-}
-
-impl CreatedIndexes {
-    /// Return a validated capability only when every persistent result resource
-    /// can participate in the index session transaction.
-    ///
-    /// This covers core indexes through [`SessionControl`], source checkpoints
-    /// and persisted result sequences through [`CheckpointStore`], outbox
-    /// append/trim through [`OutboxWriter`], and live-result mutations through
-    /// [`LiveResultsWriter`].
-    pub fn atomic_result_transaction(&self) -> Option<AtomicResultTransaction> {
-        validate_atomic_result_domains(
-            self.set.session_control.transaction_domain(),
-            self.checkpoint_store
-                .as_ref()
-                .and_then(|store| store.transaction_domain()),
-            self.outbox_writer
-                .as_ref()
-                .and_then(|writer| writer.transaction_domain()),
-            self.live_results_writer
-                .as_ref()
-                .and_then(|writer| writer.transaction_domain()),
-        )
-    }
-}
-
-fn validate_atomic_result_domains(
-    session_domain: Option<super::TransactionDomain>,
-    checkpoint_domain: Option<super::TransactionDomain>,
-    outbox_domain: Option<super::TransactionDomain>,
-    live_results_domain: Option<super::TransactionDomain>,
-) -> Option<AtomicResultTransaction> {
-    let domain = session_domain?;
-    if checkpoint_domain? == domain && outbox_domain? == domain && live_results_domain? == domain {
-        Some(AtomicResultTransaction::new(domain))
-    } else {
-        None
-    }
 }
 
 impl fmt::Debug for CreatedIndexes {
@@ -186,10 +150,7 @@ pub trait IndexBackendPlugin: Send + Sync {
     /// Persistent backends additionally return a [`CheckpointStore`] that
     /// shares the same session state as the returned `SessionControl`, so
     /// `stage_checkpoint` writes land in the same database transaction as
-    /// index updates. Other persistent writers advertise participation through
-    /// [`TransactionDomain`](super::TransactionDomain); callers validate the complete bundle with
-    /// [`CreatedIndexes::atomic_result_transaction`]. Volatile backends
-    /// return `checkpoint_store: None`.
+    /// index updates. Volatile backends return `checkpoint_store: None`.
     async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError>;
 
     /// Returns true if this backend is volatile (data lost on restart).
@@ -197,40 +158,4 @@ pub trait IndexBackendPlugin: Send + Sync {
     /// Volatile backends (like in-memory) require re-bootstrapping after restart,
     /// while persistent backends (like RocksDB) retain data.
     fn is_volatile(&self) -> bool;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_atomic_result_domains;
-    use crate::interface::TransactionDomain;
-
-    #[test]
-    fn atomic_result_transaction_requires_every_resource_in_one_domain() {
-        let domain = TransactionDomain::new();
-        let other = TransactionDomain::new();
-
-        assert!(validate_atomic_result_domains(
-            Some(domain.clone()),
-            Some(domain.clone()),
-            Some(domain.clone()),
-            Some(domain.clone()),
-        )
-        .is_some());
-
-        assert!(validate_atomic_result_domains(
-            Some(domain.clone()),
-            Some(domain.clone()),
-            None,
-            Some(domain.clone()),
-        )
-        .is_none());
-
-        assert!(validate_atomic_result_domains(
-            Some(domain.clone()),
-            Some(domain.clone()),
-            Some(other),
-            Some(domain),
-        )
-        .is_none());
-    }
 }

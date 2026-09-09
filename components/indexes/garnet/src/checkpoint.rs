@@ -24,16 +24,15 @@
 //! - `ss:{<query_id>}:sources` → JSON array of source IDs with checkpoints
 //! - `ss:{<query_id>}:config_hash` → decimal u64 hash
 //!
-//! `stage_checkpoint` and `write_result_sequence` use the active
-//! `GarnetSessionState` write buffer so they commit atomically with index
-//! updates. Result-sequence writes remain standalone outside a session.
+//! `stage_checkpoint` writes into the active `GarnetSessionState` write buffer
+//! so it commits atomically with index updates.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint, TransactionDomain};
+use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 
 use crate::session_state::{BufferReadResult, GarnetSessionState};
@@ -84,10 +83,6 @@ impl GarnetCheckpointStore {
 
 #[async_trait]
 impl CheckpointStore for GarnetCheckpointStore {
-    fn transaction_domain(&self) -> Option<TransactionDomain> {
-        Some(self.session_state.transaction_domain())
-    }
-
     fn is_persistent(&self) -> bool {
         true
     }
@@ -302,15 +297,6 @@ impl CheckpointStore for GarnetCheckpointStore {
         sequence: u64,
     ) -> Result<(), IndexError> {
         let key = self.result_sequence_key();
-
-        {
-            let mut guard = self.session_state.lock()?;
-            if let Some(buffer) = guard.as_mut() {
-                buffer.string_set(key, sequence.to_string().into_bytes());
-                return Ok(());
-            }
-        }
-
         let mut con = self.connection.clone();
         con.set::<&str, String, ()>(&key, sequence.to_string())
             .await
@@ -320,30 +306,10 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
         let key = self.result_sequence_key();
-
-        let buffered = {
-            let guard = self.session_state.lock()?;
-            match guard.as_ref() {
-                Some(buffer) => buffer.string_get(&key),
-                None => BufferReadResult::NotInBuffer,
-            }
-        };
-
-        match buffered {
-            BufferReadResult::Found(bytes) => {
-                let sequence = String::from_utf8(bytes)
-                    .map_err(IndexError::other)?
-                    .parse()
-                    .map_err(IndexError::other)?;
-                Ok(Some(sequence))
-            }
-            BufferReadResult::KeyDeleted => Ok(None),
-            BufferReadResult::NotInBuffer => {
-                let mut con = self.connection.clone();
-                con.get::<String, Option<u64>>(key)
-                    .await
-                    .map_err(IndexError::other)
-            }
+        let mut con = self.connection.clone();
+        match con.get::<String, Option<u64>>(key).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(IndexError::other(e)),
         }
     }
 }

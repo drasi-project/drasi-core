@@ -19,8 +19,8 @@
 //! Requires a running Redis instance. Uses testcontainers via `shared_tests::redis_helpers`.
 //! Tests are marked `#[ignore]` for CI environments without Docker.
 
-use drasi_core::interface::{IndexBackendPlugin, LiveResultsWriter, OutboxWriter, RowMutation};
-use drasi_index_garnet::{GarnetIndexProvider, GarnetLiveResultsWriter, GarnetOutboxWriter};
+use drasi_core::interface::{LiveResultsWriter, OutboxWriter, RowMutation};
+use drasi_index_garnet::{GarnetLiveResultsWriter, GarnetOutboxWriter};
 use shared_tests::redis_helpers::{setup_redis, RedisGuard};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -44,69 +44,6 @@ async fn get_connection() -> redis::aio::MultiplexedConnection {
 /// Generate a unique query ID to avoid test interference.
 fn unique_query_id() -> String {
     format!("test-{}", Uuid::new_v4())
-}
-
-#[tokio::test]
-#[ignore]
-async fn garnet_bundle_does_not_advertise_full_atomic_result_persistence() {
-    let redis = shared_redis().await;
-    let provider = GarnetIndexProvider::new(redis.url(), None, true);
-    let query_id = unique_query_id();
-    let created = provider
-        .create_indexes(&query_id)
-        .await
-        .expect("create Garnet indexes");
-
-    let core_domain = created
-        .set
-        .session_control
-        .transaction_domain()
-        .expect("Garnet core indexes have an atomic session domain");
-    assert_eq!(
-        created
-            .checkpoint_store
-            .as_ref()
-            .and_then(|store| store.transaction_domain()),
-        Some(core_domain)
-    );
-    assert!(created
-        .outbox_writer
-        .as_ref()
-        .and_then(|writer| writer.transaction_domain())
-        .is_none());
-    assert!(created
-        .live_results_writer
-        .as_ref()
-        .and_then(|writer| writer.transaction_domain())
-        .is_none());
-    assert!(created.atomic_result_transaction().is_none());
-
-    let checkpoint_store = created
-        .checkpoint_store
-        .as_ref()
-        .expect("Garnet checkpoint store");
-    created
-        .set
-        .session_control
-        .begin()
-        .await
-        .expect("begin result-sequence rollback session");
-    checkpoint_store
-        .write_result_sequence(&query_id, 1)
-        .await
-        .expect("stage result sequence");
-    created
-        .set
-        .session_control
-        .rollback()
-        .expect("rollback result sequence");
-    assert_eq!(
-        checkpoint_store
-            .read_result_sequence(&query_id)
-            .await
-            .expect("read rolled-back result sequence"),
-        None
-    );
 }
 
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────

@@ -72,22 +72,6 @@ pub struct QueryBase {
     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
-struct AbortTaskOnDrop(Option<tokio::task::JoinHandle<()>>);
-
-impl AbortTaskOnDrop {
-    fn take(&mut self) -> tokio::task::JoinHandle<()> {
-        self.0.take().expect("pending query task handle")
-    }
-}
-
-impl Drop for AbortTaskOnDrop {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.0 {
-            handle.abort();
-        }
-    }
-}
-
 impl QueryBase {
     /// Create a new QueryBase with the given configuration
     pub fn new(config: QueryConfig) -> Result<Self> {
@@ -233,23 +217,13 @@ impl QueryBase {
     /// Handle common stop functionality.
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping query '{}'", self.config.id);
-        self.reap_task().await;
 
-        self.set_status(
-            ComponentStatus::Stopped,
-            Some(format!("Query '{}' stopped", self.config.id)),
-        )
-        .await;
-        info!("Query '{}' stopped", self.config.id);
-        Ok(())
-    }
-
-    /// Stop and fully reap the current processor task without changing status.
-    pub(super) async fn reap_task(&self) {
+        // Send shutdown signal if we have one
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
 
+        // Wait for task to complete
         if let Some(mut handle) = self.task_handle.write().await.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
@@ -264,18 +238,22 @@ impl QueryBase {
                         self.config.id
                     );
                     handle.abort();
-                    let _ = handle.await;
                 }
             }
         }
+
+        self.set_status(
+            ComponentStatus::Stopped,
+            Some(format!("Query '{}' stopped", self.config.id)),
+        )
+        .await;
+        info!("Query '{}' stopped", self.config.id);
+        Ok(())
     }
 
     /// Set the task handle
     pub async fn set_task_handle(&self, handle: tokio::task::JoinHandle<()>) {
-        let mut pending = AbortTaskOnDrop(Some(handle));
-        let mut installed = self.task_handle.write().await;
-        debug_assert!(installed.is_none(), "query processor handle was not reaped");
-        *installed = Some(pending.take());
+        *self.task_handle.write().await = Some(handle);
     }
 
     /// Set the shutdown sender

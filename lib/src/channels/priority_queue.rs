@@ -17,31 +17,25 @@ use log::{debug, trace};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
-/// Wrapper for priority queue events with stable timestamp-based ordering.
+/// Wrapper for priority queue events with timestamp-based ordering
 #[derive(Clone)]
 struct PriorityQueueEvent<T>
 where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     event: Arc<T>,
-    ordering_timestamp: chrono::DateTime<chrono::Utc>,
-    ordinal: u64,
 }
 
 impl<T> PriorityQueueEvent<T>
 where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
-    fn new(event: Arc<T>, ordering_timestamp: chrono::DateTime<chrono::Utc>, ordinal: u64) -> Self {
-        Self {
-            event,
-            ordering_timestamp,
-            ordinal,
-        }
+    fn new(event: Arc<T>) -> Self {
+        Self { event }
     }
 }
 
@@ -51,7 +45,7 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.ordering_timestamp == other.ordering_timestamp && self.ordinal == other.ordinal
+        self.event.timestamp() == other.event.timestamp()
     }
 }
 
@@ -71,12 +65,8 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse the lexicographic key for min-heap behavior. The ordinal
-        // keeps equal timestamps stable and makes this a total order.
-        other
-            .ordering_timestamp
-            .cmp(&self.ordering_timestamp)
-            .then_with(|| other.ordinal.cmp(&self.ordinal))
+        // Reverse ordering for min-heap behavior (oldest first)
+        other.event.timestamp().cmp(&self.event.timestamp())
     }
 }
 
@@ -131,10 +121,6 @@ impl Default for PriorityQueueMetrics {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("priority queue is closed")]
-pub(crate) struct PriorityQueueClosed;
-
 /// Thread-safe generic priority queue for ordering events by timestamp
 ///
 /// # Backpressure and Dispatch Modes
@@ -176,10 +162,6 @@ where
     notify: Arc<Notify>,
     /// Maximum queue capacity (for backpressure)
     max_capacity: usize,
-    /// Closed queues reject new events and wake blocked enqueuers.
-    closed: Arc<AtomicBool>,
-    /// Stable insertion order for events with the same ordering timestamp.
-    next_ordinal: Arc<AtomicU64>,
     /// Metrics (using atomic operations for lock-free updates)
     metrics: Arc<PriorityQueueMetrics>,
 }
@@ -194,8 +176,6 @@ where
             heap: Arc::new(Mutex::new(BinaryHeap::new())),
             notify: Arc::new(Notify::new()),
             max_capacity,
-            closed: Arc::new(AtomicBool::new(false)),
-            next_ordinal: Arc::new(AtomicU64::new(0)),
             metrics: Arc::new(PriorityQueueMetrics::default()),
         }
     }
@@ -203,22 +183,7 @@ where
     /// Enqueue an event into the priority queue
     /// Returns true if enqueued, false if queue is at capacity
     pub async fn enqueue(&self, event: Arc<T>) -> bool {
-        let ordering_timestamp = event.timestamp();
-        self.enqueue_with_ordering_timestamp(event, ordering_timestamp)
-            .await
-    }
-
-    /// Enqueue using an internal ordering timestamp without changing the event.
-    pub(crate) async fn enqueue_with_ordering_timestamp(
-        &self,
-        event: Arc<T>,
-        ordering_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> bool {
         let mut heap = self.heap.lock().await;
-
-        if self.closed.load(AtomicOrdering::Acquire) {
-            return false;
-        }
 
         // Check capacity
         if heap.len() >= self.max_capacity {
@@ -245,8 +210,7 @@ where
         }
 
         // Enqueue event
-        let ordinal = self.next_ordinal.fetch_add(1, AtomicOrdering::Relaxed);
-        heap.push(PriorityQueueEvent::new(event, ordering_timestamp, ordinal));
+        heap.push(PriorityQueueEvent::new(event));
 
         // Update metrics using atomic operations (lock-free)
         self.metrics
@@ -287,22 +251,6 @@ where
     /// WARNING: Do NOT use with Broadcast dispatch mode - will cause deadlock!
     /// In broadcast mode, use the non-blocking `enqueue()` method instead.
     pub async fn enqueue_wait(&self, event: Arc<T>) {
-        let ordering_timestamp = event.timestamp();
-        if self
-            .enqueue_wait_with_ordering_timestamp(event, ordering_timestamp)
-            .await
-            .is_err()
-        {
-            debug!("Priority queue closed while enqueue was waiting");
-        }
-    }
-
-    /// Enqueue with backpressure using an internal ordering timestamp.
-    pub(crate) async fn enqueue_wait_with_ordering_timestamp(
-        &self,
-        event: Arc<T>,
-        ordering_timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), PriorityQueueClosed> {
         loop {
             // Register notified future BEFORE acquiring lock to avoid race
             let notified = self.notify.notified();
@@ -310,15 +258,10 @@ where
 
             let mut heap = self.heap.lock().await;
 
-            if self.closed.load(AtomicOrdering::Acquire) {
-                return Err(PriorityQueueClosed);
-            }
-
             // Check if there's capacity
             if heap.len() < self.max_capacity {
                 // Space available - enqueue the event
-                let ordinal = self.next_ordinal.fetch_add(1, AtomicOrdering::Relaxed);
-                heap.push(PriorityQueueEvent::new(event, ordering_timestamp, ordinal));
+                heap.push(PriorityQueueEvent::new(event));
 
                 // Update metrics using atomic operations (lock-free)
                 self.metrics
@@ -348,7 +291,7 @@ where
                 // Notify waiting dequeuers
                 self.notify.notify_one();
 
-                return Ok(());
+                return;
             }
 
             // Queue is full - increment blocked count and wait
@@ -373,21 +316,6 @@ where
             // Wait for dequeue to create space
             notified.await;
         }
-    }
-
-    /// Close the queue and wake every producer blocked on capacity.
-    pub(crate) async fn close(&self) {
-        let heap = self.heap.lock().await;
-        self.closed.store(true, AtomicOrdering::Release);
-        drop(heap);
-        self.notify.notify_waiters();
-    }
-
-    /// Reopen a closed queue for a new producer generation.
-    pub(crate) async fn reopen(&self) {
-        let heap = self.heap.lock().await;
-        self.closed.store(false, AtomicOrdering::Release);
-        drop(heap);
     }
 
     /// Dequeue the oldest event from the priority queue (non-blocking)
@@ -490,8 +418,6 @@ where
         let events: Vec<Arc<T>> = heap.drain().map(|pq_event| pq_event.event).collect();
 
         self.metrics.current_depth.store(0, AtomicOrdering::Relaxed);
-        drop(heap);
-        self.notify.notify_waiters();
 
         debug!("Drained {} events from priority queue", events.len());
         events
@@ -507,8 +433,6 @@ where
             heap: Arc::clone(&self.heap),
             notify: Arc::clone(&self.notify),
             max_capacity: self.max_capacity,
-            closed: Arc::clone(&self.closed),
-            next_ordinal: Arc::clone(&self.next_ordinal),
             metrics: Arc::clone(&self.metrics),
         }
     }
@@ -562,22 +486,6 @@ mod tests {
 
         let dequeued3 = pq.try_dequeue().await.unwrap();
         assert_eq!(dequeued3.id, "event3"); // Newest
-    }
-
-    #[tokio::test]
-    async fn test_equal_timestamps_preserve_enqueue_order() {
-        let pq = PriorityQueue::new(100);
-        let timestamp = Utc::now();
-
-        for id in ["event1", "event2", "event3", "event4", "event5", "event6", "event7", "event8"] {
-            assert!(pq.enqueue(create_test_event(id, timestamp)).await);
-        }
-
-        for expected in
-            ["event1", "event2", "event3", "event4", "event5", "event6", "event7", "event8"]
-        {
-            assert_eq!(pq.try_dequeue().await.unwrap().id, expected);
-        }
     }
 
     #[tokio::test]
@@ -718,43 +626,6 @@ mod tests {
 
         assert!(result.is_ok(), "enqueue_wait should have been notified");
         assert_eq!(pq.depth().await, 1);
-    }
-
-    #[tokio::test]
-    async fn test_close_cancels_blocked_enqueue_and_reopen_accepts_new_events() {
-        let pq = PriorityQueue::new(1);
-        let timestamp = Utc::now();
-        pq.enqueue_wait(create_test_event("event1", timestamp))
-            .await;
-
-        let blocked_queue = pq.clone();
-        let blocked = tokio::spawn(async move {
-            blocked_queue
-                .enqueue_wait_with_ordering_timestamp(
-                    create_test_event("event2", timestamp),
-                    timestamp,
-                )
-                .await
-        });
-        while pq.metrics().await.blocked_enqueue_count == 0 {
-            tokio::task::yield_now().await;
-        }
-
-        pq.close().await;
-        let result = tokio::time::timeout(tokio::time::Duration::from_secs(1), blocked)
-            .await
-            .expect("closed queue did not wake blocked enqueue")
-            .expect("blocked enqueue task panicked");
-        assert_eq!(result, Err(PriorityQueueClosed));
-        assert_eq!(pq.depth().await, 1);
-
-        pq.drain().await;
-        pq.reopen().await;
-        assert!(
-            pq.enqueue(create_test_event("event3", timestamp)).await,
-            "reopened queue should accept new events"
-        );
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "event3");
     }
 
     #[tokio::test]

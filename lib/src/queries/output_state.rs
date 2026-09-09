@@ -51,7 +51,8 @@ pub const DEFAULT_OUTBOX_CAPACITY: usize = 1000;
 /// acquire a read lock and clone the `im::HashMap` in O(1) via structural sharing.
 ///
 /// All fields are private to enforce invariants (sequence monotonicity, ring buffer
-/// bounds). Use accessor methods for read access and the mutation helpers below.
+/// bounds). Use accessor methods for read access and `apply_diffs` /
+/// `advance_sequence_and_push` for mutations.
 #[derive(Debug, Clone)]
 pub struct QueryOutputState {
     /// Live result set, keyed by `row_signature` for O(1) updates.
@@ -66,13 +67,6 @@ pub struct QueryOutputState {
     outbox: VecDeque<Arc<QueryResult>>,
     /// Maximum number of entries retained in the outbox.
     outbox_capacity: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("prepared query result sequence {prepared} does not match expected sequence {expected}")]
-pub(crate) struct PreparedSequenceMismatch {
-    pub(crate) expected: u64,
-    pub(crate) prepared: u64,
 }
 
 impl QueryOutputState {
@@ -148,116 +142,6 @@ impl QueryOutputState {
         self.outbox.push_back(arc_result.clone());
 
         arc_result
-    }
-
-    /// Return the sequence that the next emitted result will receive.
-    pub(crate) const fn next_sequence(&self) -> u64 {
-        self.as_of_sequence.saturating_add(1)
-    }
-
-    /// Replace the process-local projection with a verified durable snapshot.
-    ///
-    /// Callers must validate the sequence, outbox, and live-result bundle before
-    /// invoking this method. The in-memory outbox retains the newest entries when
-    /// the configured capacity is lower than the durable history.
-    pub(crate) fn hydrate(
-        &mut self,
-        results: im::HashMap<u64, serde_json::Value>,
-        as_of_sequence: u64,
-        mut outbox: Vec<Arc<QueryResult>>,
-    ) {
-        if outbox.len() > self.outbox_capacity {
-            outbox.drain(..outbox.len() - self.outbox_capacity);
-        }
-
-        self.results = results;
-        self.as_of_sequence = as_of_sequence;
-        self.outbox = outbox.into();
-    }
-
-    /// Reset all process-local output state after persistent state is cleared.
-    pub(crate) fn reset(&mut self) {
-        self.reset_to_sequence(0);
-    }
-
-    /// Clear the result projection and outbox while preserving a monotonic
-    /// public output high-water across a destructive reset.
-    pub(crate) fn reset_to_sequence(&mut self, as_of_sequence: u64) {
-        self.results.clear();
-        self.as_of_sequence = as_of_sequence;
-        self.outbox.clear();
-    }
-
-    /// Clear only the current row projection before rebuilding it from bootstrap.
-    ///
-    /// Volatile stop/start reuses this `QueryOutputState`, so its sequence and
-    /// outbox remain the reaction recovery timeline across re-bootstrap.
-    pub(crate) fn clear_results(&mut self) {
-        self.results.clear();
-    }
-
-    /// Apply a result prepared for the current next sequence.
-    ///
-    /// Returns `None` when another writer advanced the state while the result was
-    /// being prepared, allowing the caller to rebuild it with a fresh sequence
-    /// without mutating state or creating a gap.
-    pub(crate) fn try_apply_prepared_result(
-        &mut self,
-        result: QueryResult,
-    ) -> Option<Arc<QueryResult>> {
-        self.try_apply_prepared_arc(Arc::new(result))
-    }
-
-    pub(crate) fn try_apply_prepared_arc(
-        &mut self,
-        result: Arc<QueryResult>,
-    ) -> Option<Arc<QueryResult>> {
-        let expected_sequence = self.next_sequence();
-        if result.sequence != expected_sequence {
-            return None;
-        }
-
-        self.apply_diffs(&result.results);
-        self.as_of_sequence = result.sequence;
-        if self.outbox.len() >= self.outbox_capacity {
-            self.outbox.pop_front();
-        }
-        self.outbox.push_back(result.clone());
-        Some(result)
-    }
-
-    /// Apply a result prepared by the query host's sole output writer.
-    ///
-    /// Atomic processing has already committed the prepared sequence durably, so a
-    /// stale sequence is a recoverable fatal invariant violation rather than a
-    /// reason to rebuild the result under a different sequence.
-    pub(crate) fn apply_committed_result(
-        &mut self,
-        result: QueryResult,
-    ) -> Result<Arc<QueryResult>, PreparedSequenceMismatch> {
-        self.apply_committed_arc(Arc::new(result))
-    }
-
-    /// Apply the exact result allocation that was serialized into durable output.
-    pub(crate) fn apply_committed_arc(
-        &mut self,
-        result: Arc<QueryResult>,
-    ) -> Result<Arc<QueryResult>, PreparedSequenceMismatch> {
-        let expected = self.next_sequence();
-        if result.sequence != expected {
-            return Err(PreparedSequenceMismatch {
-                expected,
-                prepared: result.sequence,
-            });
-        }
-
-        self.apply_diffs(&result.results);
-        self.as_of_sequence = result.sequence;
-        if self.outbox.len() >= self.outbox_capacity {
-            self.outbox.pop_front();
-        }
-        self.outbox.push_back(result.clone());
-        Ok(result)
     }
 
     /// Return the live result set as a `Vec` for backward compatibility with `get_current_results`.
@@ -746,125 +630,6 @@ mod tests {
         let arc = state.advance_sequence_and_push(result);
         assert_eq!(arc.sequence, 2);
         assert_eq!(state.outbox.len(), 2);
-    }
-
-    #[test]
-    fn clear_results_preserves_sequence_and_outbox_history() {
-        let mut state = QueryOutputState::new(4);
-        state.apply_diffs(&[ResultDiff::Add {
-            data: serde_json::json!({"name": "bootstrap"}),
-            row_signature: 1,
-        }]);
-        state.advance_sequence_and_push(make_query_result(
-            "q1",
-            vec![ResultDiff::Add {
-                data: serde_json::json!({"name": "live"}),
-                row_signature: 2,
-            }],
-        ));
-
-        state.clear_results();
-
-        assert_eq!(state.results_len(), 0);
-        assert_eq!(state.as_of_sequence(), 1);
-        assert_eq!(state.outbox_len(), 1);
-        assert_eq!(
-            state
-                .fetch_outbox_after(0)
-                .expect("preserved outbox")
-                .first()
-                .expect("preserved result")
-                .sequence,
-            1
-        );
-    }
-
-    #[test]
-    fn test_prepared_result_retries_after_sequence_changes() {
-        let mut state = QueryOutputState::new(3);
-        let mut stale = make_query_result(
-            "q1",
-            vec![ResultDiff::Add {
-                data: serde_json::json!({"name": "stale"}),
-                row_signature: 1,
-            }],
-        );
-        stale.sequence = state.next_sequence();
-
-        let mut winner = make_query_result(
-            "q1",
-            vec![ResultDiff::Add {
-                data: serde_json::json!({"name": "winner"}),
-                row_signature: 2,
-            }],
-        );
-        winner.sequence = state.next_sequence();
-        state.try_apply_prepared_result(winner).unwrap();
-
-        assert!(state.try_apply_prepared_result(stale).is_none());
-        assert_eq!(state.as_of_sequence(), 1);
-        assert_eq!(state.results_len(), 1);
-        assert_eq!(state.get_result(&1), None);
-        assert_eq!(
-            state.get_result(&2),
-            Some(&serde_json::json!({"name": "winner"}))
-        );
-
-        let mut retried = make_query_result(
-            "q1",
-            vec![ResultDiff::Add {
-                data: serde_json::json!({"name": "stale"}),
-                row_signature: 1,
-            }],
-        );
-        retried.sequence = state.next_sequence();
-        let retried = state.try_apply_prepared_result(retried).unwrap();
-        assert_eq!(retried.sequence, 2);
-        assert_eq!(state.as_of_sequence(), 2);
-        assert_eq!(
-            state.get_result(&1),
-            Some(&serde_json::json!({"name": "stale"}))
-        );
-    }
-
-    #[test]
-    fn test_prepared_result_preserves_saturating_sequence_behavior() {
-        let mut state = QueryOutputState::new(3);
-        state.as_of_sequence = u64::MAX;
-
-        let mut result = make_query_result(
-            "q1",
-            vec![ResultDiff::Add {
-                data: serde_json::json!({"name": "max"}),
-                row_signature: 1,
-            }],
-        );
-        result.sequence = state.next_sequence();
-
-        let applied = state.try_apply_prepared_result(result).unwrap();
-        assert_eq!(applied.sequence, u64::MAX);
-        assert_eq!(state.as_of_sequence(), u64::MAX);
-        assert_eq!(state.outbox.back().unwrap().sequence, u64::MAX);
-    }
-
-    #[test]
-    fn test_committed_result_preserves_saturating_sequence_behavior() {
-        let mut state = QueryOutputState::new(3);
-        state.as_of_sequence = u64::MAX;
-
-        let mut result = make_query_result(
-            "q1",
-            vec![ResultDiff::Add {
-                data: serde_json::json!({"name": "max"}),
-                row_signature: 1,
-            }],
-        );
-        result.sequence = state.next_sequence();
-
-        let applied = state.apply_committed_result(result).unwrap();
-        assert_eq!(applied.sequence, u64::MAX);
-        assert_eq!(state.as_of_sequence(), u64::MAX);
-        assert_eq!(state.outbox.back().unwrap().sequence, u64::MAX);
     }
 
     #[test]

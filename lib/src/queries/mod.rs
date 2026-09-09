@@ -18,7 +18,6 @@ pub mod label_extractor;
 pub mod manager;
 pub mod output_state;
 pub mod priority_queue;
-mod query_composite_host;
 pub mod sequence_dedup;
 pub mod subscription_builder;
 
@@ -33,9 +32,6 @@ mod checkpoint_tests;
 
 #[cfg(test)]
 mod e2e_checkpoint_tests;
-
-#[cfg(test)]
-mod atomic_lifecycle_tests;
 
 pub use base::QueryBase;
 pub use config_hash::compute_config_hash;

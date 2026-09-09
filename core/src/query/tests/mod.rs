@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod result_hook_tests;
 mod row_signature_tests;
 
 use std::sync::Arc;
