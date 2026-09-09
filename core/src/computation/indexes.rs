@@ -172,3 +172,40 @@ pub trait ComputationResourceCleanup: Send + Sync {
         Err(IndexError::NotSupported)
     }
 }
+
+/// Explicit volatile provider for the parallel graph; no durable/atomic claim.
+#[derive(Default)]
+pub struct InMemoryComputationProvider;
+
+#[async_trait]
+impl ComputationIndexProvider for InMemoryComputationProvider {
+    async fn create_indexes(
+        &self,
+        _graph_id: &str,
+        _query_id: &str,
+    ) -> std::result::Result<ComputationIndexes, IndexError> {
+        use crate::in_memory_index::{
+            in_memory_element_index::InMemoryElementIndex,
+            in_memory_future_queue::InMemoryFutureQueue,
+            in_memory_result_index::InMemoryResultIndex,
+        };
+        let elements = Arc::new(InMemoryElementIndex::new());
+        ComputationIndexes::try_new(
+            IndexSet {
+                element_index: elements.clone(),
+                archive_index: elements,
+                result_index: Arc::new(InMemoryResultIndex::new()),
+                future_queue: Arc::new(InMemoryFutureQueue::new()),
+                session_control: Arc::new(crate::interface::NoOpSessionControl),
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(IndexError::other)
+    }
+    fn is_volatile(&self) -> bool {
+        true
+    }
+}

@@ -13,4 +13,5 @@
 // limitations under the License.
 
 pub(crate) mod change;
+pub(crate) mod query_state;
 pub(crate) mod typed_change;

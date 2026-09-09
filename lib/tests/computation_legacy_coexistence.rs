@@ -102,8 +102,9 @@ impl Source for InjectableSource {
     }
 }
 
+#[derive(Clone)]
 struct CapturingReaction {
-    base: ReactionBase,
+    base: Arc<ReactionBase>,
     results: mpsc::Sender<QueryResult>,
     loop_stops: Arc<AtomicUsize>,
 }
@@ -320,6 +321,14 @@ async fn assert_coexistence(instance_id: &str) {
     let source = InjectableSource {
         base: injector.clone(),
     };
+    let reaction = CapturingReaction {
+        base: Arc::new(ReactionBase::new(ReactionBaseParams::new(
+            LEGACY_REACTION,
+            vec![LEGACY_QUERY.to_string()],
+        ))),
+        results: results_tx,
+        loop_stops: legacy_loop_stops.clone(),
+    };
     let drasi = DrasiLib::builder()
         .with_id(instance_id)
         .with_source(source.clone())
@@ -331,14 +340,7 @@ async fn assert_coexistence(instance_id: &str) {
                 .auto_start(true)
                 .build(),
         )
-        .with_reaction(CapturingReaction {
-            base: ReactionBase::new(ReactionBaseParams::new(
-                LEGACY_REACTION,
-                vec![LEGACY_QUERY.to_string()],
-            )),
-            results: results_tx,
-            loop_stops: legacy_loop_stops.clone(),
-        })
+        .with_reaction(reaction.clone())
         .build()
         .await
         .expect("build legacy pipeline");
@@ -512,7 +514,7 @@ async fn assert_coexistence(instance_id: &str) {
                 source_resource,
                 ResourceHandle::new(
                     ResourceRole::LegacySource,
-                    Arc::new(LegacySourceResource::borrowed(Arc::new(source))),
+                    Arc::new(LegacySourceResource::borrowed(Arc::new(source.clone()))),
                 ),
             )
             .expect("borrow actual running source")
@@ -573,6 +575,123 @@ async fn assert_coexistence(instance_id: &str) {
         inject_and_assert_result(&injector, &mut results_rx, "after-wrapper", 5000).await;
         assert_legacy_running(&drasi).await;
         assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 0);
+    }
+    {
+        use drasi_lib::computation::v1::{
+            ComputationQueryLanguage, ContinuousQueryDefinition, ContinuousQueryTransformer,
+            LegacyReactionSink, LegacySourceAdapter, LegacySourceResource,
+        };
+        let wrapped = LegacySourceAdapter::bind(
+            "native-query-graph",
+            ComponentId::try_new("native-source").expect("id"),
+            StreamId::try_new("native-source/out").expect("stream"),
+            Arc::new(LegacySourceResource::borrowed(Arc::new(source))),
+        )
+        .await
+        .expect("borrow source without lifecycle mutation");
+        let native_query = ContinuousQueryTransformer::new(
+            ContinuousQueryDefinition {
+                graph_id: "native-query-graph".into(),
+                id: ComponentId::try_new("native-query").expect("id"),
+                query: "MATCH (i:Item) RETURN i.name AS name".into(),
+                language: ComputationQueryLanguage::Cypher,
+                output_stream: StreamId::try_new("native-query/out").expect("stream"),
+                outbox_capacity: std::num::NonZeroUsize::new(8).expect("capacity"),
+            },
+            Arc::new(drasi_core::computation::InMemoryComputationProvider),
+        )
+        .await
+        .expect("construct new graph-owned CQ");
+        let native_reaction = LegacyReactionSink::borrowed(
+            ComponentId::try_new("native-reaction").expect("id"),
+            Arc::new(reaction),
+        );
+        assert_eq!(native_reaction.completion(), SinkCompletion::Accepted);
+        let endpoint = |node: &str, port: &str| {
+            Endpoint::new(
+                ComponentId::try_new(node).expect("id"),
+                PortId::try_new(port).expect("port"),
+            )
+        };
+        let mut native = ComputationGraph::builder("native-query-graph")
+            .source(Box::new(wrapped))
+            .query(Box::new(native_query))
+            .sink(Box::new(native_reaction))
+            .bind_stream(
+                endpoint("native-source", "out"),
+                StreamId::try_new("native-source/out").expect("stream"),
+            )
+            .bind_stream(
+                endpoint("native-query", "out"),
+                StreamId::try_new("native-query/out").expect("stream"),
+            )
+            .connect(
+                EdgeDefinition::new(
+                    endpoint("native-source", "out"),
+                    endpoint("native-query", "in"),
+                ),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .connect(
+                EdgeDefinition::new(
+                    endpoint("native-query", "out"),
+                    endpoint("native-reaction", "in"),
+                ),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .build()
+            .expect("wrapped Source -> native CQ -> borrowed real ReactionBase");
+        let run = native.start().expect("native scope");
+        let control = run.control();
+        let (outcome, ()) = tokio::join!(run, async {
+            control.startup_report().await.expect("native startup");
+            injector
+                .dispatch_source_change(SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(LEGACY_SOURCE, "native-query"),
+                            labels: Arc::from([Arc::from("Item")]),
+                            effective_from: 6000,
+                        },
+                        properties: ElementPropertyMap::from(
+                            serde_json::json!({ "name": "native-query" }),
+                        ),
+                    },
+                })
+                .await
+                .expect("same real source feeds both query runtimes");
+            let mut results = vec![
+                results_rx.recv().await.expect("first pipeline result"),
+                results_rx.recv().await.expect("second pipeline result"),
+            ];
+            results.sort_by(|left, right| left.query_id.cmp(&right.query_id));
+            assert_eq!(
+                results
+                    .iter()
+                    .map(|result| result.query_id.as_str())
+                    .collect::<Vec<_>>(),
+                [LEGACY_QUERY, "native-query"]
+            );
+            for result in results {
+                assert!(
+                    matches!(&result.results[0], ResultDiff::Add { data, .. } if data["name"] == "native-query")
+                );
+            }
+            assert_legacy_running(&drasi).await;
+            control.cancel();
+        });
+        assert!(matches!(outcome, Err(GraphError::Cancelled)));
+        native
+            .dispose()
+            .await
+            .expect("dispose only new graph resources");
+        assert_eq!(
+            legacy_loop_stops.load(Ordering::SeqCst),
+            0,
+            "borrowed reaction was not stopped"
+        );
+        inject_and_assert_result(&injector, &mut results_rx, "after-native-query", 7000).await;
+        assert_legacy_running(&drasi).await;
     }
     drasi.stop().await.expect("stop legacy pipeline");
     assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 1);

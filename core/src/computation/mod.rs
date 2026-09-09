@@ -28,6 +28,7 @@ mod transaction;
 pub use crate::query::computation_exports::ComputationQuery;
 pub use indexes::{
     ComputationIndexProvider, ComputationIndexes, ComputationResource, ComputationResourceCleanup,
+    InMemoryComputationProvider,
 };
 pub use transaction::{AtomicResultTransaction, TransactionDomain};
 

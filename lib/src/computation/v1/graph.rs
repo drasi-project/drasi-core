@@ -1055,7 +1055,13 @@ async fn run_node(
     }
     let mut receivers: FuturesUnordered<_> = inputs.iter_mut().map(receive).collect();
     let mut ready = Vec::new();
-    loop {
+    let wakeup = match &*component {
+        Component::Transformer(transformer) | Component::Query(transformer) => {
+            transformer.wakeup_source()
+        }
+        _ => None,
+    };
+    'processing: loop {
         let mut acknowledgement = None;
         let emissions = match component {
             Component::Source(source) => {
@@ -1071,9 +1077,50 @@ async fn run_node(
                     }
                 }
             }
-            _ => {
+            _ => 'input_work: {
                 if ready.is_empty() {
-                    let Some((incoming, delivery)) = receivers.next().await else {
+                    let mut scheduled = false;
+                    let incoming = if let Some(wakeup) = &wakeup {
+                        if receivers.is_empty() {
+                            if !wakeup
+                                .has_pending()
+                                .await
+                                .map_err(|source| component_error(node, "scheduled work", source))?
+                            {
+                                return Ok(());
+                            }
+                            wakeup.wait().await.map_err(|source| {
+                                component_error(node, "scheduled wait", source)
+                            })?;
+                            scheduled = true;
+                            None
+                        } else {
+                            tokio::select! {
+                                result = wakeup.wait() => {
+                                    result.map_err(|source| component_error(node, "scheduled wait", source))?;
+                                    scheduled = true;
+                                    None
+                                }
+                                incoming = receivers.next() => incoming,
+                            }
+                        }
+                    } else {
+                        receivers.next().await
+                    };
+                    if scheduled {
+                        match component {
+                            Component::Transformer(transformer) | Component::Query(transformer) => {
+                                break 'input_work transformer.on_wakeup().await.map_err(
+                                    |source| component_error(node, "scheduled processing", source),
+                                )?;
+                            }
+                            _ => return Err(topology("non-transformer received scheduled work")),
+                        }
+                    }
+                    let Some((incoming, delivery)) = incoming else {
+                        if wakeup.is_some() {
+                            continue 'processing;
+                        }
                         return Ok(());
                     };
                     let delivery = delivery.map_err(|source| GraphError::Pipe {
@@ -1081,7 +1128,7 @@ async fn run_node(
                         source,
                     })?;
                     let Some(delivery) = delivery else {
-                        continue;
+                        continue 'processing;
                     };
                     ready.push((incoming, delivery));
                 }

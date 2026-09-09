@@ -105,6 +105,23 @@ For a durable commit error, inspect `SendFailure::acceptance()` before deciding
 what to retry: `Unknown` is not definite rejection. Explicit event-time input
 merging compares available stream heads without reordering any producer's stream.
 
+**Graph-owned queries and legacy boundaries:** `ContinuousQueryFactory` constructs
+a Cypher or GQL transformer using an explicit `QueryIndexProviderResource`.
+`ContinuousQueryTransformer` also supports programmatic construction and exposes
+typed snapshot/retained-history readers. Query evaluation, scheduled future work,
+source checkpoints and output publication belong to the new graph; no legacy
+query manager is used. Complete persistent bundles stage index/checkpoint/sequence/
+outbox/live-row changes together, and startup reconciles those records before
+accepting more input. Failed processing is fenced until cleanup/recovery.
+
+`LegacySourceFactory` adapts compatible isolated Channel subscriptions while
+preserving raw source sequence/cursor/time/profiling/schema separately from its
+own producer sequence. Borrowed sources are never initialized/stopped/deprovisioned;
+owned sources require a fresh transferred instance and registered cleanup owner.
+The basic adapter does not implicitly inject identity/state/WAL/bootstrap services.
+`LegacyReactionFactory` borrows an already-managed Reaction and only enqueues
+normal `QueryResult` values, declaring `Accepted`, never `Handled`.
+
 **Lifecycle:** `let run = graph.start()?; run.await?;` drives a caller-owned future.
 Every eligible created component is attempted; data relationships are
 activation-independent unless explicitly configured otherwise. A failed Source
@@ -134,8 +151,8 @@ shared deadline; failed/timed-out hooks remain visibly incomplete. Dropping a gr
 cannot await cleanup for resources a component itself spawned.
 
 This is an incremental parallel in-process runtime, not the entire composable framework.
-Legacy adapters, server configuration, and a new plugin ABI are not supplied by
-these pipe profiles. Enabling computation does not migrate or change existing Sources, Queries,
+Server configuration and a new plugin ABI are not supplied by
+these components. Enabling computation does not migrate or change existing Sources, Queries,
 Reactions, or `DrasiLib`. Immutable topology snapshots contain no live provider handles
 or resolved secrets. Future legacy codecs must preserve typed values; internal
 canonical identity bytes are not a proven reversible wire codec.

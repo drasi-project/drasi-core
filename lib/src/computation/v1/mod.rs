@@ -36,8 +36,9 @@
 //! Records/envelopes do not implement automatic serialization. [`EnvelopeCodec`]
 //! explicitly encodes versioned computation storage and validates registered
 //! schemas when decoding. Record payload encoding is schema-specific, not a
-//! legacy Drasi wire standard. Legacy adapters and SDK/ABI integration are separate
-//! work; canonical identity bytes are not used as a reversible codec.
+//! legacy Drasi wire standard. [`GraphChangeCodec`] and [`QueryChangeCodec`] preserve
+//! typed graph/query boundaries, while explicit source/reaction adapters retain
+//! legacy APIs. SDK/ABI integration is separate work.
 //!
 //! ```
 //! use drasi_lib::computation::v1::{
@@ -125,8 +126,9 @@
 //! may discard volatile queued/in-flight events. [`RetainedPipe`] preserves
 //! unacknowledged stored work; durable providers distinguish uncertain commit
 //! outcomes rather than claiming definite rejection. Generic cross-component
-//! transactions, exactly-once external effects, and legacy adapters are not
-//! inferred from these profiles.
+//! transactions and exactly-once external effects are not inferred from these
+//! profiles. [`ContinuousQueryTransformer`] owns query evaluation/publication and
+//! scheduled work; [`LegacyReactionSink`] remains acceptance-only.
 
 mod bounded_pipe;
 mod broadcast_pipe;
@@ -137,11 +139,13 @@ mod envelope;
 mod error;
 mod graph;
 mod graph_codec;
+mod legacy_reaction;
 mod legacy_source;
 mod lifecycle;
 mod pipe;
 mod pipe_metrics;
 mod ports;
+mod query;
 mod query_codec;
 mod retained_pipe;
 mod retained_store;
@@ -155,11 +159,13 @@ pub use envelope::*;
 pub use error::{ContractError, Result};
 pub use graph::*;
 pub use graph_codec::*;
+pub use legacy_reaction::*;
 pub use legacy_source::*;
 pub use lifecycle::*;
 pub use pipe::*;
 pub use pipe_metrics::PipeMetricsSnapshot;
 pub use ports::*;
+pub use query::*;
 pub use query_codec::*;
 pub use retained_pipe::*;
 pub use retained_store::*;

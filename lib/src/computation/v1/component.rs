@@ -16,6 +16,12 @@ use async_trait::async_trait;
 
 use super::{ChangeEnvelope, ComponentDescriptor, PortId};
 
+#[async_trait]
+pub trait WakeupSource: Send + Sync {
+    async fn wait(&self) -> anyhow::Result<()>;
+    async fn has_pending(&self) -> anyhow::Result<bool>;
+}
+
 /// Fixed meaning of a sink's successful handle call. This is an instance-level
 /// declaration, never a per-call downgrade or a consequence of pipe capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +77,12 @@ pub trait EnvelopeSource: ComputationComponent {
 /// A stateful transformer with declared input and output ports.
 #[async_trait]
 pub trait Transformer: ComputationComponent {
+    fn wakeup_source(&self) -> Option<std::sync::Arc<dyn WakeupSource>> {
+        None
+    }
+    async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        anyhow::bail!("this transformer does not implement scheduled processing")
+    }
     /// Produce zero, one, or many ordered emissions. Use ChangeEnvelope::derive to
     /// preserve input context and lineage, with this producer's output sequence.
     ///
