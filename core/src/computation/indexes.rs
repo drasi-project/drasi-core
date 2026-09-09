@@ -167,4 +167,8 @@ pub trait ComputationIndexProvider: Send + Sync {
 pub trait ComputationResourceCleanup: Send + Sync {
     fn cancel(&self);
     async fn shutdown(&self) -> std::result::Result<(), IndexError>;
+    /// Await already submitted work without sealing a healthy resource scope.
+    async fn quiesce(&self) -> std::result::Result<(), IndexError> {
+        Err(IndexError::NotSupported)
+    }
 }

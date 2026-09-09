@@ -141,13 +141,22 @@ impl BlockingScope {
 
     pub(super) async fn shutdown(&self) -> Result<(), IndexError> {
         self.cancel();
+        self.quiesce().await
+    }
+
+    pub(super) async fn quiesce(&self) -> Result<(), IndexError> {
         let _shutdown = self.shutdown_lock.lock().await;
-        let jobs = std::mem::take(&mut self.lock()?.jobs);
-        let mut pass = CleanupPass { scope: self, jobs };
-        while let Some(job) = pass.jobs.last_mut() {
-            let result = job.await;
-            drop(pass.jobs.pop());
-            self.lock()?.record(result);
+        loop {
+            let jobs = std::mem::take(&mut self.lock()?.jobs);
+            if jobs.is_empty() {
+                break;
+            }
+            let mut pass = CleanupPass { scope: self, jobs };
+            while let Some(job) = pass.jobs.last_mut() {
+                let result = job.await;
+                drop(pass.jobs.pop());
+                self.lock()?.record(result);
+            }
         }
         let failures = std::mem::take(&mut self.lock()?.failures);
         if failures.is_empty() {

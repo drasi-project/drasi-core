@@ -33,8 +33,14 @@ pub use transaction::{AtomicResultTransaction, TransactionDomain};
 
 use crate::{
     evaluation::EvaluationError,
-    interface::{IndexError, QueryBuilderError},
+    interface::{FutureElementRef, IndexError, QueryBuilderError},
 };
+
+pub struct ComputationFutureResult {
+    pub results: Vec<crate::evaluation::context::QueryPartEvaluationContext>,
+    pub source_id: std::sync::Arc<str>,
+    pub future: FutureElementRef,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ComputationQueryError {

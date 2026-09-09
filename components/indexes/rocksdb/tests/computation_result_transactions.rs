@@ -759,3 +759,43 @@ async fn cancelled_commit_requires_recovery_without_falsely_claiming_output_roll
         [(1, b"output".to_vec())]
     );
 }
+
+#[tokio::test]
+async fn healthy_query_quiescence_retains_resources_and_batches_share_one_commit() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let fixture = fixture(
+        temp.path(),
+        "batch-quiescence",
+        "MATCH (n:Person) RETURN n.name AS name",
+    )
+    .await;
+    let results = fixture
+        .query
+        .process_source_changes_with_result_hook(
+            vec![person("alice"), person("bob")],
+            &fixture.transaction,
+            |results| {
+                let fixture = &fixture;
+                async move {
+                    assert_eq!(results.len(), 2);
+                    stage(fixture, 1, results[0].row_signature()).await
+                }
+            },
+        )
+        .await
+        .expect("single batch commit");
+    assert_eq!(results.len(), 2);
+    fixture
+        .query
+        .quiesce()
+        .await
+        .expect("await healthy provider work without sealing");
+    assert!(!fixture.query.recovery_required());
+    let next = fixture
+        .query
+        .process_source_change(person("charlie"))
+        .await
+        .expect("same healthy instance resumes");
+    assert_eq!(next.len(), 1);
+    fixture.query.shutdown().await.expect("final cleanup");
+}

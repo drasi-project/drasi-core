@@ -22,8 +22,8 @@ use std::{
 
 use crate::{
     computation::{
-        AtomicResultTransaction, ComputationIndexes, ComputationQueryError,
-        ComputationResourceCleanup, Result,
+        AtomicResultTransaction, ComputationFutureResult, ComputationIndexes,
+        ComputationQueryError, ComputationResourceCleanup, Result,
     },
     evaluation::{context::QueryPartEvaluationContext, EvaluationError},
     interface::{FutureQueue, IndexError, SessionControl},
@@ -31,7 +31,7 @@ use crate::{
     query::QueryBuilder,
 };
 
-use super::{ContinuousQuery, DueFutureResult};
+use super::ContinuousQuery;
 
 /// Query-local execution for the parallel graph, using the unchanged evaluator.
 ///
@@ -122,6 +122,24 @@ impl ComputationQuery {
         Ok(())
     }
 
+    pub async fn quiesce(&self) -> Result<()> {
+        let _lock = self
+            .inner
+            .change_lock
+            .try_lock()
+            .map_err(|_| ComputationQueryError::OperationInProgress)?;
+        if self.recovery_required() {
+            return Err(ComputationQueryError::RecoveryRequired);
+        }
+        if let Some(cleanup) = self.resources.cleanup() {
+            if let Err(error) = cleanup.quiesce().await {
+                self.recovery_required.store(true, Ordering::Release);
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
     async fn in_operation<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
         let _lock = self.inner.change_lock.lock().await;
         if self.recovery_required() {
@@ -175,11 +193,22 @@ impl ComputationQuery {
         &self,
         change: SourceChange,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
-        let changes = self
-            .inner
-            .execute_source_middleware(change)
-            .await
-            .map_err(EvaluationError::from)?;
+        self.evaluate_source_changes(vec![change]).await
+    }
+
+    async fn evaluate_source_changes(
+        &self,
+        input: Vec<SourceChange>,
+    ) -> Result<Vec<QueryPartEvaluationContext>> {
+        let mut changes = Vec::new();
+        for change in input {
+            changes.extend(
+                self.inner
+                    .execute_source_middleware(change)
+                    .await
+                    .map_err(EvaluationError::from)?,
+            );
+        }
         Ok(self.inner.process_changes_inner(changes).await?)
     }
 
@@ -201,9 +230,22 @@ impl ComputationQuery {
         F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
+        self.process_source_changes_with_non_atomic_result_hook(vec![change], pre_commit_hook)
+            .await
+    }
+
+    pub async fn process_source_changes_with_non_atomic_result_hook<F, Fut>(
+        &self,
+        changes: Vec<SourceChange>,
+        pre_commit_hook: F,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>>
+    where
+        F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
+        Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
+    {
         self.in_operation(async {
             let results: Arc<[QueryPartEvaluationContext]> =
-                self.evaluate_source_change(change).await?.into();
+                self.evaluate_source_changes(changes).await?.into();
             pre_commit_hook(results.clone()).await?;
             Ok(results)
         })
@@ -222,12 +264,26 @@ impl ComputationQuery {
         F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
-        self.validate_transaction(transaction)?;
-        self.process_source_change_with_non_atomic_result_hook(change, pre_commit_hook)
+        self.process_source_changes_with_result_hook(vec![change], transaction, pre_commit_hook)
             .await
     }
 
-    pub async fn process_due_futures(&self) -> Result<Option<Arc<DueFutureResult>>> {
+    pub async fn process_source_changes_with_result_hook<F, Fut>(
+        &self,
+        changes: Vec<SourceChange>,
+        transaction: &AtomicResultTransaction,
+        pre_commit_hook: F,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>>
+    where
+        F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
+        Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
+    {
+        self.validate_transaction(transaction)?;
+        self.process_source_changes_with_non_atomic_result_hook(changes, pre_commit_hook)
+            .await
+    }
+
+    pub async fn process_due_futures(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
         self.process_due_futures_with_non_atomic_result_hook(|_| async { Ok(()) })
             .await
     }
@@ -237,9 +293,9 @@ impl ComputationQuery {
     pub async fn process_due_futures_with_non_atomic_result_hook<F, Fut>(
         &self,
         pre_commit_hook: F,
-    ) -> Result<Option<Arc<DueFutureResult>>>
+    ) -> Result<Option<Arc<ComputationFutureResult>>>
     where
-        F: FnOnce(Arc<DueFutureResult>) -> Fut + Send,
+        F: FnOnce(Arc<ComputationFutureResult>) -> Fut + Send,
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
         self.in_operation(async {
@@ -247,11 +303,14 @@ impl ComputationQuery {
                 return Ok(None);
             };
             let source_id = future_ref.element_ref.source_id.clone();
-            let results = Arc::new(DueFutureResult {
+            let results = Arc::new(ComputationFutureResult {
                 results: self
-                    .evaluate_source_change(SourceChange::Future { future_ref })
+                    .evaluate_source_change(SourceChange::Future {
+                        future_ref: future_ref.clone(),
+                    })
                     .await?,
                 source_id,
+                future: future_ref,
             });
             pre_commit_hook(results.clone()).await?;
             Ok(Some(results))
@@ -263,9 +322,9 @@ impl ComputationQuery {
         &self,
         transaction: &AtomicResultTransaction,
         pre_commit_hook: F,
-    ) -> Result<Option<Arc<DueFutureResult>>>
+    ) -> Result<Option<Arc<ComputationFutureResult>>>
     where
-        F: FnOnce(Arc<DueFutureResult>) -> Fut + Send,
+        F: FnOnce(Arc<ComputationFutureResult>) -> Fut + Send,
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
         self.validate_transaction(transaction)?;

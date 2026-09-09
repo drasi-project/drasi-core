@@ -52,6 +52,10 @@ impl ComputationResourceCleanup for ComputationSession {
         self.work.cancel();
     }
 
+    async fn quiesce(&self) -> Result<(), IndexError> {
+        self.work.quiesce().await
+    }
+
     async fn shutdown(&self) -> Result<(), IndexError> {
         let mut failures = Vec::new();
         if let Err(error) = self.work.shutdown().await {
