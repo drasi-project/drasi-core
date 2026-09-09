@@ -725,3 +725,90 @@ async fn explicit_creation_dependency_blocks_when_its_required_instance_is_unrea
     });
     assert!(matches!(result, Err(GraphError::Cancelled)));
 }
+
+#[tokio::test]
+async fn failed_optional_binding_never_becomes_available_idle_or_exhausted() {
+    for finite in [false, true] {
+        let (received, _receiver) = mpsc::channel(2);
+        let source: Box<dyn EnvelopeSource> = if finite {
+            Box::new(FiniteSource::new(
+                "source",
+                vec![output(root("source", 1, &[1]))],
+            ))
+        } else {
+            source("source", Arc::new(Calls::default()), vec![])
+        };
+        let mut graph = ComputationGraph::builder("optional-binding")
+            .source(source)
+            .sink(sink("good", Arc::new(Calls::default()), received.clone()))
+            .sink(sink("bad", Arc::new(Calls::default()), received))
+            .bind_stream(endpoint("source", "out"), stream("source"))
+            .connect(
+                edge("source", "good"),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .connect(edge("source", "bad"), Box::new(FailingPipe))
+            .relationship_policy(
+                edge("source", "bad"),
+                RelationshipPolicy {
+                    required_for_binding: false,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .expect("valid graph");
+        let run = graph.run().expect("scope");
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            control.deployment_report().await.expect("partial bindings");
+            control
+                .start_components(GraphRevision(1), GraphSelection::All)
+                .await
+                .expect("independent startup");
+            if finite {
+                let mut observed = control.subscribe_observed();
+                observed
+                    .wait_for(|state| {
+                        state.relationships[&edge("source", "good")].availability
+                            == DataAvailability::Exhausted
+                    })
+                    .await
+                    .expect("real finite EOF");
+            }
+            let node = control.observed().components[&component("source")].clone();
+            control
+                .report_health(
+                    GraphRevision(1),
+                    HealthObservation {
+                        component: component("source"),
+                        generation: node.generation,
+                        operation: node.operation,
+                        health: ComponentHealth::Healthy,
+                    },
+                )
+                .await
+                .expect("valid health observation");
+            assert_eq!(
+                control.observed().relationships[&edge("source", "bad")].binding,
+                BindingState::Failed
+            );
+            assert_eq!(
+                control.observed().relationships[&edge("source", "bad")].availability,
+                DataAvailability::Unavailable
+            );
+            control
+                .stop_components(
+                    GraphRevision(1),
+                    GraphSelection::Exact(vec![component("source")]),
+                )
+                .await
+                .expect("stop source");
+            assert_eq!(
+                control.observed().relationships[&edge("source", "bad")].availability,
+                DataAvailability::Unavailable
+            );
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+    }
+}

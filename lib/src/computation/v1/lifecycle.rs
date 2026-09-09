@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Utc};
 
-use super::{ComponentId, EdgeDefinition, GraphError};
+use super::{ComponentId, EdgeDefinition, GraphError, ResourceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GraphRevision(pub u64);
@@ -129,7 +129,10 @@ pub enum OperationSummary {
 pub enum CreationOutcome {
     Created,
     CreationFailed(ComponentFailure),
-    Blocked { dependencies: Vec<ComponentId> },
+    Blocked {
+        dependencies: Vec<ComponentId>,
+        resources: Vec<ResourceId>,
+    },
     NotAttempted,
 }
 
@@ -138,6 +141,7 @@ pub struct DeploymentReport {
     pub revision: GraphRevision,
     pub summary: OperationSummary,
     pub components: BTreeMap<ComponentId, CreationOutcome>,
+    pub resources: BTreeMap<ResourceId, ResourceRealization>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,8 +182,26 @@ pub struct ObservedGraph {
     pub run_epoch: u64,
     pub components: BTreeMap<ComponentId, ObservedComponent>,
     pub relationships: BTreeMap<EdgeDefinition, ObservedRelationship>,
+    pub resources: BTreeMap<ResourceId, ObservedResource>,
     pub deployment: Option<DeploymentReport>,
     pub startup: Option<StartReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceRealization {
+    Pending,
+    Created,
+    CleanupRequired,
+    Released,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObservedResource {
+    pub realization: ResourceRealization,
+    pub revision: GraphRevision,
+    pub generation: u64,
+    pub transition_time: DateTime<Utc>,
+    pub failure: Option<ComponentFailure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

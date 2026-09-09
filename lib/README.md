@@ -66,6 +66,15 @@ Continuous Query**. Fanout shares payloads; fanin preserves per-stream FIFO.
 One output stream cannot feed multiple input ports on the same component:
 independent queues for that stream would not preserve component-wide FIFO.
 
+Declarative components use `component(ComponentSpecification, Arc<dyn ComponentFactory>)`.
+Factories declare implementation/plugin identity, configuration schema/version,
+resource interfaces and cardinalities. The complete graph is validated before
+factory creation. `declare_resource` records ownership and an unresolved binding;
+`provide_resource` supplies the actual instance separately. Missing instances and
+failed creation remain visible in per-item deployment reports without erasing
+desired specifications. Secret fields require unresolved references; resolved
+values and resource handles are excluded from desired snapshots.
+
 Run the native custom-schema example (direct graph and two-transformer chain):
 
 ```bash
@@ -87,6 +96,11 @@ calls use exclusive instance leases, but cancellation never waits for their lock
 controller open. The control handle exposes deployment/start reports, immutable
 desired/observed snapshots, revision-checked lifecycle-policy changes and scoped
 start/stop commands, plus generation/operation-bound health reporting.
+Deployment constructs and binds components without requiring their sources to
+run, external systems to be reachable, or bootstrap to finish. Call
+`graph.dispose().await` to release graph-owned provider resources after component
+cleanup; borrowed providers are never shut down by the graph. Failed provider
+cleanup remains registered and explicitly retryable.
 
 Only a fully drained, successfully stopped `Completed` graph can restart.
 Components and sequence high-watermarks are retained; each new generation gets

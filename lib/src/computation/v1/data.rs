@@ -62,6 +62,7 @@ name_type!(
 );
 name_type!(ComponentId, "Component identity within a graph.");
 name_type!(PortId, "Port identity within a component.");
+name_type!(ResourceId, "Resource identity within a computation graph.");
 name_type!(
     StreamId,
     "Logical producer stream identity, unique to a producer/output port."

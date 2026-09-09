@@ -25,6 +25,8 @@ use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt}
 use tokio::sync::{mpsc, watch};
 
 mod controller;
+mod specification;
+pub use specification::*;
 
 use super::{
     data::{validate_identifier, validate_schema},
@@ -32,8 +34,8 @@ use super::{
     ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeReceiver, EnvelopeSender,
     EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, LifecyclePolicy, ObservedGraph,
     OutputEnvelope, PipeCapabilities, PipeCapability, PipeControl, PipeError, PipeProvider,
-    PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy, SendFailure,
-    SinkCompletion, StreamId, Transformer,
+    PipeRequirements, PortDescriptor, PortDirection, PortId, RelationshipPolicy, ResourceId,
+    SendFailure, SinkCompletion, StreamId, Transformer,
 };
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
@@ -65,6 +67,19 @@ pub enum GraphError {
     DependencyUnavailable {
         component: ComponentId,
         dependency: ComponentId,
+    },
+    #[error("component {component} construction failed: {source}")]
+    Creation {
+        component: ComponentId,
+        disposition: super::FailureDisposition,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("resource {resource} cleanup failed: {source}")]
+    ResourceCleanup {
+        resource: ResourceId,
+        #[source]
+        source: anyhow::Error,
     },
     #[error("{cause}")]
     Reported {
@@ -135,6 +150,7 @@ pub enum GraphState {
 pub enum ComponentRole {
     Source,
     Transformer,
+    Query,
     Sink,
 }
 
@@ -186,12 +202,20 @@ pub struct GraphSnapshot {
     pub edges: Arc<[EdgeSnapshot]>,
     pub requirements: PipeRequirements,
     pub lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
+    pub specifications: BTreeMap<ComponentId, ComponentSpecification>,
+    pub external_bindings: BTreeMap<ComponentId, Arc<str>>,
+    pub resources: BTreeMap<ResourceId, ResourceSpecification>,
 }
 
 enum Component {
     Source(Box<dyn EnvelopeSource>),
     Transformer(Box<dyn Transformer>),
+    Query(Box<dyn Transformer>),
     Sink(Box<dyn EnvelopeSink>),
+    Deferred {
+        specification: Arc<ComponentSpecification>,
+        factory: Arc<dyn ComponentFactory>,
+    },
 }
 
 impl Component {
@@ -199,7 +223,9 @@ impl Component {
         match self {
             Self::Source(component) => component.descriptor(),
             Self::Transformer(component) => component.descriptor(),
+            Self::Query(component) => component.descriptor(),
             Self::Sink(component) => component.descriptor(),
+            Self::Deferred { specification, .. } => &specification.descriptor,
         }
     }
 
@@ -207,13 +233,16 @@ impl Component {
         match self {
             Self::Source(_) => ComponentRole::Source,
             Self::Transformer(_) => ComponentRole::Transformer,
+            Self::Query(_) => ComponentRole::Query,
             Self::Sink(_) => ComponentRole::Sink,
+            Self::Deferred { specification, .. } => specification.role,
         }
     }
 
     fn completion(&self) -> Option<SinkCompletion> {
         match self {
             Self::Sink(component) => Some(component.completion()),
+            Self::Deferred { specification, .. } => specification.completion,
             _ => None,
         }
     }
@@ -222,7 +251,9 @@ impl Component {
         match self {
             Self::Source(component) => component.start().await,
             Self::Transformer(component) => component.start().await,
+            Self::Query(component) => component.start().await,
             Self::Sink(component) => component.start().await,
+            Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
         }
     }
 
@@ -230,7 +261,9 @@ impl Component {
         match self {
             Self::Source(component) => component.stop().await,
             Self::Transformer(component) => component.stop().await,
+            Self::Query(component) => component.stop().await,
             Self::Sink(component) => component.stop().await,
+            Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
         }
     }
 }
@@ -254,9 +287,46 @@ pub struct ComputationGraphBuilder {
     cleanup_timeout: Duration,
     lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
     relationship_policies: BTreeMap<EdgeDefinition, RelationshipPolicy>,
+    resources: BTreeMap<ResourceId, ResourceSpecification>,
+    resource_handles: BTreeMap<ResourceId, ResourceHandle>,
 }
 
 impl ComputationGraphBuilder {
+    pub fn component(
+        mut self,
+        specification: ComponentSpecification,
+        factory: Arc<dyn ComponentFactory>,
+    ) -> Self {
+        self.components.push(Component::Deferred {
+            specification: Arc::new(specification),
+            factory,
+        });
+        self
+    }
+
+    pub fn declare_resource(mut self, specification: ResourceSpecification) -> GraphResult<Self> {
+        validate_identifier("resource binding", &specification.binding)?;
+        if self
+            .resources
+            .insert(specification.id.clone(), specification)
+            .is_some()
+        {
+            return Err(topology("duplicate resource specification"));
+        }
+        Ok(self)
+    }
+
+    pub fn provide_resource(
+        mut self,
+        id: ResourceId,
+        resource: ResourceHandle,
+    ) -> GraphResult<Self> {
+        if self.resource_handles.insert(id, resource).is_some() {
+            return Err(topology("duplicate constructed resource binding"));
+        }
+        Ok(self)
+    }
+
     pub fn source(mut self, source: Box<dyn EnvelopeSource>) -> Self {
         self.components.push(Component::Source(source));
         self
@@ -264,6 +334,11 @@ impl ComputationGraphBuilder {
 
     pub fn transformer(mut self, transformer: Box<dyn Transformer>) -> Self {
         self.components.push(Component::Transformer(transformer));
+        self
+    }
+
+    pub fn query(mut self, query: Box<dyn Transformer>) -> Self {
+        self.components.push(Component::Query(query));
         self
     }
 
@@ -321,7 +396,28 @@ impl ComputationGraphBuilder {
         }
         let mut ids = BTreeMap::new();
         let mut nodes = Vec::new();
+        for (id, handle) in &self.resource_handles {
+            let declaration = self
+                .resources
+                .get(id)
+                .ok_or_else(|| topology(format!("resource {id} was not declared")))?;
+            if declaration.role != handle.role() {
+                return Err(topology(format!("resource {id} has an incompatible role")));
+            }
+        }
         for (index, component) in self.components.iter().enumerate() {
+            if let Component::Deferred {
+                specification,
+                factory,
+            } = component
+            {
+                specification::validate_specification(
+                    specification,
+                    factory.as_ref(),
+                    &self.resources,
+                    &self.resource_handles,
+                )?;
+            }
             let descriptor = component.descriptor();
             if ids.insert(descriptor.id().clone(), index).is_some() {
                 return Err(topology(format!("duplicate component {}", descriptor.id())));
@@ -334,7 +430,7 @@ impl ComputationGraphBuilder {
             let outputs = descriptor.ports().len() - inputs;
             let valid = match component.role() {
                 ComponentRole::Source => inputs == 0 && outputs > 0,
-                ComponentRole::Transformer => inputs > 0 && outputs > 0,
+                ComponentRole::Transformer | ComponentRole::Query => inputs > 0 && outputs > 0,
                 ComponentRole::Sink => inputs > 0 && outputs == 0,
             };
             if !valid {
@@ -492,6 +588,35 @@ impl ComputationGraphBuilder {
             edges: edges.into(),
             requirements: self.requirements,
             lifecycle_policies,
+            specifications: self
+                .components
+                .iter()
+                .filter_map(|component| {
+                    if let Component::Deferred { specification, .. } = component {
+                        Some((
+                            specification.descriptor.id().clone(),
+                            specification.as_ref().clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            external_bindings: self
+                .components
+                .iter()
+                .filter_map(|component| {
+                    if matches!(component, Component::Deferred { .. }) {
+                        None
+                    } else {
+                        Some((
+                            component.descriptor().id().clone(),
+                            Arc::from(component.descriptor().id().as_str()),
+                        ))
+                    }
+                })
+                .collect(),
+            resources: self.resources,
         };
         let observed = controller::initial_observations(&snapshot);
         Ok(ComputationGraph {
@@ -515,6 +640,7 @@ impl ComputationGraphBuilder {
             ids,
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
+            resource_handles: self.resource_handles,
         })
     }
 }
@@ -594,6 +720,7 @@ pub struct ComputationGraph {
     desired: watch::Sender<Arc<GraphSnapshot>>,
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
+    resource_handles: BTreeMap<ResourceId, ResourceHandle>,
 }
 
 impl ComputationGraph {
@@ -607,6 +734,8 @@ impl ComputationGraph {
             cleanup_timeout: Duration::from_secs(5),
             lifecycle_policies: BTreeMap::new(),
             relationship_policies: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            resource_handles: BTreeMap::new(),
         }
     }
 
@@ -687,6 +816,7 @@ impl ComputationGraph {
             if self.state() == GraphState::CleanupRequired {
                 self.state.send_replace(GraphState::Cancelled);
             }
+
             return Ok(());
         }
         self.state.send_replace(GraphState::CleanupRequired);
@@ -700,6 +830,16 @@ impl ComputationGraph {
                 errors,
             })
         }
+    }
+
+    /// Release graph-owned external resources after scoped component cleanup.
+    /// Borrowed resources are never shut down. Failed cleanup remains registered.
+    pub async fn dispose(&mut self) -> GraphResult<()> {
+        self.shutdown().await?;
+        self.state.send_replace(GraphState::CleanupRequired);
+        controller::dispose_resources(self).await?;
+        self.state.send_replace(GraphState::Cancelled);
+        Ok(())
     }
 
     async fn execute(
@@ -881,10 +1021,12 @@ async fn run_node(
                 // At most one pending receive per edge, no forwarding tasks or hidden queues.
                 receivers.push(receive(incoming));
                 match component {
-                    Component::Transformer(transformer) => transformer
-                        .transform(input)
-                        .await
-                        .map_err(|source| component_error(node, "transform", source))?,
+                    Component::Transformer(transformer) | Component::Query(transformer) => {
+                        transformer
+                            .transform(input)
+                            .await
+                            .map_err(|source| component_error(node, "transform", source))?
+                    }
                     Component::Sink(sink) => {
                         sink.handle(input)
                             .await
@@ -892,6 +1034,9 @@ async fn run_node(
                         Vec::new()
                     }
                     Component::Source(_) => unreachable!(),
+                    Component::Deferred { .. } => {
+                        return Err(topology("cannot process an unconstructed component"))
+                    }
                 }
             }
         };

@@ -26,6 +26,7 @@ use futures::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
+use super::specification::{ConstructionContext, ResourceOwnership};
 use super::{
     cancelled, check_descriptor, component_error, run_node, topology, Component, ComputationGraph,
     GraphControl, GraphError, GraphResult, GraphSnapshot, GraphState, Incoming, NodeSnapshot,
@@ -35,8 +36,9 @@ use crate::computation::v1::{
     ActivationCoupling, BindingState, ComponentFailure, ComponentGeneration, ComponentHealth,
     ComponentId, ComponentLifecycle, CreationOutcome, DataAvailability, DeploymentReport,
     FailureDisposition, FailurePhase, GraphRevision, GraphSelection, HealthObservation,
-    LifecyclePolicy, ObservedComponent, ObservedGraph, ObservedRelationship, OperationEpoch,
-    OperationSummary, PortId, RealizationState, StartOutcome, StartReport, StopOutcome, StopReport,
+    LifecyclePolicy, ObservedComponent, ObservedGraph, ObservedRelationship, ObservedResource,
+    OperationEpoch, OperationSummary, PortId, RealizationState, ResourceRealization, StartOutcome,
+    StartReport, StopOutcome, StopReport,
 };
 
 pub(super) struct InstanceSlot {
@@ -157,10 +159,11 @@ impl GraphControl {
 
     pub async fn deployment_report(&self) -> GraphResult<DeploymentReport> {
         let mut observed = self.observed.clone();
-        let snapshot = observed
-            .wait_for(|value| value.deployment.is_some())
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
+        let snapshot = tokio::select! {
+            biased;
+            result = observed.wait_for(|value| value.deployment.is_some()) => result.map_err(|_| GraphError::ControllerClosed)?,
+            _ = self.commands.closed() => return Err(GraphError::ControllerClosed),
+        };
         snapshot
             .deployment
             .clone()
@@ -169,10 +172,11 @@ impl GraphControl {
 
     pub async fn startup_report(&self) -> GraphResult<StartReport> {
         let mut observed = self.observed.clone();
-        let snapshot = observed
-            .wait_for(|value| value.startup.is_some())
-            .await
-            .map_err(|_| GraphError::ControllerClosed)?;
+        let snapshot = tokio::select! {
+            biased;
+            result = observed.wait_for(|value| value.startup.is_some()) => result.map_err(|_| GraphError::ControllerClosed)?,
+            _ = self.commands.closed() => return Err(GraphError::ControllerClosed),
+        };
         snapshot.startup.clone().ok_or(GraphError::ControllerClosed)
     }
 
@@ -291,6 +295,22 @@ pub(super) fn initial_observations(snapshot: &GraphSnapshot) -> ObservedGraph {
             .collect(),
         deployment: None,
         startup: None,
+        resources: snapshot
+            .resources
+            .keys()
+            .map(|id| {
+                (
+                    id.clone(),
+                    ObservedResource {
+                        realization: ResourceRealization::Pending,
+                        revision: snapshot.revision,
+                        generation: 1,
+                        transition_time: now,
+                        failure: None,
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
@@ -325,8 +345,10 @@ pub(super) fn mark_cleanup_required(observed: &watch::Sender<Arc<ObservedGraph>>
 fn failure(error: GraphError, phase: FailurePhase) -> ComponentFailure {
     ComponentFailure {
         phase,
-        disposition: if matches!(
-            error,
+        disposition: if let GraphError::Creation { disposition, .. } = &error {
+            *disposition
+        } else if matches!(
+            &error,
             GraphError::Contract(_) | GraphError::Emission { .. } | GraphError::Topology { .. }
         ) {
             FailureDisposition::Terminal
@@ -389,21 +411,161 @@ fn select(graph: &ComputationGraph, selection: &GraphSelection) -> GraphResult<B
     Ok(selected)
 }
 
-fn deploy(graph: &mut ComputationGraph) -> GraphResult<PipeGuard> {
-    for (slot, node) in graph.components.iter().zip(graph.snapshot.nodes.iter()) {
+async fn deploy(
+    graph: &mut ComputationGraph,
+    cancel: &mut watch::Receiver<bool>,
+) -> GraphResult<PipeGuard> {
+    update(graph, |state| {
+        for (id, resource) in &mut state.resources {
+            resource.realization = if graph.resource_handles.contains_key(id) {
+                ResourceRealization::Created
+            } else {
+                ResourceRealization::Pending
+            };
+            resource.transition_time = Utc::now();
+        }
+    });
+    let mut unavailable = BTreeSet::new();
+    let mut creation_failures = BTreeMap::new();
+    let mut resource_blocks = BTreeMap::new();
+    for index in graph.order.iter().copied() {
+        let slot = graph.components[index].clone();
+        let node = graph.snapshot.nodes[index].clone();
         let mut lease = slot.take()?;
-        check_descriptor(&lease.component, node)?;
+        check_descriptor(&lease.component, &node)?;
         lease.inputs.clear();
         lease.outputs.clear();
+        let missing_creation: Vec<_> = graph
+            .snapshot
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.policy.required_for_creation
+                    && edge.definition.to.component == slot.id
+                    && unavailable.contains(&graph.ids[&edge.definition.from.component])
+            })
+            .map(|edge| edge.definition.from.component.clone())
+            .collect();
+        if !missing_creation.is_empty() {
+            unavailable.insert(index);
+            continue;
+        }
+        if let Some(failure) = graph.observed().components[&slot.id]
+            .failure
+            .as_ref()
+            .filter(|failure| failure.phase == FailurePhase::Creation)
+        {
+            unavailable.insert(index);
+            creation_failures.insert(index, failure.clone());
+            continue;
+        }
+        if let Component::Deferred {
+            specification,
+            factory,
+        } = &lease.component
+        {
+            let specification = specification.clone();
+            let factory = factory.clone();
+            let missing_resources: BTreeSet<_> = specification
+                .dependencies
+                .values()
+                .flatten()
+                .chain(specification.configuration.values().filter_map(|value| {
+                    if let super::specification::ConfigurationValue::Reference {
+                        resource, ..
+                    } = value
+                    {
+                        Some(resource)
+                    } else {
+                        None
+                    }
+                }))
+                .filter(|id| !graph.resource_handles.contains_key(*id))
+                .cloned()
+                .collect();
+            if !missing_resources.is_empty() {
+                unavailable.insert(index);
+                resource_blocks.insert(index, missing_resources.into_iter().collect::<Vec<_>>());
+                continue;
+            }
+            update(graph, |state| {
+                let observed = state.components.get_mut(&slot.id).expect("component");
+                observed.realization = RealizationState::Creating;
+                observed.transition_time = Utc::now();
+            });
+            let construction = async {
+                let context = ConstructionContext::resolve(
+                    graph.snapshot.id.clone(),
+                    slot.generation,
+                    specification,
+                    graph.resource_handles.clone(),
+                    &factory.descriptor().configuration,
+                )
+                .await?;
+                factory.create(context).await
+            };
+            let result = tokio::select! {
+                biased;
+                _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+                result = construction => result,
+            };
+            match result {
+                Ok(constructed) => {
+                    lease.component = constructed.0;
+                    let invalid = if lease.component.role() != node.role {
+                        Err(topology(
+                            "constructed component role differs from its factory specification",
+                        ))
+                    } else {
+                        check_descriptor(&lease.component, &node)
+                    };
+                    if let Err(error) = invalid {
+                        lease.attempted = true;
+                        let failure = failure(error, FailurePhase::Creation);
+                        unavailable.insert(index);
+                        creation_failures.insert(index, failure);
+                    }
+                }
+                Err(error) => {
+                    let failure = failure(
+                        GraphError::Creation {
+                            component: slot.id.clone(),
+                            disposition: error.disposition,
+                            source: error.source,
+                        },
+                        FailurePhase::Creation,
+                    );
+                    unavailable.insert(index);
+                    creation_failures.insert(index, failure);
+                }
+            }
+        }
     }
     let mut controls = PipeGuard(BTreeMap::new());
-    let mut unavailable = BTreeSet::new();
+    let unconstructed = unavailable.clone();
     for (edge_index, (provider, edge)) in graph
         .providers
         .iter()
         .zip(graph.snapshot.edges.iter())
         .enumerate()
     {
+        let from = graph.ids[&edge.definition.from.component];
+        let to = graph.ids[&edge.definition.to.component];
+        if unconstructed.contains(&from) || unconstructed.contains(&to) {
+            update(graph, |state| {
+                let observed = state
+                    .relationships
+                    .get_mut(&edge.definition)
+                    .expect("relationship");
+                observed.binding = BindingState::Declared;
+                observed.availability = DataAvailability::Unavailable;
+            });
+            if edge.policy.required_for_binding {
+                unavailable.insert(to);
+                unavailable.insert(from);
+            }
+            continue;
+        }
         update(graph, |state| {
             let observed = state
                 .relationships
@@ -493,20 +655,31 @@ fn deploy(graph: &mut ComputationGraph) -> GraphResult<PipeGuard> {
     for (index, node) in graph.snapshot.nodes.iter().enumerate() {
         let id = node.descriptor.id();
         let blocked = unavailable.contains(&index);
+        let creation_failure = creation_failures.get(&index);
         update(graph, |state| {
             let observed = state.components.get_mut(id).expect("component");
-            observed.realization = if blocked {
+            observed.realization = if creation_failure.is_some() {
+                RealizationState::CreationFailed
+            } else if blocked {
                 RealizationState::Blocked
             } else {
                 RealizationState::Created
             };
             observed.lifecycle = ComponentLifecycle::Stopped;
             observed.health = ComponentHealth::Unknown;
+            observed.failure = creation_failure.cloned();
             observed.transition_time = Utc::now();
         });
         outcomes.insert(
             id.clone(),
-            if blocked {
+            if let Some(failure) = creation_failure {
+                CreationOutcome::CreationFailed(failure.clone())
+            } else if let Some(resources) = resource_blocks.get(&index) {
+                CreationOutcome::Blocked {
+                    dependencies: Vec::new(),
+                    resources: resources.clone(),
+                }
+            } else if blocked {
                 CreationOutcome::Blocked {
                     dependencies: graph
                         .snapshot
@@ -534,6 +707,7 @@ fn deploy(graph: &mut ComputationGraph) -> GraphResult<PipeGuard> {
                             }
                         })
                         .collect(),
+                    resources: Vec::new(),
                 }
             } else {
                 CreationOutcome::Created
@@ -548,6 +722,12 @@ fn deploy(graph: &mut ComputationGraph) -> GraphResult<PipeGuard> {
             OperationSummary::CompletedWithFailures
         },
         components: outcomes,
+        resources: graph
+            .observed()
+            .resources
+            .iter()
+            .map(|(id, state)| (id.clone(), state.realization))
+            .collect(),
     };
     update(graph, |state| state.deployment = Some(report));
     Ok(controls)
@@ -842,6 +1022,8 @@ impl Operations {
                 group.pending.insert(index);
             } else if graph.components[index].take()?.attempted {
                 group.pending.insert(index);
+            } else if graph.observed().components[id].realization != RealizationState::Created {
+                group.outcomes.insert(id.clone(), StopOutcome::NotCreated);
             } else {
                 group
                     .outcomes
@@ -1006,7 +1188,7 @@ impl Operations {
                 }
                 update(graph, |state| {
                     for (edge, observed) in &mut state.relationships {
-                        if edge.from.component == *id {
+                        if edge.from.component == *id && observed.binding == BindingState::Bound {
                             observed.availability = DataAvailability::Exhausted;
                         }
                     }
@@ -1029,6 +1211,7 @@ impl Operations {
                     node.transition_time = Utc::now();
                     for (edge, observed) in &mut state.relationships {
                         if edge.from.component == *id
+                            && observed.binding == BindingState::Bound
                             && observed.availability != DataAvailability::Exhausted
                         {
                             observed.availability = DataAvailability::Idle;
@@ -1107,7 +1290,7 @@ pub(super) async fn run(
     if *cancel.borrow() {
         return Err(GraphError::Cancelled);
     }
-    let controls = deploy(graph)?;
+    let controls = deploy(graph, cancel).await?;
     let mut operations = Operations::default();
     if auto_start {
         operations.begin_start(graph, select(graph, &GraphSelection::All)?, None);
@@ -1199,6 +1382,7 @@ pub(super) async fn run(
                             node.transition_time = Utc::now();
                             for (edge, observed) in &mut state.relationships {
                                 if edge.from.component == observation.component
+                                    && observed.binding == BindingState::Bound
                                     && observed.availability != DataAvailability::Exhausted
                                 {
                                     observed.availability = match observation.health {
@@ -1297,7 +1481,10 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
             }
         }
         for node in state.components.values_mut() {
-            if node.realization == RealizationState::Created {
+            if matches!(
+                node.realization,
+                RealizationState::Created | RealizationState::Creating
+            ) {
                 node.realization = RealizationState::Pending;
             }
         }
@@ -1313,4 +1500,60 @@ pub(super) fn needs_cleanup(graph: &ComputationGraph) -> GraphResult<bool> {
         }
     }
     Ok(false)
+}
+
+pub(super) async fn dispose_resources(graph: &mut ComputationGraph) -> GraphResult<()> {
+    let mut failures = Vec::new();
+    for (id, specification) in &graph.snapshot.resources {
+        if specification.ownership == ResourceOwnership::Borrowed {
+            continue;
+        }
+        let Some(resource) = graph.resource_handles.get(id) else {
+            continue;
+        };
+        update(graph, |state| {
+            state.resources.get_mut(id).expect("resource").realization =
+                ResourceRealization::CleanupRequired;
+        });
+        let result = tokio::time::timeout(graph.cleanup_timeout, resource.shutdown()).await;
+        match result {
+            Ok(Ok(())) => {
+                graph.resource_handles.remove(id);
+                update(graph, |state| {
+                    let observed = state.resources.get_mut(id).expect("resource");
+                    observed.realization = ResourceRealization::Released;
+                    observed.failure = None;
+                    observed.transition_time = Utc::now();
+                });
+            }
+            other => {
+                let source = match other {
+                    Ok(Err(error)) => error,
+                    Err(error) => anyhow::Error::new(error),
+                    Ok(Ok(())) => unreachable!(),
+                };
+                let failure = failure(
+                    GraphError::ResourceCleanup {
+                        resource: id.clone(),
+                        source,
+                    },
+                    FailurePhase::Removal,
+                );
+                update(graph, |state| {
+                    state.resources.get_mut(id).expect("resource").failure = Some(failure.clone());
+                });
+                failures.push(GraphError::Reported {
+                    cause: failure.cause,
+                });
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(GraphError::Cleanup {
+            primary: None,
+            errors: failures,
+        })
+    }
 }
