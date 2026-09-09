@@ -19,7 +19,7 @@ use super::{
     SinkCompletion,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PortDirection {
     Input,
     Output,
@@ -27,7 +27,9 @@ pub enum PortDirection {
 
 /// Provider promises which must be negotiated before a graph starts.
 /// These descriptors implement no delivery guarantees by themselves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum PipeCapability {
     /// FIFO for each logical producer stream using authoritative sequence.
     FifoPerStream,
@@ -49,7 +51,7 @@ pub enum PipeCapability {
 }
 
 /// Immutable required guarantees; unsupported requirements are errors.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PipeRequirements {
     required: BTreeSet<PipeCapability>,
 }
@@ -139,7 +141,7 @@ impl PipeCapabilities {
 
 /// Named, single-schema port with required transport guarantees.
 /// Descriptors contain no resolved configuration, secrets, or runtime contexts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PortDescriptor {
     id: PortId,
     direction: PortDirection,
@@ -180,10 +182,24 @@ impl PortDescriptor {
 }
 
 /// Immutable descriptive component interface, not a runtime properties dump.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ComponentDescriptor {
     id: ComponentId,
     ports: Arc<[PortDescriptor]>,
+}
+
+impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Specification {
+            id: ComponentId,
+            ports: Vec<PortDescriptor>,
+        }
+        let value = Specification::deserialize(deserializer)?;
+        Self::try_new(value.id, value.ports).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ComponentDescriptor {

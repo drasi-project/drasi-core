@@ -26,7 +26,9 @@ use tokio::sync::{mpsc, watch};
 
 mod controller;
 mod specification;
+mod topology;
 pub use specification::*;
+pub use topology::*;
 
 use super::{
     data::{validate_identifier, validate_schema},
@@ -146,7 +148,7 @@ pub enum GraphState {
     CleanupRequired,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ComponentRole {
     Source,
     Transformer,
@@ -154,7 +156,7 @@ pub enum ComponentRole {
     Sink,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Endpoint {
     pub component: ComponentId,
     pub port: PortId,
@@ -166,7 +168,7 @@ impl Endpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct EdgeDefinition {
     pub from: Endpoint,
     pub to: Endpoint,
@@ -194,6 +196,7 @@ pub struct EdgeSnapshot {
     pub capabilities: PipeCapabilities,
     pub policy: RelationshipPolicy,
     pub resources: BTreeMap<ResourceId, ResourceRole>,
+    pub pipe: DesiredPipe,
 }
 
 #[derive(Debug, Clone)]
@@ -572,6 +575,13 @@ impl ComputationGraphBuilder {
             indegree[to] += 1;
             edges.push(EdgeSnapshot {
                 definition: edge.clone(),
+                pipe: provider
+                    .specification()
+                    .unwrap_or_else(|| DesiredPipe::External {
+                        binding: format!("pipe:{edge_index}"),
+                        capabilities: capabilities.supported().iter().copied().collect(),
+                        capacity: capabilities.capacity().map(std::num::NonZeroUsize::get),
+                    }),
                 capabilities,
                 policy: self
                     .relationship_policies

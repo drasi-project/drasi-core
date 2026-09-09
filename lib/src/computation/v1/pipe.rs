@@ -90,7 +90,7 @@ pub enum AcceptanceState {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum InputMergePolicy {
     #[default]
     Arrival,

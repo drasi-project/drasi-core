@@ -122,6 +122,27 @@ The basic adapter does not implicitly inject identity/state/WAL/bootstrap servic
 `LegacyReactionFactory` borrows an already-managed Reaction and only enqueues
 normal `QueryResult` values, declaring `Accepted`, never `Handled`.
 
+**Recovery:** graph-owned bootstrap streams and watermarks establish the initial
+query state separately from creation. Persistent in-progress markers reject
+partial bootstrap; explicitly configured `AutoReset` requires a bootstrap provider
+and preserves output high-water and reset generation. Non-atomic publication is
+an explicit mode with a durable pending-output fence, not an atomicity claim.
+`WalReplaySourceFactory` resumes/tails an explicitly registered WAL partition and
+reports unavailable positions instead of silently skipping them.
+
+`QueryReplayTransformer` joins a typed snapshot or retained suffix to the bound
+live stream. Native `CheckpointedSink` advances its query-sequence/reset-generation
+checkpoint only after actual handling or supported snapshot replacement; failed
+initialization never seeds progress. Strict, snapshot-reset and explicitly lossy
+gap policies are distinct. A borrowed legacy enqueue sink cannot pretend to
+replace external state from a snapshot.
+
+Desired topology snapshots support exact/dependency/dependent/all selections and
+versioned JSON export/import. They contain component/resource specifications and
+unresolved bindings, not observed health/lifecycle, secrets, data or live handles.
+External components/providers must be supplied again; incomplete selections keep
+their boundary relationships explicit rather than silently omitting dependencies.
+
 **Lifecycle:** `let run = graph.start()?; run.await?;` drives a caller-owned future.
 Every eligible created component is attempted; data relationships are
 activation-independent unless explicitly configured otherwise. A failed Source

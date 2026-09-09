@@ -53,6 +53,24 @@ macro_rules! name_type {
                 f.write_str(self.as_str())
             }
         }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> std::result::Result<Self, D::Error> {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::try_new(value).map_err(serde::de::Error::custom)
+            }
+        }
     };
 }
 
@@ -166,6 +184,7 @@ impl SchemaDescriptor {
         if definition.is_empty() {
             return Err(ContractError::EmptySchemaDefinition);
         }
+
         let fingerprint = SchemaFingerprint(computation_bridge::schema_fingerprint(
             id.as_str(),
             version.value(),
@@ -199,6 +218,46 @@ impl SchemaDescriptor {
 
     pub const fn fingerprint(&self) -> SchemaFingerprint {
         self.fingerprint
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SchemaSpecification {
+    id: SchemaId,
+    version: u32,
+    encoding: String,
+    definition: Vec<u8>,
+}
+
+impl serde::Serialize for SchemaDescriptor {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(
+            &SchemaSpecification {
+                id: self.id.clone(),
+                version: self.version.value(),
+                encoding: self.encoding.to_string(),
+                definition: self.definition.to_vec(),
+            },
+            serializer,
+        )
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SchemaDescriptor {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = <SchemaSpecification as serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(
+            value.id,
+            SchemaVersion::try_new(value.version).map_err(serde::de::Error::custom)?,
+            value.encoding,
+            Bytes::from(value.definition),
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 

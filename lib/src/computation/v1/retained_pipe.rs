@@ -27,7 +27,7 @@ use super::{
     RetentionPolicy, SendFailure,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReplayGapPolicy {
     Strict,
     /// Explicitly accept loss and advance to the oldest available entry.
@@ -43,7 +43,7 @@ impl ResourceCleanup for RetainedStoreResource {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RetainedPipeConfig {
     pub resource: ResourceId,
     pub capacity: NonZeroUsize,
@@ -72,6 +72,9 @@ fn capabilities(
 }
 
 impl PipeProvider for RetainedPipeConfig {
+    fn specification(&self) -> Option<super::DesiredPipe> {
+        Some(super::DesiredPipe::Retained(self.clone()))
+    }
     fn capabilities(&self) -> Result<PipeCapabilities, PipeError> {
         capabilities(self.capacity, self.durable, self.retention)
     }

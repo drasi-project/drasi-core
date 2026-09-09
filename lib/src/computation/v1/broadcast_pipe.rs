@@ -27,7 +27,7 @@ use super::{
     PipeMetricsSnapshot, PipeProvider, ProvidedPipe, SendFailure,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BroadcastLagPolicy {
     Report,
     /// Explicitly lossy behavior: log/count skipped events and keep receiving.
@@ -41,6 +41,12 @@ pub struct BroadcastPipeConfig {
 }
 
 impl PipeProvider for BroadcastPipeConfig {
+    fn specification(&self) -> Option<super::DesiredPipe> {
+        Some(super::DesiredPipe::Broadcast {
+            capacity: self.capacity,
+            lag_policy: self.lag_policy,
+        })
+    }
     fn capabilities(&self) -> Result<PipeCapabilities, PipeError> {
         let capacity = NonZeroUsize::new(self.capacity).ok_or(PipeError::InvalidCapacity)?;
         Ok(PipeCapabilities::try_new(

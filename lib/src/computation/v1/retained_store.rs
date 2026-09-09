@@ -27,7 +27,7 @@ use tokio::sync::{Mutex, Notify};
 
 use super::{ChangeEnvelope, EnvelopeCodec, PipeError, ResourceCleanup};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RetentionPolicy {
     Backpressure,
     /// Explicitly lossy retention; receivers must detect the unavailable position.

@@ -37,6 +37,9 @@ use super::{
 };
 
 const QUERY_METADATA: &str = "drasi.query-output.v1";
+const QUERY_SEQUENCE: &str = "drasi.query-output-sequence.v1";
+const SNAPSHOT: &str = "drasi.query-snapshot.v1";
+const GENERATION: &str = "drasi.query-generation.v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryCodecError {
@@ -110,6 +113,111 @@ fn decode_row(bytes: &[u8]) -> Result<Row, Box<bincode::ErrorKind>> {
 }
 
 impl QueryChangeCodec {
+    pub fn query_generation(envelope: &ChangeEnvelope) -> Result<u64, QueryCodecError> {
+        match envelope
+            .annotations()
+            .entries()
+            .find(|entry| entry.key() == GENERATION)
+        {
+            Some(entry) => match entry.value() {
+                ContextValue::Unsigned(generation) => Ok(generation),
+                _ => Err(QueryCodecError::InvalidRow),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub(crate) fn set_generation(
+        envelope: &mut ChangeEnvelope,
+        component: &ComponentId,
+        generation: u64,
+    ) -> Result<(), QueryCodecError> {
+        envelope.append_annotation(ContextEntry::try_new(
+            component.clone(),
+            GENERATION,
+            ContextValue::Unsigned(generation),
+        )?)?;
+        Ok(())
+    }
+
+    pub fn is_snapshot(envelope: &ChangeEnvelope) -> bool {
+        envelope
+            .annotations()
+            .entries()
+            .find(|entry| entry.key() == SNAPSHOT)
+            .is_some_and(|entry| entry.value() == ContextValue::Bool(true))
+    }
+
+    pub fn snapshot_envelope(
+        query_id: &str,
+        snapshot: &super::QuerySnapshot,
+        component: &ComponentId,
+        system: SystemMetadata,
+    ) -> Result<ChangeEnvelope, QueryCodecError> {
+        let mut rows: Vec<_> = snapshot.rows.values().cloned().collect();
+        rows.sort_by(|left, right| {
+            (left.identity().namespace(), left.identity().value())
+                .cmp(&(right.identity().namespace(), right.identity().value()))
+        });
+        let operations = rows
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, after)| super::ChangeOperation::Added {
+                ordinal: ordinal as u64,
+                after,
+            })
+            .collect();
+        let changes = ChangeSet::try_new(
+            ChangeSetId::try_new(
+                system.stream().as_str(),
+                Bytes::copy_from_slice(&system.sequence().to_be_bytes()),
+            )?,
+            Self::schema().descriptor().clone(),
+            operations,
+        )?;
+        let id = super::emission_id(system.stream(), system.sequence())?;
+        let mut envelope = ChangeEnvelope::new(id, changes, system);
+        let metadata = QueryOutputMetadata {
+            query_id: query_id.to_owned(),
+            source_id: None,
+            timestamp: Utc::now(),
+            metadata: HashMap::new(),
+            profiling: None,
+        };
+        envelope.append_annotation(ContextEntry::try_new(
+            component.clone(),
+            QUERY_METADATA,
+            ContextValue::Bytes(Arc::from(serde_json::to_vec(&metadata)?)),
+        )?)?;
+        envelope.append_annotation(ContextEntry::try_new(
+            component.clone(),
+            QUERY_SEQUENCE,
+            ContextValue::Unsigned(snapshot.as_of_sequence),
+        )?)?;
+        envelope.append_annotation(ContextEntry::try_new(
+            component.clone(),
+            SNAPSHOT,
+            ContextValue::Bool(true),
+        )?)?;
+        Self::set_generation(&mut envelope, component, snapshot.generation)?;
+        Ok(envelope)
+    }
+
+    pub fn query_sequence(envelope: &ChangeEnvelope) -> Result<u64, QueryCodecError> {
+        match envelope
+            .annotations()
+            .entries()
+            .find(|entry| entry.key() == QUERY_SEQUENCE)
+        {
+            Some(entry) => match entry.value() {
+                ContextValue::Unsigned(sequence) => Ok(sequence),
+                _ => Err(QueryCodecError::InvalidRow),
+            },
+            // Earlier v1 envelopes used the query producer's system sequence.
+            None => Ok(envelope.system().sequence()),
+        }
+    }
+
     pub fn schema() -> Arc<Schema> {
         static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
         SCHEMA.get_or_init(|| Arc::new(Schema::new(
@@ -272,7 +380,8 @@ impl QueryChangeCodec {
             });
         }
         operations.sort_by_key(ChangeOperation::ordinal);
-        let id = super::emission_id(system.stream(), system.sequence())?;
+        let sequence = system.sequence();
+        let id = super::emission_id(system.stream(), sequence)?;
         let changes = ChangeSet::try_new(
             ChangeSetId::try_new(
                 system.stream().as_str(),
@@ -285,6 +394,16 @@ impl QueryChangeCodec {
             Some(input) => input.derive(id, changes, system),
             None => ChangeEnvelope::new(id, changes, system),
         };
+        envelope.append_annotation(ContextEntry::try_new(
+            component.clone(),
+            QUERY_SEQUENCE,
+            ContextValue::Unsigned(sequence),
+        )?)?;
+        envelope.append_annotation(ContextEntry::try_new(
+            component.clone(),
+            SNAPSHOT,
+            ContextValue::Bool(false),
+        )?)?;
         envelope.append_annotation(ContextEntry::try_new(
             component.clone(),
             QUERY_METADATA,
@@ -382,7 +501,7 @@ impl QueryChangeCodec {
             typed_change::QueryEnvelopeMetadata::new(
                 metadata.query_id,
                 metadata.source_id.map(Arc::from),
-                envelope.system().sequence(),
+                Self::query_sequence(envelope)?,
                 metadata.timestamp,
                 metadata.metadata,
                 metadata.profiling,

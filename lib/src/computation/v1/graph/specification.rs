@@ -26,13 +26,13 @@ use crate::computation::v1::{
     EnvelopeSource, FailureDisposition, ResourceId, SinkCompletion, Transformer,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct PluginIdentity {
     pub id: Arc<str>,
     pub version: Arc<str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct ImplementationIdentity {
     pub name: Arc<str>,
     pub version: Arc<str>,
@@ -61,7 +61,7 @@ impl ImplementationIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ConfigurationValue {
     Literal(serde_json::Value),
     Reference {
@@ -107,7 +107,7 @@ pub struct ConfigurationSchema {
     pub allow_additional: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceRole {
     Bootstrap,
     Identity,
@@ -124,13 +124,13 @@ pub enum ResourceRole {
     LegacyReaction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceOwnership {
     Graph,
     Borrowed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceSpecification {
     pub id: ResourceId,
     pub role: ResourceRole,
@@ -220,7 +220,7 @@ pub struct FactoryDescriptor {
     pub dependencies: BTreeMap<Arc<str>, ResourceRequirement>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComponentSpecification {
     pub descriptor: ComponentDescriptor,
     pub role: ComponentRole,

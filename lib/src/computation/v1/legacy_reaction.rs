@@ -75,6 +75,9 @@ impl EnvelopeSink for LegacyReactionSink {
         SinkCompletion::Accepted
     }
     async fn handle(&mut self, mut input: InputEnvelope) -> anyhow::Result<()> {
+        if QueryChangeCodec::is_snapshot(&input.envelope) {
+            anyhow::bail!("legacy enqueue cannot claim snapshot replacement; use an explicit bootstrap-capable boundary");
+        }
         let result = QueryChangeCodec::to_legacy_result(&input.envelope)?;
         self.resource.0.enqueue_query_result(result).await?;
         input.envelope.append_annotation(ContextEntry::try_new(

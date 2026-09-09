@@ -24,7 +24,7 @@ pub trait WakeupSource: Send + Sync {
 
 /// Fixed meaning of a sink's successful handle call. This is an instance-level
 /// declaration, never a per-call downgrade or a consequence of pipe capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SinkCompletion {
     /// Accepted by the sink or a legacy queue. No claim of durable acceptance,
     /// completed processing, or completed external effects.
@@ -95,6 +95,12 @@ pub trait Transformer: ComputationComponent {
 /// A consumer beside legacy Reaction. Its descriptor has input ports only.
 #[async_trait]
 pub trait EnvelopeSink: ComputationComponent {
+    fn supports_snapshot(&self) -> bool {
+        false
+    }
+    async fn replace_snapshot(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
+        anyhow::bail!("this sink does not support replacing its state from a snapshot")
+    }
     /// Immutable for this component instance. A legacy Reaction enqueue adapter
     /// must declare Accepted, never Handled. ExplicitAcknowledgement on a pipe
     /// cannot upgrade this declaration.

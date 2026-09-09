@@ -93,6 +93,20 @@ impl ComputationQuery {
         &self.resources
     }
 
+    /// Run graph-owned metadata/reset staging under the same serialized resource
+    /// transaction and cancellation/recovery rules as evaluation.
+    pub async fn resource_transaction<F, Fut>(&self, operation: F) -> Result<()>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
+    {
+        self.in_operation(async {
+            operation().await?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Includes the builder's existing shadow queue; no spawned timer/consumer.
     pub fn future_queue(&self) -> Arc<dyn FutureQueue> {
         self.inner.future_queue.clone()

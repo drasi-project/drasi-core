@@ -25,6 +25,7 @@ use crate::computation::v1::{ChangeEnvelope, ChangeOperation, Record, RecordId};
 #[derive(Clone)]
 pub struct QuerySnapshot {
     pub as_of_sequence: u64,
+    pub generation: u64,
     pub rows: im::HashMap<RecordId, Record>,
 }
 
@@ -45,6 +46,8 @@ pub(crate) struct QueryOutputState {
     pub(crate) sequence: u64,
     pub(crate) outbox: VecDeque<ChangeEnvelope>,
     pub(crate) capacity: NonZeroUsize,
+    pub(crate) ready: bool,
+    pub(crate) generation: u64,
 }
 
 impl QueryOutputState {
@@ -54,6 +57,8 @@ impl QueryOutputState {
             sequence: 0,
             outbox: VecDeque::new(),
             capacity,
+            ready: false,
+            generation: 0,
         }
     }
 
@@ -67,6 +72,16 @@ impl QueryOutputState {
         if envelope.system().sequence() != self.next_sequence()? {
             anyhow::bail!("committed output does not match the next in-memory sequence");
         }
+        self.apply_rows(&envelope);
+        self.sequence = envelope.system().sequence();
+        if self.outbox.len() == self.capacity.get() {
+            self.outbox.pop_front();
+        }
+        self.outbox.push_back(envelope);
+        Ok(())
+    }
+
+    pub(crate) fn apply_rows(&mut self, envelope: &ChangeEnvelope) {
         for operation in envelope.changes().operations() {
             match operation {
                 ChangeOperation::Added { after, .. } | ChangeOperation::Updated { after, .. } => {
@@ -77,12 +92,6 @@ impl QueryOutputState {
                 }
             }
         }
-        self.sequence = envelope.system().sequence();
-        if self.outbox.len() == self.capacity.get() {
-            self.outbox.pop_front();
-        }
-        self.outbox.push_back(envelope);
-        Ok(())
     }
 
     pub(crate) fn hydrate(
@@ -90,17 +99,20 @@ impl QueryOutputState {
         rows: im::HashMap<RecordId, Record>,
         sequence: u64,
         outbox: Vec<ChangeEnvelope>,
+        generation: u64,
     ) {
         self.rows = rows;
+        self.generation = generation;
         self.sequence = sequence;
         let skip = outbox.len().saturating_sub(self.capacity.get());
         self.outbox = outbox.into_iter().skip(skip).collect();
     }
 
-    pub(crate) fn reset_to_sequence(&mut self, sequence: u64) {
+    pub(crate) fn reset_to_sequence(&mut self, sequence: u64, generation: u64) {
         self.rows.clear();
         self.outbox.clear();
         self.sequence = sequence;
+        self.generation = generation;
     }
 }
 
@@ -108,13 +120,32 @@ impl QueryOutputState {
 #[derive(Clone)]
 pub struct QueryResults {
     pub(crate) state: Arc<RwLock<QueryOutputState>>,
+    pub(crate) notify: Arc<tokio::sync::Notify>,
 }
 
 impl QueryResults {
+    pub async fn wait_ready(&self) -> Result<(), QueryHistoryError> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .state
+                .read()
+                .map_err(|_| QueryHistoryError::Poisoned)?
+                .ready
+            {
+                return Ok(());
+            }
+            notified.await;
+        }
+    }
+
     pub fn snapshot(&self) -> Result<QuerySnapshot, QueryHistoryError> {
         let state = self.state.read().map_err(|_| QueryHistoryError::Poisoned)?;
         Ok(QuerySnapshot {
             as_of_sequence: state.sequence,
+            generation: state.generation,
             rows: state.rows.clone(),
         })
     }

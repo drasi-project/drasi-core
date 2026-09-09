@@ -477,4 +477,60 @@ mod atomic_failure {
         assert_eq!(output[0].envelope.system().sequence(), 1);
         recovered.stop().await.expect("stop");
     }
+
+    #[tokio::test]
+    async fn non_atomic_publication_failure_keeps_a_visible_durable_pending_fence() {
+        let temp = tempfile::tempdir().expect("temp");
+        let base: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
+            temp.path(),
+            RocksIndexOptions::new(
+                false,
+                false,
+                RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("budget"),
+            ),
+        ));
+        let provider = Arc::new(Provider {
+            inner: base.clone(),
+            fail: Arc::new(AtomicBool::new(true)),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let options = QueryOptions {
+            recovery: QueryRecoveryPolicy::Strict,
+            publication: QueryPublicationMode::NonAtomic,
+        };
+        let definition = definition("MATCH (n:Person) RETURN n.name AS name");
+        {
+            let mut query =
+                ContinuousQueryTransformer::new_with_options(definition.clone(), provider, options)
+                    .await
+                    .expect("construct");
+            query.start().await.expect("start");
+            assert!(query
+                .transform(InputEnvelope {
+                    port: port("in"),
+                    envelope: GraphChangeCodec::encode_change(
+                        person("Alice", false, 1000),
+                        stream("source/out"),
+                        1,
+                        None
+                    )
+                    .expect("input"),
+                })
+                .await
+                .is_err());
+            query.stop().await.expect("stop failed publication");
+        }
+        let mut reopened = ContinuousQueryTransformer::new_with_options(definition, base, options)
+            .await
+            .expect("reopen");
+        let error = reopened
+            .start()
+            .await
+            .expect_err("incomplete publication cannot silently resume");
+        assert!(matches!(
+            error.downcast_ref::<QueryRecoveryError>(),
+            Some(QueryRecoveryError::PendingPublication)
+        ));
+        reopened.stop().await.expect("cleanup");
+    }
 }

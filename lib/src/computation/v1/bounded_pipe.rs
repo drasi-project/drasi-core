@@ -47,6 +47,9 @@ pub struct ProvidedPipe {
 /// clones are not supported by the graph (they can prevent finite completion).
 /// The graph requires cancellation-safe receive and synchronous control closure.
 pub trait PipeProvider: Send + Sync {
+    fn specification(&self) -> Option<super::DesiredPipe> {
+        None
+    }
     fn resource_dependencies(
         &self,
     ) -> std::collections::BTreeMap<super::ResourceId, super::ResourceRole> {
@@ -79,6 +82,11 @@ pub struct BoundedPipeConfig {
 }
 
 impl PipeProvider for BoundedPipeConfig {
+    fn specification(&self) -> Option<super::DesiredPipe> {
+        Some(super::DesiredPipe::Bounded {
+            capacity: self.capacity,
+        })
+    }
     fn capabilities(&self) -> std::result::Result<PipeCapabilities, PipeError> {
         if self.capacity > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(PipeError::InvalidCapacity);

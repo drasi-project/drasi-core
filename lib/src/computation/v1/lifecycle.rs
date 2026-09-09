@@ -18,7 +18,9 @@ use chrono::{DateTime, Utc};
 
 use super::{ComponentId, EdgeDefinition, GraphError, ResourceId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct GraphRevision(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -204,7 +206,7 @@ pub struct ObservedResource {
     pub failure: Option<ComponentFailure>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivationCoupling {
     Independent,
     RequiresRunning,
@@ -218,7 +220,7 @@ pub enum RemovalPolicy {
     Drain,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RelationshipPolicy {
     pub required_for_creation: bool,
     pub required_for_binding: bool,
@@ -241,7 +243,7 @@ impl Default for RelationshipPolicy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LifecyclePolicy {
     pub auto_start: bool,
 }
