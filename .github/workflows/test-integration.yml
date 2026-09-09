@@ -1,0 +1,178 @@
+# Copyright 2026 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs #[ignore]d plugin integration/e2e tests that need external services.
+# Default `cargo test` (test.yml) skips these. Live-network / credential
+# ignored tests are not included.
+
+name: Integration Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - feature/*
+      - feature-lib
+      - release/*
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: ${{ matrix.name }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Postgres source
+            timeout: 60
+            extra: none
+            command: |
+              cargo test -p drasi-source-postgres --test integration_tests -- --ignored --nocapture --test-threads=1
+
+          - name: MySQL source
+            timeout: 45
+            extra: none
+            command: |
+              cargo test -p drasi-source-mysql --test integration_test -- --ignored --nocapture --test-threads=1
+
+          - name: MSSQL source
+            timeout: 60
+            extra: none
+            command: |
+              cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture --test-threads=1
+
+          - name: Kafka source
+            timeout: 45
+            extra: none
+            command: |
+              cargo test -p drasi-source-kafka --test integration -- --ignored --nocapture --test-threads=1
+
+          - name: Neo4j source
+            timeout: 45
+            extra: none
+            command: |
+              cargo test -p drasi-source-neo4j --test integration_tests -- --ignored --nocapture --test-threads=1
+
+          - name: Kubernetes source
+            timeout: 60
+            extra: none
+            command: |
+              cargo test -p drasi-source-kubernetes --test integration_tests -- --ignored --nocapture --test-threads=1
+
+          - name: Oracle source
+            timeout: 90
+            extra: oracle
+            command: |
+              cargo test -p drasi-source-oracle --test integration_test -- --ignored --nocapture --test-threads=1
+
+          - name: OTel source
+            timeout: 45
+            extra: none
+            command: |
+              cargo test -p drasi-source-otel --test integration_test -- --ignored --nocapture --test-threads=1
+
+          - name: Cloudflare Radar source
+            timeout: 45
+            extra: none
+            command: |
+              cargo test -p drasi-source-cloudflare-radar --test integration_test -- --ignored --nocapture --test-threads=1
+
+          - name: Reactions
+            timeout: 60
+            extra: none
+            command: |
+              cargo test -p drasi-reaction-loki --test loki_integration_tests -- --ignored --nocapture --test-threads=1
+              cargo test -p drasi-reaction-rabbitmq --test integration_test -- --ignored --nocapture --test-threads=1
+              cargo test -p drasi-reaction-aws-sqs --test sqs_tests -- --ignored --nocapture --test-threads=1
+              cargo test -p drasi-reaction-azure-storage --test integration_tests -- --ignored --nocapture --test-threads=1
+
+          - name: Garnet index
+            timeout: 45
+            extra: none
+            command: |
+              cargo test -p drasi-index-garnet -- --ignored --nocapture --test-threads=1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Install Oracle Instant Client
+        if: matrix.extra == 'oracle'
+        run: |
+          sudo apt-get install -y unzip
+          sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
+          curl -fsSL -o /tmp/instantclient.zip \
+            https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip
+          sudo mkdir -p /opt/oracle
+          sudo unzip -q /tmp/instantclient.zip -d /opt/oracle
+          ic_dir="$(find /opt/oracle -maxdepth 1 -type d -name 'instantclient*' | head -1)"
+          echo "LD_LIBRARY_PATH=${ic_dir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "$ic_dir" >> "$GITHUB_PATH"
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android "/opt/hostedtoolcache/CodeQL"
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Cache Cargo registry
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo index
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+
+      - name: Cache Cargo build
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-integration-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-integration-${{ matrix.name }}-
+            ${{ runner.os }}-cargo-build-
+
+      - name: Run ignored integration tests
+        run: ${{ matrix.command }}
