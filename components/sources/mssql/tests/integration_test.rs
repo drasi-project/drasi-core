@@ -2134,7 +2134,7 @@ async fn subscribe_direct(
     query_id: &str,
 ) -> Result<(
     tokio::sync::mpsc::Receiver<drasi_lib::channels::BootstrapEvent>,
-    Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>>,
+    Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::StampedSourceEvent>>,
 )> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(15) {

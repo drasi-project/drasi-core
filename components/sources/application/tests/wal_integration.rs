@@ -104,7 +104,7 @@ fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSu
 async fn subscribe_fresh(
     source: &ApplicationSource,
     source_id: &str,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
     let resp = source
         .subscribe(fresh_settings(source_id, "test-query"))
         .await
@@ -117,7 +117,7 @@ async fn subscribe_with_resume(
     source: &ApplicationSource,
     source_id: &str,
     resume_seq: u64,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
     let resp = source
         .subscribe(resume_settings(source_id, "test-query-resume", resume_seq))
         .await
@@ -184,8 +184,7 @@ async fn test_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert!(event.sequence.is_some());
-    assert_eq!(event.sequence.unwrap(), 1);
+    assert_eq!(event.sequence, 1);
     assert!(event.source_position.is_some());
 
     // Verify WAL has the event
@@ -202,7 +201,7 @@ async fn test_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event2.sequence.unwrap(), 2);
+    assert_eq!(event2.sequence, 2);
 
     let count = wal.event_count("persist-src").await.unwrap();
     assert_eq!(count, 2);
@@ -359,7 +358,7 @@ async fn test_crash_recovery_resumes_sequence() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.sequence.unwrap(), 6);
+        assert_eq!(event.sequence, 6);
 
         source.stop().await.unwrap();
     }
@@ -403,8 +402,7 @@ async fn test_replay_via_subscribe() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            event.sequence.unwrap(),
-            expected_seq,
+            event.sequence, expected_seq,
             "Expected replay seq {expected_seq}"
         );
     }
@@ -420,13 +418,13 @@ async fn test_replay_via_subscribe() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event1.sequence.unwrap(), 6);
+    assert_eq!(event1.sequence, 6);
 
     let event2 = tokio::time::timeout(Duration::from_secs(2), rx2.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event2.sequence.unwrap(), 6);
+    assert_eq!(event2.sequence, 6);
 
     source.stop().await.unwrap();
 }
@@ -479,7 +477,7 @@ async fn test_concurrent_writes_monotonic_sequences() {
             .await
             .unwrap()
             .unwrap();
-        sequences.push(event.sequence.unwrap());
+        sequences.push(event.sequence);
     }
 
     // Verify all sequences are unique and cover 1..=total_events
@@ -554,7 +552,7 @@ async fn test_resume_from_position_end_to_end() {
             .await
             .expect("timed out waiting for event")
             .unwrap();
-        let seq = event.sequence.expect("event should have WAL sequence");
+        let seq = event.sequence;
         // Simulate query confirming progress by advancing position handle
         position_handle.store(seq, std::sync::atomic::Ordering::Release);
         last_confirmed_seq = seq;
@@ -612,7 +610,7 @@ async fn test_resume_from_position_end_to_end() {
             .await
             .expect("timed out waiting for replay event")
             .unwrap();
-        replayed_seqs.push(event.sequence.expect("replay event should have sequence"));
+        replayed_seqs.push(event.sequence);
     }
     assert_eq!(
         replayed_seqs,
@@ -632,10 +630,7 @@ async fn test_resume_from_position_end_to_end() {
         .expect("timed out waiting for live event")
         .unwrap();
     assert_eq!(
-        live_event
-            .sequence
-            .expect("live event should have sequence"),
-        9,
+        live_event.sequence, 9,
         "Live event after restart should continue sequence"
     );
 
@@ -693,8 +688,7 @@ async fn test_sequence_stamped_without_durability() {
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
         assert_eq!(
-            event.sequence,
-            Some(expected_seq),
+            event.sequence, expected_seq,
             "event {expected_seq} should carry a framework sequence with durability off"
         );
     }

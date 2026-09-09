@@ -18,7 +18,7 @@ use crate::config::KafkaSourceConfig;
 use crate::position::{decode_partition_offsets, encode_position};
 use anyhow::{anyhow, Context, Result};
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::events::{SourceEvent, SourceEventDraft};
 use drasi_lib::sources::SourceBase;
 use drasi_source_mapping::{SourceMapping, SourceMappingEngine};
 use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -203,13 +203,13 @@ impl KafkaConsumerTask {
                                         offsets_for_event[partition] = offset + 1;
                                     }
 
-                                    let wrapper = SourceEventWrapper {
+                                    let wrapper = SourceEventDraft {
                                         source_id: self.source_id.clone(),
                                         event: SourceEvent::Change(change),
                                         timestamp: chrono::Utc::now(),
                                         profiling: None,
-                                        sequence: None,
                                         source_position: Some(encode_position(partition, &offsets_for_event)),
+                                        supplied_sequence: None,
                                     };
 
                                     if let Err(e) = self.base.dispatch_event(wrapper).await {

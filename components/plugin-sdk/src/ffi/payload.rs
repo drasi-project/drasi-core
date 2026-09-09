@@ -16,7 +16,7 @@
 //!
 //! # Why this exists (issue #602)
 //!
-//! `SourceEventWrapper` / `BootstrapEvent` are `repr(Rust)` types that contain
+//! `StampedSourceEvent` / `BootstrapEvent` are `repr(Rust)` types that contain
 //! `bytes::Bytes` and `Arc<str>`. The previous design transferred them across the
 //! cdylib boundary as opaque `Box::into_raw` pointers and reconstructed them on the
 //! other side with `Box::from_raw`. That is **undefined behavior**: `repr(Rust)`
@@ -38,7 +38,7 @@ use super::vtables::{FfiBootstrapEvent, FfiQueryResult, FfiSourceEvent};
 use bytes::Bytes;
 use chrono::DateTime;
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::events::{BootstrapEvent, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::events::{BootstrapEvent, SourceEvent, StampedSourceEvent};
 use serde::{Deserialize, Serialize};
 
 /// Maximum accepted serialized FFI payload size.
@@ -99,19 +99,21 @@ pub unsafe fn take_ffi_payload<T>(
     decoded
 }
 
-/// Serialized form of a `SourceEventWrapper` for FFI transfer.
+/// Serialized form of a `StampedSourceEvent` for FFI transfer.
 ///
 /// Carries everything the host needs to rebuild a host-owned
-/// `SourceEventWrapper`. `profiling` is intentionally omitted: it is `None` at the
-/// point a source emits an event and is populated later by the framework.
+/// `StampedSourceEvent`. `profiling` is intentionally omitted: it is `None` at
+/// the point a source emits an event and is populated later by the framework.
+/// The event is always already stamped by the producing plugin's framework, so
+/// `sequence` is mandatory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceEventPayload {
     pub source_id: String,
     pub event: SourceEvent,
     /// Event timestamp in microseconds since the Unix epoch.
     pub timestamp_us: i64,
-    /// Monotonic sequence number; `None` for volatile sources.
-    pub sequence: Option<u64>,
+    /// Framework-assigned monotonic sequence number (always present).
+    pub sequence: u64,
     /// Opaque, source-defined replication position bytes.
     pub source_position: Option<Vec<u8>>,
 }
@@ -123,43 +125,42 @@ pub struct BootstrapEventPayload {
     pub change: SourceChange,
     /// Event timestamp in microseconds since the Unix epoch.
     pub timestamp_us: i64,
-    /// Monotonic sequence number; always present for bootstrap events
-    /// (unlike `SourceEventPayload::sequence`, which is `None` for volatile sources).
+    /// Monotonic sequence number; always present for bootstrap events.
     pub sequence: u64,
 }
 
 impl SourceEventPayload {
-    /// Build a payload from a `SourceEventWrapper` (producing side).
-    pub fn from_wrapper(wrapper: &SourceEventWrapper) -> Self {
-        let timestamp_us = wrapper
+    /// Build a payload from a `StampedSourceEvent` (producing side).
+    pub fn from_stamped(event: &StampedSourceEvent) -> Self {
+        let timestamp_us = event
             .timestamp
             .timestamp_nanos_opt()
             .map(|n| n / 1000)
             .unwrap_or(0);
         Self {
-            source_id: wrapper.source_id.clone(),
-            event: wrapper.event.clone(),
+            source_id: event.source_id.clone(),
+            event: event.event.clone(),
             timestamp_us,
-            sequence: wrapper.sequence,
-            source_position: wrapper.source_position.as_ref().map(|b| b.to_vec()),
+            sequence: event.sequence,
+            source_position: event.source_position.as_ref().map(|b| b.to_vec()),
         }
     }
 
-    /// Reconstruct a host/plugin-owned `SourceEventWrapper` (consuming side).
-    pub fn into_wrapper(self) -> SourceEventWrapper {
+    /// Reconstruct a host/plugin-owned `StampedSourceEvent` (consuming side).
+    pub fn into_stamped(self) -> StampedSourceEvent {
         let timestamp = DateTime::from_timestamp_micros(self.timestamp_us)
             // Deterministic fallback (Unix epoch) on an out-of-range/invalid
             // timestamp — never `Utc::now()`, which would be non-deterministic
             // and could silently mask a corrupt payload.
             .unwrap_or(DateTime::UNIX_EPOCH);
-        SourceEventWrapper {
-            source_id: self.source_id,
-            event: self.event,
+        StampedSourceEvent::from_ffi_parts(
+            self.source_id,
+            self.event,
             timestamp,
-            profiling: None,
-            sequence: self.sequence,
-            source_position: self.source_position.map(Bytes::from),
-        }
+            None,
+            self.sequence,
+            self.source_position.map(Bytes::from),
+        )
     }
 }
 
@@ -195,11 +196,11 @@ impl BootstrapEventPayload {
     }
 }
 
-/// Decode raw MessagePack FFI payload bytes into a `SourceEventWrapper`.
+/// Decode raw MessagePack FFI payload bytes into a `StampedSourceEvent`.
 /// Returns `None` (and logs) on decode failure.
-pub fn decode_source_event_payload(bytes: &[u8]) -> Option<SourceEventWrapper> {
+pub fn decode_source_event_payload(bytes: &[u8]) -> Option<StampedSourceEvent> {
     match rmp_serde::from_slice::<SourceEventPayload>(bytes) {
-        Ok(p) => Some(p.into_wrapper()),
+        Ok(p) => Some(p.into_stamped()),
         Err(e) => {
             log::error!("Failed to decode FFI source event payload: {e}");
             None
@@ -249,7 +250,7 @@ pub fn decode_query_result(bytes: &[u8]) -> Option<drasi_lib::channels::QueryRes
 }
 
 /// Consume a peer-produced `FfiSourceEvent`: decode its serialized payload into a
-/// host-owned `SourceEventWrapper` and free the peer's payload buffer via the
+/// host-owned `StampedSourceEvent` and free the peer's payload buffer via the
 /// envelope's `payload_drop_fn` (delegating null/size hardening to
 /// [`take_ffi_payload`]). The `#[repr(C)]` envelope itself is borrowed and not
 /// freed here.
@@ -261,7 +262,7 @@ pub fn decode_query_result(bytes: &[u8]) -> Option<drasi_lib::channels::QueryRes
 /// # Safety
 /// `ffi` must reference a valid envelope produced by the peer's serializer, whose
 /// `payload_ptr`/`payload_len`/`payload_drop_fn` describe a peer-owned buffer.
-pub unsafe fn consume_source_event(ffi: &FfiSourceEvent) -> Option<SourceEventWrapper> {
+pub unsafe fn consume_source_event(ffi: &FfiSourceEvent) -> Option<StampedSourceEvent> {
     unsafe {
         take_ffi_payload(
             ffi.payload_ptr,
@@ -350,18 +351,18 @@ mod tests {
 
     #[test]
     fn source_event_payload_roundtrips_via_named_encoding() {
-        let wrapper = SourceEventWrapper {
-            source_id: "src-1".to_string(),
-            event: SourceEvent::Change(SourceChange::Insert {
+        let wrapper = StampedSourceEvent::from_ffi_parts(
+            "src-1".to_string(),
+            SourceEvent::Change(SourceChange::Insert {
                 element: sample_node(),
             }),
-            timestamp: Utc::now(),
-            profiling: None,
-            sequence: Some(42),
-            source_position: Some(Bytes::from_static(b"binlog:000003:1766")),
-        };
+            Utc::now(),
+            None,
+            42,
+            Some(Bytes::from_static(b"binlog:000003:1766")),
+        );
 
-        let payload = SourceEventPayload::from_wrapper(&wrapper);
+        let payload = SourceEventPayload::from_stamped(&wrapper);
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
         let decoded = decode_source_event_payload(&bytes).expect("decode");
 
@@ -445,17 +446,17 @@ mod tests {
     }
 
     fn encoded_source_event() -> Vec<u8> {
-        let wrapper = SourceEventWrapper {
-            source_id: "src-1".to_string(),
-            event: SourceEvent::Change(SourceChange::Insert {
+        let wrapper = StampedSourceEvent::from_ffi_parts(
+            "src-1".to_string(),
+            SourceEvent::Change(SourceChange::Insert {
                 element: sample_node(),
             }),
-            timestamp: Utc::now(),
-            profiling: None,
-            sequence: Some(1),
-            source_position: None,
-        };
-        let payload = SourceEventPayload::from_wrapper(&wrapper);
+            Utc::now(),
+            None,
+            1,
+            None,
+        );
+        let payload = SourceEventPayload::from_stamped(&wrapper);
         rmp_serde::to_vec_named(&payload).unwrap()
     }
 

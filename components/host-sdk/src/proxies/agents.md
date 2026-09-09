@@ -16,7 +16,7 @@ implementations (`Source`, `Reaction`, `BootstrapProvider`, etc.). They are the
 | `ReactionPluginProxy` | `ReactionPluginDescriptor` | `ReactionPluginVtable` | `vtable_gen.rs: build_reaction_plugin_vtable()` |
 | `BootstrapProviderProxy` | `BootstrapProvider` | `BootstrapProviderVtable` | `vtable_gen.rs: build_bootstrap_provider_vtable()` |
 | `BootstrapPluginProxy` | `BootstrapPluginDescriptor` | `BootstrapPluginVtable` | `vtable_gen.rs: build_bootstrap_plugin_vtable()` |
-| `ChangeReceiverProxy` | `ChangeReceiver<SourceEventWrapper>` | `FfiChangeReceiver` | `vtable_gen.rs` (inline) |
+| `ChangeReceiverProxy` | `ChangeReceiver<StampedSourceEvent>` | `FfiChangeReceiver` | `vtable_gen.rs` (inline) |
 | `BootstrapReceiverProxy` | (custom) | `FfiBootstrapReceiver` | `vtable_gen.rs` (inline) |
 
 ### When modifying these proxies
@@ -31,7 +31,7 @@ If a trait method is added/changed in `drasi-lib`, you need to update **both sid
 
 ### Rich event payloads cross as serialized bytes (issue #602)
 
-`SourceEventWrapper`, `BootstrapEvent`, and `QueryResult` are `repr(Rust)` types
+`StampedSourceEvent`, `BootstrapEvent`, and `QueryResult` are `repr(Rust)` types
 that embed `bytes::Bytes` / `Arc<str>`. They cross the boundary **by value as
 serialized MessagePack bytes**, NOT as reinterpreted opaque pointers:
 
@@ -57,7 +57,7 @@ serialized MessagePack bytes**, NOT as reinterpreted opaque pointers:
 envelope/vtable ABI — it does **not** and cannot guarantee `repr(Rust)` payload
 layout agreement. That is why payloads must be serialized.
 
-If you change the definition of `SourceEventWrapper`, `BootstrapEvent`,
+If you change the definition of `StampedSourceEvent`, `BootstrapEvent`,
 `QueryResult`, or the payload structs (in `drasi-core/core/src/models/`,
 `drasi-core/lib/src/channels/`, or `plugin-sdk/src/ffi/payload.rs`), keep their
 `serde` derives intact and bump `FFI_SDK_VERSION` in

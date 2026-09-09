@@ -559,11 +559,7 @@ mod event_generation {
                 .await
                 .expect("Timeout")
                 .expect("No event");
-            sequences.push(
-                event
-                    .sequence
-                    .expect("mock source event must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         source.stop().await.unwrap();

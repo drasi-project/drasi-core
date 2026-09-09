@@ -44,13 +44,12 @@ impl SequenceDedup {
     /// Returns `true` iff this event has already been processed for its source
     /// (i.e., its sequence is `<=` the stored checkpoint).
     ///
-    /// Events without a sequence (`None`) always pass through — they originate
-    /// from volatile sources that cannot be replayed, so dedup does not apply.
-    pub fn should_skip(&self, source_id: &str, sequence: Option<u64>) -> bool {
-        match sequence {
-            Some(seq) => self.checkpoints.get(source_id).is_some_and(|&cp| seq <= cp),
-            None => false,
-        }
+    /// Every event past the source boundary carries a framework-assigned
+    /// sequence, so this always has a concrete value to compare.
+    pub fn should_skip(&self, source_id: &str, sequence: u64) -> bool {
+        self.checkpoints
+            .get(source_id)
+            .is_some_and(|&cp| sequence <= cp)
     }
 
     /// Advance the checkpoint for a source after a successful commit.
@@ -89,9 +88,8 @@ mod tests {
     #[test]
     fn empty_dedup_passes_everything() {
         let d = SequenceDedup::default();
-        assert!(!d.should_skip("s1", Some(1)));
-        assert!(!d.should_skip("s1", Some(u64::MAX)));
-        assert!(!d.should_skip("s1", None));
+        assert!(!d.should_skip("s1", 1));
+        assert!(!d.should_skip("s1", u64::MAX));
     }
 
     #[test]
@@ -100,9 +98,9 @@ mod tests {
         checkpoints.insert("s1".to_string(), 100u64);
         let d = SequenceDedup::new(checkpoints);
 
-        assert!(d.should_skip("s1", Some(1)));
-        assert!(d.should_skip("s1", Some(99)));
-        assert!(d.should_skip("s1", Some(100))); // equal is a skip
+        assert!(d.should_skip("s1", 1));
+        assert!(d.should_skip("s1", 99));
+        assert!(d.should_skip("s1", 100)); // equal is a skip
     }
 
     #[test]
@@ -111,17 +109,8 @@ mod tests {
         checkpoints.insert("s1".to_string(), 100u64);
         let d = SequenceDedup::new(checkpoints);
 
-        assert!(!d.should_skip("s1", Some(101)));
-        assert!(!d.should_skip("s1", Some(u64::MAX)));
-    }
-
-    #[test]
-    fn none_sequence_always_passes() {
-        let mut checkpoints = HashMap::new();
-        checkpoints.insert("s1".to_string(), 100u64);
-        let d = SequenceDedup::new(checkpoints);
-
-        assert!(!d.should_skip("s1", None));
+        assert!(!d.should_skip("s1", 101));
+        assert!(!d.should_skip("s1", u64::MAX));
     }
 
     #[test]
@@ -130,8 +119,8 @@ mod tests {
         checkpoints.insert("s1".to_string(), 100u64);
         let d = SequenceDedup::new(checkpoints);
 
-        assert!(!d.should_skip("other", Some(1)));
-        assert!(!d.should_skip("other", Some(200)));
+        assert!(!d.should_skip("other", 1));
+        assert!(!d.should_skip("other", 200));
     }
 
     #[test]
@@ -174,8 +163,8 @@ mod tests {
         assert_eq!(d.checkpoint_for("s1"), Some(100));
         assert_eq!(d.checkpoint_for("s2"), Some(50));
 
-        assert!(d.should_skip("s1", Some(50)));
-        assert!(!d.should_skip("s2", Some(75)));
+        assert!(d.should_skip("s1", 50));
+        assert!(!d.should_skip("s2", 75));
     }
 
     #[test]

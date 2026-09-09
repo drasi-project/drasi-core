@@ -23,7 +23,7 @@ use drasi_kubernetes_common::mapping::{
 };
 use drasi_kubernetes_common::{build_client, parse_api_version};
 use drasi_lib::channels::{
-    ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft, SubscriptionResponse,
 };
 use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::profiling;
@@ -543,7 +543,7 @@ pub(crate) async fn dispatch_changes(
     for change in changes {
         let mut profile = profiling::ProfilingMetadata::new();
         profile.source_send_ns = Some(profiling::timestamp_ns());
-        let wrapper = SourceEventWrapper::with_profiling(
+        let wrapper = SourceEventDraft::with_profiling(
             source_id.to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),

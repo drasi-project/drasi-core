@@ -437,7 +437,7 @@ impl DrasiLib {
 mod tests {
     use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
     use crate::channels::ComponentStatus;
-    use crate::channels::{SourceEventWrapper, SubscriptionResponse};
+    use crate::channels::{StampedSourceEvent, SubscriptionResponse};
     use crate::component_graph::ComponentStatusHandle;
     use crate::error::DrasiError;
     use crate::lib_core::DrasiLib;
@@ -455,7 +455,7 @@ mod tests {
         id: String,
         status_handle: ComponentStatusHandle,
         dispatchers:
-            std::sync::Arc<tokio::sync::RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+            std::sync::Arc<tokio::sync::RwLock<Vec<Box<dyn ChangeDispatcher<StampedSourceEvent>>>>>,
     }
 
     impl SchemaAwareSource {
@@ -541,7 +541,7 @@ mod tests {
             &self,
             settings: crate::config::SourceSubscriptionSettings,
         ) -> Result<SubscriptionResponse> {
-            let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(16);
+            let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(16);
             let receiver = dispatcher.create_receiver().await?;
             self.dispatchers.write().await.push(Box::new(dispatcher));
 

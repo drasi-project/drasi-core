@@ -25,7 +25,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventDraft};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
@@ -1044,7 +1044,7 @@ async fn dispatch_changes(
         let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
         let wrapper =
-            SourceEventWrapper::with_profiling(source_id.to_string(), event, Utc::now(), profiling);
+            SourceEventDraft::with_profiling(source_id.to_string(), event, Utc::now(), profiling);
         base.dispatch_event(wrapper).await?;
     }
     Ok(())
@@ -1305,11 +1305,7 @@ mod tests {
                 .await
                 .expect("timed out waiting for event")
                 .expect("event stream closed unexpectedly");
-            sequences.push(
-                event
-                    .sequence
-                    .expect("dispatched change must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         assert_eq!(

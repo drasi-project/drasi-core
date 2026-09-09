@@ -83,9 +83,9 @@ Implement components **exactly as specified** in the plan:
 
 #### Event Dispatch
 - **MUST** use `self.base.dispatch_event(event)` or `self.base.dispatch_events_batch(events)` to emit events — never use raw dispatchers directly
-- Set `source_position` on each `SourceEventWrapper` before dispatch (if `supports_replay()` is true):
+- Set `source_position` on each `SourceEventDraft` before dispatch (if `supports_replay()` is true):
   - Encode the source's native position as `Option<Bytes>` (e.g., 8-byte big-endian `u64` for LSN/offset)
-  - `SourceBase` automatically stamps monotonic `sequence` numbers and stores `sequence → source_position` mappings
+  - `SourceBase` automatically stamps monotonic `sequence` numbers (producing a `StampedSourceEvent`) and stores `sequence → source_position` mappings
 - If `supports_replay()` is false, `source_position` can be `None` on events
 
 #### Subscribe Contract

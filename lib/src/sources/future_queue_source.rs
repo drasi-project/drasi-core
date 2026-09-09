@@ -22,7 +22,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::channels::{
     ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher, SourceControl, SourceEvent,
-    SourceEventWrapper,
+    SourceEventDraft, StampedSourceEvent,
 };
 use tracing::Instrument;
 
@@ -50,7 +50,11 @@ pub struct FutureQueueSource {
     /// Query ID for logging
     query_id: String,
     /// Dispatcher for sending events to subscribers
-    dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<StampedSourceEvent>>>>>,
+    /// Monotonic sequence counter for the control events this source emits.
+    /// `FuturesDue` signals bypass `SourceBase`, so this source stamps them
+    /// itself to satisfy the mandatory-sequence contract.
+    next_sequence: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl FutureQueueSource {
@@ -62,6 +66,7 @@ impl FutureQueueSource {
             task_handle: Arc::new(RwLock::new(None)),
             query_id,
             dispatcher: Arc::new(RwLock::new(None)),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
@@ -69,9 +74,9 @@ impl FutureQueueSource {
     /// Creates a channel dispatcher and returns its receiver.
     pub async fn subscribe(
         &self,
-    ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>, Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<Box<dyn ChangeReceiver<StampedSourceEvent>>, Box<dyn std::error::Error + Send + Sync>>
     {
-        let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
+        let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(1000);
         let receiver = dispatcher.create_receiver().await.map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
                 Box::new(std::io::Error::new(
@@ -99,6 +104,7 @@ impl FutureQueueSource {
         let status_clone = self.status.clone();
         let query_id = self.query_id.clone();
         let dispatcher_clone = self.dispatcher.clone();
+        let next_sequence = self.next_sequence.clone();
 
         let span = tracing::info_span!(
             "future_queue_polling",
@@ -144,7 +150,7 @@ impl FutureQueueSource {
                         continue;
                     }
 
-                    // Item is due — dispatch FuturesDue signal
+                    // Item is due — compute the event timestamp.
                     let timestamp = match i64::try_from(next_due_time) {
                         Ok(millis) => match DateTime::from_timestamp_millis(millis) {
                             Some(dt) => dt,
@@ -163,11 +169,16 @@ impl FutureQueueSource {
                         }
                     };
 
-                    let event_wrapper = SourceEventWrapper::new(
+                    // Item is due — dispatch FuturesDue signal. This source
+                    // bypasses SourceBase, so it stamps a monotonic sequence
+                    // itself to honor the mandatory-sequence contract.
+                    let draft = SourceEventDraft::new(
                         FUTURE_QUEUE_SOURCE_ID.to_string(),
                         SourceEvent::Control(SourceControl::FuturesDue),
                         timestamp,
                     );
+                    let seq = next_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let event_wrapper = StampedSourceEvent::stamp(draft, seq);
 
                     let dispatcher_guard = dispatcher_clone.read().await;
                     if let Some(dispatcher) = dispatcher_guard.as_ref() {

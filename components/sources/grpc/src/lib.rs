@@ -577,7 +577,7 @@ impl SourceService for GrpcSourceService {
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let mut wrapper = SourceEventWrapper::with_profiling(
+                    let mut wrapper = SourceEventDraft::with_profiling(
                         self.source_id.clone(),
                         SourceEvent::Change(source_change),
                         chrono::Utc::now(),
@@ -586,7 +586,7 @@ impl SourceService for GrpcSourceService {
 
                     // Set WAL-assigned sequence and source_position
                     if let Some(seq) = wal_seq {
-                        wrapper.sequence = Some(seq);
+                        wrapper.supplied_sequence = Some(seq);
                         wrapper.source_position =
                             Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                     }
@@ -696,7 +696,7 @@ impl SourceService for GrpcSourceService {
                             let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                            let mut wrapper = SourceEventWrapper::with_profiling(
+                            let mut wrapper = SourceEventDraft::with_profiling(
                                 source_id.clone(),
                                 SourceEvent::Change(source_change),
                                 chrono::Utc::now(),
@@ -705,7 +705,7 @@ impl SourceService for GrpcSourceService {
 
                             // Set WAL-assigned sequence and source_position
                             if let Some(seq) = wal_seq {
-                                wrapper.sequence = Some(seq);
+                                wrapper.supplied_sequence = Some(seq);
                                 wrapper.source_position =
                                     Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                             }

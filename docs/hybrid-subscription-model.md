@@ -12,7 +12,7 @@ This document explains both subscription patterns, the hybrid reaction subscript
 
 ### Source → Query: "Give me your data changes"
 
-A **Query subscribes to one or more Sources**. The Query needs a stream of `SourceEventWrapper` items (inserts, updates, deletes on graph elements). The Source doesn't know or care what the Query does with the events — it just dispatches them.
+A **Query subscribes to one or more Sources**. The Query needs a stream of `StampedSourceEvent` items (inserts, updates, deletes on graph elements). The Source doesn't know or care what the Query does with the events — it just dispatches them.
 
 ### Query → Reaction: "Give me your query results"
 
@@ -33,7 +33,7 @@ When `DrasiQuery::start()` is called:
 1. The Query iterates over its configured source IDs
 2. For each source, it calls `source.subscribe(settings)` directly
 3. The Source returns a `SubscriptionResponse` containing:
-   - A `receiver: Box<dyn ChangeReceiver<SourceEventWrapper>>` — an async stream of events
+   - A `receiver: Box<dyn ChangeReceiver<StampedSourceEvent>>` — an async stream of events
    - An optional `bootstrap_receiver` — for loading initial data
 4. The Query spawns a forwarder task that reads from the receiver and pushes events into its internal priority queue
 
@@ -274,7 +274,7 @@ Putting it all together, here is the end-to-end flow from a Source change to an 
 
 ```
 1. Source dispatches SourceChange
-     │ via ChangeDispatcher<SourceEventWrapper>
+     │ via ChangeDispatcher<StampedSourceEvent>
      ▼
 2. Query's forwarder task receives it
      │ receiver.recv() → priority_queue.enqueue()
@@ -381,7 +381,7 @@ Consumer (Query or Reaction)
 ```
 
 The `ChangeDispatcher<T>` / `ChangeReceiver<T>` abstraction is generic over the event type (`T`):
-- For Sources: `T = SourceEventWrapper`
+- For Sources: `T = StampedSourceEvent`
 - For Queries: `T = QueryResult`
 
 ---
