@@ -1570,9 +1570,10 @@ async fn test_events_carry_source_position_bytes() -> Result<()> {
                 let lsn = u64::from_be_bytes(pos[..8].try_into().expect("8 bytes"));
                 assert!(lsn > 0, "commit LSN should be non-zero");
 
-                // Verify the event has a sequence number stamped by dispatch_event
-                // (mandatory on StampedSourceEvent).
-                let _ = event.sequence;
+                assert!(
+                    event.sequence > 0,
+                    "Postgres events should carry a positive framework sequence"
+                );
 
                 found_event = true;
                 break;

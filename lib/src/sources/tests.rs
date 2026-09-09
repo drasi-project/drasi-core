@@ -53,7 +53,7 @@ impl TestMockSource {
             auto_start: true,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
-            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -65,7 +65,7 @@ impl TestMockSource {
             auto_start,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
-            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -366,6 +366,55 @@ impl Source for LoggingTestSource {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_mock_source_sequences_start_at_one() {
+        use crate::config::SourceSubscriptionSettings;
+        use drasi_core::models::{ElementMetadata, ElementReference};
+
+        let sources = [
+            TestMockSource::new("default-source".to_string()).unwrap(),
+            TestMockSource::with_auto_start("auto-source".to_string(), true).unwrap(),
+            TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap(),
+        ];
+
+        for source in sources {
+            let mut receiver = source
+                .subscribe(SourceSubscriptionSettings {
+                    source_id: source.id().to_string(),
+                    query_id: "sequence-test".to_string(),
+                    enable_bootstrap: false,
+                    nodes: Default::default(),
+                    relations: Default::default(),
+                    resume_sequence: None,
+                    request_position_handle: false,
+                    resume_from: None,
+                })
+                .await
+                .unwrap()
+                .receiver;
+
+            for expected_sequence in 1..=2 {
+                source
+                    .inject_event(SourceChange::Delete {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(source.id(), "test-node"),
+                            labels: vec![].into(),
+                            effective_from: 0,
+                        },
+                    })
+                    .await
+                    .unwrap();
+
+                let event =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                        .await
+                        .expect("timed out waiting for injected event")
+                        .expect("event stream closed unexpectedly");
+                assert_eq!(event.sequence, expected_sequence, "source {}", source.id());
+            }
+        }
+    }
 
     #[test]
     fn test_source_supports_replay_default_true() {
