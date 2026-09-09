@@ -186,13 +186,15 @@ pub fn root(producer: &str, sequence: u64, readings: &[u16]) -> Envelope {
     // Deliberately opaque, non-UTF8 IDs, not the optional emission_id convention.
     let mut opaque_id = vec![0xff, 0, 0xfe];
     opaque_id.extend_from_slice(&sequence.to_le_bytes());
-    Envelope::new(
+    let mut envelope = ChangeEnvelope::new(
         EnvelopeId::try_new(producer, Bytes::from(opaque_id)).expect("opaque envelope ID"),
         changes(producer, sequence, readings),
         SystemMetadata::new(stream(producer), sequence),
-    )
-    .append_context(annotation(producer))
-    .expect("source context")
+    );
+    envelope
+        .append_annotation(annotation(producer))
+        .expect("source context");
+    envelope
 }
 
 pub fn output(envelope: Envelope) -> OutputEnvelope {
@@ -203,14 +205,15 @@ pub fn output(envelope: Envelope) -> OutputEnvelope {
 }
 
 pub fn derived(input: &Envelope, producer: &str, sequence: u64, changes: ChangeSetRef) -> Envelope {
-    input
-        .append_context(annotation(producer))
-        .expect("branch context")
-        .derive(
-            emission_id(&stream(producer), sequence).expect("derived ID"),
-            changes,
-            SystemMetadata::new(stream(producer), sequence),
-        )
+    let mut envelope = input.derive(
+        emission_id(&stream(producer), sequence).expect("derived ID"),
+        changes,
+        SystemMetadata::new(stream(producer), sequence),
+    );
+    envelope
+        .append_annotation(annotation(producer))
+        .expect("branch context");
+    envelope
 }
 
 pub struct FiniteSource {
@@ -255,6 +258,7 @@ pub type Received = Arc<Mutex<Vec<InputEnvelope>>>;
 pub struct CollectSink {
     descriptor: ComponentDescriptor,
     received: Received,
+    annotate: bool,
 }
 
 impl CollectSink {
@@ -262,7 +266,13 @@ impl CollectSink {
         Self {
             descriptor: descriptor(id, inputs, &[]),
             received,
+            annotate: false,
         }
+    }
+
+    pub fn with_annotation(mut self) -> Self {
+        self.annotate = true;
+        self
     }
 }
 
@@ -311,7 +321,12 @@ impl EnvelopeSink for CollectSink {
         SinkCompletion::Handled
     }
 
-    async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+    async fn handle(&mut self, mut input: InputEnvelope) -> anyhow::Result<()> {
+        if self.annotate {
+            input
+                .envelope
+                .append_annotation(annotation(self.descriptor.id().as_str()))?;
+        }
         self.received.lock().expect("sink lock").push(input);
         Ok(())
     }

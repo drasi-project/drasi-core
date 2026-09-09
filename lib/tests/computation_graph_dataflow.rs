@@ -113,6 +113,76 @@ async fn direct_scenario() {
 
 both_runtimes!(direct, direct_scenario);
 
+async fn annotation_history_scenario() {
+    let original = root("source", 1, &[2, 4]);
+    let left = Received::default();
+    let right = Received::default();
+    let transform = NativeTransform::new("double", |input| {
+        let values: Vec<_> = values(&input.envelope)
+            .into_iter()
+            .map(|value| value * 2)
+            .collect();
+        Ok(vec![output(derived(
+            &input.envelope,
+            "double",
+            1,
+            changes("double", 1, &values),
+        ))])
+    });
+    let mut graph = ComputationGraph::builder("annotation-history")
+        .source(Box::new(FiniteSource::new(
+            "source",
+            vec![output(original.clone())],
+        )))
+        .transformer(Box::new(transform))
+        .sink(Box::new(
+            CollectSink::new("left", &["in"], left.clone()).with_annotation(),
+        ))
+        .sink(Box::new(
+            CollectSink::new("right", &["in"], right.clone()).with_annotation(),
+        ))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(endpoint("double", "out"), stream("double"))
+        .connect(
+            edge("source", "double"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("double", "left"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("double", "right"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .expect("annotation graph");
+
+    complete(&mut graph).await;
+    let left = left.lock().expect("left sink");
+    let right = right.lock().expect("right sink");
+    assert_eq!(left.len(), 1);
+    assert_eq!(right.len(), 1);
+    let left = &left[0].envelope;
+    let right = &right[0].envelope;
+    assert_eq!(values(left), [4, 8]);
+    assert_eq!(values(right), [4, 8]);
+    assert!(Arc::ptr_eq(left.event(), right.event()));
+    assert!(!Arc::ptr_eq(left.event(), original.event()));
+    assert_eq!(contributors(left), ["left", "double", "source"]);
+    assert_eq!(contributors(right), ["right", "double", "source"]);
+    assert_eq!(contributors(&original), ["source"]);
+    assert_eq!(
+        left.event()
+            .lineage()
+            .expect("transformed event retains input lineage")
+            .envelope_id(),
+        original.id()
+    );
+}
+
+both_runtimes!(annotation_history, annotation_history_scenario);
+
 async fn chain_scenario() {
     let inputs = [root("source", 20, &[2, 4]), root("source", 30, &[6])];
     let mut double_sequence = 0;

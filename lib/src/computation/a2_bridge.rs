@@ -12,23 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Compiled as a private child of `change`, so v1 can reuse context storage
-//! without widening the visibility of any existing A2 constructor or type.
+//! Bridge to computation-owned A2 primitives; no legacy pipeline dependency.
 
-use super::{ContextContribution, ContextRootId, ProcessingContext, StableIdBuilder};
+use super::{ProcessingContext, StableIdBuilder};
 
-pub(crate) fn new_context(namespace: &str, identity: &[u8]) -> ProcessingContext {
+pub(crate) fn new_context<T: Clone>(namespace: &str, identity: &[u8]) -> ProcessingContext<T> {
     let mut hash = StableIdBuilder::new("drasi.computation.context-root/v1");
     hash.string("namespace", namespace);
     hash.bytes("identity", identity);
-    ProcessingContext::new(ContextRootId::new(hash.finish()))
+    ProcessingContext::new(hash.finish())
 }
 
-// The v1 caller checks length overflow before using A2's append primitive.
-pub(crate) fn append_context(
-    context: &ProcessingContext,
-    contribution: ContextContribution,
-) -> ProcessingContext {
+pub(crate) fn append_context<T: Clone>(
+    context: &ProcessingContext<T>,
+    contribution: T,
+) -> Option<ProcessingContext<T>> {
     context.append(contribution)
 }
 
@@ -44,31 +42,51 @@ pub(crate) fn schema_fingerprint(id: &str, version: u32, encoding: &str, definit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::change::{ContextContributor, ContextContributorKind, ContextValue};
     use std::sync::Arc;
 
     #[test]
     fn computation_reuses_a2_context_allocations() {
         let root = new_context("example", b"event");
-        let entry = ContextContribution::new(
-            ContextContributor::new(ContextContributorKind::Runtime, "transform"),
-            "count",
-            ContextValue::Unsigned(1),
-        );
-        let first = append_context(&root, entry.clone());
-        let left = append_context(&first, entry.clone());
-        let right = append_context(&first, entry);
-        assert!(Arc::ptr_eq(root.root(), left.root()));
+        let entry = Arc::new("immutable annotation");
+        let first = append_context(&root, entry.clone()).unwrap();
+        let left = append_context(&first, entry.clone()).unwrap();
+        let right = append_context(&first, entry.clone()).unwrap();
+        assert!(Arc::ptr_eq(&root.root, &left.root));
         assert!(Arc::ptr_eq(
-            left.head().unwrap().parent().unwrap(),
-            first.head().unwrap()
+            left.head.as_ref().unwrap().parent.as_ref().unwrap(),
+            first.head.as_ref().unwrap()
         ));
         assert!(Arc::ptr_eq(
-            left.head().unwrap().parent().unwrap(),
-            right.head().unwrap().parent().unwrap()
+            left.head.as_ref().unwrap().parent.as_ref().unwrap(),
+            right.head.as_ref().unwrap().parent.as_ref().unwrap()
         ));
-        assert!(!Arc::ptr_eq(left.head().unwrap(), right.head().unwrap()));
+        assert!(!Arc::ptr_eq(
+            left.head.as_ref().unwrap(),
+            right.head.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&left.entries().next().unwrap(), &entry));
         assert_eq!(root.len(), 0);
         assert_eq!(first.len(), 1);
+    }
+
+    #[test]
+    fn append_overflow_preserves_existing_context() {
+        let mut context = new_context("example", b"event");
+        context.len = usize::MAX;
+        assert!(append_context(&context, "entry").is_none());
+        assert_eq!(context.len(), usize::MAX);
+        assert!(context.head.is_none());
+    }
+
+    #[test]
+    fn context_id_preserves_opaque_identity_and_field_boundaries() {
+        let left = new_context::<()>("a", b"bc");
+        let right = new_context::<()>("ab", b"c");
+        assert_ne!(left.root, right.root);
+        assert_eq!(left.root, new_context::<()>("a", b"bc").root);
+        assert_ne!(
+            new_context::<()>("source", &[0, 0xff]).root,
+            new_context::<()>("source", &[0xff, 0]).root
+        );
     }
 }

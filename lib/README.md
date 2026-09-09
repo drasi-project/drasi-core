@@ -45,8 +45,13 @@ drasi-lib = { version = "0.9", features = ["computation"] }
 ```
 
 These contracts support custom schema-validated immutable record bytes, ordered
-Adds/Updates/Deletes (explicit PATCH versus REPLACE), shared envelopes, append-only
-branch-local context, and input lineage. They also define host-owned
+Adds/Updates/Deletes (explicit PATCH versus REPLACE), and input lineage.
+Every new graph data-plane boundary carries a `ChangeEnvelope`: a shared immutable
+`ChangeEvent` describing a set diff at a time, plus a branch-owned appendable list
+of immutable context entries. `append_annotation` extends only that envelope's
+history; fanout shares the event and existing entries without mixing branch histories.
+`derive` creates a new event for a transformed diff without changing the input.
+`Envelope` is a compatibility name for the same type. These contracts also define host-owned
 `EnvelopeSource`, `Transformer`, and `EnvelopeSink` traits, named schema ports, and
 pipe capability negotiation. A transformer can emit zero, one, or many outputs,
 using its own producer stream and sequence while retaining input lineage.

@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 
 use super::{
-    Delivery, EnqueueReceipt, Envelope, EnvelopeReceiver, EnvelopeSender, Pipe, PipeCapabilities,
-    PipeError, SendFailure,
+    ChangeEnvelope, Delivery, EnqueueReceipt, EnvelopeReceiver, EnvelopeSender, Pipe,
+    PipeCapabilities, PipeError, SendFailure,
 };
 
 /// Out-of-band pipe lifecycle. Implementations must wake pending operations.
@@ -100,13 +100,16 @@ impl PipeControl for Control {
 }
 
 struct Sender {
-    sender: mpsc::Sender<Envelope>,
+    sender: mpsc::Sender<ChangeEnvelope>,
     control: Arc<Control>,
 }
 
 #[async_trait]
 impl EnvelopeSender for Sender {
-    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure> {
+    async fn send(
+        &self,
+        envelope: ChangeEnvelope,
+    ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         let mut closure = self.control.0.subscribe();
         let permit = tokio::select! {
             biased;
@@ -131,7 +134,7 @@ impl EnvelopeSender for Sender {
 }
 
 struct Receiver {
-    receiver: mpsc::Receiver<Envelope>,
+    receiver: mpsc::Receiver<ChangeEnvelope>,
     control: Arc<Control>,
 }
 

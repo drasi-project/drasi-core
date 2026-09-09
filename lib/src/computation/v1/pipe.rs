@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{ContractError, Envelope, EnvelopeId, PipeCapabilities};
+use super::{ChangeEnvelope, ContractError, EnvelopeId, PipeCapabilities};
 
 /// Enqueue acceptance ONLY. Not downstream handling, acknowledgement, checkpoint
 /// advancement, or durability (unless DurableAcceptance was explicitly negotiated).
@@ -62,12 +62,12 @@ pub enum PipeError {
 #[derive(Debug, thiserror::Error)]
 #[error("envelope was not accepted: {error}")]
 pub struct SendFailure {
-    pub envelope: Envelope,
+    pub envelope: ChangeEnvelope,
     #[source]
     pub error: PipeError,
 }
 
-/// One-shot, local-only handling acknowledgement, NOT part of an Envelope.
+/// One-shot, local-only handling acknowledgement, NOT part of a ChangeEnvelope.
 /// Drop is never acknowledgement. Retry, failure, replay, and transaction scope
 /// must be supplied by a future provider/host contract, not inferred here.
 #[async_trait]
@@ -83,25 +83,28 @@ pub trait Acknowledgement: Send + Sync {
 /// Received event and optional separate local delivery capability.
 /// Intentionally not Clone or serializable. A volatile pipe uses no ack handle.
 pub struct Delivery {
-    envelope: Envelope,
+    envelope: ChangeEnvelope,
     acknowledgement: Option<Box<dyn Acknowledgement>>,
 }
 
 impl Delivery {
-    pub fn new(envelope: Envelope, acknowledgement: Option<Box<dyn Acknowledgement>>) -> Self {
+    pub fn new(
+        envelope: ChangeEnvelope,
+        acknowledgement: Option<Box<dyn Acknowledgement>>,
+    ) -> Self {
         Self {
             envelope,
             acknowledgement,
         }
     }
 
-    pub fn envelope(&self) -> &Envelope {
+    pub fn envelope(&self) -> &ChangeEnvelope {
         &self.envelope
     }
 
     /// The host retains the handle separately while invoking a sink/transformer;
     /// neither processing success nor dropping the handle implicitly completes it.
-    pub fn into_parts(self) -> (Envelope, Option<Box<dyn Acknowledgement>>) {
+    pub fn into_parts(self) -> (ChangeEnvelope, Option<Box<dyn Acknowledgement>>) {
         (self.envelope, self.acknowledgement)
     }
 }
@@ -114,7 +117,10 @@ pub trait EnvelopeSender: Send + Sync {
     /// before a result can be ambiguous and MUST NOT be interpreted as nonacceptance.
     /// Receiver drop or runtime closure must wake blocked capacity waiters and
     /// return Closed with their unaccepted envelope, rather than hang indefinitely.
-    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure>;
+    async fn send(
+        &self,
+        envelope: ChangeEnvelope,
+    ) -> std::result::Result<EnqueueReceipt, SendFailure>;
 }
 
 /// Single-consumer boundary. The negotiated FIFO guarantee follows producer

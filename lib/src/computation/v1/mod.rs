@@ -19,6 +19,13 @@
 //! a Continuous Query. [`BoundedPipe`] supplies volatile FIFO/backpressure.
 //! Legacy source/query/reaction execution remains unchanged.
 //!
+//! Every data-plane boundary carries [`ChangeEnvelope`]: a shared immutable
+//! [`ChangeEvent`] describing a set diff and a branch-owned appendable list of
+//! immutable context entries. [`ChangeEnvelope::append_annotation`] extends only
+//! that envelope's history. Clones share the event and existing annotations;
+//! [`ChangeEnvelope::derive`] creates a new event without changing its input.
+//! [`Envelope`] remains a compatibility name for the same envelope type.
+//!
 //! Records contain immutable, schema-defined bytes. A [`RecordValidator`] must
 //! check their encoding, domain constraints, and embedded identity where applicable.
 //! [`RecordReference`] validates schema-specific keys even for image-less deletes.

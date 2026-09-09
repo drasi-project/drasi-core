@@ -514,6 +514,73 @@ fn before_identity_and_image_roles_are_checked_for_updates_and_deletes() {
 }
 
 #[test]
+fn change_event_is_shared_while_each_envelope_annotation_list_can_grow() {
+    let event = Arc::new(ChangeEvent::new(
+        event_id(3),
+        changes(vec![added(0)]),
+        SystemMetadata::new(stream("source/out"), 3),
+    ));
+    let mut first = ChangeEnvelope::from_event(event.clone());
+    first
+        .append_annotation(entry("source", ContextValue::Bool(true)))
+        .unwrap();
+    let mut left = first.clone();
+    let mut right = first.clone();
+    left.append_annotation(entry("branch", ContextValue::String(Arc::from("left"))))
+        .unwrap();
+    right
+        .append_annotation(entry("branch", ContextValue::String(Arc::from("right"))))
+        .unwrap();
+
+    for envelope in [&first, &left, &right] {
+        assert!(Arc::ptr_eq(envelope.event(), &event));
+        assert!(Arc::ptr_eq(envelope.changes(), event.changes()));
+        assert!(Arc::ptr_eq(envelope.system(), event.system()));
+        assert_eq!(envelope.id(), event.id());
+    }
+    assert_eq!(first.annotations().len(), 1);
+    assert_eq!(left.annotations().len(), 2);
+    assert_eq!(right.annotations().len(), 2);
+    assert_eq!(
+        left.annotations().entries().next().unwrap().value(),
+        ContextValue::String(Arc::from("left"))
+    );
+    assert_eq!(
+        right.annotations().entries().next().unwrap().value(),
+        ContextValue::String(Arc::from("right"))
+    );
+    assert_eq!(event.changes().operations().len(), 1);
+    assert_eq!(event.system().sequence(), 3);
+    assert!(event.lineage().is_none());
+}
+
+#[test]
+fn deriving_a_new_change_event_retains_but_does_not_mutate_input_history() {
+    let original = envelope(7, vec![added(0)]);
+    let mut derived = original.derive(
+        event_id(8),
+        changes(vec![added(1)]),
+        SystemMetadata::new(stream("transform/out"), 8),
+    );
+    derived
+        .append_annotation(entry("processed", ContextValue::Bool(true)))
+        .unwrap();
+    assert!(!Arc::ptr_eq(original.event(), derived.event()));
+    assert!(original.annotations().is_empty());
+    assert_eq!(derived.annotations().len(), 1);
+    assert_eq!(
+        derived.event().lineage().unwrap().envelope_id(),
+        original.id()
+    );
+    assert!(Arc::ptr_eq(
+        derived.event().lineage().unwrap().system(),
+        original.system()
+    ));
+    assert_eq!(original.event().changes().operations()[0].ordinal(), 0);
+    assert_eq!(derived.event().changes().operations()[0].ordinal(), 1);
+}
+
+#[test]
 fn context_branches_append_without_mutating_siblings_and_share_data() {
     let text: Arc<str> = Arc::from("value");
     let bytes: Arc<[u8]> = Arc::from([1, 2, 3]);

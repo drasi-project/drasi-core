@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 
-use super::{ComponentDescriptor, Envelope, PortId};
+use super::{ChangeEnvelope, ComponentDescriptor, PortId};
 
 /// Fixed meaning of a sink's successful handle call. This is an instance-level
 /// declaration, never a per-call downgrade or a consequence of pipe capabilities.
@@ -32,7 +32,7 @@ pub enum SinkCompletion {
 #[derive(Debug, Clone)]
 pub struct InputEnvelope {
     pub port: PortId,
-    pub envelope: Envelope,
+    pub envelope: ChangeEnvelope,
 }
 
 /// New emission on a declared output port. The producing component owns its
@@ -40,7 +40,7 @@ pub struct InputEnvelope {
 #[derive(Debug, Clone)]
 pub struct OutputEnvelope {
     pub port: PortId,
-    pub envelope: Envelope,
+    pub envelope: ChangeEnvelope,
 }
 
 /// Host-owned component lifecycle, independent of legacy Source/Reaction contexts.
@@ -71,7 +71,7 @@ pub trait EnvelopeSource: ComputationComponent {
 /// A stateful transformer with declared input and output ports.
 #[async_trait]
 pub trait Transformer: ComputationComponent {
-    /// Produce zero, one, or many ordered emissions. Use Envelope::derive to
+    /// Produce zero, one, or many ordered emissions. Use ChangeEnvelope::derive to
     /// preserve input context and lineage, with this producer's output sequence.
     ///
     /// Success means local transformation completed, not that outputs have been

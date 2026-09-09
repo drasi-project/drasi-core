@@ -17,7 +17,7 @@ use std::{collections::HashSet, fmt, sync::Arc};
 use bytes::Bytes;
 
 use super::{ContractError, Result};
-use crate::change::computation_bridge;
+use crate::computation::internal::change::computation_bridge;
 
 pub(super) fn validate_identifier(kind: &'static str, value: &str) -> Result<()> {
     if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
