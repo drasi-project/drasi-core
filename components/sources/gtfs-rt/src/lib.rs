@@ -85,7 +85,7 @@ impl Source for GtfsRtSource {
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let state_store = self.base.state_store().await;
         let client = self.client.clone();
 
@@ -126,23 +126,7 @@ impl Source for GtfsRtSource {
                         _ = interval.tick() => {
                             match poller.poll_once(&source_id).await {
                                 Ok(result) => {
-                                    for change in result.changes {
-                                        let wrapper = SourceEventWrapper::new(
-                                            source_id.clone(),
-                                            SourceEvent::Change(change),
-                                            chrono::Utc::now(),
-                                        );
-
-                                        if let Err(err) = SourceBase::dispatch_from_task(
-                                            dispatchers.clone(),
-                                            wrapper,
-                                            &source_id,
-                                        )
-                                        .await
-                                        {
-                                            warn!("Failed to dispatch GTFS-RT change: {err}");
-                                        }
-                                    }
+                                    dispatch_changes(&base, &source_id, result.changes).await;
 
                                     if let Err(err) = persist_feed_cursors(
                                         state_store.as_ref(),
@@ -214,6 +198,26 @@ impl Source for GtfsRtSource {
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
     ) {
         self.base.set_bootstrap_provider(provider).await;
+    }
+}
+
+/// Dispatch a poll cycle's changes through the owned `SourceBase` so the
+/// framework stamps a monotonic `sequence` on each event (issue #828).
+async fn dispatch_changes(
+    base: &SourceBase,
+    source_id: &str,
+    changes: Vec<drasi_core::models::SourceChange>,
+) {
+    for change in changes {
+        let wrapper = SourceEventWrapper::new(
+            source_id.to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+        );
+
+        if let Err(err) = base.dispatch_event(wrapper).await {
+            warn!("Failed to dispatch GTFS-RT change: {err}");
+        }
     }
 }
 
@@ -442,6 +446,70 @@ impl GtfsRtSourceBuilder {
 impl GtfsRtSource {
     pub fn builder(id: impl Into<String>) -> GtfsRtSourceBuilder {
         GtfsRtSourceBuilder::new(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+    use drasi_lib::sources::SourceBaseParams;
+
+    fn insert_node(source_id: &str, id: &str) -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source_id, id),
+                    labels: Arc::from([Arc::<str>::from("VehiclePosition")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::new(),
+            },
+        }
+    }
+
+    /// Every change routed through the poll-loop dispatch path
+    /// (`dispatch_changes` → `SourceBase::dispatch_event`) must carry a
+    /// framework-assigned, strictly increasing `sequence` (issue #828). GTFS-RT
+    /// has no durability, so before migrating from the unstamped
+    /// `dispatch_from_task` helper these events had `sequence = None`. This drives
+    /// `dispatch_changes` directly with a stubbed poll cycle and asserts the
+    /// emitted sequences are monotonic.
+    #[tokio::test]
+    async fn dispatch_changes_stamps_monotonic_sequence() {
+        let source_id = "gtfs-seq-source";
+        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let mut rx = base.test_subscribe().await;
+
+        let changes = vec![
+            insert_node(source_id, "veh-1"),
+            insert_node(source_id, "veh-2"),
+            insert_node(source_id, "veh-3"),
+        ];
+        let expected = changes.len() as u64;
+
+        dispatch_changes(&base, source_id, changes).await;
+
+        let mut sequences = Vec::new();
+        for _ in 0..expected {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            sequences.push(
+                event
+                    .sequence
+                    .expect("dispatched change must carry a framework sequence"),
+            );
+        }
+
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3],
+            "poll-cycle changes must carry unique, strictly increasing sequences"
+        );
     }
 }
 
