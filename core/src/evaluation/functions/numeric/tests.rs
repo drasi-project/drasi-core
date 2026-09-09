@@ -14,6 +14,8 @@
 
 mod abs_tests;
 mod ceil_tests;
+mod e_tests;
+mod exp_tests;
 mod floor_tests;
 mod random_tests;
 mod round_tests;
