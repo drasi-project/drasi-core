@@ -20,6 +20,10 @@
 mod adapters;
 mod canonical;
 
+#[cfg(feature = "computation")]
+#[path = "../computation/a2_bridge.rs"]
+pub(crate) mod computation_bridge;
+
 pub(crate) use adapters::{
     query_evaluation_to_envelope, query_result_from_envelope, source_change_from_envelope,
     source_change_from_envelope_owned, source_event_from_envelope, source_event_parts_to_envelope,

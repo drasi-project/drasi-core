@@ -52,6 +52,10 @@ pub mod wal;
 /// Error types for drasi-lib
 pub mod error;
 
+/// Experimental, opt-in computation contracts (not a graph runtime).
+#[cfg(feature = "computation")]
+pub mod computation;
+
 /// Identity providers for authentication credentials
 pub mod identity;
 

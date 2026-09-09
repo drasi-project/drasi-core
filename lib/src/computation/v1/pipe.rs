@@ -1,0 +1,137 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
+use super::{ContractError, Envelope, EnvelopeId, PipeCapabilities};
+
+/// Enqueue acceptance ONLY. Not downstream handling, acknowledgement, checkpoint
+/// advancement, or durability (unless DurableAcceptance was explicitly negotiated).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnqueueReceipt {
+    id: EnvelopeId,
+}
+
+impl EnqueueReceipt {
+    /// Providers construct a receipt only after actually accepting the event.
+    pub fn new(id: EnvelopeId) -> Self {
+        Self { id }
+    }
+
+    pub fn envelope_id(&self) -> &EnvelopeId {
+        &self.id
+    }
+}
+
+/// Local handling outcome submitted separately to a delivery acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlingOutcome {
+    Handled,
+    Failed { reason: String },
+}
+
+/// Typed in-process pipe errors; provider errors retain their source chain.
+#[derive(Debug, thiserror::Error)]
+pub enum PipeError {
+    #[error(transparent)]
+    Contract(#[from] ContractError),
+    #[error("pipe is closed")]
+    Closed,
+    #[error("pipe receiver has already been taken")]
+    ReceiverTaken,
+    #[error(transparent)]
+    Backend(#[from] anyhow::Error),
+}
+
+/// A definite nonacceptance, returning the immutable event to its caller.
+#[derive(Debug, thiserror::Error)]
+#[error("envelope was not accepted: {error}")]
+pub struct SendFailure {
+    pub envelope: Envelope,
+    #[source]
+    pub error: PipeError,
+}
+
+/// One-shot, local-only handling acknowledgement, NOT part of an Envelope.
+/// Drop is never acknowledgement. Retry, failure, replay, and transaction scope
+/// must be supplied by a future provider/host contract, not inferred here.
+#[async_trait]
+pub trait Acknowledgement: Send + Sync {
+    /// Consume this handle to report actual handling. A successful call means
+    /// the provider accepted the outcome, not an automatic end-to-end commit.
+    async fn complete(
+        self: Box<Self>,
+        outcome: HandlingOutcome,
+    ) -> std::result::Result<(), PipeError>;
+}
+
+/// Received event and optional separate local delivery capability.
+/// Intentionally not Clone or serializable. A volatile pipe uses no ack handle.
+pub struct Delivery {
+    envelope: Envelope,
+    acknowledgement: Option<Box<dyn Acknowledgement>>,
+}
+
+impl Delivery {
+    pub fn new(envelope: Envelope, acknowledgement: Option<Box<dyn Acknowledgement>>) -> Self {
+        Self {
+            envelope,
+            acknowledgement,
+        }
+    }
+
+    pub fn envelope(&self) -> &Envelope {
+        &self.envelope
+    }
+
+    /// The host retains the handle separately while invoking a sink/transformer;
+    /// neither processing success nor dropping the handle implicitly completes it.
+    pub fn into_parts(self) -> (Envelope, Option<Box<dyn Acknowledgement>>) {
+        (self.envelope, self.acknowledgement)
+    }
+}
+
+/// Enqueue boundary. Concurrent producers have no cross-stream global order.
+/// A host serializes sends for a single producer stream in sequence order.
+#[async_trait]
+pub trait EnvelopeSender: Send + Sync {
+    /// Success is acceptance only. Err means definitely not accepted. Cancellation
+    /// before a result can be ambiguous and MUST NOT be interpreted as nonacceptance.
+    /// Receiver drop or runtime closure must wake blocked capacity waiters and
+    /// return Closed with their unaccepted envelope, rather than hang indefinitely.
+    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure>;
+}
+
+/// Single-consumer boundary. The negotiated FIFO guarantee follows producer
+/// sequence, never wall-clock timestamps.
+#[async_trait]
+pub trait EnvelopeReceiver: Send + Sync {
+    /// None means closed and drained, not temporarily empty. Cancellation must
+    /// not silently acknowledge or discard an event removed from a volatile queue;
+    /// durable providers retain responsibility until their negotiated completion.
+    /// Dropping all senders or runtime closure must wake a waiting receiver;
+    /// drain accepted events before returning None on a graceful close.
+    async fn receive(&mut self) -> std::result::Result<Option<Delivery>, PipeError>;
+}
+
+/// In-process pipe interface, with no concrete implementation in this phase.
+/// A future host validates capabilities/requirements before starting components.
+pub trait Pipe: Send + Sync {
+    fn capabilities(&self) -> &PipeCapabilities;
+    fn sender(&self) -> Arc<dyn EnvelopeSender>;
+    /// Transfer the single receiver to its owning task; subsequent calls fail.
+    fn take_receiver(&mut self) -> std::result::Result<Box<dyn EnvelopeReceiver>, PipeError>;
+}

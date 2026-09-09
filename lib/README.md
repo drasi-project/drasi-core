@@ -35,6 +35,37 @@ tokio = { version = "1", features = ["full"] }
 
 **Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
 
+## Experimental computation contracts
+
+The **default-off** `computation` feature exposes additive, versioned contracts at
+`drasi_lib::computation::v1`:
+
+```toml
+drasi-lib = { version = "0.9", features = ["computation"] }
+```
+
+These contracts support custom schema-validated immutable record bytes, ordered
+Adds/Updates/Deletes (explicit PATCH versus REPLACE), shared envelopes, append-only
+branch-local context, and input lineage. They also define host-owned
+`EnvelopeSource`, `Transformer`, and `EnvelopeSink` traits, named schema ports, and
+pipe capability negotiation. A transformer can emit zero, one, or many outputs,
+using its own producer stream and sequence while retaining input lineage.
+
+**This is not yet a composable graph runtime.** There is no concrete pipe, graph
+runner, legacy adapter, serialization format, server configuration, or plugin ABI
+in this feature. Enabling it does not migrate or change existing Sources, Queries,
+Reactions, or `DrasiLib` behavior. Future legacy codecs must preserve typed values;
+internal canonical identity bytes are not a proven reversible wire codec.
+
+Enqueue receipts mean **acceptance only**, not handling or acknowledgement.
+Sinks declare a fixed `Accepted` or `Handled` completion boundary; legacy reaction
+queue acceptance must never be advertised as completed handling. Local
+acknowledgement handles remain outside envelopes and contexts. The volatile bounded
+pipe descriptor advertises only per-stream FIFO and backpressure, rejecting
+requirements for durability, replay, explicit acknowledgement, transactions, or
+exactly-once. Sequence is authoritative; timestamps do not reorder a stream.
+See the v1 rustdocs for validation, lifecycle, and capability contracts.
+
 ## Identity Providers
 
 DrasiLib includes a trait-based identity provider abstraction for authenticating with databases and external services. The core trait (`IdentityProvider`) and `PasswordIdentityProvider` are built into `drasi-lib`. Cloud-specific providers are available as separate crates.

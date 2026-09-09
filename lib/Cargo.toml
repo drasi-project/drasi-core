@@ -30,6 +30,9 @@ workspace = true
 [features]
 default = []
 
+# Experimental, additive in-process computation contracts.
+computation = []
+
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
 middleware-bundled-jq = ["drasi-middleware/bundled-jq"]
