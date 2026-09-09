@@ -442,7 +442,7 @@ impl ApplicationSource {
             .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
 
         let source_name = self.base.id.clone();
-        let base_dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let reporter = self.base.status_handle();
         let source_id = self.base.id.clone();
 
@@ -494,13 +494,7 @@ impl ApplicationSource {
                             Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                     }
 
-                    if let Err(e) = SourceBase::dispatch_from_task(
-                        base_dispatchers.clone(),
-                        wrapper,
-                        &source_name,
-                    )
-                    .await
-                    {
+                    if let Err(e) = base.dispatch_event(wrapper).await {
                         debug!("Failed to dispatch change (no subscribers): {e}");
                     }
                 }

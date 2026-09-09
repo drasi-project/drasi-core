@@ -328,6 +328,7 @@ mod tests {
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.unwrap();
@@ -393,6 +394,7 @@ mod tests {
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.unwrap();
@@ -915,6 +917,7 @@ mod tests {
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.unwrap();

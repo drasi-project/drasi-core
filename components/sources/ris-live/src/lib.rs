@@ -149,7 +149,7 @@ impl Source for RisLiveSource {
 
         let source_id = self.base.id.clone();
         let config = self.config.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -172,7 +172,7 @@ impl Source for RisLiveSource {
                 if let Err(error) = stream::run_stream_loop(
                     source_id.clone(),
                     config,
-                    dispatchers,
+                    base,
                     state_store,
                     shutdown_rx,
                 )
