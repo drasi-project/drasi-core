@@ -22,6 +22,7 @@ mod mock_source;
 use anyhow::Result;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
+use drasi_lib::reactions::checkpoint::ReactionCheckpoint;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query, Reaction};
@@ -247,7 +248,26 @@ impl Reaction for RecordingReaction {
     }
 
     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-        let _ = self.tx.send(result);
+        let checkpoint = self
+            .base
+            .read_checkpoint(&result.query_id)
+            .await?
+            .unwrap_or(ReactionCheckpoint {
+                sequence: 0,
+                config_hash: 0,
+            });
+        self.tx
+            .send(result.clone())
+            .map_err(|_| anyhow::anyhow!("recording receiver closed"))?;
+        self.base
+            .write_checkpoint(
+                &result.query_id,
+                &ReactionCheckpoint {
+                    sequence: result.sequence,
+                    config_hash: checkpoint.config_hash,
+                },
+            )
+            .await?;
         Ok(())
     }
 

@@ -143,15 +143,35 @@ pub async fn start_component<R: ComponentRuntime>(
     component_type: &str,
     runtime: &R,
 ) -> Result<()> {
-    // Validate and apply Starting transition atomically through the graph
-    {
-        let mut g = graph.write().await;
-        g.validate_and_transition(
-            id,
-            ComponentStatus::Starting,
-            Some(format!("Starting {component_type}")),
-        )?
-    };
+    claim_component_start(graph, id, component_type).await?;
+    start_claimed_component(graph, id, runtime).await
+}
+
+/// Atomically validate and claim a component start, returning its prior status.
+pub(crate) async fn claim_component_start(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    id: &str,
+    component_type: &str,
+) -> Result<ComponentStatus> {
+    let mut graph = graph.write().await;
+    let prior_status = graph
+        .get_component(id)
+        .map(|node| node.status)
+        .ok_or_else(|| anyhow::anyhow!("{component_type} '{id}' not found"))?;
+    graph.validate_and_transition(
+        id,
+        ComponentStatus::Starting,
+        Some(format!("Starting {component_type}")),
+    )?;
+    Ok(prior_status)
+}
+
+/// Start a runtime after its `Starting` transition has already been claimed.
+pub(crate) async fn start_claimed_component<R: ComponentRuntime>(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    id: &str,
+    runtime: &R,
+) -> Result<()> {
     if let Err(e) = runtime.start().await {
         // Revert graph status so the component isn't stuck at Starting
         let mut g = graph.write().await;

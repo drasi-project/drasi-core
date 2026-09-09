@@ -22,11 +22,10 @@
 //! loop: advance a per-query `(sequence, config_hash)` checkpoint **only after a
 //! batch of results has been successfully delivered (acked)**.
 //!
-//! Deduplication of replayed events is **not** done here — the host
-//! `ReactionManager` forwarder already filters events with
-//! `sequence <= checkpoint.sequence` (seeded from the persisted checkpoint at
-//! startup) before they reach a reaction's priority queue. These helpers only
-//! persist checkpoints, which the forwarder deliberately does not do.
+//! Deduplication of replay/live overlap is **not** done here — the host
+//! `ReactionManager` tracks a generation-local forwarded high-water separately
+//! from the durable checkpoint. These helpers persist only successfully
+//! delivered progress.
 //!
 //! Reactions that follow the simple per-event pattern can use
 //! [`ReactionBase::run_standard_loop`](crate::reactions::common::base::ReactionBase::run_standard_loop)
@@ -43,12 +42,10 @@ use crate::recovery::ReactionRecoveryPolicy;
 /// advances move forward monotonically and preserve `config_hash`.
 ///
 /// The `config_hash` is read **lazily on the first advance for a query**, not at
-/// construction. The host persists the startup-seed checkpoint (carrying the
-/// real `config_hash`) *after* the reaction's `start()` runs, so reading it
-/// eagerly would capture a stale `config_hash` of `0` and a subsequent write
-/// would clobber the seed — causing a false `config_hash` mismatch (and
-/// recovery) on the next restart. Seeding lazily, after the bootstrap gate has
-/// opened, picks up the correct value.
+/// construction. The host establishes the startup baseline carrying the real
+/// `config_hash` before replay, while snapshot/bootstrap checkpoints are
+/// committed after successful bootstrap. Lazy seeding observes whichever
+/// authoritative baseline applies without treating enqueue as acknowledgement.
 ///
 /// Checkpoints are persisted only when a state store is configured. A
 /// non-durable reaction (`is_durable() == false`) without a store advances its
