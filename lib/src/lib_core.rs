@@ -183,6 +183,8 @@ pub struct DrasiLib {
     pub(crate) component_graph: Arc<RwLock<ComponentGraph>>,
     /// Handle to the graph update loop task for clean shutdown.
     pub(crate) graph_update_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    #[cfg(feature = "computation")]
+    pub(crate) computation_registry: Arc<crate::computation::instance::ComputationRegistry>,
 }
 
 impl Clone for DrasiLib {
@@ -202,6 +204,8 @@ impl Clone for DrasiLib {
             component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
             component_graph: Arc::clone(&self.component_graph),
             graph_update_handle: Arc::clone(&self.graph_update_handle),
+            #[cfg(feature = "computation")]
+            computation_registry: self.computation_registry.clone(),
         }
     }
 }
@@ -385,6 +389,10 @@ impl DrasiLib {
             component_event_broadcast_tx,
             component_graph,
             graph_update_handle,
+            #[cfg(feature = "computation")]
+            computation_registry: Arc::new(crate::computation::instance::ComputationRegistry::new(
+                instance_id,
+            )),
         }
     }
 
@@ -470,6 +478,8 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start(&self) -> crate::error::Result<()> {
+        #[cfg(feature = "computation")]
+        let _lifecycle = self.computation_registry.lifecycle.lock().await;
         // Reject start after permanent shutdown
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             return Err(DrasiError::invalid_state(
@@ -495,6 +505,9 @@ impl DrasiLib {
         info!("Starting drasi-lib");
 
         // Start all configured components (no lock held during this await)
+        #[cfg(feature = "computation")]
+        self.start_parallel_components().await?;
+        #[cfg(not(feature = "computation"))]
         self.lifecycle.start_components().await?;
 
         // Brief write lock to set the flag
@@ -535,6 +548,12 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop(&self) -> crate::error::Result<()> {
+        #[cfg(feature = "computation")]
+        let _lifecycle = self.computation_registry.lifecycle.lock().await;
+        self.stop_unlocked().await
+    }
+
+    async fn stop_unlocked(&self) -> crate::error::Result<()> {
         // Check precondition under a brief read lock, then release before heavy work.
         {
             let running = self.running.read().await;
@@ -549,7 +568,16 @@ impl DrasiLib {
         // Stop all components (no lock held during this await).
         // Capture the result but always mark as stopped — partial shutdown is
         // preferable to leaving the running flag set after a partial failure.
+        #[cfg(feature = "computation")]
+        let computation_result = self.computation_registry.stop_all().await;
         let result = self.lifecycle.stop_all_components().await;
+        #[cfg(feature = "computation")]
+        let result = match (result, computation_result) {
+            (Ok(()), result) | (result, Ok(())) => result,
+            (Err(legacy), Err(computation)) => Err(legacy.context(format!(
+                "parallel computation stop also failed: {computation:#}"
+            ))),
+        };
 
         // Brief write lock to clear the flag
         *self.running.write().await = false;
@@ -596,17 +624,25 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn shutdown(&self) -> crate::error::Result<()> {
-        // Mark as permanently shut down; idempotent if already set
-        if self
+        let already_shutdown = self
             .is_shutdown
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(not(feature = "computation"))]
+        if already_shutdown {
             return Ok(());
         }
+        #[cfg(feature = "computation")]
+        let _ = already_shutdown;
+        #[cfg(feature = "computation")]
+        self.computation_registry.request_shutdown();
+        #[cfg(feature = "computation")]
+        let _lifecycle = self.computation_registry.lifecycle.lock().await;
 
+        #[cfg(feature = "computation")]
+        let computation_shutdown = self.computation_registry.shutdown().await;
         // Stop components if still running (tolerate stop errors during shutdown)
         if self.is_running().await {
-            if let Err(e) = self.stop().await {
+            if let Err(e) = self.stop_unlocked().await {
                 warn!("Errors during shutdown stop: {e}");
             }
         }
@@ -625,6 +661,9 @@ impl DrasiLib {
         // backends (e.g. RocksDB) release their exclusive lock. On-disk data is left
         // intact for a future reopen.
         self.query_manager.release_all_persistent_handles().await;
+
+        #[cfg(feature = "computation")]
+        computation_shutdown?;
 
         info!("drasi-lib shut down permanently");
         Ok(())

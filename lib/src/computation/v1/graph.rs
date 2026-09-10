@@ -787,6 +787,8 @@ impl ComputationGraphBuilder {
             })
             .collect();
         Ok(ComputationGraph {
+            execution_scope: snapshot.id.clone(),
+            inspector: super::ComputationInspector::new(&snapshot, Arc::new(observed.clone())),
             next_edge: snapshot.edges.len(),
             next_binding_generation: 1,
             next_resource_generation: 2,
@@ -888,9 +890,13 @@ pub struct GraphControl {
     commands: mpsc::Sender<controller::Command>,
     observed: watch::Receiver<Arc<ObservedGraph>>,
     desired: watch::Receiver<Arc<GraphSnapshot>>,
+    inspector: super::ComputationInspector,
 }
 
 impl GraphControl {
+    pub fn inspector(&self) -> super::ComputationInspector {
+        self.inspector.clone()
+    }
     pub fn cancel(&self) {
         self.cancel.send_replace(true);
     }
@@ -940,9 +946,17 @@ pub struct ComputationGraph {
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    inspector: super::ComputationInspector,
+    execution_scope: Arc<str>,
 }
 
 impl ComputationGraph {
+    pub(crate) fn set_execution_scope(&mut self, scope: Arc<str>) {
+        self.execution_scope = scope;
+    }
+    pub fn inspector(&self) -> super::ComputationInspector {
+        self.inspector.clone()
+    }
     pub fn builder(id: impl Into<Arc<str>>) -> ComputationGraphBuilder {
         ComputationGraphBuilder {
             id: id.into(),
@@ -1007,6 +1021,7 @@ impl ComputationGraph {
         observed.startup = None;
         observed.deployment = None;
         self.observed = watch::channel(Arc::new(observed)).0;
+        self.inspector.publish(&self.snapshot, self.observed());
         self.desired = watch::channel(Arc::new(self.snapshot.clone())).0;
         let (cancel, cancellation) = watch::channel(false);
         let (commands, receiver) = mpsc::channel(64);
@@ -1016,15 +1031,18 @@ impl ComputationGraph {
             commands,
             observed: self.observed.subscribe(),
             desired: self.desired.subscribe(),
+            inspector: self.inspector.clone(),
         };
         let state = self.state.clone();
         let observed = self.observed.clone();
+        let inspector = self.inspector.clone();
         Ok(GraphRun {
             future: self.execute(cancellation, receiver, auto_start).boxed(),
             control,
             state,
             finished: false,
             observed,
+            inspector,
         })
     }
 
@@ -1097,6 +1115,7 @@ pub struct GraphRun<'a> {
     state: watch::Sender<GraphState>,
     finished: bool,
     observed: watch::Sender<Arc<ObservedGraph>>,
+    inspector: super::ComputationInspector,
 }
 
 impl GraphRun<'_> {
@@ -1123,6 +1142,10 @@ impl Drop for GraphRun<'_> {
             self.control.cancel();
             self.state.send_replace(GraphState::CleanupRequired);
             controller::mark_cleanup_required(&self.observed);
+            self.inspector.publish(
+                &self.control.desired_snapshot(),
+                self.observed.borrow().clone(),
+            );
         }
     }
 }

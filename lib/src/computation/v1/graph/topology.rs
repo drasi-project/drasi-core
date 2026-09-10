@@ -101,9 +101,13 @@ impl FactoryRegistry {
         let factories: Vec<Arc<dyn ComponentFactory>> = vec![
             Arc::new(crate::computation::v1::ContinuousQueryFactory::default()),
             Arc::new(crate::computation::v1::LegacySourceFactory::default()),
+            Arc::new(crate::computation::v1::SourcePluginAdapterFactory::default()),
             Arc::new(crate::computation::v1::LegacyReactionFactory::default()),
+            Arc::new(crate::computation::v1::ReactionPluginAdapterFactory::default()),
             Arc::new(crate::computation::v1::QueryReplayFactory::default()),
+            Arc::new(crate::computation::v1::QueryResultsOutletFactory::default()),
             Arc::new(crate::computation::v1::WalReplaySourceFactory::default()),
+            Arc::new(crate::computation::v1::ComputationTopologyFactory::default()),
         ];
         Self {
             factories: factories

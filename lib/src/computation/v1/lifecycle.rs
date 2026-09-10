@@ -228,6 +228,8 @@ pub struct RelationshipPolicy {
     pub required_for_creation: bool,
     pub required_for_binding: bool,
     pub dynamically_replaceable: bool,
+    #[serde(default)]
+    pub rebind_on_consumer_replace: bool,
     pub activation: ActivationCoupling,
     pub propagate_failure: bool,
     /// Stop the graph-owned producer if this consumer fails, for example to
@@ -243,6 +245,7 @@ impl Default for RelationshipPolicy {
             required_for_creation: false,
             required_for_binding: true,
             dynamically_replaceable: true,
+            rebind_on_consumer_replace: false,
             activation: ActivationCoupling::Independent,
             propagate_failure: false,
             fence_producer_on_failure: false,

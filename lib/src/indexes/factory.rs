@@ -175,6 +175,35 @@ impl IndexFactory {
         self.default_backend.as_ref()
     }
 
+    #[cfg(feature = "computation")]
+    pub(crate) fn computation_backend(
+        &self,
+        requested: Option<&StorageBackendRef>,
+    ) -> Result<(StorageBackendRef, bool), IndexError> {
+        let backend = requested
+            .cloned()
+            .or_else(|| self.default_backend.clone())
+            .unwrap_or(StorageBackendRef::Inline(StorageBackendSpec::Memory {
+                enable_archive: false,
+            }));
+        let volatile = match &backend {
+            StorageBackendRef::Named(name) => {
+                if let Some(provider) = self.providers.get(name) {
+                    provider.is_volatile()
+                } else if self.memory_backends.contains_key(name) {
+                    true
+                } else {
+                    return Err(IndexError::UnknownStore(name.clone()));
+                }
+            }
+            StorageBackendRef::Inline(StorageBackendSpec::Memory { .. }) => true,
+            StorageBackendRef::Inline(StorageBackendSpec::Plugin { .. }) => {
+                return Err(IndexError::NotSupported)
+            }
+        };
+        Ok((backend, volatile))
+    }
+
     /// Build a CreatedIndexes for a query using the specified storage backend
     ///
     /// # Arguments

@@ -44,6 +44,160 @@ The **default-off** `computation` feature exposes additive, versioned contracts 
 drasi-lib = { version = "0.9", features = ["computation"] }
 ```
 
+### Hosting both graphs in one DrasiLib instance
+
+`DrasiLib` can now own **both** its existing ComponentGraph pipeline and explicitly
+registered ComputationGraphs. Nothing is automatically converted. Native queries
+run their own evaluator, indexes, bootstrap and output recovery; they do not call
+the legacy QueryManager.
+
+Run the complete [side-by-side example](examples/computation_instance.rs):
+
+```bash
+cargo run -p drasi-lib --features computation --example computation_instance
+```
+
+It uses a real ApplicationSource and two ApplicationReactions. Both engines run the
+same query over a shared source, then the native graph is stopped while the legacy
+pipeline continues.
+
+For an initialized `drasi` instance, an existing `query_config`, and a **fresh**
+reaction plugin instance, the compatibility builder looks like this:
+
+```rust,ignore
+use drasi_lib::computation::v1::*;
+
+let pipeline = drasi.computation_pipeline("analytics")?;
+let reaction = ReactionPluginHost::owned(
+    Box::new(reaction),
+    pipeline.services(),
+    pipeline.catalog(),
+    ReactionPluginOptions::default(),
+)?;
+let graph = pipeline
+    .source(
+        drasi.borrow_computation_source("orders").await?,
+        SourceSubscriptionOptions::default(),
+    )?
+    .query(query_config)
+    .reaction(reaction, true)
+    .build()?;
+let handle = drasi.add_computation_graph(graph, ComputationOptions::default()).await?;
+drasi.start().await?;
+// ...
+drasi.shutdown().await?;
+```
+
+The query must name sources supplied to this builder. Existing `QueryConfig`
+synthetic joins, Cypher/GQL, registered middleware, per-source middleware pipelines,
+label filters, bootstrap settings, queue capacities and dispatch choices are
+translated into native specifications and bindings. The builder includes a
+`QueryResultsOutletFactory`, so a query can expose results without any reaction.
+`pipeline.catalog()` provides native snapshots, retained replay and a bounded live
+broadcast subscription; a lag error is not a lossless subscription.
+
+`add_computation_graph` registers a graph and its instance-owned driver. Its
+`auto_start` option joins instance startup, or starts it immediately if the instance
+is already running. `with_computation_graph` is also available on `DrasiLibBuilder`
+for graphs constructed independently of instance services. Creation and activation
+remain separate, with per-item reports on the returned `ComputationHandle`.
+Builder validation failures await disposal of transferred graph resources; keep
+awaiting a consuming build when those resources require asynchronous cleanup.
+If rollback itself fails, the returned `DrasiError::Internal` contains a
+`ComputationCleanupError`; downcast to it and await `cleanup()` to retry the
+still-owned resources. The same ownership rule applies to rejected registrations.
+
+Use `start_computation_graph`, `stop_computation_graph`, and
+`remove_computation_graph` to manage only the selected native graph. Soft stop
+parks processing at safe boundaries without destroying the controller; restart
+reuses native state and reconstructs plugins when their host has a constructor.
+Instance `stop()` stops both systems, while `shutdown()` permanently cancels,
+joins and disposes native drivers before completing legacy shutdown. A cancelled
+shutdown retains cleanup ownership: await `shutdown()` again. Dropping the entire
+instance is **not** a substitute for awaited shutdown.
+
+### Reusing existing plugins
+
+| Plugin family | ComputationGraph integration |
+| --- | --- |
+| Source | `SourcePluginHost::owned`, `recreatable`, or `borrowed`, with one `LegacySourceSubscription` per native query. Full adapters preserve filtering, bootstrap results, cursor/sequence, schema, timestamps and profiling. |
+| Reaction | `ReactionPluginHost` injects a native snapshot fetcher, bridges bootstrap/checkpoint/outbox recovery, and accepts normal `QueryResult` values. Completion is always **Accepted**, never Handled. |
+| Bootstrap | Install the existing provider with `SourcePluginHost::set_bootstrap_provider` before initialization. `LegacySourceBootstrap` coordinates snapshots and live subscriptions with native query progress. |
+| State, identity, WAL, secrets | `pipeline.services()` exposes graph-scoped instance services. Captured services and bootstrap providers are explicit declared dependencies, separate from desired configuration. State and WAL partitions include instance and graph identity. |
+| Index backend | `LegacyIndexProviderAdapter` runs existing `IndexBackendPlugin` implementations in separate namespaces. The pipeline also uses the instance's named/default index provider. Legacy writers imply **non-atomic** publication; persistent recovery requires actual checkpoint, outbox and live-result stores. |
+| Native index provider | `query_provider(query_id, provider, publication)` supplies an explicit native provider, including supported atomic output bundles. Callers sharing a provider across instances must supply distinct graph/storage scopes. |
+
+An underlying plugin has exactly one lifecycle owner. A borrowed source is not
+initialized, started, stopped, deprovisioned or given a new bootstrap provider by
+the native graph. Owned hosts must receive fresh plugin instances. Borrowed
+bootstrap/replay requires explicit `borrowed_recovery` permission; source-side
+Broadcast requires `allow_broadcast_loss`. Neither permission upgrades a plugin's
+capabilities. The instance places initial native subscriptions before the common
+legacy source subscription-complete fence.
+
+Use a `SourcePluginConstructor` or `ReactionPluginConstructor` when a plugin cannot
+restart the same object. ApplicationSource, for example, consumes its receiver on
+first start: reconstruct it and obtain its new application handle. A transient
+source cannot recover changes emitted while its native subscription was stopped.
+Replay-capable Channel sources resume from **confirmed raw source progress**, not
+adapter receipt; the native producer sequence is separate. Snapshot reset, strict
+recovery and deliberately lossy gap handling remain distinct policies. A legacy
+reaction without handled checkpoints can receive duplicates after restart.
+Recreated volatile sources retain the committed raw sequence floor even without
+positional replay. Reconstructed volatile queries have a separate incarnation
+identity, so an old durable reaction checkpoint cannot match unrelated fresh
+query state merely because its sequence and reset generation are both zero.
+
+The optional `drasi-plugin-sdk/computation` module supplies descriptor-backed
+`SourcePluginFactory`, `ReactionPluginFactory`, `BootstrapPluginFactory`, and
+provider creation helpers. They validate the descriptor's exact kind/configuration
+version and available schema, retain an unresolved `PluginConfiguration` recipe,
+and reuse existing plugin constructors. No library-to-SDK dependency or plugin ABI
+change is introduced. Store the original recipes alongside exported topology and
+re-supply their external bindings on import; export never calls `properties()` to
+recover potentially secret-bearing resolved configuration.
+
+In-process descriptor creation uses task-scoped instance secret resolution through
+`PluginResolution`, not a process-global resolver replacement. This scope also
+wraps automatic source/reaction reconstruction. `create_with_services` and
+`create_scoped_index_provider` apply it to bootstrap/index creation; other helper
+calls can be wrapped with `PluginResolution::run`. Existing schemas sometimes erase
+the inner type of `ConfigValue<T>`: those references get structural validation,
+then the descriptor performs the concrete type conversion during creation.
+
+**Compatibility limits:** descriptors must already be safely loaded and
+version-checked by the host. An FFI plugin retains its host-injected resolver and
+executor; task-local scopes do not cross that boundary. Current FFI SourceProxy
+reports replay unsupported because its ABI cannot remove position handles.
+The adapter does not bypass that restriction. Full source adapters consume and
+ignore subscription-control notifications, as the legacy query path does, rather
+than encoding them as data; native queries own their scheduled-future control.
+Cleanup can only await the plugin's own `stop()` contract; it cannot join
+opaque workers that a plugin fails to join itself. No adapter makes arbitrary
+plugins durable, lossless, externally exactly-once, or restartable.
+
+### Inspecting and changing a managed graph
+
+`get_computation_graph`, `list_computation_graphs` and
+`inspect_computation_graph` expose native state without adding native components
+to ComponentGraph. `ComputationInspector` publishes coherent desired/observed
+snapshots and the latest 256 controller publications. Requests for evicted history
+fail explicitly. The handle exposes the same revision/generation-checked control,
+preview/reconcile and desired export APIs as a standalone graph.
+
+`ComputationTopologySource`/`ComputationTopologyFactory` expose that inspection as
+queryable graph data: components, resources, active flows and explicitly unbound
+relationships. They converge to the latest publication, not every intermediate
+transition, and omit configuration values, secret values and failure messages.
+`subscribe_computation_logs` reads the existing log registry under
+`<instance>::computation::<graph>`; use a wrapped plugin's own ID for its worker
+logs. Native transformers use the Query log category and native sinks use Reaction.
+
+This milestone does not add Server YAML/REST routing, a dynamic-plugin loader,
+automatic legacy persistence migration, or a second legacy manager hierarchy.
+
+### Native graph contracts
+
 These contracts support custom schema-validated immutable record bytes, ordered
 Adds/Updates/Deletes (explicit PATCH versus REPLACE), and input lineage.
 Every new graph data-plane boundary carries a `ChangeEnvelope`: a shared immutable
@@ -222,8 +376,8 @@ cannot await cleanup for resources a component itself spawned.
 This is a parallel in-process runtime, not a replacement for the platform.
 Server configuration, plugin loading/ABI changes, distributed graph control and
 generic cross-component exactly-once transactions are not supplied by these
-components. Enabling computation does not migrate or change existing Sources, Queries,
-Reactions, or `DrasiLib`. Immutable topology snapshots contain no live provider handles
+components. Enabling computation alone does not migrate existing Sources, Queries,
+Reactions, or change an unextended `DrasiLib` pipeline. Immutable topology snapshots contain no live provider handles
 or resolved secrets. The explicit boundary codecs preserve typed values; internal
 canonical identity bytes are not used as a reversible wire codec.
 

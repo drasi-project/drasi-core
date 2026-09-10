@@ -13,13 +13,17 @@
 // limitations under the License.
 
 //! Experimental computation contracts and runtime, enabled by the default-off `computation`
-//! Cargo feature. These sit beside, and do not modify, the existing
-//! [`crate::Source`], [`crate::Reaction`], or [`crate::DrasiLib`] APIs.
+//! Cargo feature. These sit beside the existing [`crate::Source`] and
+//! [`crate::Reaction`] contracts. Opt-in [`crate::DrasiLib`] methods host native
+//! graphs without migrating its legacy ComponentGraph pipeline.
 //!
 //! Only versioned namespaces are public. [`v1::ComputationGraph`] runs native
-//! components over bounded volatile pipes. Legacy adapters, durable delivery,
-//! persistence formats, and plugin ABIs are separate work.
+//! components over capability-checked pipes, with explicit adapters for existing
+//! plugins and graph-owned query recovery. Server configuration and plugin loading
+//! remain the embedding host's responsibility; legacy plugin ABIs are unchanged.
 
+pub(crate) mod instance;
+mod instance_ops;
 mod internal;
 
 pub mod v1;

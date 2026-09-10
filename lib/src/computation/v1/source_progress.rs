@@ -28,6 +28,8 @@ pub enum SourceProgressKey {
 #[derive(Debug, Clone, Default)]
 pub struct SourceProgressSnapshot {
     pub ready: bool,
+    pub recovered: bool,
+    pub bootstrap_complete: bool,
     pub persistent: bool,
     pub reset_generation: u64,
     pub checkpoints: BTreeMap<SourceProgressKey, SourceCheckpoint>,
@@ -59,6 +61,19 @@ impl QuerySourceProgress {
     pub fn snapshot(&self) -> Arc<SourceProgressSnapshot> {
         self.state.borrow().clone()
     }
+    pub fn subscribe(&self) -> watch::Receiver<Arc<SourceProgressSnapshot>> {
+        self.state.subscribe()
+    }
+    pub async fn wait_recovered(&self) -> anyhow::Result<Arc<SourceProgressSnapshot>> {
+        let mut receiver = self.state.subscribe();
+        let snapshot = receiver
+            .wait_for(|snapshot| snapshot.recovered || snapshot.failure.is_some())
+            .await?;
+        if let Some(failure) = &snapshot.failure {
+            anyhow::bail!("{failure}");
+        }
+        Ok(snapshot.clone())
+    }
     pub async fn wait_ready(&self) -> anyhow::Result<Arc<SourceProgressSnapshot>> {
         let mut receiver = self.state.subscribe();
         let snapshot = receiver
@@ -73,6 +88,7 @@ impl QuerySourceProgress {
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
             state.ready = false;
+            state.recovered = false;
             state.failure = None;
         });
     }

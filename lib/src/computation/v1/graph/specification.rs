@@ -110,6 +110,8 @@ pub struct ConfigurationSchema {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceRole {
     Bootstrap,
+    Middleware,
+    Inspection,
     Identity,
     IndexBackend,
     SecretStore,
@@ -121,6 +123,8 @@ pub enum ResourceRole {
     LiveResults,
     FutureQueue,
     LegacySource,
+    SourceSubscription,
+    QueryCatalog,
     LegacyReaction,
 }
 
@@ -321,6 +325,7 @@ pub struct ConfigurationResolverResource(pub Arc<dyn ConfigurationResolver>);
 /// Runtime-only context: resolved values and actual resource instances cannot be
 /// obtained by serializing the desired specification.
 pub struct ConstructionContext {
+    pub instance_id: Arc<str>,
     pub graph_id: Arc<str>,
     pub component_id: ComponentId,
     pub generation: ComponentGeneration,
@@ -355,6 +360,7 @@ impl ConstructionContext {
     }
 
     pub(super) async fn resolve(
+        instance_id: Arc<str>,
         graph_id: Arc<str>,
         generation: ComponentGeneration,
         specification: Arc<ComponentSpecification>,
@@ -394,6 +400,7 @@ impl ConstructionContext {
             configuration.insert(key.clone(), value);
         }
         Ok(Self {
+            instance_id,
             graph_id,
             component_id: specification.descriptor.id().clone(),
             generation,

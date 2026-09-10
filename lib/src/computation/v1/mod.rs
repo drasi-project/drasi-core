@@ -38,7 +38,8 @@
 //! schemas when decoding. Record payload encoding is schema-specific, not a
 //! legacy Drasi wire standard. [`GraphChangeCodec`] and [`QueryChangeCodec`] preserve
 //! typed graph/query boundaries, while explicit source/reaction adapters retain
-//! legacy APIs. SDK/ABI integration is separate work.
+//! legacy APIs. The optional SDK computation module bridges existing descriptors
+//! without changing their ABI; the embedding host remains responsible for loading.
 //!
 //! ```
 //! use drasi_lib::computation::v1::{
@@ -138,6 +139,10 @@
 //! profiles. [`ContinuousQueryTransformer`] owns query evaluation/publication and
 //! scheduled work; [`LegacyReactionSink`] remains acceptance-only.
 
+pub use super::instance::{
+    ComputationCleanupError, ComputationHandle, ComputationInfo, ComputationOptions,
+};
+
 mod bounded_pipe;
 mod broadcast_pipe;
 mod codec;
@@ -148,13 +153,29 @@ mod envelope;
 mod error;
 mod graph;
 mod graph_codec;
+mod legacy_index;
 mod legacy_reaction;
+pub use legacy_index::*;
+mod plugin_services;
+pub use plugin_services::*;
+mod plugin_source;
+pub use plugin_source::*;
+mod plugin_reaction;
+pub use plugin_reaction::*;
+mod pipeline;
+pub use pipeline::*;
 mod legacy_source;
 mod lifecycle;
 mod pipe;
 mod pipe_metrics;
 mod ports;
 mod query;
+mod query_configuration;
+pub use query_configuration::*;
+mod query_catalog;
+pub use query_catalog::*;
+mod inspection;
+pub use inspection::*;
 mod query_bootstrap;
 mod query_codec;
 mod retained_pipe;

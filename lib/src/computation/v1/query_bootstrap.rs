@@ -35,7 +35,23 @@ pub struct ComputationBootstrapSnapshot {
 /// resources requiring asynchronous cleanup must be registered with the graph.
 #[async_trait]
 pub trait ComputationBootstrapProvider: Send + Sync {
+    /// Establish source subscription readiness before deciding whether persisted
+    /// query state can be reused. This must not consume snapshot records.
+    async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
+        Ok(BootstrapPreparation::Ready)
+    }
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot>;
+    /// Boundaries that become available only after the snapshot stream closes.
+    async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapPreparation {
+    Ready,
+    RefreshVolatile,
+    ResetRequired,
 }
 
 pub struct QueryBootstrapResource(pub Arc<dyn ComputationBootstrapProvider>);
@@ -64,6 +80,8 @@ pub struct QueryOptions {
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryRecoveryError {
+    #[error("source subscription requires reset/rebootstrap before this query can resume")]
+    SourceResetRequired,
     #[error("query configuration changed; explicit reset/rebootstrap is required")]
     ConfigurationChanged,
     #[error("query bootstrap did not complete; explicit reset/rebootstrap is required")]

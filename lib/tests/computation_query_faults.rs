@@ -47,6 +47,7 @@ const PENDING: &str = "\0computation:pending-output:v1";
 enum Fault {
     InputCheckpoint,
     ResultSequence,
+    PendingStart,
     PendingStage,
     PendingClear,
     BootstrapComplete,
@@ -115,6 +116,8 @@ impl CheckpointStore for Checkpoints {
     ) -> Result<(), IndexError> {
         let fault = if key.starts_with("computation:input:") {
             Some(Fault::InputCheckpoint)
+        } else if key == PENDING && position.is_some() {
+            Some(Fault::PendingStart)
         } else if key == PENDING && sequence > 0 {
             Some(Fault::PendingStage)
         } else if key == PENDING {
@@ -361,7 +364,7 @@ async fn atomic_fault_matrix_rolls_back_all_output_and_source_progress_before_fe
 
 #[tokio::test]
 async fn non_atomic_pending_marker_stage_and_clear_failures_have_distinct_recovery_boundaries() {
-    for point in [Fault::PendingStage, Fault::PendingClear] {
+    for point in [Fault::PendingStart, Fault::PendingStage, Fault::PendingClear] {
         let temp = tempfile::tempdir().expect("temp");
         let base = provider(temp.path());
         let fault = Injection::new(point);
@@ -389,11 +392,11 @@ async fn non_atomic_pending_marker_stage_and_clear_failures_have_distinct_recove
             ContinuousQueryTransformer::new_with_options(definition(false), base, options)
                 .await
                 .expect("reopen");
-        if point == Fault::PendingStage {
+        if point == Fault::PendingStart {
             reopened
                 .start()
                 .await
-                .expect("marker stage failed before core commit");
+                .expect("initial fence failed before evaluation began");
             assert_eq!(
                 reopened.transform(input(1)).await.expect("replay input")[0]
                     .envelope

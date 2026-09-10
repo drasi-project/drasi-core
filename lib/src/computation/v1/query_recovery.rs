@@ -59,6 +59,24 @@ impl ContinuousQueryTransformer {
             }
             self.reset_for_bootstrap().await?;
         }
+        self.publish_source_progress(false).await?;
+        if let Some(provider) = self.bootstrap.clone() {
+            let preparation = provider.prepare().await?;
+            if preparation != super::super::BootstrapPreparation::Ready {
+                if preparation == super::super::BootstrapPreparation::RefreshVolatile
+                    && self.provider.is_volatile()
+                    || self.options.recovery == QueryRecoveryPolicy::AutoReset
+                {
+                    self.reset_for_bootstrap().await?;
+                    self.publish_source_progress(false).await?;
+                    if provider.prepare().await? != super::super::BootstrapPreparation::Ready {
+                        return Err(QueryRecoveryError::SourceResetRequired.into());
+                    }
+                } else {
+                    return Err(QueryRecoveryError::SourceResetRequired.into());
+                }
+            }
+        }
         self.run_bootstrap().await
     }
 
@@ -84,6 +102,22 @@ impl ContinuousQueryTransformer {
             )
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("query reset generation exhausted"))?;
+        if self.provider.is_volatile() {
+            query.shutdown().await?;
+            self.query = None;
+            self.build().await?;
+            self.results
+                .state
+                .write()
+                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
+                .reset_to_sequence(highwater, generation);
+            self.watermarks
+                .lock()
+                .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                .clear();
+            self.bootstrap_complete.store(false, Ordering::Release);
+            return Ok(());
+        }
         if let Some(marker) = old_marker {
             highwater = highwater.max(marker.sequence);
         }
@@ -116,7 +150,7 @@ impl ContinuousQueryTransformer {
                 })
                 .await?;
         }
-        let config = self.definition.configuration_bytes()?;
+        let config = self.definition.configuration_bytes(&self.execution)?;
         query
             .resource_transaction(|| async {
                 resources.indexes().element_index.clear().await?;
@@ -179,20 +213,7 @@ impl ContinuousQueryTransformer {
                 .await?;
         }
         let mut snapshot = provider.snapshot().await?;
-        let mut sources = std::collections::BTreeSet::new();
-        for watermark in &snapshot.watermarks {
-            if !sources.insert(progress_key(
-                watermark.stream.as_str(),
-                watermark.source_id.as_deref(),
-            )) {
-                anyhow::bail!("bootstrap contains duplicate source watermarks");
-            }
-            if watermark.position.as_ref().is_some_and(|position| {
-                position.len() > crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES
-            }) {
-                anyhow::bail!("bootstrap source position exceeds the supported checkpoint limit");
-            }
-        }
+        validate_watermarks(&snapshot.watermarks)?;
         let bootstrap_stream = StreamId::try_new(format!(
             "{}/bootstrap/{}",
             self.definition.id,
@@ -270,6 +291,10 @@ impl ContinuousQueryTransformer {
                     .apply_rows(&output);
             }
         }
+        snapshot
+            .watermarks
+            .extend(provider.complete_snapshot().await?);
+        validate_watermarks(&snapshot.watermarks)?;
         let watermarks: Vec<_> = snapshot
             .watermarks
             .into_iter()
@@ -312,6 +337,14 @@ impl ContinuousQueryTransformer {
                 })
                 .await?;
         }
+        if let Some(progress) = &self.source_progress {
+            for (key, sequence, position) in &watermarks {
+                progress.confirm(
+                    progress_identity(key)?,
+                    SourceCheckpoint::new(*sequence, position.clone()),
+                );
+            }
+        }
         self.watermarks
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
@@ -324,14 +357,37 @@ impl ContinuousQueryTransformer {
         Ok(())
     }
 
+    pub(super) async fn begin_non_atomic(&self) -> anyhow::Result<()> {
+        if self.provider.is_volatile()
+            || self.options.publication != QueryPublicationMode::NonAtomic
+        {
+            return Ok(());
+        }
+        let query = self.query()?;
+        let in_progress = Bytes::from_static(b"evaluating-v1");
+        query
+            .resource_transaction(|| async {
+                query
+                    .resources()
+                    .checkpoint_store()
+                    .ok_or(IndexError::NotSupported)?
+                    .stage_checkpoint(PENDING_OUTPUT, 0, Some(&in_progress))
+                    .await
+            })
+            .await?;
+        Ok(())
+    }
+
     pub(super) async fn finish_non_atomic(
         &self,
-        output: &super::super::ChangeEnvelope,
+        output: Option<&super::super::ChangeEnvelope>,
     ) -> anyhow::Result<()> {
         let query = self.query()?;
         query
             .resource_transaction(|| async {
-                self.stage_output(output).await?;
+                if let Some(output) = output {
+                    self.stage_output(output).await?;
+                }
                 query
                     .resources()
                     .checkpoint_store()

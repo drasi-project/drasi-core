@@ -514,6 +514,8 @@ pub(super) fn preview(
             || replace.contains(&edge.from.component)
             || resource_changed
             || (missing_binding && replace.contains(&edge.to.component))
+            || (description.policy.rebind_on_consumer_replace
+                && replace.contains(&edge.to.component))
             || ([&edge.from.component, &edge.to.component].iter().any(|id| {
                 restart.contains(*id)
                     && graph
@@ -1005,6 +1007,65 @@ async fn drive<T>(
             }
         }
     }
+}
+
+pub(super) async fn quiesce(
+    graph: &ComputationGraph,
+    operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    selected: BTreeSet<usize>,
+) -> GraphResult<Vec<ComponentId>> {
+    if operations.starting.is_some() || operations.stopping.is_some() {
+        return Err(GraphError::OperationInProgress);
+    }
+    let ids: BTreeSet<_> = selected
+        .iter()
+        .map(|index| graph.nodes[*index].descriptor.id().clone())
+        .collect();
+    let result = async {
+        for &index in &graph.order {
+            if !selected.contains(&index) {
+                continue;
+            }
+            for (&edge_index, edge) in &graph.edges {
+                let from = graph.ids[&edge.definition.from.component];
+                if &edge.definition.to.component != graph.nodes[index].descriptor.id()
+                    || !selected.contains(&from)
+                    || operations.invalidated_bindings.contains(&edge_index)
+                {
+                    continue;
+                }
+                let progress = graph.components[from]
+                    .take()?
+                    .outputs
+                    .iter()
+                    .find(|output| output.edge == edge_index)
+                    .map(|output| output.progress.clone());
+                if let Some(progress) = progress {
+                    let control = controls
+                        .0
+                        .get(&edge_index)
+                        .cloned()
+                        .ok_or_else(|| topology("bound edge has no drain control"))?;
+                    drive(graph, operations, controls, cancel, async {
+                        progress.drained(control.as_ref()).await
+                    })
+                    .await?;
+                }
+            }
+            pause(graph, operations, controls, cancel, index).await?;
+        }
+        Ok::<_, GraphError>(())
+    }
+    .await;
+    if let Err(error) = result {
+        if !matches!(error, GraphError::Cancelled) {
+            resume(graph, operations, &ids)?;
+        }
+        return Err(error);
+    }
+    Ok(ids.into_iter().collect())
 }
 
 async fn pause(
@@ -1682,6 +1743,7 @@ async fn realize(
             let graph_id = graph.snapshot.id.clone();
             created = drive(graph, operations, controls, cancel, async {
                 let context = ConstructionContext::resolve(
+                    graph.execution_scope.clone(),
                     graph_id,
                     slot.generation,
                     spec,

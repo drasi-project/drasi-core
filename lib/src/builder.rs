@@ -147,6 +147,11 @@ pub struct DrasiLibBuilder {
     secret_store_provider: Option<Arc<dyn SecretStoreProvider>>,
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     default_index_backend: Option<crate::indexes::StorageBackendRef>,
+    #[cfg(feature = "computation")]
+    computation_graphs: Vec<(
+        crate::computation::v1::ComputationGraph,
+        crate::computation::v1::ComputationOptions,
+    )>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -156,6 +161,18 @@ impl Default for DrasiLibBuilder {
 }
 
 impl DrasiLibBuilder {
+    /// Register a parallel computation graph with instance-owned execution.
+    /// It does not add its nodes to the existing ComponentGraph.
+    #[cfg(feature = "computation")]
+    pub fn with_computation_graph(
+        mut self,
+        graph: crate::computation::v1::ComputationGraph,
+        options: crate::computation::v1::ComputationOptions,
+    ) -> Self {
+        self.computation_graphs.push((graph, options));
+        self
+    }
+
     /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
@@ -174,6 +191,8 @@ impl DrasiLibBuilder {
             secret_store_provider: None,
             default_recovery_policy: None,
             default_index_backend: None,
+            #[cfg(feature = "computation")]
+            computation_graphs: Vec::new(),
         }
     }
 
@@ -485,6 +504,17 @@ impl DrasiLibBuilder {
     /// This validates the configuration, creates all components, and initializes the server.
     /// After building, you can call `start()` to begin processing.
     pub async fn build(self) -> Result<DrasiLib> {
+        #[cfg(feature = "computation")]
+        {
+            let mut builder = self;
+            let graphs = std::mem::take(&mut builder.computation_graphs);
+            crate::computation::instance::build_instance(builder.build_inner(), graphs).await
+        }
+        #[cfg(not(feature = "computation"))]
+        self.build_inner().await
+    }
+
+    async fn build_inner(self) -> Result<DrasiLib> {
         // Build the configuration
         let config = DrasiLibConfig {
             id: self.server_id.unwrap_or_else(|| "drasi-lib".to_string()),
@@ -610,6 +640,15 @@ impl DrasiLibBuilder {
         // Inject WAL provider into SourceManager (if configured)
         // This allows transient sources to persist events for crash recovery
         if let Some(wal_provider) = self.wal_provider {
+            #[cfg(feature = "computation")]
+            {
+                *core
+                    .computation_registry
+                    .wal
+                    .lock()
+                    .map_err(|_| DrasiError::invalid_state("computation WAL binding poisoned"))? =
+                    Some(wal_provider.clone());
+            }
             core.source_manager.inject_wal_provider(wal_provider).await;
         }
 

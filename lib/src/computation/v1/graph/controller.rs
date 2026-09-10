@@ -25,6 +25,7 @@ use futures::{
     FutureExt, StreamExt,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+use tracing::Instrument;
 
 #[path = "reconcile.rs"]
 pub(super) mod reconcile;
@@ -37,11 +38,11 @@ use super::{
 };
 use crate::computation::v1::{
     ActivationCoupling, BindingState, ComponentFailure, ComponentGeneration, ComponentHealth,
-    ComponentId, ComponentLifecycle, CreationOutcome, DataAvailability, DeploymentReport,
-    FailureDisposition, FailurePhase, GraphRevision, GraphSelection, HealthObservation,
-    LifecyclePolicy, ObservedComponent, ObservedGraph, ObservedRelationship, ObservedResource,
-    OperationEpoch, OperationSummary, PortId, RealizationState, ResourceRealization, StartOutcome,
-    StartReport, StopOutcome, StopReport,
+    ComponentId, ComponentLifecycle, ComponentRole, CreationOutcome, DataAvailability,
+    DeploymentReport, FailureDisposition, FailurePhase, GraphRevision, GraphSelection,
+    HealthObservation, LifecyclePolicy, ObservedComponent, ObservedGraph, ObservedRelationship,
+    ObservedResource, OperationEpoch, OperationSummary, PortId, RealizationState,
+    ResourceRealization, StartOutcome, StartReport, StopOutcome, StopReport,
 };
 
 pub(super) struct InstanceSlot {
@@ -144,6 +145,11 @@ pub(super) enum Command {
         selection: GraphSelection,
         reply: oneshot::Sender<GraphResult<StopReport>>,
     },
+    Quiesce {
+        revision: GraphRevision,
+        selection: GraphSelection,
+        reply: oneshot::Sender<GraphResult<Vec<ComponentId>>>,
+    },
     Policy {
         revision: GraphRevision,
         component: ComponentId,
@@ -158,6 +164,26 @@ pub(super) enum Command {
 }
 
 impl GraphControl {
+    /// Park selected processing at safe boundaries without stopping instances.
+    /// Incoming work from selected producers drains first; other input queues
+    /// remain owned by the parked component. No external-effect drain is implied.
+    pub async fn quiesce_components(
+        &self,
+        revision: GraphRevision,
+        selection: GraphSelection,
+    ) -> GraphResult<Vec<ComponentId>> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::Quiesce {
+                revision,
+                selection,
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
     pub fn observed(&self) -> Arc<ObservedGraph> {
         self.observed.borrow().clone()
     }
@@ -339,6 +365,7 @@ fn update(graph: &ComputationGraph, change: impl FnOnce(&mut ObservedGraph)) {
     graph
         .observed
         .send_modify(|snapshot| change(Arc::make_mut(snapshot)));
+    graph.inspector.publish(&graph.snapshot, graph.observed());
 }
 
 pub(super) fn mark_cleanup_required(observed: &watch::Sender<Arc<ObservedGraph>>) {
@@ -547,6 +574,7 @@ async fn deploy(
             });
             let construction = async {
                 let context = ConstructionContext::resolve(
+                    graph.execution_scope.clone(),
                     graph.snapshot.id.clone(),
                     slot.generation,
                     specification,
@@ -869,6 +897,15 @@ impl Operations {
         );
         let timeout = graph.cleanup_timeout;
         let (quiesce, mut quiescence) = watch::channel(false);
+        let span = tracing::info_span!("computation_component",
+            instance_id = %graph.execution_scope,
+            component_id = %node.descriptor.id(),
+            component_type = match node.role {
+                ComponentRole::Source => "source",
+                ComponentRole::Transformer | ComponentRole::Query => "query",
+                ComponentRole::Sink => "reaction",
+            },
+            generation = generation.0);
         update(graph, |state| {
             let observed = state.components.get_mut(&slot.id).expect("component");
             observed.operation = epoch;
@@ -935,7 +972,7 @@ impl Operations {
                     generation,
                     epoch,
                     operation,
-                    result: Abortable::new(future, registration).await,
+                    result: Abortable::new(future.instrument(span), registration).await,
                 }
             }
             .boxed(),
@@ -1465,6 +1502,15 @@ pub(super) async fn run(
                         Ok(selected) => operations.begin_stop(graph, selected, reply)?,
                         Err(error) => { let _ = reply.send(Err(error)); }
                     }
+                }
+                Some(Command::Quiesce { revision, selection, reply }) => {
+                    let result = match check_revision(graph, revision).and_then(|_| select(graph, &selection)) {
+                        Ok(selected) => reconcile::quiesce(graph, &mut operations, &controls, cancel, selected).await,
+                        Err(error) => Err(error),
+                    };
+                    let was_cancelled = matches!(&result, Err(GraphError::Cancelled));
+                    let _ = reply.send(result);
+                    if was_cancelled { return Err(GraphError::Cancelled); }
                 }
                 Some(Command::Policy { revision, component, policy, reply }) => {
                     let result = check_revision(graph, revision).and_then(|_| {

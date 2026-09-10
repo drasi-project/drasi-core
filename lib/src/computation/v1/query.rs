@@ -61,6 +61,7 @@ use super::{
     RecordId, RecordImage, ResourceRequirement, ResourceRole, StreamId, SystemMetadata,
     Transformer, WakeupSource,
 };
+use super::{QueryExecutionSettings, QueryMiddlewareResource};
 use super::{
     QuerySourceProgress, QuerySourceProgressResource, SourceProgressKey, SourceProgressSnapshot,
 };
@@ -95,7 +96,16 @@ impl ContinuousQueryDefinition {
         query_descriptor(self.id.clone())
     }
 
-    fn configuration_bytes(&self) -> anyhow::Result<Bytes> {
+    fn configuration_bytes(&self, execution: &QueryExecutionSettings) -> anyhow::Result<Bytes> {
+        if !execution.is_empty() {
+            return Ok(Bytes::from(serde_json::to_vec(&(
+                2u32,
+                &self.query,
+                self.language,
+                self.output_stream.as_str(),
+                execution,
+            ))?));
+        }
         Ok(Bytes::from(serde_json::to_vec(&(
             1u32,
             &self.query,
@@ -232,6 +242,45 @@ fn progress_key(stream: &str, source: Option<&str>) -> String {
     )
 }
 
+fn progress_identity(key: &str) -> anyhow::Result<SourceProgressKey> {
+    let key = key
+        .strip_prefix(INPUT_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("invalid source checkpoint prefix"))?;
+    if key.len() % 2 != 0 || !key.is_ascii() {
+        anyhow::bail!("invalid source checkpoint identity");
+    }
+    let decoded = (0..key.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&key[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()?;
+    let decoded = String::from_utf8(decoded)?;
+    if let Some(source) = decoded.strip_prefix("source:") {
+        Ok(SourceProgressKey::Source(source.to_owned()))
+    } else if let Some(stream) = decoded.strip_prefix("stream:") {
+        Ok(SourceProgressKey::Stream(StreamId::try_new(stream)?))
+    } else {
+        anyhow::bail!("invalid source checkpoint identity");
+    }
+}
+
+fn validate_watermarks(watermarks: &[super::BootstrapWatermark]) -> anyhow::Result<()> {
+    let mut sources = std::collections::BTreeSet::new();
+    for watermark in watermarks {
+        if !sources.insert(progress_key(
+            watermark.stream.as_str(),
+            watermark.source_id.as_deref(),
+        )) {
+            anyhow::bail!("bootstrap contains duplicate source watermarks");
+        }
+        if watermark.position.as_ref().is_some_and(|position| {
+            position.len() > crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES
+        }) {
+            anyhow::bail!("bootstrap source position exceeds the supported checkpoint limit");
+        }
+    }
+    Ok(())
+}
+
 pub struct ContinuousQueryTransformer {
     definition: ContinuousQueryDefinition,
     descriptor: ComponentDescriptor,
@@ -245,6 +294,9 @@ pub struct ContinuousQueryTransformer {
     bootstrap_complete: AtomicBool,
     watermarks: Mutex<HashMap<String, u64>>,
     source_progress: Option<Arc<QuerySourceProgress>>,
+    execution: QueryExecutionSettings,
+    middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
+    registration: Option<super::query_catalog::QueryRegistration>,
 }
 
 impl ContinuousQueryTransformer {
@@ -260,6 +312,27 @@ impl ContinuousQueryTransformer {
         provider: Arc<dyn ComputationIndexProvider>,
         options: QueryOptions,
     ) -> anyhow::Result<Self> {
+        Self::new_configured(
+            definition,
+            provider,
+            options,
+            QueryExecutionSettings::default(),
+            None,
+        )
+        .await
+    }
+
+    pub async fn new_configured(
+        definition: ContinuousQueryDefinition,
+        provider: Arc<dyn ComputationIndexProvider>,
+        options: QueryOptions,
+        execution: QueryExecutionSettings,
+        middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
+    ) -> anyhow::Result<Self> {
+        execution.validate(middleware.as_deref())?;
+        if !execution.middleware.is_empty() && middleware.is_none() {
+            anyhow::bail!("query middleware requires a registered middleware resource");
+        }
         let (parser, _) = parser(definition.language);
         parser.parse(&definition.query)?;
         let mut codec =
@@ -284,6 +357,9 @@ impl ContinuousQueryTransformer {
             bootstrap_complete: AtomicBool::new(false),
             watermarks: Mutex::new(HashMap::new()),
             source_progress: None,
+            execution,
+            middleware,
+            registration: None,
         };
         instance.build().await?;
         Ok(instance)
@@ -291,6 +367,25 @@ impl ContinuousQueryTransformer {
 
     pub fn results(&self) -> QueryResults {
         self.results.clone()
+    }
+    pub fn with_result_catalog(
+        mut self,
+        catalog: &super::QueryResultsCatalog,
+    ) -> anyhow::Result<Self> {
+        if catalog.graph_id() != self.definition.graph_id {
+            anyhow::bail!("query catalogue belongs to another graph");
+        }
+        use std::hash::Hasher;
+        let mut hasher = fnv::FnvHasher::default();
+        hasher.write(&self.definition.configuration_bytes(&self.execution)?);
+        self.registration = Some(catalog.register(
+            self.definition.id.clone(),
+            self.results.clone(),
+            self.source_progress.clone(),
+            hasher.finish(),
+            self.provider.is_volatile(),
+        )?);
+        Ok(self)
     }
 
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
@@ -311,45 +406,42 @@ impl ContinuousQueryTransformer {
         Ok(self)
     }
 
-    async fn publish_source_progress(&self) -> anyhow::Result<()> {
+    async fn publish_source_progress(&self, ready: bool) -> anyhow::Result<()> {
         let Some(progress) = &self.source_progress else {
             return Ok(());
         };
-        let checkpoint = self
-            .query()?
-            .resources()
-            .checkpoint_store()
-            .ok_or_else(|| {
-                anyhow::anyhow!("source resume requires an actual query checkpoint store")
-            })?;
-        if !checkpoint.is_persistent() || self.provider.is_volatile() {
-            anyhow::bail!("source resume cannot use volatile query progress");
-        }
         let mut checkpoints = BTreeMap::new();
-        for (key, checkpoint) in checkpoint.read_all_checkpoints().await? {
-            let Some(key) = key.strip_prefix(INPUT_PREFIX) else {
-                continue;
-            };
-            if key.len() % 2 != 0 || !key.is_ascii() {
-                anyhow::bail!("invalid source checkpoint identity");
+        let store = self.query()?.resources().checkpoint_store();
+        let persistent =
+            store.is_some_and(|store| store.is_persistent()) && !self.provider.is_volatile();
+        if let Some(store) = store {
+            for (key, checkpoint) in store.read_all_checkpoints().await? {
+                if key.starts_with(INPUT_PREFIX) {
+                    checkpoints.insert(progress_identity(&key)?, checkpoint);
+                }
             }
-            let decoded = (0..key.len())
-                .step_by(2)
-                .map(|index| u8::from_str_radix(&key[index..index + 2], 16))
-                .collect::<Result<Vec<_>, _>>()?;
-            let decoded = String::from_utf8(decoded)?;
-            let key = if let Some(source) = decoded.strip_prefix("source:") {
-                SourceProgressKey::Source(source.to_owned())
-            } else if let Some(stream) = decoded.strip_prefix("stream:") {
-                SourceProgressKey::Stream(StreamId::try_new(stream)?)
-            } else {
-                anyhow::bail!("invalid source checkpoint identity");
-            };
-            checkpoints.insert(key, checkpoint);
+        } else {
+            let previous = progress.snapshot();
+            for (key, sequence) in self
+                .watermarks
+                .lock()
+                .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                .iter()
+            {
+                let key = progress_identity(key)?;
+                let position = previous
+                    .checkpoints
+                    .get(&key)
+                    .filter(|saved| saved.sequence == *sequence)
+                    .and_then(|saved| saved.source_position.clone());
+                checkpoints.insert(key, SourceCheckpoint::new(*sequence, position));
+            }
         }
         progress.publish(SourceProgressSnapshot {
-            ready: true,
-            persistent: true,
+            ready,
+            recovered: true,
+            bootstrap_complete: self.bootstrap_complete.load(Ordering::Acquire),
+            persistent,
             reset_generation: self.results.snapshot()?.generation,
             checkpoints,
             failure: None,
@@ -366,14 +458,21 @@ impl ContinuousQueryTransformer {
         {
             resources.atomic_result_transaction()?;
         }
+        if !self.provider.is_volatile()
+            && (resources.checkpoint_store().is_none()
+                || resources.outbox_writer().is_none()
+                || resources.live_results_writer().is_none())
+        {
+            anyhow::bail!(
+                "persistent query recovery requires checkpoint, outbox and live-result resources"
+            );
+        }
         let (parser, functions) = parser(self.definition.language);
-        self.query = Some(
-            ComputationQuery::try_build(
-                QueryBuilder::new(&self.definition.query, parser).with_function_registry(functions),
-                resources,
-            )
-            .await?,
-        );
+        let builder = self.execution.configure(
+            QueryBuilder::new(&self.definition.query, parser).with_function_registry(functions),
+            self.middleware.clone(),
+        )?;
+        self.query = Some(ComputationQuery::try_build(builder, resources).await?);
         Ok(())
     }
 
@@ -397,6 +496,7 @@ impl ContinuousQueryTransformer {
             if marker.sequence == 0 {
                 return Err(QueryRecoveryError::IncompleteBootstrap.into());
             }
+            self.bootstrap_complete.store(true, Ordering::Release);
         }
         if checkpoint
             .read_checkpoint(PENDING_OUTPUT)
@@ -409,7 +509,7 @@ impl ContinuousQueryTransformer {
         if reset.as_ref().is_some_and(|marker| marker.in_progress) {
             return Err(QueryRecoveryError::IncompleteReset.into());
         }
-        let configuration = self.definition.configuration_bytes()?;
+        let configuration = self.definition.configuration_bytes(&self.execution)?;
         let stored = checkpoint.read_checkpoint(CONFIGURATION).await?;
         if let Some(stored) = stored {
             if stored.source_position.as_ref() != Some(&configuration) {
@@ -665,6 +765,7 @@ impl ContinuousQueryTransformer {
             }
         }
         let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
+        self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);
         let mut profiling = progress.profiling.clone().unwrap_or_default();
         profiling.query_receive_ns = Some(timestamp_ns());
@@ -760,9 +861,7 @@ impl ContinuousQueryTransformer {
         if self.options.publication == QueryPublicationMode::NonAtomic
             && !self.provider.is_volatile()
         {
-            if let Some(output) = &output {
-                self.finish_non_atomic(output).await?;
-            }
+            self.finish_non_atomic(output.as_ref()).await?;
         }
         self.watermarks
             .lock()
@@ -803,7 +902,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
             self.build().await?;
         }
         self.initialize_recovery().await?;
-        self.publish_source_progress().await?;
+        self.publish_source_progress(true).await?;
         guard.complete = true;
         self.failure.store(false, Ordering::Release);
         self.results
@@ -870,6 +969,7 @@ impl Transformer for ContinuousQueryTransformer {
             progress: self.source_progress.clone(),
         };
         let query = self.query()?;
+        self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);
         let owner = &*self;
         let hook = |due: Arc<drasi_core::computation::ComputationFutureResult>| {
@@ -968,9 +1068,7 @@ impl Transformer for ContinuousQueryTransformer {
         if self.options.publication == QueryPublicationMode::NonAtomic
             && !self.provider.is_volatile()
         {
-            if let Some(output) = &output {
-                self.finish_non_atomic(output).await?;
-            }
+            self.finish_non_atomic(output.as_ref()).await?;
         }
         let result = self.publish(output);
         guard.complete = result.is_ok();
@@ -993,6 +1091,7 @@ impl Default for ContinuousQueryFactory {
             ("outbox_capacity", ConfigurationType::Integer, false),
             ("recovery", ConfigurationType::String, false),
             ("publication", ConfigurationType::String, false),
+            ("execution", ConfigurationType::Object, false),
         ]
         .into_iter()
         .map(|(name, value_type, required)| {
@@ -1017,6 +1116,24 @@ impl Default for ContinuousQueryFactory {
                     allow_additional: false,
                 },
                 dependencies: BTreeMap::from([
+                    (
+                        Arc::from("catalog"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<super::QueryResultsCatalog>(
+                                ResourceRole::QueryCatalog,
+                            )
+                        },
+                    ),
+                    (
+                        Arc::from("middleware"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<QueryMiddlewareResource>(
+                                ResourceRole::Middleware,
+                            )
+                        },
+                    ),
                     (
                         Arc::from("indexes"),
                         ResourceRequirement::exactly_one::<QueryIndexProviderResource>(
@@ -1096,6 +1213,22 @@ impl ComponentFactory for ContinuousQueryFactory {
         resources: &BTreeMap<super::ResourceId, super::ResourceHandle>,
     ) -> anyhow::Result<()> {
         self.validate_resources(spec, declarations, resources)?;
+        if let Some(ConfigurationValue::Literal(value)) = spec.configuration.get("execution") {
+            let execution: QueryExecutionSettings = serde_json::from_value(value.clone())?;
+            let registry = spec
+                .dependencies
+                .get("middleware")
+                .into_iter()
+                .flatten()
+                .find_map(|id| resources.get(id))
+                .map(|handle| {
+                    handle
+                        .get::<QueryMiddlewareResource>()
+                        .map(|resource| resource.0.clone())
+                })
+                .transpose()?;
+            execution.validate(registry.as_deref())?;
+        }
         for id in spec
             .dependencies
             .get("source_progress")
@@ -1114,6 +1247,18 @@ impl ComponentFactory for ContinuousQueryFactory {
         Ok(())
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
+        if let Some(ConfigurationValue::Literal(value)) = spec.configuration.get("execution") {
+            let execution: QueryExecutionSettings = serde_json::from_value(value.clone())?;
+            execution.validate(None)?;
+            if !execution.middleware.is_empty()
+                && spec
+                    .dependencies
+                    .get("middleware")
+                    .map_or(true, Vec::is_empty)
+            {
+                anyhow::bail!("query middleware requires a declared middleware resource");
+            }
+        }
         let literals = spec
             .configuration
             .iter()
@@ -1216,10 +1361,31 @@ impl ComponentFactory for ContinuousQueryFactory {
             output_stream: StreamId::try_new(stream).map_err(ComponentCreationError::terminal)?,
             outbox_capacity: capacity,
         };
-        let mut query = ContinuousQueryTransformer::new_with_options(
+        let execution: QueryExecutionSettings = config
+            .get("execution")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(ComponentCreationError::terminal)?
+            .unwrap_or_default();
+        let middleware = if context
+            .specification
+            .dependencies
+            .contains_key("middleware")
+        {
+            context
+                .resources::<QueryMiddlewareResource>("middleware")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+                .map(|resource| resource.0.clone())
+        } else {
+            None
+        };
+        let mut query = ContinuousQueryTransformer::new_configured(
             definition,
             provider.0.clone(),
             options(config).map_err(ComponentCreationError::terminal)?,
+            execution,
+            middleware,
         )
         .await
         .map_err(ComponentCreationError::retryable)?;
@@ -1244,6 +1410,17 @@ impl ComponentFactory for ContinuousQueryFactory {
             {
                 query = query
                     .with_source_progress(progress.0.clone())
+                    .map_err(ComponentCreationError::terminal)?;
+            }
+        }
+        if context.specification.dependencies.contains_key("catalog") {
+            if let Some(catalog) = context
+                .resources::<super::QueryResultsCatalog>("catalog")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+            {
+                query = query
+                    .with_result_catalog(&catalog)
                     .map_err(ComponentCreationError::terminal)?;
             }
         }

@@ -70,6 +70,10 @@ path = "src/lib.rs"
 name = "computation_graph"
 required-features = ["computation"]
 
+[[example]]
+name = "computation_instance"
+required-features = ["computation"]
+
 [dependencies]
 drasi-core.workspace = true
 drasi-functions-cypher.workspace = true
@@ -122,6 +126,11 @@ serial_test = "3.0"
 pretty_assertions = "1.4"
 test-case = "3.3"
 drasi-index-rocksdb = { path = "../components/indexes/rocksdb" }
+drasi-source-application = { path = "../components/sources/application" }
+drasi-wal-redb = { path = "../components/wals/redb" }
+drasi-state-store-redb = { path = "../components/state_stores/redb" }
+drasi-reaction-snapshot-test = { path = "../components/reactions/snapshot-test" }
+drasi-reaction-application = { path = "../components/reactions/application" }
 
 # Additional testing dependencies
 rstest = "0.18"
