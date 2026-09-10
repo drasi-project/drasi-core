@@ -391,15 +391,16 @@ impl ReactionManager {
 
         // 1. Wire subscriptions FIRST so events buffer in broadcast channels
         //    while bootstrap runs. Forwarders wait on gate before processing.
-        self.wire_subscriptions(
-            reaction_id,
-            &reaction,
-            &query_provider,
-            &query_ids,
-            shared_checkpoints.clone(),
-            gate,
-        )
-        .await?;
+        let subscribe_heads = self
+            .wire_subscriptions(
+                reaction_id,
+                &reaction,
+                &query_provider,
+                &query_ids,
+                shared_checkpoints.clone(),
+                gate,
+            )
+            .await?;
 
         // 2. Read existing checkpoints from the state store (batch).
         let existing_checkpoints = match state_store.as_ref() {
@@ -445,6 +446,7 @@ impl ReactionManager {
                             &state_store,
                             &mut bootstrap_queries,
                             &per_query_metrics,
+                            subscribe_heads.get(query_id).copied(),
                         )
                         .await?;
                     initial_checkpoints.insert(query_id.clone(), cp);
@@ -540,10 +542,11 @@ impl ReactionManager {
     ///
     /// If `needs_snapshot_on_fresh_start`, fetches a snapshot and sets the
     /// checkpoint to `as_of_sequence` so the reaction can bootstrap.
-    /// Otherwise skip retained outbox history, persist
-    /// `(current_sequence, config_hash)`, and deliver only later live results
-    /// (`sequence > current_sequence`). Subscribe-before-bootstrap already
-    /// captures true live events in the broadcast buffer.
+    /// Otherwise skip retained outbox history, persist the subscribe-time
+    /// head `(subscribe_as_of, config_hash)`, and deliver only later live
+    /// results (`sequence > subscribe_as_of`). The cutoff is the sequence
+    /// captured when the receiver was attached, not a later outbox sample.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_fresh_start(
         &self,
         reaction_id: &str,
@@ -553,6 +556,7 @@ impl ReactionManager {
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
+        subscribe_as_of: Option<u64>,
     ) -> Result<ReactionCheckpoint> {
         let config_hash = query_epoch_hash(query).await;
 
@@ -572,36 +576,20 @@ impl ReactionManager {
             Ok(cp)
         } else {
             // Fresh start without snapshot bootstrap must not fire side effects
-            // for retained history. Ask for entries after `u64::MAX` so
-            // `fetch_outbox` returns only `latest_sequence` without cloning
-            // retained outbox entries. The live gate then delivers later
-            // sequences.
-            metrics.record_fetch_outbox();
-            let seq = match query.fetch_outbox(u64::MAX).await {
-                Ok(resp) => {
-                    info!(
-                        "[{reaction_id}] Fresh start for query '{query_id}' — \
-                         skipping retained history, latest_seq={}",
-                        resp.latest_sequence
-                    );
-                    resp.latest_sequence
-                }
-                Err(FetchError::OutboxGap(gap)) => {
-                    info!(
-                        "[{reaction_id}] Fresh start for query '{query_id}' — \
-                         outbox gap on fresh start without snapshot, latest_seq={}",
-                        gap.latest_sequence
-                    );
-                    gap.latest_sequence
-                }
-                Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
-                    info!(
-                        "[{reaction_id}] Fresh start for query '{query_id}' — \
-                         query not yet running, starting from sequence 0"
-                    );
-                    0
-                }
+            // for retained history. Use the sequence captured at subscribe so
+            // results that arrived after the receiver was attached are not
+            // skipped. Do not sample the outbox head later, and do not invent
+            // checkpoint 0 when the head is unknown.
+            let Some(seq) = subscribe_as_of else {
+                return Err(anyhow::anyhow!(
+                    "Reaction '{reaction_id}': cannot determine query head for \
+                     '{query_id}' at subscribe time; not persisting checkpoint 0"
+                ));
             };
+            info!(
+                "[{reaction_id}] Fresh start for query '{query_id}' — \
+                 skipping retained history, subscribe_as_of={seq}"
+            );
 
             let cp = ReactionCheckpoint {
                 sequence: seq,
@@ -1100,12 +1088,13 @@ impl ReactionManager {
         query_ids: &[String],
         shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
         gate: tokio::sync::watch::Receiver<bool>,
-    ) -> Result<()> {
+    ) -> Result<HashMap<String, u64>> {
         let instance_id = self.instance_id.clone();
         let policy = reaction.default_recovery_policy();
         let state_store = self.state_store.read().await.clone();
         let mut abort_handles: Vec<tokio::task::AbortHandle> = Vec::new();
         let mut join_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut subscribe_heads: HashMap<String, u64> = HashMap::new();
 
         // Mutex to serialize concurrent bootstrap calls (§9 — multi-query gap recovery).
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
@@ -1114,6 +1103,7 @@ impl ReactionManager {
             let query = query_provider.get_query_instance(query_id).await?;
 
             let subscription = query.subscribe(reaction_id.to_string()).await?;
+            subscribe_heads.insert(query_id.clone(), subscription.as_of_sequence);
             let mut receiver = subscription.receiver;
 
             // Create or retrieve per-(reaction, query) metrics
@@ -1360,7 +1350,7 @@ impl ReactionManager {
             .await
             .insert(reaction_id.to_string(), abort_handles);
 
-        Ok(())
+        Ok(subscribe_heads)
     }
 
     /// Handle a broadcast gap (§6): `RecvError::Lagged` in the forwarder loop.
@@ -1983,6 +1973,13 @@ mod tests {
             );
         }
 
+        let cp =
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_fresh_trigger", "q1")
+                .await
+                .unwrap()
+                .expect("fresh trigger should persist subscribe-time checkpoint");
+        assert_eq!(cp.sequence, 2, "cutoff must be the subscribe-time head");
+
         inject_events(&core, 1).await;
         let results = enqueued.lock().await;
         assert_eq!(
@@ -1992,6 +1989,82 @@ mod tests {
             results.len()
         );
         assert_eq!(results[0].sequence, 3);
+    }
+
+    #[tokio::test]
+    async fn subscribe_head_is_not_raised_by_later_outbox() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        inject_events(&core, 2).await;
+        let query = core.query_manager.get_query_instance("q1").await.unwrap();
+        let subscription = query.subscribe("probe".into()).await.unwrap();
+        assert_eq!(
+            subscription.as_of_sequence, 2,
+            "subscribe must capture the head at attach time"
+        );
+
+        inject_events(&core, 1).await;
+        let outbox = query.fetch_outbox(u64::MAX).await.unwrap();
+        assert_eq!(outbox.latest_sequence, 3);
+        assert_eq!(
+            subscription.as_of_sequence, 2,
+            "a later outbox head must not rewrite the subscribe-time cutoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_trigger_does_not_persist_zero_when_query_unavailable() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store.clone()).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        inject_events(&core, 2).await;
+        core.stop_query("q1").await.unwrap();
+
+        let reaction = MockReaction::new("r_stopped", vec!["q1".into()])
+            .with_snapshot_on_fresh(false)
+            .with_policy(ReactionRecoveryPolicy::Strict);
+        core.add_reaction(reaction).await.unwrap();
+        let result = core.start_reaction("r_stopped").await;
+
+        let cp = crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_stopped", "q1")
+            .await
+            .unwrap();
+        match result {
+            Ok(()) => {
+                let cp = cp.expect("successful start must persist the known query head");
+                assert_eq!(
+                    cp.sequence, 2,
+                    "must not invent checkpoint 0 over existing history"
+                );
+            }
+            Err(_) => {
+                assert!(
+                    cp.is_none() || cp.as_ref().is_some_and(|c| c.sequence != 0),
+                    "failed start must not persist checkpoint 0 over existing history, got {cp:?}"
+                );
+            }
+        }
     }
 
     // ========================================================================
