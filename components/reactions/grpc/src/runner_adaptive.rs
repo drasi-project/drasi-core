@@ -237,23 +237,24 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 }
             }
             for (q, s) in &to_advance {
-                if let Err(e) = checkpoints.advance(&batcher_base, q, *s).await {
+                if let Err(e) = checkpoints
+                    .advance_with_policy(&batcher_base, q, *s, policy)
+                    .await
+                {
                     error!(
                         "[{batcher_name}] Failed to write checkpoint for query '{q}' (seq {s}): {e}"
                     );
-                    if FailureAction::from_policy(policy) == FailureAction::Stop {
-                        fail_stop(
-                            &batcher_base,
-                            &batcher_errored,
-                            &batcher_name,
-                            &format!(
-                                "gRPC checkpoint write failed for query '{q}' (seq {s}); \
-                                 stopped per recovery policy"
-                            ),
-                        )
-                        .await;
-                        return;
-                    }
+                    fail_stop(
+                        &batcher_base,
+                        &batcher_errored,
+                        &batcher_name,
+                        &format!(
+                            "gRPC checkpoint write failed for query '{q}' (seq {s}); \
+                             stopped per recovery policy"
+                        ),
+                    )
+                    .await;
+                    return;
                 }
             }
         }
