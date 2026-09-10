@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
@@ -26,9 +29,18 @@ use super::{
 /// Out-of-band pipe lifecycle. Implementations must wake pending operations.
 /// Close rejects new sends and drains accepted events; cancel may discard them.
 /// This handle must not retain a sender or keep a drained receiver alive.
+#[async_trait]
 pub trait PipeControl: Send + Sync {
     fn close(&self);
     fn cancel(&self);
+    /// Authoritative absence of buffered/replayable or provider-in-flight
+    /// deliveries, after the graph has parked this pipe's producer. The graph
+    /// separately waits for its received deliveries to finish handling.
+    async fn is_idle(&self) -> Result<bool, PipeError> {
+        Err(PipeError::Backend(anyhow::anyhow!(
+            "provider cannot prove a drain boundary"
+        )))
+    }
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         None
     }
@@ -113,9 +125,16 @@ enum Closure {
     Cancelled,
 }
 
-struct Control(watch::Sender<Closure>, PipeMetrics);
+struct Control(watch::Sender<Closure>, PipeMetrics, AtomicUsize);
 
+#[async_trait]
 impl PipeControl for Control {
+    async fn is_idle(&self) -> Result<bool, PipeError> {
+        if *self.0.borrow() == Closure::Cancelled {
+            return Err(PipeError::Closed);
+        }
+        Ok(self.2.load(Ordering::Acquire) == 0)
+    }
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         Some(self.1.snapshot())
     }
@@ -162,6 +181,7 @@ impl EnvelopeSender for Sender {
             Some(permit) if *state == Closure::Open => {
                 let receipt = EnqueueReceipt::new(envelope.id().clone());
                 self.control.1.accepted();
+                self.control.2.fetch_add(1, Ordering::AcqRel);
                 permit.send(envelope);
                 Ok(receipt)
             }
@@ -195,6 +215,7 @@ impl EnvelopeReceiver for Receiver {
                         discarded += 1;
                     }
                     self.control.1.discarded(discarded);
+                    self.control.2.fetch_sub(discarded, Ordering::AcqRel);
                     return Ok(None);
                 }
             }
@@ -204,6 +225,7 @@ impl EnvelopeReceiver for Receiver {
                 envelope = self.receiver.recv() => {
                     return Ok(envelope.map(|envelope| {
                         self.control.1.delivered();
+                        self.control.2.fetch_sub(1, Ordering::AcqRel);
                         Delivery::new(envelope, None)
                     }));
                 }
@@ -216,6 +238,9 @@ impl Drop for Receiver {
     fn drop(&mut self) {
         self.control.cancel();
         self.control.1.discarded(self.receiver.len());
+        self.control
+            .2
+            .fetch_sub(self.receiver.len(), Ordering::AcqRel);
     }
 }
 
@@ -243,7 +268,11 @@ impl BoundedPipe {
         let capabilities = BoundedPipeConfig { capacity }.capabilities()?;
         let (sender, receiver) = mpsc::channel(capacity);
         let (closure, _) = watch::channel(Closure::Open);
-        let control = Arc::new(Control(closure, PipeMetrics::default()));
+        let control = Arc::new(Control(
+            closure,
+            PipeMetrics::default(),
+            AtomicUsize::new(0),
+        ));
         Ok(Self {
             capabilities,
             sender: Arc::new(Sender {

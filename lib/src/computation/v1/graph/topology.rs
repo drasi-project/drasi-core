@@ -20,7 +20,7 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DesiredPipe {
     Bounded {
         capacity: usize,
@@ -34,16 +34,20 @@ pub enum DesiredPipe {
         binding: String,
         capabilities: Vec<PipeCapability>,
         capacity: Option<usize>,
+        #[serde(default)]
+        resources: BTreeMap<ResourceId, ResourceRole>,
+        #[serde(default)]
+        exclusive_resources: Vec<ResourceId>,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ComponentConstruction {
     Factory(ComponentSpecification),
     External { binding: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredComponent {
     pub descriptor: ComponentDescriptor,
@@ -55,7 +59,7 @@ pub struct DesiredComponent {
     pub construction: ComponentConstruction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredRelationship {
     pub definition: EdgeDefinition,
@@ -79,9 +83,9 @@ pub struct DesiredTopology {
     pub boundary_relationships: Vec<DesiredRelationship>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FactoryRegistry {
-    factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
+    pub(super) factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
 }
 
 impl FactoryRegistry {
@@ -119,6 +123,14 @@ pub struct TopologyBindings {
 }
 
 impl DesiredPipe {
+    pub(super) fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
+        match self {
+            Self::Retained(config) => config.resource_dependencies(),
+            Self::External { resources, .. } => resources.clone(),
+            Self::Bounded { .. } | Self::Broadcast { .. } => BTreeMap::new(),
+        }
+    }
+
     pub(super) fn resolve(
         &self,
         bindings: &mut TopologyBindings,
@@ -139,6 +151,8 @@ impl DesiredPipe {
                 binding,
                 capabilities,
                 capacity,
+                resources,
+                exclusive_resources,
             } => {
                 let provider = bindings.pipes.remove(binding).ok_or_else(|| {
                     topology(format!("external pipe binding {binding} was not supplied"))
@@ -157,6 +171,17 @@ impl DesiredPipe {
                 {
                     return Err(topology(format!(
                         "external pipe binding {binding} changed its capabilities"
+                    )));
+                }
+                if provider.resource_dependencies() != *resources
+                    || provider
+                        .exclusive_resources()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>()
+                        != exclusive_resources.iter().cloned().collect::<BTreeSet<_>>()
+                {
+                    return Err(topology(format!(
+                        "external pipe binding {binding} changed its resource dependencies"
                     )));
                 }
                 provider
@@ -183,13 +208,9 @@ impl DesiredTopology {
         if self.version != 1 {
             return Err(topology("unsupported desired topology version"));
         }
-        if !self.boundary_relationships.is_empty() {
-            return Err(topology(
-                "selected topology has unresolved external relationship endpoints",
-            ));
-        }
         let mut builder = ComputationGraph::builder(self.graph_id.as_str())
             .requirements(self.requirements.clone());
+        builder.unbound_relationships = self.boundary_relationships.clone();
         for resource in &self.resources {
             builder = builder.declare_resource(resource.clone())?;
             if let Some(handle) = bindings.resources.remove(&resource.id) {
@@ -256,7 +277,23 @@ impl DesiredTopology {
                 .connect(relationship.definition.clone(), pipe)
                 .relationship_policy(relationship.definition.clone(), relationship.policy.clone());
         }
-        builder.build()
+        let mut graph = builder.build()?;
+        graph.snapshot.external_bindings = self
+            .components
+            .iter()
+            .filter_map(|component| {
+                if let ComponentConstruction::External { binding } = &component.construction {
+                    Some((
+                        component.descriptor.id().clone(),
+                        Arc::from(binding.as_str()),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+        Ok(graph)
     }
 }
 
@@ -351,7 +388,18 @@ impl GraphSnapshot {
             })
             .collect();
         let mut relationships = Vec::new();
-        let mut boundary_relationships = Vec::new();
+        let mut boundary_relationships: Vec<_> = self
+            .unbound_relationships
+            .iter()
+            .filter(|edge| {
+                selected.contains(&edge.definition.from.component)
+                    || selected.contains(&edge.definition.to.component)
+            })
+            .cloned()
+            .collect();
+        for edge in &boundary_relationships {
+            resources.extend(edge.pipe.resource_dependencies().into_keys());
+        }
         for edge in self.edges.iter() {
             let from = selected.contains(&edge.definition.from.component);
             let to = selected.contains(&edge.definition.to.component);

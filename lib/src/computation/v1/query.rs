@@ -61,6 +61,9 @@ use super::{
     RecordId, RecordImage, ResourceRequirement, ResourceRole, StreamId, SystemMetadata,
     Transformer, WakeupSource,
 };
+use super::{
+    QuerySourceProgress, QuerySourceProgressResource, SourceProgressKey, SourceProgressSnapshot,
+};
 
 const CONFIGURATION: &str = "\0computation:query-configuration:v1";
 const INPUT_PREFIX: &str = "computation:input:";
@@ -162,11 +165,15 @@ impl WakeupSource for FutureWakeup {
 struct ProcessingGuard {
     failure: Arc<AtomicBool>,
     complete: bool,
+    progress: Option<Arc<QuerySourceProgress>>,
 }
 impl Drop for ProcessingGuard {
     fn drop(&mut self) {
         if !self.complete {
             self.failure.store(true, Ordering::Release);
+            if let Some(progress) = &self.progress {
+                progress.fail();
+            }
         }
     }
 }
@@ -177,6 +184,7 @@ struct InputProgress {
     position: Option<Bytes>,
     source_id: String,
     profiling: Option<ProfilingMetadata>,
+    identity: SourceProgressKey,
 }
 
 fn input_progress(input: &super::ChangeEnvelope) -> anyhow::Result<InputProgress> {
@@ -187,6 +195,11 @@ fn input_progress(input: &super::ChangeEnvelope) -> anyhow::Result<InputProgress
         .unwrap_or_else(|| input.system().stream().as_str().to_owned());
     let stable_source = raw.as_ref().and_then(|metadata| metadata.sequence);
     Ok(InputProgress {
+        identity: if stable_source.is_some() {
+            SourceProgressKey::Source(source_id.clone())
+        } else {
+            SourceProgressKey::Stream(input.system().stream().clone())
+        },
         key: progress_key(
             input.system().stream().as_str(),
             stable_source.map(|_| source_id.as_str()),
@@ -231,6 +244,7 @@ pub struct ContinuousQueryTransformer {
     bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
     bootstrap_complete: AtomicBool,
     watermarks: Mutex<HashMap<String, u64>>,
+    source_progress: Option<Arc<QuerySourceProgress>>,
 }
 
 impl ContinuousQueryTransformer {
@@ -269,6 +283,7 @@ impl ContinuousQueryTransformer {
             bootstrap: None,
             bootstrap_complete: AtomicBool::new(false),
             watermarks: Mutex::new(HashMap::new()),
+            source_progress: None,
         };
         instance.build().await?;
         Ok(instance)
@@ -281,6 +296,65 @@ impl ContinuousQueryTransformer {
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
         self.bootstrap = Some(provider);
         self
+    }
+
+    pub fn with_source_progress(
+        mut self,
+        progress: Arc<QuerySourceProgress>,
+    ) -> anyhow::Result<Self> {
+        if progress.graph_id() != self.definition.graph_id
+            || progress.query_id() != &self.definition.id
+        {
+            anyhow::bail!("source progress belongs to another graph/query");
+        }
+        self.source_progress = Some(progress);
+        Ok(self)
+    }
+
+    async fn publish_source_progress(&self) -> anyhow::Result<()> {
+        let Some(progress) = &self.source_progress else {
+            return Ok(());
+        };
+        let checkpoint = self
+            .query()?
+            .resources()
+            .checkpoint_store()
+            .ok_or_else(|| {
+                anyhow::anyhow!("source resume requires an actual query checkpoint store")
+            })?;
+        if !checkpoint.is_persistent() || self.provider.is_volatile() {
+            anyhow::bail!("source resume cannot use volatile query progress");
+        }
+        let mut checkpoints = BTreeMap::new();
+        for (key, checkpoint) in checkpoint.read_all_checkpoints().await? {
+            let Some(key) = key.strip_prefix(INPUT_PREFIX) else {
+                continue;
+            };
+            if key.len() % 2 != 0 || !key.is_ascii() {
+                anyhow::bail!("invalid source checkpoint identity");
+            }
+            let decoded = (0..key.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&key[index..index + 2], 16))
+                .collect::<Result<Vec<_>, _>>()?;
+            let decoded = String::from_utf8(decoded)?;
+            let key = if let Some(source) = decoded.strip_prefix("source:") {
+                SourceProgressKey::Source(source.to_owned())
+            } else if let Some(stream) = decoded.strip_prefix("stream:") {
+                SourceProgressKey::Stream(StreamId::try_new(stream)?)
+            } else {
+                anyhow::bail!("invalid source checkpoint identity");
+            };
+            checkpoints.insert(key, checkpoint);
+        }
+        progress.publish(SourceProgressSnapshot {
+            ready: true,
+            persistent: true,
+            reset_generation: self.results.snapshot()?.generation,
+            checkpoints,
+            failure: None,
+        });
+        Ok(())
     }
 
     async fn build(&mut self) -> anyhow::Result<()> {
@@ -694,6 +768,12 @@ impl ContinuousQueryTransformer {
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
             .insert(progress.key, progress.sequence);
+        if let Some(confirmation) = &self.source_progress {
+            confirmation.confirm(
+                progress.identity,
+                SourceCheckpoint::new(progress.sequence, progress.position),
+            );
+        }
         self.publish(output)
     }
 }
@@ -705,6 +785,14 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
+        if let Some(progress) = &self.source_progress {
+            progress.pending();
+        }
+        let mut guard = ProcessingGuard {
+            failure: self.failure.clone(),
+            complete: false,
+            progress: self.source_progress.clone(),
+        };
         if self.failure.load(Ordering::Acquire)
             && self.provider.is_volatile()
             && (self.options.recovery != QueryRecoveryPolicy::AutoReset || self.bootstrap.is_none())
@@ -714,11 +802,8 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if self.query.is_none() {
             self.build().await?;
         }
-        let mut guard = ProcessingGuard {
-            failure: self.failure.clone(),
-            complete: false,
-        };
         self.initialize_recovery().await?;
+        self.publish_source_progress().await?;
         guard.complete = true;
         self.failure.store(false, Ordering::Release);
         self.results
@@ -731,6 +816,9 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
+        if let Some(progress) = &self.source_progress {
+            progress.pending();
+        }
         self.results
             .state
             .write()
@@ -759,6 +847,7 @@ impl Transformer for ContinuousQueryTransformer {
         let mut guard = ProcessingGuard {
             failure: self.failure.clone(),
             complete: false,
+            progress: self.source_progress.clone(),
         };
         let result = self.process(input).await;
         guard.complete = result.is_ok();
@@ -778,6 +867,7 @@ impl Transformer for ContinuousQueryTransformer {
         let mut guard = ProcessingGuard {
             failure: self.failure.clone(),
             complete: false,
+            progress: self.source_progress.clone(),
         };
         let query = self.query()?;
         let prepared = Mutex::new(None);
@@ -942,6 +1032,15 @@ impl Default for ContinuousQueryFactory {
                             )
                         },
                     ),
+                    (
+                        Arc::from("source_progress"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<QuerySourceProgressResource>(
+                                ResourceRole::Checkpoint,
+                            )
+                        },
+                    ),
                 ]),
             },
         }
@@ -988,6 +1087,31 @@ fn options(config: &BTreeMap<Arc<str>, serde_json::Value>) -> anyhow::Result<Que
 impl ComponentFactory for ContinuousQueryFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
+    }
+    fn validate_scope(
+        &self,
+        graph_id: &str,
+        spec: &ComponentSpecification,
+        declarations: &BTreeMap<super::ResourceId, super::ResourceSpecification>,
+        resources: &BTreeMap<super::ResourceId, super::ResourceHandle>,
+    ) -> anyhow::Result<()> {
+        self.validate_resources(spec, declarations, resources)?;
+        for id in spec
+            .dependencies
+            .get("source_progress")
+            .into_iter()
+            .flatten()
+        {
+            if let Some(handle) = resources.get(id) {
+                let progress = handle.get::<QuerySourceProgressResource>()?;
+                if progress.0.graph_id() != graph_id
+                    || progress.0.query_id() != spec.descriptor.id()
+                {
+                    anyhow::bail!("source progress belongs to another graph/query");
+                }
+            }
+        }
+        Ok(())
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         let literals = spec
@@ -1106,6 +1230,21 @@ impl ComponentFactory for ContinuousQueryFactory {
                 .pop()
             {
                 query = query.with_bootstrap(bootstrap.0.clone());
+            }
+        }
+        if context
+            .specification
+            .dependencies
+            .contains_key("source_progress")
+        {
+            if let Some(progress) = context
+                .resources::<QuerySourceProgressResource>("source_progress")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+            {
+                query = query
+                    .with_source_progress(progress.0.clone())
+                    .map_err(ComponentCreationError::terminal)?;
             }
         }
         Ok(ConstructedComponent::query(Box::new(query)))

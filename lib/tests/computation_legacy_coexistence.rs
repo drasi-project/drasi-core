@@ -585,7 +585,7 @@ async fn assert_coexistence(instance_id: &str) {
             "native-query-graph",
             ComponentId::try_new("native-source").expect("id"),
             StreamId::try_new("native-source/out").expect("stream"),
-            Arc::new(LegacySourceResource::borrowed(Arc::new(source))),
+            Arc::new(LegacySourceResource::borrowed(Arc::new(source.clone()))),
         )
         .await
         .expect("borrow source without lifecycle mutation");
@@ -693,6 +693,7 @@ async fn assert_coexistence(instance_id: &str) {
         inject_and_assert_result(&injector, &mut results_rx, "after-native-query", 7000).await;
         assert_legacy_running(&drasi).await;
     }
+    assert_shared_source_ingress_fence(&drasi, source, &injector, &mut results_rx).await;
     drasi.stop().await.expect("stop legacy pipeline");
     assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 1);
 }
@@ -712,4 +713,132 @@ async fn legacy_pipeline_survives_graph_cancellation_on_current_thread() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_pipeline_survives_graph_cancellation_on_multi_thread() {
     run_coexistence("coexistence-multi-thread").await;
+}
+
+async fn assert_shared_source_ingress_fence(
+    drasi: &DrasiLib,
+    source: InjectableSource,
+    injector: &SourceBase,
+    legacy_results: &mut mpsc::Receiver<QueryResult>,
+) {
+    use drasi_lib::computation::v1::*;
+    let endpoint = |node: &str, port: &str| {
+        Endpoint::new(
+            ComponentId::try_new(node).expect("id"),
+            PortId::try_new(port).expect("port"),
+        )
+    };
+    let wrapped = LegacySourceAdapter::bind(
+        "fenced-query",
+        ComponentId::try_new("wrapped").expect("id"),
+        StreamId::try_new("wrapped/out").expect("stream"),
+        Arc::new(LegacySourceResource::borrowed(Arc::new(source))),
+    )
+    .await
+    .expect("isolated borrowed subscription");
+    let query = ContinuousQueryTransformer::new(
+        ContinuousQueryDefinition {
+            graph_id: "fenced-query".into(),
+            id: ComponentId::try_new("query").expect("id"),
+            query: "MATCH (i:Item) RETURN size(42) AS invalid".into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out").expect("stream"),
+            outbox_capacity: std::num::NonZeroUsize::new(8).expect("capacity"),
+        },
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
+    )
+    .await
+    .expect("runtime-invalid expression parses");
+    let (received, mut failed_output) = mpsc::channel(1);
+    let mut graph = ComputationGraph::builder("fenced-query")
+        .source(Box::new(wrapped))
+        .query(Box::new(query))
+        .sink(Box::new(NativeSink {
+            descriptor: ComponentDescriptor::try_new(
+                ComponentId::try_new("sink").expect("id"),
+                vec![PortDescriptor::new(
+                    PortId::try_new("in").expect("port"),
+                    PortDirection::Input,
+                    QueryChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )],
+            )
+            .expect("sink"),
+            handled: received,
+            stops: Arc::new(AtomicUsize::new(0)),
+        }))
+        .bind_stream(
+            endpoint("wrapped", "out"),
+            StreamId::try_new("wrapped/out").expect("stream"),
+        )
+        .bind_stream(
+            endpoint("query", "out"),
+            StreamId::try_new("query/out").expect("stream"),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint("wrapped", "out"), endpoint("query", "in")),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .relationship_policy(
+            EdgeDefinition::new(endpoint("wrapped", "out"), endpoint("query", "in")),
+            RelationshipPolicy {
+                fence_producer_on_failure: true,
+                ..RelationshipPolicy::default()
+            },
+        )
+        .build()
+        .expect("graph");
+    let run = graph.run().expect("scope");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.expect("deployment");
+        control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .expect("startup");
+        inject_and_assert_result(injector, legacy_results, "trigger-fence", 8000).await;
+        let mut observed = control.subscribe_observed();
+        observed
+            .wait_for(|state| {
+                state.components[&ComponentId::try_new("wrapped").expect("id")].lifecycle
+                    == ComponentLifecycle::Failed
+            })
+            .await
+            .expect("adapter stopped after consumer failure");
+        assert_eq!(
+            control.observed().components[&ComponentId::try_new("query").expect("id")]
+                .failure
+                .as_ref()
+                .expect("query failure")
+                .phase,
+            FailurePhase::Processing
+        );
+        assert_eq!(
+            control.desired_snapshot().nodes.len(),
+            3,
+            "failure did not erase desired nodes"
+        );
+        for sequence in 0..64 {
+            inject_and_assert_result(
+                injector,
+                legacy_results,
+                &format!("after-fence-{sequence}"),
+                9000 + sequence,
+            )
+            .await;
+        }
+        assert!(failed_output.try_recv().is_err());
+        assert_legacy_running(drasi).await;
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    graph
+        .dispose()
+        .await
+        .expect("dispose isolated adapter only");
+    assert_legacy_running(drasi).await;
 }

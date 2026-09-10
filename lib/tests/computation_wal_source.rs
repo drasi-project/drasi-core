@@ -185,3 +185,280 @@ async fn unavailable_wal_position_is_reported_instead_of_silently_skipped() {
         .downcast_ref::<WalError>()
         .is_some());
 }
+
+#[cfg(feature = "computation-rocksdb-tests")]
+mod persistent_progress {
+    use super::*;
+    use drasi_core::computation::ComputationIndexProvider;
+    use drasi_index_rocksdb::{
+        computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
+    };
+    use std::{num::NonZeroUsize, time::Duration};
+    use tokio::sync::mpsc;
+
+    struct Sink {
+        descriptor: ComponentDescriptor,
+        received: mpsc::Sender<ChangeEnvelope>,
+    }
+    #[async_trait]
+    impl ComputationComponent for Sink {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl EnvelopeSink for Sink {
+        fn completion(&self) -> SinkCompletion {
+            SinkCompletion::Handled
+        }
+        async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+            self.received.send(input.envelope).await?;
+            Ok(())
+        }
+    }
+
+    fn query_definition() -> ContinuousQueryDefinition {
+        ContinuousQueryDefinition {
+            graph_id: "source-progress".into(),
+            id: ComponentId::try_new("query").expect("id"),
+            query: "MATCH (n:Item) RETURN n AS item".into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out").expect("stream"),
+            outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wal_resume_waits_for_and_uses_real_committed_query_progress_across_reconstruction() {
+        let temp = tempfile::tempdir().expect("temp");
+        let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
+            temp.path(),
+            RocksIndexOptions::new(
+                false,
+                false,
+                RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("budget"),
+            ),
+        ));
+        let progress = Arc::new(
+            QuerySourceProgress::new(
+                "source-progress",
+                ComponentId::try_new("query").expect("id"),
+            )
+            .expect("scope"),
+        );
+        let wal = Arc::new(Wal::default());
+        wal.append("source", &event(1)).await.expect("first");
+        let wal_resource = Arc::new(WalSourceResource {
+            provider: wal.clone(),
+            partition: "source".into(),
+        });
+        let source_factory = Arc::new(WalReplaySourceFactory::default());
+        let query_factory = Arc::new(ContinuousQueryFactory::default());
+        let endpoint = |node: &str, port: &str| {
+            Endpoint::new(
+                ComponentId::try_new(node).expect("id"),
+                PortId::try_new(port).expect("port"),
+            )
+        };
+        let resource_id = |id: &str| ResourceId::try_new(id).expect("resource");
+        let literal = |value: &str| ConfigurationValue::Literal(value.into());
+        let (received, mut output) = mpsc::channel(8);
+        let source = ComponentSpecification {
+            descriptor: ComponentDescriptor::try_new(
+                ComponentId::try_new("source").expect("id"),
+                vec![PortDescriptor::new(
+                    PortId::try_new("out").expect("port"),
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )],
+            )
+            .expect("source"),
+            role: ComponentRole::Source,
+            completion: None,
+            implementation: source_factory.descriptor().implementation.clone(),
+            configuration_version: 1,
+            configuration: BTreeMap::from([(Arc::from("stream"), literal("source/out"))]),
+            dependencies: BTreeMap::from([
+                (Arc::from("wal"), vec![resource_id("wal")]),
+                (Arc::from("source_progress"), vec![resource_id("progress")]),
+            ]),
+        };
+        let query = ComponentSpecification {
+            descriptor: query_definition().descriptor(),
+            role: ComponentRole::Query,
+            completion: None,
+            implementation: query_factory.descriptor().implementation.clone(),
+            configuration_version: 1,
+            configuration: BTreeMap::from([
+                (Arc::from("stream"), literal("query/out")),
+                (Arc::from("query"), literal(&query_definition().query)),
+            ]),
+            dependencies: BTreeMap::from([
+                (Arc::from("indexes"), vec![resource_id("indexes")]),
+                (Arc::from("source_progress"), vec![resource_id("progress")]),
+            ]),
+        };
+        let sink = Sink {
+            descriptor: ComponentDescriptor::try_new(
+                ComponentId::try_new("sink").expect("id"),
+                vec![PortDescriptor::new(
+                    PortId::try_new("in").expect("port"),
+                    PortDirection::Input,
+                    QueryChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )],
+            )
+            .expect("sink"),
+            received,
+        };
+        let mut builder = ComputationGraph::builder("source-progress")
+            .component(source, source_factory)
+            .component(query, query_factory)
+            .sink(Box::new(sink))
+            .bind_stream(
+                endpoint("source", "out"),
+                StreamId::try_new("source/out").expect("stream"),
+            )
+            .bind_stream(
+                endpoint("query", "out"),
+                StreamId::try_new("query/out").expect("stream"),
+            )
+            .connect(
+                EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .connect(
+                EdgeDefinition::new(endpoint("query", "out"), endpoint("sink", "in")),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            );
+        for (id, role, handle) in [
+            (
+                "wal",
+                ResourceRole::Wal,
+                ResourceHandle::new(ResourceRole::Wal, wal_resource.clone()),
+            ),
+            (
+                "indexes",
+                ResourceRole::IndexBackend,
+                ResourceHandle::new(
+                    ResourceRole::IndexBackend,
+                    Arc::new(QueryIndexProviderResource(indexes.clone())),
+                ),
+            ),
+            (
+                "progress",
+                ResourceRole::Checkpoint,
+                ResourceHandle::new(
+                    ResourceRole::Checkpoint,
+                    Arc::new(QuerySourceProgressResource(progress.clone())),
+                ),
+            ),
+        ] {
+            builder = builder
+                .declare_resource(ResourceSpecification {
+                    id: resource_id(id),
+                    role,
+                    ownership: ResourceOwnership::Borrowed,
+                    binding: Arc::from(id),
+                })
+                .expect("declare")
+                .provide_resource(resource_id(id), handle)
+                .expect("provide");
+        }
+        let mut graph = builder.build().expect("preflight");
+        assert!(
+            !progress.snapshot().ready,
+            "construction is not activation or acknowledgement"
+        );
+        let run = graph.start().expect("scope");
+        let control = run.control();
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(run, async {
+                let startup = control.startup_report().await.expect("startup");
+                assert_eq!(startup.summary, OperationSummary::Completed, "{startup:?}");
+                assert_eq!(
+                    output
+                        .recv()
+                        .await
+                        .expect("first output")
+                        .system()
+                        .sequence(),
+                    1
+                );
+                let key = SourceProgressKey::Source("source".into());
+                assert_eq!(progress.snapshot().checkpoints[&key].sequence, 1);
+                assert_eq!(
+                    progress.snapshot().checkpoints[&key]
+                        .source_position
+                        .as_deref(),
+                    Some(&1u64.to_be_bytes()[..])
+                );
+                wal.append("source", &event(2)).await.expect("live append");
+                assert_eq!(
+                    output
+                        .recv()
+                        .await
+                        .expect("live output")
+                        .system()
+                        .sequence(),
+                    2
+                );
+                assert_eq!(progress.snapshot().checkpoints[&key].sequence, 2);
+                control.cancel();
+            })
+        })
+        .await
+        .expect("progress handoff deadlocked");
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        drop(graph);
+        assert!(!progress.snapshot().ready);
+
+        let mut query = ContinuousQueryTransformer::new(query_definition(), indexes)
+            .await
+            .expect("reconstruct query")
+            .with_source_progress(progress.clone())
+            .expect("same owner");
+        let mut source = WalReplaySource::new(
+            ComponentId::try_new("source").expect("id"),
+            StreamId::try_new("source/out").expect("stream"),
+            wal_resource,
+            0,
+        )
+        .with_source_progress(progress.clone());
+        let (source_started, query_started) = tokio::join!(source.start(), query.start());
+        source_started.expect("source waits for durable query reconciliation");
+        query_started.expect("query recovery");
+        wal.append("source", &event(3)).await.expect("next append");
+        let next = source.next().await.expect("resume").expect("event");
+        assert_eq!(
+            GraphChangeCodec::source_metadata(&next.envelope)
+                .expect("metadata")
+                .expect("raw")
+                .sequence,
+            Some(3)
+        );
+        assert_eq!(
+            next.envelope.system().sequence(),
+            1,
+            "new adapter sequence is independent from durable raw progress"
+        );
+        let output = query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in").expect("port"),
+                envelope: next.envelope,
+            })
+            .await
+            .expect("process");
+        assert_eq!(output[0].envelope.system().sequence(), 3);
+        source.stop().await.expect("stop source");
+        query.stop().await.expect("stop query");
+        assert_eq!(wal.deletes.load(Ordering::SeqCst), 0);
+    }
+}

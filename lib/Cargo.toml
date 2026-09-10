@@ -31,7 +31,7 @@ workspace = true
 default = []
 
 # Experimental, additive in-process computation contracts and runtime.
-computation = ["drasi-core/computation"]
+computation = ["drasi-core/computation", "serde/rc"]
 # Explicit integration-test wiring; does not enable a backend in the default runtime.
 computation-rocksdb-tests = ["computation", "drasi-index-rocksdb/computation"]
 
@@ -88,7 +88,7 @@ drasi-middleware = { workspace = true, optional = true }
 bytes = "1"
 tokio = { version = "1.0", features = ["rt", "sync", "time", "macros"] }
 tokio-stream = "0.1"
-serde = { version = "1.0", features = ["derive", "rc"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 anyhow = "1.0"

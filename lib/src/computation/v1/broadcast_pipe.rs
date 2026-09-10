@@ -104,7 +104,15 @@ impl Shared {
     }
 }
 
+#[async_trait]
 impl PipeControl for Shared {
+    async fn is_idle(&self) -> Result<bool, PipeError> {
+        let queue = self.lock()?;
+        if queue.cancelled {
+            return Err(PipeError::Closed);
+        }
+        Ok(queue.values.is_empty())
+    }
     fn close(&self) {
         self.close(false);
     }

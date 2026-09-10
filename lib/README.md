@@ -121,6 +121,11 @@ owned sources require a fresh transferred instance and registered cleanup owner.
 The basic adapter does not implicitly inject identity/state/WAL/bootstrap services.
 `LegacyReactionFactory` borrows an already-managed Reaction and only enqueues
 normal `QueryResult` values, declaring `Accepted`, never `Handled`.
+For a dedicated borrowed-source adapter, an edge can explicitly enable
+`fence_producer_on_failure`: consumer failure stops only that graph-owned adapter,
+releasing its isolated subscription so it cannot block the shared legacy Source.
+This is opt-in lifecycle coupling, not a change to default independent activation
+or to the legacy Source's lifecycle.
 
 **Recovery:** graph-owned bootstrap streams and watermarks establish the initial
 query state separately from creation. Persistent in-progress markers reject
@@ -129,6 +134,15 @@ and preserves output high-water and reset generation. Non-atomic publication is
 an explicit mode with a durable pending-output fence, not an atomicity claim.
 `WalReplaySourceFactory` resumes/tails an explicitly registered WAL partition and
 reports unavailable positions instead of silently skipping them.
+
+An optional declared `QuerySourceProgressResource` connects that source to its
+owning query's confirmed input checkpoints. The source waits for query recovery,
+then resumes after the committed **raw source** sequence; adapter producer sequence
+remains separate. Confirmation follows successful query/checkpoint/output commit,
+not receipt or failed handling. The read-only view is rehydrated from the actual
+persistent checkpoint store after reconstruction, carries reset generation and
+opaque cursor bytes, and wakes waiting sources with an error if its query fails.
+It does not install a position handle on a borrowed legacy Source or prune its WAL.
 
 `QueryReplayTransformer` joins a typed snapshot or retained suffix to the bound
 live stream. Native `CheckpointedSink` advances its query-sequence/reset-generation
@@ -161,6 +175,40 @@ run, external systems to be reachable, or bootstrap to finish. Call
 cleanup; borrowed providers are never shut down by the graph. Failed provider
 cleanup remains registered and explicitly retryable.
 
+**Live changes:** use `control.preview(revision, mutations)` followed by
+`control.reconcile(preview, bindings)`. The immutable preview identifies creation,
+replacement, in-place update, restart, pause, binding and removal impact. Execution
+checks revision and generation/operation epochs again, then validates all actual
+factories/resources before changing desired topology. Factory identities cannot
+silently switch implementations. Explicitly supported in-place configuration
+updates keep the construction generation; other specification changes reconstruct
+only affected instances.
+
+A sink-only replacement parks that sink at a handling boundary, transfers its
+unconsumed input queues, and leaves upstream lifecycle hooks alone. Changed pipes
+drain in dependency order while their consumers are still active. Providers must
+implement `PipeControl::is_idle` to prove a binding can be drained, including
+recovered retained backlog; diagnostic metrics are not used as that proof.
+Old senders are revoked before replacement bindings are installed. Unchanged
+producer streams retain sequence high-water; newly named streams start independent
+sequences. Exhausted components and their closed bindings can be explicitly restarted.
+
+`Reject` refuses dependency-breaking removal. `Cascade` removes selected components
+and their dependents. `Orphan` requires an explicitly optional, orphan-permitted
+relationship and retains that unsatisfied relationship in desired export. `Drain`
+waits for pending work through handled boundaries and refuses acceptance-only sinks
+or failed processing boundaries. All binding removal waits for admitted work; no
+operation claims to undo or drain an external effect merely accepted by a legacy
+queue. A removal that would strand a mandatory port is rejected.
+
+Cleanup failure leaves the old desired topology intact and reports partial effects:
+successfully stopped instances remain stopped, and bindings to released or
+cleanup-failed resources remain visibly failed and quiesced until explicit repair.
+Creation/start failures after a desired update leave the new specifications present.
+`Retry` applies only to visible retryable failures; terminal creation failures require
+a changed specification or removal. Reconciliation remains caller-polled, bounded
+by the cleanup deadline, and cancellable while unrelated graph workers keep running.
+
 Only a fully drained, successfully stopped `Completed` graph can restart.
 Components and sequence high-watermarks are retained; each new generation gets
 fresh pipes. No automatic failure retry or rollback is implied. While the
@@ -171,12 +219,13 @@ call `graph.shutdown().await` to await remaining stop hooks. Cleanup has a bound
 shared deadline; failed/timed-out hooks remain visibly incomplete. Dropping a graph
 cannot await cleanup for resources a component itself spawned.
 
-This is an incremental parallel in-process runtime, not the entire composable framework.
-Server configuration and a new plugin ABI are not supplied by
-these components. Enabling computation does not migrate or change existing Sources, Queries,
+This is a parallel in-process runtime, not a replacement for the platform.
+Server configuration, plugin loading/ABI changes, distributed graph control and
+generic cross-component exactly-once transactions are not supplied by these
+components. Enabling computation does not migrate or change existing Sources, Queries,
 Reactions, or `DrasiLib`. Immutable topology snapshots contain no live provider handles
-or resolved secrets. Future legacy codecs must preserve typed values; internal
-canonical identity bytes are not a proven reversible wire codec.
+or resolved secrets. The explicit boundary codecs preserve typed values; internal
+canonical identity bytes are not used as a reversible wire codec.
 
 Enqueue receipts mean **acceptance only**, not handling or acknowledgement.
 Sinks declare a fixed `Accepted` or `Handled` completion boundary; legacy reaction

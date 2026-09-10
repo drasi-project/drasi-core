@@ -77,6 +77,14 @@
 //! resource-cardinality checks run before construction. [`ResourceSpecification`]
 //! describes scoped ownership; [`ResourceHandle`] holds an actual instance outside
 //! desired snapshots. [`ComputationGraph::dispose`] awaits owned-resource cleanup.
+//! [`GraphControl::preview`] and [`GraphControl::reconcile`] apply revision-bound
+//! desired mutations without restarting unaffected upstream components. Mutable
+//! processing is parked at safe boundaries; retained input ownership survives
+//! sink replacement. Changed bindings use provider-backed drain checks, not
+//! metrics or generation-local send counts. Cleanup failures preserve desired
+//! specifications and keep invalidated bindings quiesced. [`RemovalPolicy`]
+//! makes rejection, dependent cascade, permissible orphaning and handled drain
+//! explicit; accepted-only external effects are never promoted to handled drain.
 //! Cancellation is not rollback. Cleanup errors preserve their causes and leave
 //! `CleanupRequired`.
 //!
@@ -151,7 +159,9 @@ mod query_bootstrap;
 mod query_codec;
 mod retained_pipe;
 mod retained_store;
+mod source_progress;
 mod wal_source;
+pub use source_progress::*;
 
 pub use bounded_pipe::*;
 pub use broadcast_pipe::*;

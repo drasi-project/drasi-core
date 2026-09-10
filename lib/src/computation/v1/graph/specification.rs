@@ -175,6 +175,10 @@ impl ResourceHandle {
         self.cleanup.is_some()
     }
 
+    pub(super) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.value, &other.value)
+    }
+
     pub fn get<T: Any + Send + Sync>(&self) -> GraphResult<Arc<T>> {
         self.value
             .clone()
@@ -220,7 +224,7 @@ pub struct FactoryDescriptor {
     pub dependencies: BTreeMap<Arc<str>, ResourceRequirement>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ComponentSpecification {
     pub descriptor: ComponentDescriptor,
     pub role: ComponentRole,
@@ -277,6 +281,9 @@ impl ConstructedComponent {
 #[async_trait]
 pub trait ComponentFactory: Send + Sync {
     fn descriptor(&self) -> &FactoryDescriptor;
+    fn supports_reconfiguration(&self) -> bool {
+        false
+    }
     /// Additional pure definition validation, after generic schema/dependency checks.
     fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()>;
     fn validate_resources(
@@ -286,6 +293,15 @@ pub trait ComponentFactory: Send + Sync {
         _resources: &BTreeMap<ResourceId, ResourceHandle>,
     ) -> anyhow::Result<()> {
         self.validate(specification)
+    }
+    fn validate_scope(
+        &self,
+        _graph_id: &str,
+        specification: &ComponentSpecification,
+        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<()> {
+        self.validate_resources(specification, declarations, resources)
     }
     async fn create(
         &self,
@@ -389,6 +405,7 @@ impl ConstructionContext {
 }
 
 pub(super) fn validate_specification(
+    graph_id: &str,
     spec: &ComponentSpecification,
     factory: &dyn ComponentFactory,
     declarations: &BTreeMap<ResourceId, ResourceSpecification>,
@@ -506,6 +523,6 @@ pub(super) fn validate_specification(
         return Err(super::topology("undeclared factory dependency slot"));
     }
     factory
-        .validate_resources(spec, declarations, resources)
+        .validate_scope(graph_id, spec, declarations, resources)
         .map_err(|error| super::topology(format!("invalid component definition: {error:#}")))
 }

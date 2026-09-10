@@ -20,6 +20,7 @@
 //! ```text
 //! direct: input [2, 4, 6] -> [2, 4, 6] (Completed)
 //! chain: input [2, 4, 6] -> double -> add one -> [5, 9, 13] (Completed)
+//! lifecycle: restarted source without restarting sink -> [2, 4, 2, 4]; drained and removed
 //! ```
 //! These bounded pipes are volatile; sink handling is not durable acknowledgement.
 
@@ -362,5 +363,88 @@ async fn run_pipeline(with_transforms: bool) -> anyhow::Result<()> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     run_pipeline(false).await?;
-    run_pipeline(true).await
+    run_pipeline(true).await?;
+    run_lifecycle().await
+}
+
+async fn run_lifecycle() -> anyhow::Result<()> {
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let mut graph = ComputationGraph::builder("lifecycle")
+        .source(Box::new(FiniteReadings::new(vec![2, 4])?))
+        .sink(Box::new(CollectReadings {
+            descriptor: descriptor("sink", &["in"], &[])?,
+            values: values.clone(),
+        }))
+        .bind_stream(endpoint("source", "out")?, StreamId::try_new("source/out")?)
+        .connect(
+            EdgeDefinition::new(endpoint("source", "out")?, endpoint("sink", "in")?),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()?;
+    let run = graph.run()?;
+    let control = run.control();
+    let edit = async {
+        control.deployment_report().await?;
+        let started = control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await?;
+        ensure!(started.summary == OperationSummary::Completed);
+        let mut observed = control.subscribe_observed();
+        observed
+            .wait_for(|state| state.components.values().all(|node| node.exhausted))
+            .await?;
+        let preview = control
+            .preview(
+                GraphRevision(1),
+                vec![DesiredMutation::Restart(GraphSelection::Exact(vec![ComponentId::try_new(
+                    "source",
+                )?]))],
+            )
+            .await?;
+        ensure!(
+            preview.restarted().len() == 1
+                && preview.resumed().contains(&ComponentId::try_new("sink")?)
+        );
+        let restarted = control
+            .reconcile(preview, TopologyBindings::default())
+            .await?;
+        ensure!(restarted.summary == OperationSummary::Completed);
+        observed
+            .wait_for(|state| state.components.values().all(|node| node.exhausted))
+            .await?;
+        let saved = control
+            .desired_snapshot()
+            .select(GraphSelection::All)?
+            .to_json()?;
+        ensure!(DesiredTopology::from_json(&saved)?.components.len() == 2);
+        let removal = control
+            .preview(
+                restarted.revision,
+                vec![DesiredMutation::RemoveComponents {
+                    selection: GraphSelection::All,
+                    policy: RemovalPolicy::Drain,
+                }],
+            )
+            .await?;
+        let removed = control
+            .reconcile(removal, TopologyBindings::default())
+            .await?;
+        ensure!(removed.summary == OperationSummary::Completed && removed.removed.len() == 2);
+        Ok::<_, anyhow::Error>(())
+    };
+    let (result, edited) = tokio::join!(run, async {
+        let edited = edit.await;
+        control.cancel();
+        edited
+    });
+    edited?;
+    ensure!(matches!(result, Err(GraphError::Cancelled)));
+    let results = values
+        .lock()
+        .map_err(|_| anyhow::anyhow!("sink lock poisoned"))?;
+    ensure!(*results == [2, 4, 2, 4]);
+    println!(
+        "lifecycle: restarted source without restarting sink -> {results:?}; drained and removed"
+    );
+    Ok(())
 }

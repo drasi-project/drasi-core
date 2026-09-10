@@ -43,7 +43,7 @@ impl ResourceCleanup for RetainedStoreResource {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetainedPipeConfig {
     pub resource: ResourceId,
     pub capacity: NonZeroUsize,
@@ -180,7 +180,21 @@ impl Shared {
     }
 }
 
+#[async_trait]
 impl PipeControl for Shared {
+    async fn is_idle(&self) -> Result<bool, PipeError> {
+        {
+            let state = self.lock()?;
+            if state.cancelled || !self.current() {
+                return Err(PipeError::Closed);
+            }
+            if state.sends > 0 || state.delivery_pending {
+                return Ok(false);
+            }
+        }
+        let progress = self.store.progress(self.generation).await?;
+        Ok(self.store.next(self.generation, progress).await?.is_none())
+    }
     fn close(&self) {
         self.close(false);
     }

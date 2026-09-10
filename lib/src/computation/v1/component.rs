@@ -65,6 +65,11 @@ pub trait ComputationComponent: Send + Sync {
     fn descriptor(&self) -> &ComponentDescriptor;
     async fn start(&mut self) -> anyhow::Result<()>;
     async fn stop(&mut self) -> anyhow::Result<()>;
+    /// Called only at a processing boundary when the registered factory explicitly
+    /// supports in-place configuration changes. The descriptor cannot change.
+    async fn reconfigure(&mut self, _context: super::ConstructionContext) -> anyhow::Result<()> {
+        anyhow::bail!("this component does not support in-place reconfiguration")
+    }
 }
 
 /// A producer beside legacy Source. Its descriptor has output ports only.

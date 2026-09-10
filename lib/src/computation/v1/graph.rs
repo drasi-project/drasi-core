@@ -16,7 +16,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -27,6 +30,7 @@ use tokio::sync::{mpsc, watch};
 mod controller;
 mod specification;
 mod topology;
+pub use controller::reconcile::{DesiredMutation, ReconciliationPreview, ReconciliationReport};
 pub use specification::*;
 pub use topology::*;
 
@@ -63,6 +67,8 @@ pub enum GraphError {
     ControllerClosed,
     #[error("a conflicting component lifecycle operation is still in progress")]
     OperationInProgress,
+    #[error("reconciliation did not reach its processing or cleanup boundary before the deadline")]
+    ReconciliationTimeout,
     #[error("no selected component could be activated; inspect the per-component startup report")]
     StartupIncomplete,
     #[error("component {component} lost its explicit lifecycle dependency {dependency}")]
@@ -123,6 +129,115 @@ pub enum GraphError {
         primary: Option<Box<GraphError>>,
         errors: Vec<GraphError>,
     },
+}
+
+fn validate_role(
+    descriptor: &ComponentDescriptor,
+    role: ComponentRole,
+    completion: Option<SinkCompletion>,
+) -> GraphResult<()> {
+    let inputs = descriptor
+        .ports()
+        .iter()
+        .filter(|port| port.direction() == PortDirection::Input)
+        .count();
+    let outputs = descriptor.ports().len() - inputs;
+    let valid = match role {
+        ComponentRole::Source => inputs == 0 && outputs > 0,
+        ComponentRole::Transformer | ComponentRole::Query => inputs > 0 && outputs > 0,
+        ComponentRole::Sink => inputs > 0 && outputs == 0,
+    };
+    if !valid || (role == ComponentRole::Sink) != completion.is_some() {
+        return Err(topology(format!(
+            "invalid role/ports/completion for {}",
+            descriptor.id()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_edge_contract(
+    output: &PortDescriptor,
+    input: &PortDescriptor,
+    completion: Option<SinkCompletion>,
+    capabilities: &PipeCapabilities,
+    requirements: &PipeRequirements,
+) -> GraphResult<()> {
+    if let Some(completion) = completion {
+        for requirements in [requirements, output.requirements(), input.requirements()] {
+            validate_sink_completion(completion, requirements)?;
+        }
+        if capabilities
+            .supported()
+            .contains(&PipeCapability::ExplicitAcknowledgement)
+        {
+            validate_sink_completion(
+                completion,
+                &PipeRequirements::new([PipeCapability::ExplicitAcknowledgement]),
+            )?;
+        }
+    }
+    validate_connection(output, input, capabilities)?;
+    capabilities.validate(requirements)?;
+    for capability in capabilities.supported() {
+        if !matches!(
+            capability,
+            PipeCapability::FifoPerStream
+                | PipeCapability::Backpressure
+                | PipeCapability::DurableAcceptance
+                | PipeCapability::ExplicitAcknowledgement
+                | PipeCapability::Replay
+                | PipeCapability::RetainedHistory
+        ) {
+            return Err(ContractError::UnsupportedCapability {
+                capability: *capability,
+            }
+            .into());
+        }
+    }
+    if capabilities.capacity().is_none() {
+        return Err(topology(
+            "every edge must declare a finite nonzero capacity",
+        ));
+    }
+    Ok(())
+}
+
+fn dependency_order(
+    ids: &BTreeMap<ComponentId, usize>,
+    edges: &[EdgeSnapshot],
+) -> GraphResult<Vec<usize>> {
+    let mut successors = vec![Vec::new(); ids.len()];
+    let mut indegree = vec![0; ids.len()];
+    for edge in edges {
+        let from = *ids
+            .get(&edge.definition.from.component)
+            .ok_or_else(|| topology("unknown producer"))?;
+        let to = *ids
+            .get(&edge.definition.to.component)
+            .ok_or_else(|| topology("unknown consumer"))?;
+        successors[from].push(to);
+        indegree[to] += 1;
+    }
+    let mut ready: VecDeque<_> = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, degree)| (*degree == 0).then_some(index))
+        .collect();
+    let mut order = Vec::new();
+    while let Some(index) = ready.pop_front() {
+        order.push(index);
+        for successor in &successors[index] {
+            indegree[*successor] -= 1;
+            if indegree[*successor] == 0 {
+                ready.push_back(*successor);
+            }
+        }
+    }
+    if order.len() != ids.len() {
+        return Err(topology("cycles (including self-loops) are not supported"));
+    }
+    Ok(order)
 }
 
 impl GraphError {
@@ -210,6 +325,7 @@ pub struct GraphSnapshot {
     pub specifications: BTreeMap<ComponentId, ComponentSpecification>,
     pub external_bindings: BTreeMap<ComponentId, Arc<str>>,
     pub resources: BTreeMap<ResourceId, ResourceSpecification>,
+    pub unbound_relationships: Arc<[DesiredRelationship]>,
 }
 
 enum Component {
@@ -271,6 +387,17 @@ impl Component {
             Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
         }
     }
+
+    async fn reconfigure(&mut self, context: ConstructionContext) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.reconfigure(context).await,
+            Self::Transformer(component) | Self::Query(component) => {
+                component.reconfigure(context).await
+            }
+            Self::Sink(component) => component.reconfigure(context).await,
+            Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
+        }
+    }
 }
 
 /// Entire topology is validated by `build` before any provider creation or start.
@@ -295,6 +422,7 @@ pub struct ComputationGraphBuilder {
     resources: BTreeMap<ResourceId, ResourceSpecification>,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
     input_merge: BTreeMap<ComponentId, InputMergePolicy>,
+    unbound_relationships: Vec<DesiredRelationship>,
 }
 
 impl ComputationGraphBuilder {
@@ -423,6 +551,7 @@ impl ComputationGraphBuilder {
             } = component
             {
                 specification::validate_specification(
+                    &self.id,
                     specification,
                     factory.as_ref(),
                     &self.resources,
@@ -433,23 +562,7 @@ impl ComputationGraphBuilder {
             if ids.insert(descriptor.id().clone(), index).is_some() {
                 return Err(topology(format!("duplicate component {}", descriptor.id())));
             }
-            let inputs = descriptor
-                .ports()
-                .iter()
-                .filter(|port| port.direction() == PortDirection::Input)
-                .count();
-            let outputs = descriptor.ports().len() - inputs;
-            let valid = match component.role() {
-                ComponentRole::Source => inputs == 0 && outputs > 0,
-                ComponentRole::Transformer | ComponentRole::Query => inputs > 0 && outputs > 0,
-                ComponentRole::Sink => inputs > 0 && outputs == 0,
-            };
-            if !valid {
-                return Err(topology(format!(
-                    "invalid role/ports for {}",
-                    descriptor.id()
-                )));
-            }
+            validate_role(descriptor, component.role(), component.completion())?;
             nodes.push(NodeSnapshot {
                 descriptor: descriptor.clone(),
                 role: component.role(),
@@ -478,10 +591,24 @@ impl ComputationGraphBuilder {
             }
         }
         let mut connected = BTreeSet::new();
+        for relationship in &self.unbound_relationships {
+            validate_orphan(relationship, &ids, &nodes)?;
+            for (id, role) in relationship.pipe.resource_dependencies() {
+                if self.resources.get(&id).map(|resource| resource.role) != Some(role) {
+                    return Err(topology(
+                        "unbound relationship requires an undeclared or incompatible resource",
+                    ));
+                }
+            }
+            if ids.contains_key(&relationship.definition.from.component) {
+                connected.insert(relationship.definition.from.clone());
+            }
+            if ids.contains_key(&relationship.definition.to.component) {
+                connected.insert(relationship.definition.to.clone());
+            }
+        }
         let mut unique_edges = BTreeSet::new();
         let mut stream_destinations = BTreeSet::new();
-        let mut successors = vec![Vec::new(); nodes.len()];
-        let mut indegree = vec![0; nodes.len()];
         let mut edges = Vec::new();
         let mut used_resources = BTreeMap::new();
         for (edge_index, (edge, provider)) in self.edges.iter().enumerate() {
@@ -517,7 +644,7 @@ impl ComputationGraphBuilder {
             if !unique_edges.insert(edge.clone()) {
                 return Err(topology("duplicate edge"));
             }
-            let (from, output) = resolve(&ids, &nodes, &edge.from)?;
+            let (_, output) = resolve(&ids, &nodes, &edge.from)?;
             let (to, input) = resolve(&ids, &nodes, &edge.to)?;
             if !stream_destinations.insert((edge.from.clone(), edge.to.component.clone())) {
                 return Err(topology(
@@ -528,60 +655,32 @@ impl ComputationGraphBuilder {
                 edge: edge_index,
                 source,
             })?;
-            if let Some(completion) = nodes[to].completion {
-                for requirements in
-                    [&self.requirements, output.requirements(), input.requirements()]
-                {
-                    validate_sink_completion(completion, requirements)?;
-                }
-                if capabilities
-                    .supported()
-                    .contains(&PipeCapability::ExplicitAcknowledgement)
-                {
-                    validate_sink_completion(
-                        completion,
-                        &PipeRequirements::new([PipeCapability::ExplicitAcknowledgement]),
-                    )?;
-                }
-            }
-            validate_connection(output, input, &capabilities)?;
-            capabilities.validate(&self.requirements)?;
-            // Cross-component transaction/exactly-once scope is not inferred
-            // from a provider's declaration.
-            for capability in capabilities.supported() {
-                if !matches!(
-                    capability,
-                    PipeCapability::FifoPerStream
-                        | PipeCapability::Backpressure
-                        | PipeCapability::DurableAcceptance
-                        | PipeCapability::ExplicitAcknowledgement
-                        | PipeCapability::Replay
-                        | PipeCapability::RetainedHistory
-                ) {
-                    return Err(ContractError::UnsupportedCapability {
-                        capability: *capability,
-                    }
-                    .into());
-                }
-            }
-            if capabilities.capacity().is_none() {
-                return Err(topology(
-                    "every edge must declare a finite nonzero capacity",
-                ));
-            }
+            validate_edge_contract(
+                output,
+                input,
+                nodes[to].completion,
+                &capabilities,
+                &self.requirements,
+            )?;
             connected.insert(edge.from.clone());
             connected.insert(edge.to.clone());
-            successors[from].push(to);
-            indegree[to] += 1;
+            let pipe = provider
+                .specification()
+                .unwrap_or_else(|| DesiredPipe::External {
+                    binding: format!("pipe:{edge_index}"),
+                    capabilities: capabilities.supported().iter().copied().collect(),
+                    capacity: capabilities.capacity().map(std::num::NonZeroUsize::get),
+                    resources: resources.clone(),
+                    exclusive_resources: provider.exclusive_resources(),
+                });
+            if pipe.resource_dependencies() != resources {
+                return Err(topology(
+                    "pipe recipe omits its declared resource dependencies",
+                ));
+            }
             edges.push(EdgeSnapshot {
                 definition: edge.clone(),
-                pipe: provider
-                    .specification()
-                    .unwrap_or_else(|| DesiredPipe::External {
-                        binding: format!("pipe:{edge_index}"),
-                        capabilities: capabilities.supported().iter().copied().collect(),
-                        capacity: capabilities.capacity().map(std::num::NonZeroUsize::get),
-                    }),
+                pipe,
                 capabilities,
                 policy: self
                     .relationship_policies
@@ -606,24 +705,7 @@ impl ComputationGraphBuilder {
                 }
             }
         }
-        let mut ready: VecDeque<_> = indegree
-            .iter()
-            .enumerate()
-            .filter_map(|(index, degree)| (*degree == 0).then_some(index))
-            .collect();
-        let mut order = Vec::new();
-        while let Some(index) = ready.pop_front() {
-            order.push(index);
-            for successor in &successors[index] {
-                indegree[*successor] -= 1;
-                if indegree[*successor] == 0 {
-                    ready.push_back(*successor);
-                }
-            }
-        }
-        if order.len() != nodes.len() {
-            return Err(topology("cycles (including self-loops) are not supported"));
-        }
+        let order = dependency_order(&ids, &edges)?;
         if self
             .lifecycle_policies
             .keys()
@@ -653,7 +735,7 @@ impl ComputationGraphBuilder {
         let snapshot = GraphSnapshot {
             id: self.id,
             revision: GraphRevision(1),
-            nodes: nodes.into(),
+            nodes: nodes.clone().into(),
             edges: edges.into(),
             requirements: self.requirements,
             lifecycle_policies,
@@ -686,9 +768,32 @@ impl ComputationGraphBuilder {
                 })
                 .collect(),
             resources: self.resources,
+            unbound_relationships: self.unbound_relationships.into(),
         };
         let observed = controller::initial_observations(&snapshot);
+        let factories = self
+            .components
+            .iter()
+            .filter_map(|component| {
+                if let Component::Deferred {
+                    specification,
+                    factory,
+                } = component
+                {
+                    Some((specification.implementation.clone(), factory.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         Ok(ComputationGraph {
+            next_edge: snapshot.edges.len(),
+            next_binding_generation: 1,
+            next_resource_generation: 2,
+            edges: snapshot.edges.iter().cloned().enumerate().collect(),
+            next_generation: nodes.len() as u64 + 1,
+            nodes,
+            factories,
             desired: watch::channel(Arc::new(snapshot.clone())).0,
             snapshot,
             observed: watch::channel(Arc::new(observed)).0,
@@ -704,6 +809,7 @@ impl ComputationGraphBuilder {
                 .edges
                 .into_iter()
                 .map(|(_, provider)| provider)
+                .enumerate()
                 .collect(),
             order,
             ids,
@@ -718,6 +824,42 @@ fn topology(reason: impl Into<String>) -> GraphError {
     GraphError::Topology {
         reason: reason.into(),
     }
+}
+
+fn validate_orphan(
+    relationship: &DesiredRelationship,
+    ids: &BTreeMap<ComponentId, usize>,
+    nodes: &[NodeSnapshot],
+) -> GraphResult<()> {
+    if !relationship.policy.orphan_permitted
+        || relationship.policy.required_for_creation
+        || relationship.policy.required_for_binding
+        || relationship.policy.activation != super::ActivationCoupling::Independent
+        || relationship.policy.propagate_failure
+        || relationship.policy.fence_producer_on_failure
+    {
+        return Err(topology(
+            "unbound relationship does not permit an unsatisfied dependency",
+        ));
+    }
+    let mut present = false;
+    for (endpoint, direction) in [
+        (&relationship.definition.from, PortDirection::Output),
+        (&relationship.definition.to, PortDirection::Input),
+    ] {
+        if ids.contains_key(&endpoint.component) {
+            if resolve(ids, nodes, endpoint)?.1.direction() != direction {
+                return Err(topology(
+                    "unbound relationship has an incompatible endpoint role",
+                ));
+            }
+            present = true;
+        }
+    }
+    if !present {
+        return Err(topology("unbound relationship has no desired endpoint"));
+    }
+    Ok(())
 }
 
 fn resolve<'a>(
@@ -781,8 +923,16 @@ impl GraphControl {
 /// graph. Components owning their own external workers must stop them in hooks.
 pub struct ComputationGraph {
     snapshot: GraphSnapshot,
+    // Stable runtime indices survive compact desired snapshots and removals.
+    nodes: Vec<NodeSnapshot>,
+    edges: BTreeMap<usize, EdgeSnapshot>,
     components: Vec<Arc<controller::InstanceSlot>>,
-    providers: Vec<Box<dyn PipeProvider>>,
+    providers: BTreeMap<usize, Box<dyn PipeProvider>>,
+    factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
+    next_generation: u64,
+    next_edge: usize,
+    next_binding_generation: u64,
+    next_resource_generation: u64,
     order: Vec<usize>,
     ids: BTreeMap<ComponentId, usize>,
     observed: watch::Sender<Arc<ObservedGraph>>,
@@ -806,6 +956,7 @@ impl ComputationGraph {
             resources: BTreeMap::new(),
             resource_handles: BTreeMap::new(),
             input_merge: BTreeMap::new(),
+            unbound_relationships: Vec::new(),
         }
     }
 
@@ -995,21 +1146,88 @@ struct Incoming {
     port: PortId,
     receiver: Box<dyn EnvelopeReceiver>,
     acknowledgement_required: bool,
+    pending: Option<PendingInput>,
+    exhausted: bool,
+    progress: Arc<FlowProgress>,
 }
 
 struct Outgoing {
     edge: usize,
     port: PortId,
     sender: Arc<dyn EnvelopeSender>,
+    progress: Arc<FlowProgress>,
 }
 
-async fn receive(
-    input: &mut Incoming,
-) -> (
-    &mut Incoming,
-    std::result::Result<Option<Delivery>, PipeError>,
-) {
-    let result = input.receiver.receive().await;
+#[derive(Default)]
+struct FlowProgress {
+    in_flight: AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+impl FlowProgress {
+    async fn drained(&self, control: &dyn PipeControl) -> GraphResult<()> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.in_flight.load(Ordering::Acquire) == 0
+                && control
+                    .is_idle()
+                    .await
+                    .map_err(|source| GraphError::Pipe { edge: 0, source })?
+            {
+                return Ok(());
+            }
+            notified.await;
+        }
+    }
+}
+
+struct DeliveryWork(Arc<FlowProgress>);
+
+impl DeliveryWork {
+    fn new(progress: Arc<FlowProgress>) -> GraphResult<Self> {
+        progress
+            .in_flight
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| topology("in-flight delivery counter exhausted"))?;
+        progress.notify.notify_one();
+        Ok(Self(progress))
+    }
+}
+
+impl Drop for DeliveryWork {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.0.notify.notify_one();
+    }
+}
+
+struct PendingInput {
+    delivery: Delivery,
+    work: DeliveryWork,
+}
+
+async fn receive(input: &mut Incoming) -> (&mut Incoming, std::result::Result<(), PipeError>) {
+    let result = if input.pending.is_some() || input.exhausted {
+        Ok(())
+    } else {
+        match input.receiver.receive().await {
+            Ok(delivery) => {
+                input.exhausted = delivery.is_none();
+                if let Some(delivery) = delivery {
+                    match DeliveryWork::new(input.progress.clone()) {
+                        Ok(work) => input.pending = Some(PendingInput { delivery, work }),
+                        Err(error) => return (input, Err(PipeError::Backend(error.into()))),
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    };
     (input, result)
 }
 
@@ -1059,12 +1277,18 @@ async fn run_node(
     sequences: &mut BTreeMap<PortId, u64>,
     inputs: &mut [Incoming],
     outputs: &[Outgoing],
+    quiesce: &mut watch::Receiver<bool>,
 ) -> GraphResult<()> {
     if inputs.is_empty() && !matches!(component, Component::Source(_)) {
-        return std::future::pending().await;
+        cancelled(quiesce).await;
+        return Ok(());
     }
-    let mut receivers: FuturesUnordered<_> = inputs.iter_mut().map(receive).collect();
-    let mut ready = Vec::new();
+    let mut receivers: FuturesUnordered<_> = inputs
+        .iter_mut()
+        .filter(|input| !input.exhausted)
+        .map(receive)
+        .collect();
+    let mut ready: Vec<&mut Incoming> = Vec::new();
     let wakeup = match &*component {
         Component::Transformer(transformer) | Component::Query(transformer) => {
             transformer.wakeup_source()
@@ -1072,14 +1296,18 @@ async fn run_node(
         _ => None,
     };
     'processing: loop {
+        if *quiesce.borrow() {
+            return Ok(());
+        }
         let mut acknowledgement = None;
+        let mut consumed = None;
         let emissions = match component {
             Component::Source(source) => {
-                match source
-                    .next()
-                    .await
-                    .map_err(|source| component_error(node, "next", source))?
-                {
+                match tokio::select! {
+                    biased;
+                    _ = cancelled(quiesce) => return Ok(()),
+                    result = source.next() => result.map_err(|source| component_error(node, "next", source))?,
+                } {
                     Some(output) => vec![output],
                     None => {
                         check_descriptor(component, node)?;
@@ -1089,33 +1317,36 @@ async fn run_node(
             }
             _ => 'input_work: {
                 if ready.is_empty() {
-                    let mut scheduled = false;
-                    let incoming = if let Some(wakeup) = &wakeup {
+                    let (scheduled, incoming) = tokio::select! {
+                        biased;
+                        _ = cancelled(quiesce) => return Ok(()),
+                        result = async {
+                        if let Some(wakeup) = &wakeup {
                         if receivers.is_empty() {
                             if !wakeup
                                 .has_pending()
                                 .await
                                 .map_err(|source| component_error(node, "scheduled work", source))?
                             {
-                                return Ok(());
+                                return Ok::<_, GraphError>((false, None));
                             }
                             wakeup.wait().await.map_err(|source| {
                                 component_error(node, "scheduled wait", source)
                             })?;
-                            scheduled = true;
-                            None
+                            Ok((true, None))
                         } else {
                             tokio::select! {
                                 result = wakeup.wait() => {
                                     result.map_err(|source| component_error(node, "scheduled wait", source))?;
-                                    scheduled = true;
-                                    None
+                                    Ok((true, None))
                                 }
-                                incoming = receivers.next() => incoming,
+                                incoming = receivers.next() => Ok((false, incoming)),
                             }
                         }
                     } else {
-                        receivers.next().await
+                        Ok((false, receivers.next().await))
+                    }
+                    } => result?,
                     };
                     if scheduled {
                         match component {
@@ -1128,41 +1359,45 @@ async fn run_node(
                         }
                     }
                     let Some((incoming, delivery)) = incoming else {
-                        if wakeup.is_some() {
-                            continue 'processing;
-                        }
                         return Ok(());
                     };
-                    let delivery = delivery.map_err(|source| GraphError::Pipe {
+                    delivery.map_err(|source| GraphError::Pipe {
                         edge: incoming.edge,
                         source,
                     })?;
-                    let Some(delivery) = delivery else {
+                    if incoming.pending.is_none() {
                         continue 'processing;
-                    };
-                    ready.push((incoming, delivery));
+                    }
+                    ready.push(incoming);
                 }
                 if node.input_merge == InputMergePolicy::EventTimeAcrossStreams {
                     while let Some(Some((incoming, delivery))) = receivers.next().now_or_never() {
-                        let delivery = delivery.map_err(|source| GraphError::Pipe {
+                        delivery.map_err(|source| GraphError::Pipe {
                             edge: incoming.edge,
                             source,
                         })?;
-                        if let Some(delivery) = delivery {
-                            ready.push((incoming, delivery));
+                        if incoming.pending.is_some() {
+                            ready.push(incoming);
                         }
                     }
                 }
                 let chosen = if node.input_merge == InputMergePolicy::EventTimeAcrossStreams {
-                    event_time_selection(
-                        ready
-                            .iter()
-                            .map(|(_, delivery)| delivery.envelope().system().timestamp()),
-                    )
+                    event_time_selection(ready.iter().map(|incoming| {
+                        incoming
+                            .pending
+                            .as_ref()
+                            .expect("ready delivery")
+                            .delivery
+                            .envelope()
+                            .system()
+                            .timestamp()
+                    }))
                 } else {
                     0
                 };
-                let (incoming, delivery) = ready.remove(chosen);
+                let incoming = ready.remove(chosen);
+                let PendingInput { delivery, work } =
+                    incoming.pending.take().expect("ready delivery");
                 let (envelope, completion) = delivery.into_parts();
                 if completion.is_some() != incoming.acknowledgement_required {
                     return Err(topology(
@@ -1182,6 +1417,7 @@ async fn run_node(
                     ));
                 }
                 acknowledgement = completion.map(|completion| (incoming.edge, completion));
+                consumed = Some(work);
                 let input = InputEnvelope {
                     port: incoming.port.clone(),
                     envelope,
@@ -1239,6 +1475,7 @@ async fn run_node(
                 .await
                 .map_err(|source| GraphError::Pipe { edge, source })?;
         }
+        drop(consumed);
     }
 }
 

@@ -41,6 +41,7 @@ pub struct WalReplaySource {
     cursor: u64,
     producer_sequence: u64,
     pending: VecDeque<(u64, SourceChange)>,
+    progress: Option<Arc<QuerySourceProgress>>,
 }
 
 fn descriptor(id: ComponentId) -> ComponentDescriptor {
@@ -71,7 +72,12 @@ impl WalReplaySource {
             cursor: resume_after,
             producer_sequence: 0,
             pending: VecDeque::new(),
+            progress: None,
         }
+    }
+    pub fn with_source_progress(mut self, progress: Arc<QuerySourceProgress>) -> Self {
+        self.progress = Some(progress);
+        self
     }
     async fn read(&mut self) -> anyhow::Result<()> {
         let next = self
@@ -103,6 +109,18 @@ impl ComputationComponent for WalReplaySource {
     async fn start(&mut self) -> anyhow::Result<()> {
         self.pending.clear();
         self.cursor = self.resume;
+        if let Some(progress) = &self.progress {
+            let snapshot = progress.wait_ready().await?;
+            if !snapshot.persistent {
+                anyhow::bail!("WAL resume requires persistent committed query progress");
+            }
+            if let Some(checkpoint) = snapshot
+                .checkpoints
+                .get(&SourceProgressKey::Source(self.resource.partition.clone()))
+            {
+                self.cursor = self.cursor.max(checkpoint.sequence);
+            }
+        }
         self.read().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
@@ -187,10 +205,21 @@ impl Default for WalReplaySourceFactory {
                     ]),
                     allow_additional: false,
                 },
-                dependencies: BTreeMap::from([(
-                    Arc::from("wal"),
-                    ResourceRequirement::exactly_one::<WalSourceResource>(ResourceRole::Wal),
-                )]),
+                dependencies: BTreeMap::from([
+                    (
+                        Arc::from("wal"),
+                        ResourceRequirement::exactly_one::<WalSourceResource>(ResourceRole::Wal),
+                    ),
+                    (
+                        Arc::from("source_progress"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<QuerySourceProgressResource>(
+                                ResourceRole::Checkpoint,
+                            )
+                        },
+                    ),
+                ]),
             },
         }
     }
@@ -201,6 +230,28 @@ impl ComponentFactory for WalReplaySourceFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
+    fn validate_scope(
+        &self,
+        graph_id: &str,
+        spec: &ComponentSpecification,
+        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<()> {
+        self.validate_resources(spec, declarations, resources)?;
+        for id in spec
+            .dependencies
+            .get("source_progress")
+            .into_iter()
+            .flatten()
+        {
+            if let Some(handle) = resources.get(id) {
+                if handle.get::<QuerySourceProgressResource>()?.0.graph_id() != graph_id {
+                    anyhow::bail!("source progress belongs to another graph");
+                }
+            }
+        }
+        Ok(())
+    }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         if spec.descriptor != descriptor(spec.descriptor.id().clone()) {
             anyhow::bail!("invalid WAL source ports/schema");
@@ -209,13 +260,13 @@ impl ComponentFactory for WalReplaySourceFactory {
             if value.as_u64().is_none() {
                 anyhow::bail!("WAL resume position must be unsigned");
             }
-            if let Some(ConfigurationValue::Literal(value)) = spec.configuration.get("stream") {
-                StreamId::try_new(
-                    value
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("invalid WAL stream"))?,
-                )?;
-            }
+        }
+        if let Some(ConfigurationValue::Literal(value)) = spec.configuration.get("stream") {
+            StreamId::try_new(
+                value
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid WAL stream"))?,
+            )?;
         }
         Ok(())
     }
@@ -243,12 +294,30 @@ impl ComponentFactory for WalReplaySourceFactory {
                 ComponentCreationError::terminal(anyhow::anyhow!("invalid WAL resume sequence"))
             })?,
         };
-        let source = WalReplaySource::new(
+        let mut source = WalReplaySource::new(
             context.component_id.clone(),
             StreamId::try_new(stream).map_err(ComponentCreationError::terminal)?,
             wal,
             resume,
         );
+        if context
+            .specification
+            .dependencies
+            .contains_key("source_progress")
+        {
+            if let Some(progress) = context
+                .resources::<QuerySourceProgressResource>("source_progress")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+            {
+                if progress.0.graph_id() != context.graph_id.as_ref() {
+                    return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                        "source progress belongs to another graph"
+                    )));
+                }
+                source = source.with_source_progress(progress.0.clone());
+            }
+        }
         Ok(ConstructedComponent::source(Box::new(source)))
     }
 }

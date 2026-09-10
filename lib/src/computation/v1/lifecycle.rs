@@ -43,6 +43,8 @@ pub enum ComponentLifecycle {
     Stopped,
     Starting,
     Running,
+    Quiescing,
+    Quiesced,
     Stopping,
     Failed,
 }
@@ -107,6 +109,7 @@ pub struct ObservedComponent {
     pub lifecycle: ComponentLifecycle,
     pub health: ComponentHealth,
     pub failure: Option<ComponentFailure>,
+    pub exhausted: bool,
     pub transition_time: DateTime<Utc>,
 }
 
@@ -227,6 +230,10 @@ pub struct RelationshipPolicy {
     pub dynamically_replaceable: bool,
     pub activation: ActivationCoupling,
     pub propagate_failure: bool,
+    /// Stop the graph-owned producer if this consumer fails, for example to
+    /// release an isolated subscription to a shared, borrowed legacy Source.
+    #[serde(default)]
+    pub fence_producer_on_failure: bool,
     pub orphan_permitted: bool,
 }
 
@@ -238,6 +245,7 @@ impl Default for RelationshipPolicy {
             dynamically_replaceable: true,
             activation: ActivationCoupling::Independent,
             propagate_failure: false,
+            fence_producer_on_failure: false,
             orphan_permitted: false,
         }
     }
