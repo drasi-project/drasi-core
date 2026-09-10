@@ -660,26 +660,30 @@ impl Source for ApplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        // If WAL is enabled and subscriber is resuming, use WAL replay
+        // Durable WAL sources replay on every subscribe. `resume_from` /
+        // `resume_sequence` are the last committed checkpoint; missing both
+        // means sequence 0 so an uncommitted source event is reprocessed.
         let wal_guard = self.wal.read().await;
-        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
-            // Decode resume_from as big-endian u64 sequence
-            if resume_from.len() >= 8 {
-                let resume_seq =
-                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
-                let wal_clone = wal.clone();
-                drop(wal_guard);
-                return self
-                    .base
-                    .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "Application")
-                    .await;
+        if let Some(wal) = wal_guard.as_ref() {
+            let resume_seq = if let Some(ref resume_from) = settings.resume_from {
+                if resume_from.len() >= 8 {
+                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default())
+                } else {
+                    drop(wal_guard);
+                    return Err(anyhow::anyhow!(
+                        "Invalid resume_from position: expected at least 8 bytes, got {}",
+                        resume_from.len()
+                    ));
+                }
             } else {
-                drop(wal_guard);
-                return Err(anyhow::anyhow!(
-                    "Invalid resume_from position: expected at least 8 bytes, got {}",
-                    resume_from.len()
-                ));
-            }
+                settings.resume_sequence.unwrap_or(0)
+            };
+            let wal_clone = wal.clone();
+            drop(wal_guard);
+            return self
+                .base
+                .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "Application")
+                .await;
         }
         drop(wal_guard);
         self.base
