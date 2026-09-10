@@ -103,13 +103,15 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
             })
             .collect();
 
+        let require_session = session_state.has_active_session()?;
+
         task::spawn_blocking(move || {
             let cf = db
                 .cf_handle(LIVE_RESULTS_CF)
                 .expect("live_results cf not found");
 
-            session_state.with_txn_or_db(
-                |txn| {
+            if require_session {
+                session_state.with_txn(|txn| {
                     for (key, data) in &owned_mutations {
                         match data {
                             Some(value) => {
@@ -119,18 +121,17 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
                         }
                     }
                     Ok(())
-                },
-                |db| {
-                    let mut batch = WriteBatchWithTransaction::<true>::default();
-                    for (key, data) in &owned_mutations {
-                        match data {
-                            Some(value) => batch.put_cf(&cf, key, value),
-                            None => batch.delete_cf(&cf, key),
-                        }
+                })
+            } else {
+                let mut batch = WriteBatchWithTransaction::<true>::default();
+                for (key, data) in &owned_mutations {
+                    match data {
+                        Some(value) => batch.put_cf(&cf, key, value),
+                        None => batch.delete_cf(&cf, key),
                     }
-                    db.write(batch).map_err(IndexError::other)
-                },
-            )
+                }
+                db.write(batch).map_err(IndexError::other)
+            }
         })
         .await
         .map_err(IndexError::other)?

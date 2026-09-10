@@ -91,13 +91,19 @@ impl OutboxWriter for RocksDbOutboxWriter {
         let session_state = self.session_state.clone();
         let key = make_key(query_id, sequence);
         let data = data.to_vec();
+        // Capture intent before spawn_blocking: if this append was scheduled
+        // inside a session, cancellation/rollback must not fall back to a
+        // standalone write after the txn is gone.
+        let require_session = session_state.has_active_session()?;
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            session_state.with_txn_or_db(
-                |txn| txn.put_cf(&cf, &key, &data).map_err(IndexError::other),
-                |db| db.put_cf(&cf, &key, &data).map_err(IndexError::other),
-            )
+            if require_session {
+                session_state
+                    .with_txn(|txn| txn.put_cf(&cf, &key, &data).map_err(IndexError::other))
+            } else {
+                db.put_cf(&cf, &key, &data).map_err(IndexError::other)
+            }
         })
         .await
         .map_err(IndexError::other)?

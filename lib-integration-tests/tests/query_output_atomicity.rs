@@ -18,26 +18,45 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_core::interface::{
-    CheckpointStore, CreatedIndexes, IndexBackendPlugin, IndexError, LiveResultsWriter,
-    OutboxWriter, RowMutation, SessionControl, SourceCheckpoint,
+    CheckpointStore, CreatedIndexes, ElementIndex, IndexBackendPlugin, IndexError,
+    LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SourceCheckpoint,
 };
+use drasi_core::models::ElementReference;
 use drasi_index_rocksdb::RocksDbIndexProvider;
-use drasi_lib::channels::{ComponentStatus, QueryResult};
+use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
     CapacityPolicy, DrasiLib, DurabilityConfig, Query, Reaction, ReactionBase, ReactionBaseParams,
-    ReactionRuntimeContext, RecoveryPolicy, StorageBackendRef,
+    ReactionCheckpoint, ReactionRecoveryPolicy, ReactionRuntimeContext, RecoveryPolicy,
+    StateStoreProvider, StorageBackendRef,
 };
 use drasi_source_application::{
     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle, PropertyMapBuilder,
 };
+use drasi_state_store_redb::RedbStateStoreProvider;
 use drasi_wal_redb::RedbWalProvider;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
+
+const PHASE_ENV: &str = "DRASI_ATOMICITY_PHASE";
+const ROCKS_ENV: &str = "DRASI_ATOMICITY_ROCKS";
+const WAL_ENV: &str = "DRASI_ATOMICITY_WAL";
+const STATE_ENV: &str = "DRASI_ATOMICITY_STATE";
+const JOURNAL_ENV: &str = "DRASI_ATOMICITY_JOURNAL";
+const READY_ENV: &str = "DRASI_ATOMICITY_READY";
+const QUERY_KIND_ENV: &str = "DRASI_ATOMICITY_QUERY_KIND";
+const DURABLE_ENV: &str = "DRASI_ATOMICITY_DURABLE_REACTION";
+const STAGE_ENV: &str = "DRASI_ATOMICITY_STAGE";
+const FAULT_READY_ENV: &str = "DRASI_ATOMICITY_FAULT_READY";
 
 const SOURCE_ID: &str = "people-source";
 const QUERY_ID: &str = "people-query";
@@ -56,6 +75,29 @@ enum PersistStage {
     BeforeLiveResultsApply,
     BeforeResultSequence,
     AfterCommit,
+}
+
+impl PersistStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeSourceCheckpoint => "BeforeSourceCheckpoint",
+            Self::BeforeOutboxAppend => "BeforeOutboxAppend",
+            Self::BeforeLiveResultsApply => "BeforeLiveResultsApply",
+            Self::BeforeResultSequence => "BeforeResultSequence",
+            Self::AfterCommit => "AfterCommit",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "BeforeSourceCheckpoint" => Ok(Self::BeforeSourceCheckpoint),
+            "BeforeOutboxAppend" => Ok(Self::BeforeOutboxAppend),
+            "BeforeLiveResultsApply" => Ok(Self::BeforeLiveResultsApply),
+            "BeforeResultSequence" => Ok(Self::BeforeResultSequence),
+            "AfterCommit" => Ok(Self::AfterCommit),
+            other => anyhow::bail!("unknown persist stage {other}"),
+        }
+    }
 }
 
 struct FaultInjector {
@@ -371,10 +413,197 @@ impl Reaction for CapturingReaction {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JournalRecord {
+    Snapshot {
+        query_id: String,
+        sequence: u64,
+        rows: Vec<serde_json::Value>,
+    },
+    Result {
+        result: QueryResult,
+    },
+}
+
+#[derive(Clone)]
+struct SideEffectJournal {
+    path: Arc<PathBuf>,
+}
+
+impl SideEffectJournal {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path: Arc::new(path),
+        }
+    }
+
+    async fn append(&self, record: &JournalRecord) -> Result<()> {
+        let path = self.path.as_ref().clone();
+        let mut bytes = serde_json::to_vec(record).context("serialize journal")?;
+        bytes.push(b'\n');
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .with_context(|| format!("open journal {}", path.display()))?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(())
+        })
+        .await
+        .context("join journal write")??;
+        Ok(())
+    }
+}
+
+struct DurableRecordingReaction {
+    base: ReactionBase,
+    journal: SideEffectJournal,
+}
+
+impl DurableRecordingReaction {
+    fn new(journal: PathBuf) -> Self {
+        Self {
+            base: ReactionBase::new(ReactionBaseParams::new(
+                REACTION_ID,
+                vec![QUERY_ID.to_string()],
+            )),
+            journal: SideEffectJournal::new(journal),
+        }
+    }
+}
+
+#[async_trait]
+impl Reaction for DurableRecordingReaction {
+    fn id(&self) -> &str {
+        self.base.get_id()
+    }
+
+    fn type_name(&self) -> &str {
+        "durable-recording"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.get_queries().to_vec()
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    async fn start(&self) -> anyhow::Result<()> {
+        self.base
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
+        let mut shutdown = self.base.create_shutdown_channel().await;
+        let queue = self.base.priority_queue.clone();
+        let base = self.base.clone_shared();
+        let journal = self.journal.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let result = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break,
+                    result = queue.dequeue() => result,
+                };
+                let record = JournalRecord::Result {
+                    result: result.as_ref().clone(),
+                };
+                if journal.append(&record).await.is_err() {
+                    break;
+                }
+                let checkpoint = match base.read_checkpoint(&result.query_id).await {
+                    Ok(Some(previous)) => ReactionCheckpoint {
+                        sequence: result.sequence,
+                        config_hash: previous.config_hash,
+                    },
+                    Ok(None) => break,
+                    Err(_) => break,
+                };
+                if base
+                    .write_checkpoint(&result.query_id, &checkpoint)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.base.set_processing_task(task).await;
+        Ok(())
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        self.base.stop_common().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn deprovision(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        true
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        true
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::Strict
+    }
+
+    async fn bootstrap(&self, context: BootstrapContext) -> anyhow::Result<()> {
+        let snapshot = context
+            .fetch_snapshot()
+            .await
+            .map_err(|error| anyhow::anyhow!("fetch snapshot: {error}"))?;
+        let sequence = snapshot.as_of_sequence;
+        let config_hash = snapshot.config_hash;
+        let rows = snapshot.collect_vec().await;
+        self.journal
+            .append(&JournalRecord::Snapshot {
+                query_id: context.query_id.clone(),
+                sequence,
+                rows,
+            })
+            .await?;
+        context
+            .write_checkpoint(&ReactionCheckpoint {
+                sequence,
+                config_hash,
+            })
+            .await?;
+        Ok(())
+    }
+}
+
 struct Paths {
     rocks: PathBuf,
     wal_a: PathBuf,
     wal_b: PathBuf,
+    state: PathBuf,
+    journal: PathBuf,
+    ready: PathBuf,
+    fault_ready: PathBuf,
 }
 
 impl Paths {
@@ -393,6 +622,10 @@ impl Paths {
             rocks: root.join("rocksdb"),
             wal_a: root.join("source-wal-a"),
             wal_b: root.join("source-wal-b"),
+            state: root.join("reaction-state.redb"),
+            journal: root.join("reaction-journal.jsonl"),
+            ready: root.join("recover-ready.json"),
+            fault_ready: root.join("fault-ready.json"),
         };
         std::fs::create_dir_all(&paths.rocks)?;
         std::fs::create_dir_all(&paths.wal_a)?;
@@ -405,14 +638,101 @@ impl Paths {
             let _ = std::fs::remove_dir_all(parent);
         }
     }
+
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            rocks: PathBuf::from(std::env::var(ROCKS_ENV).context("rocks path")?),
+            wal_a: PathBuf::from(std::env::var(WAL_ENV).context("wal path")?),
+            wal_b: PathBuf::from("unused-wal-b"),
+            state: PathBuf::from(std::env::var(STATE_ENV).context("state path")?),
+            journal: PathBuf::from(std::env::var(JOURNAL_ENV).context("journal path")?),
+            ready: PathBuf::from(std::env::var(READY_ENV).context("ready path")?),
+            fault_ready: PathBuf::from(std::env::var(FAULT_READY_ENV).context("fault ready path")?),
+        })
+    }
+
+    fn apply_to(&self, command: &mut Command) {
+        command
+            .env(ROCKS_ENV, &self.rocks)
+            .env(WAL_ENV, &self.wal_a)
+            .env(STATE_ENV, &self.state)
+            .env(JOURNAL_ENV, &self.journal)
+            .env(READY_ENV, &self.ready)
+            .env(FAULT_READY_ENV, &self.fault_ready);
+    }
 }
 
-#[derive(Debug)]
+fn in_recover_child() -> bool {
+    std::env::var_os(PHASE_ENV).is_some()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RecoverObservation {
+    snapshot_seq: u64,
+    outbox_sequences: Vec<u64>,
+}
+
+fn spawn_phase_child(
+    phase: &str,
+    paths: &Paths,
+    query_kind: &str,
+    durable_reaction: bool,
+    stage: Option<PersistStage>,
+) -> Result<()> {
+    let executable = std::env::current_exe().context("resolve current test executable")?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--exact")
+        .arg("query_output_atomicity_phase")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(PHASE_ENV, phase)
+        .env(QUERY_KIND_ENV, query_kind)
+        .env(DURABLE_ENV, if durable_reaction { "1" } else { "0" });
+    if let Some(stage) = stage {
+        command.env(STAGE_ENV, stage.as_str());
+    }
+    paths.apply_to(&mut command);
+    let output: Output = command.output().context("spawn atomicity phase child")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{phase} child failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn read_recover_observation(path: &Path) -> Result<RecoverObservation> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_slice(&bytes).context("parse recover observation")
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct DurableObservation {
     source_sequence: Option<u64>,
     result_sequence: Option<u64>,
     outbox_sequences: Vec<u64>,
     live_row_count: usize,
+    graph_has_person: bool,
+    outbox_names: Vec<String>,
+    live_names: Vec<String>,
+    outbox_source_ids: Vec<String>,
+}
+
+fn person_name_from_diff(diff: &ResultDiff) -> Option<String> {
+    let data = match diff {
+        ResultDiff::Add { data, .. }
+        | ResultDiff::Update { after: data, .. }
+        | ResultDiff::Aggregation { after: data, .. } => data,
+        ResultDiff::Delete { data, .. } => data,
+        ResultDiff::Noop => return None,
+    };
+    data.get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
@@ -427,21 +747,54 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         .await?
         .map(|cp| cp.sequence);
     let result_sequence = store.read_result_sequence(QUERY_ID).await?;
-    let outbox_sequences = created
+    let raw_outbox = created
         .outbox_writer
         .as_ref()
         .context("outbox")?
         .read_from(QUERY_ID, 0)
-        .await?
-        .into_iter()
-        .map(|(seq, _)| seq)
-        .collect();
-    let live_row_count = created
+        .await?;
+    let outbox_sequences: Vec<u64> = raw_outbox.iter().map(|(seq, _)| *seq).collect();
+    let mut outbox_names = Vec::new();
+    let mut outbox_source_ids = Vec::new();
+    for (_seq, data) in &raw_outbox {
+        let result: QueryResult =
+            rmp_serde::from_slice(data).context("deserialize durable outbox")?;
+        if let Some(source_id) = result
+            .metadata
+            .get("source_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            outbox_source_ids.push(source_id.to_string());
+        }
+        for diff in &result.results {
+            if let Some(name) = person_name_from_diff(diff) {
+                outbox_names.push(name);
+            }
+        }
+    }
+    let live_rows = created
         .live_results_writer
         .as_ref()
         .context("live results")?
-        .row_count(QUERY_ID)
+        .read_snapshot(QUERY_ID)
         .await?;
+    let live_row_count = live_rows.len();
+    let mut live_names = Vec::new();
+    for (_sig, data) in live_rows {
+        let value: serde_json::Value =
+            rmp_serde::from_slice(&data).context("deserialize live row")?;
+        if let Some(name) = value.get("name").and_then(serde_json::Value::as_str) {
+            live_names.push(name.to_string());
+        }
+    }
+    created.set.session_control.begin().await?;
+    let graph_has_person = created
+        .set
+        .element_index
+        .get_element(&ElementReference::new(SOURCE_ID, "p1"))
+        .await?
+        .is_some();
+    created.set.session_control.rollback()?;
     drop(created);
     drop(provider);
     Ok(DurableObservation {
@@ -449,13 +802,19 @@ async fn inspect_durable(rocks: &Path) -> Result<DurableObservation> {
         result_sequence,
         outbox_sequences,
         live_row_count,
+        graph_has_person,
+        outbox_names,
+        live_names,
+        outbox_source_ids,
     })
 }
 
+#[derive(Clone)]
 struct FixtureOpts {
     query_text: &'static str,
     fault: Option<Arc<FaultInjector>>,
     include_reaction: bool,
+    durable_reaction: bool,
     captured: Arc<RwLock<Vec<u64>>>,
     wal: PathBuf,
 }
@@ -505,11 +864,23 @@ async fn build_core(
         );
     }
 
-    if opts.include_reaction {
+    if opts.durable_reaction {
+        let state_store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
+        builder = builder
+            .with_state_store_provider(state_store)
+            .with_reaction(DurableRecordingReaction::new(paths.journal.clone()));
+    } else if opts.include_reaction {
         builder = builder.with_reaction(CapturingReaction::new(opts.captured));
     }
 
     Ok((builder.build().await?, handle))
+}
+
+async fn shutdown_and_release(core: DrasiLib, source: ApplicationSourceHandle) -> Result<()> {
+    core.shutdown().await?;
+    drop(source);
+    drop(core);
+    Ok(())
 }
 
 async fn wait_for_status(core: &DrasiLib, id: &str, expected: ComponentStatus) -> Result<()> {
@@ -580,6 +951,49 @@ async fn wait_for_snapshot_seq(core: &DrasiLib, min_seq: u64) -> Result<u64> {
     }
 }
 
+fn read_journal(path: &Path) -> Result<Vec<JournalRecord>> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("read journal"),
+    };
+    contents
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).context("parse journal"))
+        .collect()
+}
+
+fn journal_has_sequence(records: &[JournalRecord], expected: u64) -> bool {
+    records.iter().any(|record| match record {
+        JournalRecord::Snapshot { sequence, .. } => *sequence == expected,
+        JournalRecord::Result { result } => result.sequence == expected,
+    })
+}
+
+async fn wait_for_journal_sequence(path: &Path, expected: u64) -> Result<Vec<JournalRecord>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let records = read_journal(path)?;
+        if journal_has_sequence(&records, expected) {
+            return Ok(records);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("journal sequence {expected} not found: {records:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn read_reaction_checkpoint(state: &Path) -> Result<ReactionCheckpoint> {
+    let store = RedbStateStoreProvider::new(state)?;
+    let bytes = store
+        .get(REACTION_ID, &format!("checkpoint:{QUERY_ID}"))
+        .await?
+        .context("durable reaction checkpoint is missing")?;
+    bincode::deserialize(&bytes).context("deserialize reaction checkpoint")
+}
+
 async fn start_running(core: &DrasiLib) -> Result<()> {
     core.start().await?;
     wait_for_status(core, SOURCE_ID, ComponentStatus::Running).await?;
@@ -602,31 +1016,26 @@ fn assert_output_absent(obs: &DurableObservation, context: &str) {
         obs.live_row_count, 0,
         "{context}: live results must be empty"
     );
+    assert!(
+        !obs.graph_has_person,
+        "{context}: rolled-back graph must not contain p1"
+    );
+    assert!(
+        obs.outbox_names.is_empty() && obs.live_names.is_empty(),
+        "{context}: output payloads must be empty"
+    );
 }
 
 async fn run_mid_txn_failure(stage: PersistStage) -> Result<()> {
-    let paths = Paths::new(&format!("{stage:?}"))?;
-    let fault = FaultInjector::new(stage);
-    {
-        let (core, source) = build_core(
-            &paths,
-            FixtureOpts {
-                query_text: QUERY_TEXT,
-                fault: Some(fault.clone()),
-                include_reaction: false,
-                captured: Arc::new(RwLock::new(Vec::new())),
-                wal: paths.wal_a.clone(),
-            },
-        )
-        .await?;
-        start_running(&core).await?;
-        fault.arm();
-        insert_person(&source, "p1", "Alice").await?;
-        wait_for_fault(&fault).await?;
-        core.shutdown().await?;
+    if in_recover_child() {
+        return Ok(());
     }
-
-    let failed = inspect_durable(&paths.rocks).await?;
+    let paths = Paths::new(&format!("{stage:?}"))?;
+    spawn_phase_child("fault", &paths, "normal", false, Some(stage))?;
+    let failed: DurableObservation = serde_json::from_slice(
+        &std::fs::read(&paths.fault_ready).context("read fault observation")?,
+    )
+    .context("parse fault observation")?;
     assert!(
         failed.source_sequence.unwrap_or(0) == 0,
         "{stage:?}: source checkpoint must not advance, got {:?}",
@@ -634,49 +1043,27 @@ async fn run_mid_txn_failure(stage: PersistStage) -> Result<()> {
     );
     assert_output_absent(&failed, &format!("{stage:?} after rollback"));
 
-    {
-        let (core, source) = build_core(
-            &paths,
-            FixtureOpts {
-                query_text: QUERY_TEXT,
-                fault: None,
-                include_reaction: false,
-                captured: Arc::new(RwLock::new(Vec::new())),
-                wal: paths.wal_b.clone(),
-            },
-        )
-        .await?;
-        start_running(&core).await?;
-        // Checkpoint did not advance, so a restarted source would replay. This
-        // in-process fixture has no WAL lock we can reopen; re-insert simulates replay.
-        insert_person(&source, "p1", "Alice").await?;
-        let seq = wait_for_snapshot_seq(&core, 1).await?;
-        assert_eq!(seq, 1, "{stage:?}: restart must reprocess the source event");
-        let recovered = {
-            let query = core
-                .query_manager()
-                .get_query_instance(QUERY_ID)
-                .await
-                .map_err(anyhow::Error::msg)?;
-            query.fetch_outbox(0).await?
-        };
-        assert_eq!(
-            recovered
-                .results
-                .iter()
-                .map(|r| r.sequence)
-                .collect::<Vec<_>>(),
-            vec![1],
-            "{stage:?}: restart outbox should contain sequence 1"
-        );
-        core.shutdown().await?;
-    }
+    spawn_phase_child("recover", &paths, "normal", false, None)?;
+    let recovered = read_recover_observation(&paths.ready)?;
+    assert_eq!(
+        recovered.snapshot_seq, 1,
+        "{stage:?}: restart must reprocess the source event"
+    );
+    assert_eq!(
+        recovered.outbox_sequences,
+        vec![1],
+        "{stage:?}: restart outbox should contain sequence 1"
+    );
 
     let durable = inspect_durable(&paths.rocks).await?;
     assert_eq!(durable.source_sequence, Some(1));
     assert_eq!(durable.result_sequence, Some(1));
     assert_eq!(durable.outbox_sequences, vec![1]);
     assert_eq!(durable.live_row_count, 1);
+    assert!(durable.graph_has_person, "{stage:?}: graph must contain p1");
+    assert_eq!(durable.outbox_names, vec!["Alice"]);
+    assert_eq!(durable.live_names, vec!["Alice"]);
+    assert_eq!(durable.outbox_source_ids, vec![SOURCE_ID]);
     paths.cleanup();
     Ok(())
 }
@@ -703,139 +1090,103 @@ async fn fail_after_live_results_before_result_sequence_rolls_back() -> Result<(
 
 #[tokio::test]
 async fn fail_after_commit_before_in_memory_update_hydrates_on_restart() -> Result<()> {
-    let paths = Paths::new("after-commit")?;
-    let fault = FaultInjector::new(PersistStage::AfterCommit);
-    let captured = Arc::new(RwLock::new(Vec::new()));
-    {
-        let (core, source) = build_core(
-            &paths,
-            FixtureOpts {
-                query_text: QUERY_TEXT,
-                fault: Some(fault.clone()),
-                include_reaction: true,
-                captured: captured.clone(),
-                wal: paths.wal_a.clone(),
-            },
-        )
-        .await?;
-        start_running(&core).await?;
-        wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
-        fault.arm();
-        insert_person(&source, "p1", "Alice").await?;
-        wait_for_fault(&fault).await?;
-        core.shutdown().await?;
+    if in_recover_child() {
+        return Ok(());
     }
-
-    let committed = inspect_durable(&paths.rocks).await?;
+    let paths = Paths::new("after-commit")?;
+    spawn_phase_child(
+        "fault",
+        &paths,
+        "normal",
+        true,
+        Some(PersistStage::AfterCommit),
+    )?;
+    let committed: DurableObservation = serde_json::from_slice(
+        &std::fs::read(&paths.fault_ready).context("read fault observation")?,
+    )
+    .context("parse fault observation")?;
     assert_eq!(committed.source_sequence, Some(1));
     assert_eq!(committed.result_sequence, Some(1));
     assert_eq!(committed.outbox_sequences, vec![1]);
     assert_eq!(committed.live_row_count, 1);
+    assert_eq!(committed.outbox_names, vec!["Alice"]);
     assert!(
-        captured.read().await.is_empty(),
+        !journal_has_sequence(&read_journal(&paths.journal)?, 1),
         "dispatch must not happen after a post-commit failure"
     );
 
-    {
-        let captured_restart = Arc::new(RwLock::new(Vec::new()));
-        let (core, _source) = build_core(
-            &paths,
-            FixtureOpts {
-                query_text: QUERY_TEXT,
-                fault: None,
-                include_reaction: true,
-                captured: captured_restart,
-                wal: paths.wal_b.clone(),
-            },
-        )
-        .await?;
-        start_running(&core).await?;
-        wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
-        let seq = wait_for_snapshot_seq(&core, 1).await?;
-        assert_eq!(seq, 1, "restart must hydrate the committed output");
-        let outbox = core
-            .query_manager()
-            .get_query_instance(QUERY_ID)
-            .await
-            .map_err(anyhow::Error::msg)?
-            .fetch_outbox(0)
-            .await?;
-        assert_eq!(
-            outbox
-                .results
-                .iter()
-                .map(|result| result.sequence)
-                .collect::<Vec<_>>(),
-            vec![1],
-            "hydrated outbox must contain the committed sequence"
-        );
-        // Live dispatch after hydrate is at-least-once and may be absent for a
-        // non-durable capturing reaction; durable replay is covered by hydrate.
-        core.shutdown().await?;
-    }
+    spawn_phase_child("recover", &paths, "normal", true, None)?;
+    let recovered = read_recover_observation(&paths.ready)?;
+    assert_eq!(
+        recovered.snapshot_seq, 1,
+        "restart must hydrate the committed output"
+    );
+    let records = read_journal(&paths.journal)?;
+    assert!(
+        journal_has_sequence(&records, 1),
+        "durable reaction must process the missed result after restart"
+    );
+    let checkpoint = read_reaction_checkpoint(&paths.state).await?;
+    assert_eq!(
+        checkpoint.sequence, 1,
+        "reaction checkpoint must advance only after the snapshot side effect"
+    );
     paths.cleanup();
     Ok(())
 }
 
 #[tokio::test]
 async fn fail_during_process_due_futures_output_persist_rolls_back() -> Result<()> {
-    let paths = Paths::new("due-futures")?;
-    let fault = FaultInjector::new(PersistStage::BeforeOutboxAppend);
-    {
-        let (core, source) = build_core(
-            &paths,
-            FixtureOpts {
-                query_text: FUTURE_QUERY_TEXT,
-                fault: Some(fault.clone()),
-                include_reaction: false,
-                captured: Arc::new(RwLock::new(Vec::new())),
-                wal: paths.wal_a.clone(),
-            },
-        )
-        .await?;
-        start_running(&core).await?;
-        fault.arm();
-        insert_person(&source, "p1", "Alice").await?;
-        wait_for_fault(&fault).await?;
-        core.shutdown().await?;
+    if in_recover_child() {
+        return Ok(());
     }
-
-    let failed = inspect_durable(&paths.rocks).await?;
+    let paths = Paths::new("due-futures")?;
+    spawn_phase_child(
+        "fault",
+        &paths,
+        "future",
+        false,
+        Some(PersistStage::BeforeOutboxAppend),
+    )?;
+    let failed: DurableObservation = serde_json::from_slice(
+        &std::fs::read(&paths.fault_ready).context("read fault observation")?,
+    )
+    .context("parse fault observation")?;
     assert_eq!(
         failed.source_sequence,
         Some(1),
         "insert checkpoint should commit; futures persist is a later txn"
     );
-    assert_output_absent(&failed, "due-futures after rollback");
+    assert_eq!(
+        failed.result_sequence.unwrap_or(0),
+        0,
+        "due-futures after rollback: result sequence must not advance"
+    );
+    assert!(failed.outbox_sequences.is_empty());
+    assert_eq!(failed.live_row_count, 0);
 
-    {
-        let (core, _source) = build_core(
-            &paths,
-            FixtureOpts {
-                query_text: FUTURE_QUERY_TEXT,
-                fault: None,
-                include_reaction: false,
-                captured: Arc::new(RwLock::new(Vec::new())),
-                wal: paths.wal_b.clone(),
-            },
-        )
-        .await?;
-        start_running(&core).await?;
-        let seq = wait_for_snapshot_seq(&core, 1).await?;
-        assert_eq!(seq, 1, "rolled-back future must be reprocessed");
-        core.shutdown().await?;
-    }
+    spawn_phase_child("recover", &paths, "future", false, None)?;
+    let recovered = read_recover_observation(&paths.ready)?;
+    assert_eq!(
+        recovered.snapshot_seq, 1,
+        "rolled-back future must be reprocessed"
+    );
 
     let durable = inspect_durable(&paths.rocks).await?;
     assert_eq!(durable.result_sequence, Some(1));
     assert_eq!(durable.outbox_sequences, vec![1]);
     assert_eq!(durable.live_row_count, 1);
+    assert_eq!(durable.outbox_source_ids, vec![SOURCE_ID]);
+    assert_eq!(durable.outbox_names, vec!["Alice"]);
     paths.cleanup();
     Ok(())
 }
 
 #[tokio::test]
 async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_rows() -> Result<()> {
+    if in_recover_child() {
+        return Ok(());
+    }
     let paths = Paths::new("happy")?;
     let captured = Arc::new(RwLock::new(Vec::new()));
     {
@@ -845,6 +1196,7 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
                 query_text: QUERY_TEXT,
                 fault: None,
                 include_reaction: true,
+                durable_reaction: false,
                 captured: captured.clone(),
                 wal: paths.wal_a.clone(),
             },
@@ -865,6 +1217,13 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
         let outbox = query.fetch_outbox(0).await?;
         assert_eq!(snapshot.as_of_sequence, 1);
         assert_eq!(snapshot.to_vec().len(), 1);
+        assert!(
+            snapshot
+                .to_vec()
+                .iter()
+                .any(|row| row.get("name").and_then(serde_json::Value::as_str) == Some("Alice")),
+            "snapshot row must contain Alice"
+        );
         assert_eq!(
             outbox
                 .results
@@ -888,5 +1247,106 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
         "reaction should receive sequence 1, got {sequences:?}"
     );
     paths.cleanup();
+    Ok(())
+}
+
+/// Child-process phases for crash recovery. Redb exclusive locks cannot be
+/// released in-process, so fault injection and same-WAL restart each run in
+/// a child that fully exits (same pattern as the reconstruction suite).
+#[tokio::test]
+async fn query_output_atomicity_phase() -> Result<()> {
+    match std::env::var(PHASE_ENV).ok().as_deref() {
+        Some("fault") => run_fault_phase().await,
+        Some("recover") => run_recover_phase().await,
+        _ => Ok(()),
+    }
+}
+
+async fn run_fault_phase() -> Result<()> {
+    let paths = Paths::from_env()?;
+    let stage = PersistStage::parse(&std::env::var(STAGE_ENV).context("stage")?)?;
+    let query_text = match std::env::var(QUERY_KIND_ENV).as_deref() {
+        Ok("future") => FUTURE_QUERY_TEXT,
+        _ => QUERY_TEXT,
+    };
+    let durable_reaction = std::env::var(DURABLE_ENV).ok().as_deref() == Some("1");
+    let fault = FaultInjector::new(stage);
+    let (core, source) = build_core(
+        &paths,
+        FixtureOpts {
+            query_text,
+            fault: Some(fault.clone()),
+            include_reaction: false,
+            durable_reaction,
+            captured: Arc::new(RwLock::new(Vec::new())),
+            wal: paths.wal_a.clone(),
+        },
+    )
+    .await?;
+    start_running(&core).await?;
+    if durable_reaction {
+        wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
+    }
+    fault.arm();
+    insert_person(&source, "p1", "Alice").await?;
+    wait_for_fault(&fault).await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Error).await?;
+    shutdown_and_release(core, source).await?;
+    let observation = inspect_durable(&paths.rocks).await?;
+    std::fs::write(
+        &paths.fault_ready,
+        serde_json::to_vec(&observation).context("serialize fault observation")?,
+    )
+    .context("write fault observation")?;
+    Ok(())
+}
+
+async fn run_recover_phase() -> Result<()> {
+    let paths = Paths::from_env()?;
+    let query_text = match std::env::var(QUERY_KIND_ENV).as_deref() {
+        Ok("future") => FUTURE_QUERY_TEXT,
+        _ => QUERY_TEXT,
+    };
+    let durable_reaction = std::env::var(DURABLE_ENV).ok().as_deref() == Some("1");
+    let (core, source) = build_core(
+        &paths,
+        FixtureOpts {
+            query_text,
+            fault: None,
+            include_reaction: false,
+            durable_reaction,
+            captured: Arc::new(RwLock::new(Vec::new())),
+            wal: paths.wal_a.clone(),
+        },
+    )
+    .await?;
+    start_running(&core).await?;
+    if durable_reaction {
+        wait_for_status(&core, REACTION_ID, ComponentStatus::Running).await?;
+    }
+    let seq = wait_for_snapshot_seq(&core, 1).await?;
+    let query = core
+        .query_manager()
+        .get_query_instance(QUERY_ID)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let outbox = query.fetch_outbox(0).await?;
+    let observation = RecoverObservation {
+        snapshot_seq: seq,
+        outbox_sequences: outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect(),
+    };
+    if durable_reaction {
+        wait_for_journal_sequence(&paths.journal, 1).await?;
+    }
+    std::fs::write(
+        &paths.ready,
+        serde_json::to_vec(&observation).context("serialize recover observation")?,
+    )
+    .context("write recover observation")?;
+    shutdown_and_release(core, source).await?;
     Ok(())
 }
