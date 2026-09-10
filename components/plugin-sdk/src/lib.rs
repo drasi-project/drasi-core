@@ -220,6 +220,8 @@
 //! tracks config versions and can reject incompatible plugins. See the [`descriptor`]
 //! module docs for versioning rules.
 
+#[cfg(feature = "computation")]
+pub mod computation;
 pub mod config_value;
 pub mod descriptor;
 pub mod ffi;

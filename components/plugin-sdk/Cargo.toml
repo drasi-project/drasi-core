@@ -26,12 +26,23 @@ chrono = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 tracing-log = "0.2"
+jsonschema = { version = "0.18", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+drasi-source-mock = { path = "../sources/mock" }
+drasi-reaction-log = { path = "../reactions/log" }
+drasi-bootstrap-noop = { path = "../bootstrappers/noop" }
+drasi-identity-test = { path = "../identity/test-fixture" }
+drasi-secret-store-file = { path = "../secret_stores/file" }
+drasi-index-rocksdb = { path = "../indexes/rocksdb", features = ["plugin-descriptor"] }
+tempfile = "3.27.0"
 
 [build-dependencies]
 chrono = "0.4"
 
 [lints]
 workspace = true
+
+[features]
+computation = ["drasi-lib/computation", "drasi-core/computation", "dep:jsonschema"]
