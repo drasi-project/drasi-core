@@ -125,7 +125,11 @@ impl QueryBase {
     pub async fn get_status(&self) -> ComponentStatus {
         self.status_handle.get_status().await
     }
-    pub async fn subscribe(&self, reaction_id: &str) -> Result<QuerySubscriptionResponse> {
+    pub async fn subscribe(
+        &self,
+        reaction_id: &str,
+        as_of_sequence: u64,
+    ) -> Result<QuerySubscriptionResponse> {
         info!(
             "Query '{}' received subscription from reaction '{}'",
             self.config.id, reaction_id
@@ -159,6 +163,7 @@ impl QueryBase {
         Ok(QuerySubscriptionResponse {
             query_id: self.config.id.clone(),
             receiver,
+            as_of_sequence,
         })
     }
 
@@ -387,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_channel_mode_creates_receiver() {
         let base = QueryBase::new(test_config("q1", Some(DispatchMode::Channel))).unwrap();
-        let sub = base.subscribe("reaction-a").await.unwrap();
+        let sub = base.subscribe("reaction-a", 0).await.unwrap();
         assert_eq!(sub.query_id, "q1");
 
         // A dispatcher should have been added
@@ -398,9 +403,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_channel_mode_adds_dispatcher_per_subscription() {
         let base = QueryBase::new(test_config("q1", Some(DispatchMode::Channel))).unwrap();
-        let _s1 = base.subscribe("r1").await.unwrap();
-        let _s2 = base.subscribe("r2").await.unwrap();
-        let _s3 = base.subscribe("r3").await.unwrap();
+        let _s1 = base.subscribe("r1", 0).await.unwrap();
+        let _s2 = base.subscribe("r2", 0).await.unwrap();
+        let _s3 = base.subscribe("r3", 0).await.unwrap();
 
         let dispatchers = base.dispatchers.read().await;
         assert_eq!(
@@ -413,8 +418,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_broadcast_mode_reuses_single_dispatcher() {
         let base = QueryBase::new(test_config("q1", Some(DispatchMode::Broadcast))).unwrap();
-        let _s1 = base.subscribe("r1").await.unwrap();
-        let _s2 = base.subscribe("r2").await.unwrap();
+        let _s1 = base.subscribe("r1", 0).await.unwrap();
+        let _s2 = base.subscribe("r2", 0).await.unwrap();
 
         let dispatchers = base.dispatchers.read().await;
         assert_eq!(
@@ -427,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_returns_correct_query_id() {
         let base = QueryBase::new(test_config("my-query", Some(DispatchMode::Channel))).unwrap();
-        let sub = base.subscribe("any-reaction").await.unwrap();
+        let sub = base.subscribe("any-reaction", 0).await.unwrap();
         assert_eq!(sub.query_id, "my-query");
     }
 
@@ -537,8 +542,8 @@ mod tests {
         let base = QueryBase::new(config).unwrap();
 
         // Subscribe multiple times
-        let sub1 = base.subscribe("reaction1").await.unwrap();
-        let sub2 = base.subscribe("reaction2").await.unwrap();
+        let sub1 = base.subscribe("reaction1", 0).await.unwrap();
+        let sub2 = base.subscribe("reaction2", 0).await.unwrap();
 
         // Dispatch a result
         let result = QueryResult {
@@ -587,8 +592,8 @@ mod tests {
         let base = QueryBase::new(config).unwrap();
 
         // Subscribe multiple times - each gets its own channel
-        let sub1 = base.subscribe("reaction1").await.unwrap();
-        let sub2 = base.subscribe("reaction2").await.unwrap();
+        let sub1 = base.subscribe("reaction1", 0).await.unwrap();
+        let sub2 = base.subscribe("reaction2", 0).await.unwrap();
 
         // Dispatch a result
         let result = QueryResult {
