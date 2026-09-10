@@ -386,6 +386,10 @@ pub struct SubscriptionResponse {
 pub struct QuerySubscriptionResponse {
     pub query_id: String,
     pub receiver: Box<dyn super::ChangeReceiver<QueryResult>>,
+    /// Query result sequence at subscribe time. Trigger fresh start uses this
+    /// as the skip cutoff so later live results already in `receiver` are not
+    /// dropped by a subsequent head sample.
+    pub as_of_sequence: u64,
 }
 
 /// Typed result diff emitted by continuous queries.

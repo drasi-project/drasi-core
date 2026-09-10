@@ -3046,8 +3046,12 @@ impl Query for DrasiQuery {
             reaction_id, self.base.config.id
         );
 
+        // Sample the head *before* attaching the receiver so a later
+        // `fetch_outbox` cannot raise the skip cutoff past results already
+        // buffered for this subscriber.
+        let as_of_sequence = self.output_state.read().await.as_of_sequence();
         self.base
-            .subscribe(&reaction_id)
+            .subscribe(&reaction_id, as_of_sequence)
             .await
             .context("Failed to subscribe to query")
     }
