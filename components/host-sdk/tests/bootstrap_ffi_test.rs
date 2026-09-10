@@ -91,6 +91,7 @@ impl BootstrapBackend for MockBootstrapBackend {
                 results: self.outbox_entries.clone(),
                 latest_sequence: self.outbox_latest_sequence,
                 config_hash: self.outbox_config_hash,
+                output_generation: 0,
             },
         ))
     }

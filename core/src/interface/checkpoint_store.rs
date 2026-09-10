@@ -156,4 +156,23 @@ pub trait CheckpointStore: Send + Sync {
     async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
         Ok(None)
     }
+
+    /// Persist the query output generation.
+    ///
+    /// Bumped when output is wiped/rebuilt so reactions can distinguish a new
+    /// sequence 1 from a previous generation. Default: no-op.
+    async fn write_output_generation(
+        &self,
+        _query_id: &str,
+        _generation: u64,
+    ) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    /// Read the persisted output generation.
+    ///
+    /// Returns `None` if none has been written (treated as generation 0).
+    async fn read_output_generation(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+        Ok(None)
+    }
 }

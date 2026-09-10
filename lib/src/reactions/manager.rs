@@ -49,6 +49,13 @@ fn to_policy_kind(policy: &ReactionRecoveryPolicy) -> RecoveryPolicyKind {
     }
 }
 
+async fn query_epoch_hash(query: &Arc<dyn Query>) -> u64 {
+    crate::queries::output_epoch_hash(
+        crate::queries::compute_config_hash(query.get_config()),
+        query.output_generation().await,
+    )
+}
+
 /// Context passed to `handle_broadcast_gap` to avoid excessive parameter counts.
 ///
 /// Groups the shared forwarder-task state that the recovery function needs.
@@ -405,8 +412,7 @@ impl ReactionManager {
                 }
                 Some(cp) => {
                     // Checkpoint exists — check config hash.
-                    let current_config_hash =
-                        crate::queries::compute_config_hash(query.get_config());
+                    let current_config_hash = query_epoch_hash(&query).await;
                     if cp.config_hash != current_config_hash {
                         // Hash mismatch → treat as gap → apply recovery policy.
                         self.lifecycle_metrics.record_hash_mismatch();
@@ -505,7 +511,7 @@ impl ReactionManager {
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
-        let config_hash = crate::queries::compute_config_hash(query.get_config());
+        let config_hash = query_epoch_hash(query).await;
 
         if reaction.needs_snapshot_on_fresh_start() {
             info!("[{reaction_id}] Fresh start for query '{query_id}' — fetching snapshot");
@@ -703,7 +709,7 @@ impl ReactionManager {
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
-        let config_hash = crate::queries::compute_config_hash(query.get_config());
+        let config_hash = query_epoch_hash(query).await;
 
         match policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
@@ -1348,7 +1354,7 @@ impl ReactionManager {
     /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint (serialized via mutex)
     /// - `AutoSkipGap`: jump to current sequence, update checkpoint
     async fn handle_broadcast_gap(ctx: &BroadcastGapContext<'_>) -> Result<()> {
-        let config_hash = crate::queries::compute_config_hash(ctx.query.get_config());
+        let config_hash = query_epoch_hash(&ctx.query).await;
 
         match ctx.policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
@@ -1563,6 +1569,7 @@ mod tests {
                     results: vec![],
                     latest_sequence: snapshot_seq,
                     config_hash,
+                    output_generation: 0,
                 })),
             }
         }
@@ -2297,6 +2304,7 @@ mod tests {
                 results: vec![],
                 latest_sequence: 0,
                 config_hash: 0,
+                output_generation: 0,
             })
         }
     }
