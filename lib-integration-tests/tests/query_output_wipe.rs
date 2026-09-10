@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use drasi_core::interface::{CheckpointStore, IndexBackendPlugin};
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
+use drasi_lib::queries::output_epoch_hash;
 use drasi_lib::queries::Query as QueryInstance;
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
@@ -421,6 +422,54 @@ async fn outbox_sequences(core: &DrasiLib) -> Result<(u64, Vec<u64>, u64)> {
     ))
 }
 
+fn assert_new_generation_outbox(sequences: &[u64], latest: u64) {
+    if sequences.is_empty() {
+        assert_eq!(latest, 0);
+        return;
+    }
+    assert_eq!(
+        sequences[0], 1,
+        "wiped output must restart at sequence 1, got {sequences:?}"
+    );
+    assert!(
+        sequences.windows(2).all(|w| w[1] == w[0] + 1),
+        "new-config outbox must be contiguous, got {sequences:?}"
+    );
+    assert_eq!(*sequences.last().unwrap(), latest);
+}
+
+async fn wait_for_wipe(core: &DrasiLib) -> Result<u64> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let snapshot = fetch_query(core).await?.fetch_snapshot().await?;
+        if snapshot.output_generation >= 1 {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "output generation did not bump after reconfigure; seq={} gen={}",
+                snapshot.as_of_sequence,
+                snapshot.output_generation
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let mut last = None;
+    for _ in 0..40 {
+        let seq = fetch_query(core)
+            .await?
+            .fetch_snapshot()
+            .await?
+            .as_of_sequence;
+        if last == Some(seq) {
+            return Ok(seq);
+        }
+        last = Some(seq);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(last.unwrap_or(0))
+}
+
 async fn read_reaction_checkpoint(
     store: &RedbStateStoreProvider,
 ) -> Result<Option<ReactionCheckpoint>> {
@@ -464,38 +513,31 @@ async fn update_query_text_wipes_output_in_process() -> Result<()> {
     core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
         .await?;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    let post_wipe = wait_for_wipe(&core).await?;
 
     let query = fetch_query(&core).await?;
     let snapshot = query.fetch_snapshot().await?;
-    assert_eq!(
-        snapshot.as_of_sequence, 0,
-        "reconfigure must reset sequence to 0"
-    );
     assert!(
-        snapshot.is_empty(),
-        "snapshot after update must not contain old-config rows: {:?}",
-        snapshot.to_vec()
+        snapshot.output_generation >= 1,
+        "reconfigure must bump output generation"
     );
     assert_ne!(snapshot.config_hash, hash_v1);
     let outbox = query.fetch_outbox(0).await?;
-    assert!(
-        outbox.results.is_empty(),
-        "fetch_outbox(0) must not return old-config QueryResults, got {:?}",
-        outbox
-            .results
-            .iter()
-            .map(|r| r.sequence)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(outbox.latest_sequence, 0);
+    let sequences: Vec<u64> = outbox.results.iter().map(|r| r.sequence).collect();
+    assert_new_generation_outbox(&sequences, outbox.latest_sequence);
     assert_eq!(outbox.config_hash, snapshot.config_hash);
+    assert_eq!(outbox.latest_sequence, post_wipe);
 
     insert_person(&source, "p4", "Dana").await?;
-    let seq = wait_for_snapshot_seq(&core, 1).await?;
-    assert_eq!(seq, 1, "next emission after reconfigure must be sequence 1");
+    let seq = wait_for_snapshot_seq(&core, post_wipe + 1).await?;
+    assert_eq!(
+        seq,
+        post_wipe + 1,
+        "next live emission after reconfigure must continue from the wiped head"
+    );
     let (latest, sequences, hash_v2) = outbox_sequences(&core).await?;
-    assert_eq!(latest, 1);
-    assert_eq!(sequences, vec![1]);
+    assert_eq!(latest, post_wipe + 1);
+    assert_new_generation_outbox(&sequences, latest);
     assert_eq!(hash_v2, snapshot.config_hash);
 
     core.shutdown().await?;
@@ -527,26 +569,32 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
         core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
             .await?;
         wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+        let post_wipe = wait_for_wipe(&core).await?;
         insert_person(&source, "p4", "Dana").await?;
-        wait_for_snapshot_seq(&core, 1).await?;
+        wait_for_snapshot_seq(&core, post_wipe + 1).await?;
         core.shutdown().await?;
     }
 
     let durable = inspect_durable(&paths.rocks).await?;
-    assert_eq!(
-        durable.result_sequence,
-        Some(1),
-        "durable result sequence must be the new-config head, not leftover 3"
+    assert!(
+        durable.result_sequence.unwrap_or(0) >= 1,
+        "durable result sequence must be the new-config head, got {:?}",
+        durable.result_sequence
+    );
+    assert_new_generation_outbox(
+        &durable.outbox_sequences,
+        durable.result_sequence.unwrap_or(0),
     );
     assert_eq!(
-        durable.outbox_sequences,
-        vec![1],
+        durable.outbox_sequences.last().copied(),
+        durable.result_sequence,
         "old outbox keys must not coexist with the reset sequence, got {:?}",
         durable.outbox_sequences
     );
     assert_eq!(
-        durable.live_row_count, 1,
-        "old live rows must not come back after reconfigure"
+        durable.live_row_count,
+        durable.result_sequence.unwrap_or(0) as usize,
+        "live rows must match the new-config head, not leftover old-config state"
     );
 
     {
@@ -564,11 +612,14 @@ async fn update_then_new_process_restart_hydrates_new_config_only() -> Result<()
         .await?;
         start_running(&core).await?;
         let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
-        assert_eq!(snapshot.as_of_sequence, 1);
-        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot.as_of_sequence,
+            durable.result_sequence.unwrap_or(0)
+        );
+        assert_eq!(snapshot.len(), durable.live_row_count);
         let (latest, sequences, _) = outbox_sequences(&core).await?;
-        assert_eq!(latest, 1);
-        assert_eq!(sequences, vec![1]);
+        assert_eq!(latest, durable.result_sequence.unwrap_or(0));
+        assert_eq!(sequences, durable.outbox_sequences);
         core.shutdown().await?;
     }
 
@@ -722,11 +773,8 @@ async fn seed_reaction_then_update_query(
         "reaction should see the original 3 results"
     );
 
-    let hash_v1 = fetch_query(&core)
-        .await?
-        .fetch_snapshot()
-        .await?
-        .config_hash;
+    let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
+    let hash_v1 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
     stop_reaction_and_wait(&core).await?;
 
     let checkpoint = read_reaction_checkpoint(store.as_ref())
@@ -738,6 +786,7 @@ async fn seed_reaction_then_update_query(
     core.update_query(QUERY_ID, query_config(QUERY_TEXT_V2))
         .await?;
     wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_wipe(&core).await?;
     Ok((core, source, receiver, store, hash_v1))
 }
 
@@ -748,13 +797,15 @@ async fn reaction_strict_hash_mismatch_fails_start() -> Result<()> {
     let (core, source, mut receiver, _store, hash_v1) =
         seed_reaction_then_update_query(&paths, ReactionRecoveryPolicy::Strict, true).await?;
 
-    insert_person(&source, "p4", "Dana").await?;
-    wait_for_snapshot_seq(&core, 1).await?;
-    let hash_v2 = fetch_query(&core)
+    let before = fetch_query(&core)
         .await?
         .fetch_snapshot()
         .await?
-        .config_hash;
+        .as_of_sequence;
+    insert_person(&source, "p4", "Dana").await?;
+    wait_for_snapshot_seq(&core, before + 1).await?;
+    let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
+    let hash_v2 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
     assert_ne!(hash_v2, hash_v1);
 
     let result = core.start_reaction(REACTION_ID).await;
@@ -786,13 +837,15 @@ async fn reaction_autoreset_hash_mismatch_bootstraps_new_query() -> Result<()> {
     let (core, source, receiver, store, hash_v1) =
         seed_reaction_then_update_query(&paths, ReactionRecoveryPolicy::AutoReset, true).await?;
 
-    insert_person(&source, "p4", "Dana").await?;
-    let as_of = wait_for_snapshot_seq(&core, 1).await?;
-    let hash_v2 = fetch_query(&core)
+    let before = fetch_query(&core)
         .await?
         .fetch_snapshot()
         .await?
-        .config_hash;
+        .as_of_sequence;
+    insert_person(&source, "p4", "Dana").await?;
+    let as_of = wait_for_snapshot_seq(&core, before + 1).await?;
+    let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
+    let hash_v2 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
     assert_ne!(hash_v2, hash_v1);
 
     core.start_reaction(REACTION_ID).await?;
@@ -826,15 +879,17 @@ async fn reaction_autoskipgap_hash_mismatch_jumps_to_head() -> Result<()> {
     let (core, source, mut receiver, store, hash_v1) =
         seed_reaction_then_update_query(&paths, ReactionRecoveryPolicy::AutoSkipGap, false).await?;
 
-    insert_person(&source, "p4", "Dana").await?;
-    insert_person(&source, "p5", "Eve").await?;
-    let head = wait_for_snapshot_seq(&core, 2).await?;
-    assert_eq!(head, 2);
-    let hash_v2 = fetch_query(&core)
+    let before = fetch_query(&core)
         .await?
         .fetch_snapshot()
         .await?
-        .config_hash;
+        .as_of_sequence;
+    insert_person(&source, "p4", "Dana").await?;
+    insert_person(&source, "p5", "Eve").await?;
+    let head = wait_for_snapshot_seq(&core, before + 2).await?;
+    assert_eq!(head, before + 2);
+    let snapshot = fetch_query(&core).await?.fetch_snapshot().await?;
+    let hash_v2 = output_epoch_hash(snapshot.config_hash, snapshot.output_generation);
     assert_ne!(hash_v2, hash_v1);
 
     core.start_reaction(REACTION_ID).await?;
