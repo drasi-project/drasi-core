@@ -153,7 +153,7 @@ impl ContinuousQuery {
     /// If a crash occurs before commit, the pop rolls back and the item stays in the queue.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
-        self.process_due_futures_with_hook(|_results| async { Ok(()) })
+        self.process_due_futures_with_hook(|_results, _source_id| async { Ok(()) })
             .await
     }
 
@@ -168,7 +168,7 @@ impl ContinuousQuery {
         pre_commit_hook: F,
     ) -> Result<Option<DueFutureResult>, EvaluationError>
     where
-        F: FnOnce(&[QueryPartEvaluationContext]) -> Fut + Send,
+        F: FnOnce(&[QueryPartEvaluationContext], &str) -> Fut + Send,
         Fut: Future<Output = Result<(), IndexError>> + Send,
     {
         let _lock = self.change_lock.lock().await;
@@ -187,7 +187,7 @@ impl ContinuousQuery {
         let change = SourceChange::Future { future_ref };
         let changes = self.execute_source_middleware(change).await?;
         let results = self.process_changes_inner(changes).await?;
-        pre_commit_hook(&results).await?;
+        pre_commit_hook(&results, source_id.as_ref()).await?;
         guard.commit().await?;
         Ok(Some(DueFutureResult { results, source_id }))
     }
