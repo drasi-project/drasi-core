@@ -23,10 +23,14 @@
 //! Keys are hash-tagged (`{<query_id>}`) for Redis Cluster slot compatibility.
 //! Note: u64 sequences above 2^53 lose precision when stored as f64 scores.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, OutboxWriter};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
+
+use crate::session_state::GarnetSessionState;
 
 /// Garnet/Redis-backed outbox writer.
 ///
@@ -34,6 +38,7 @@ use redis::{cmd, AsyncCommands};
 pub struct GarnetOutboxWriter {
     query_id: String,
     connection: MultiplexedConnection,
+    session_state: Option<Arc<GarnetSessionState>>,
 }
 
 impl GarnetOutboxWriter {
@@ -41,7 +46,17 @@ impl GarnetOutboxWriter {
         Self {
             query_id: query_id.to_string(),
             connection,
+            session_state: None,
         }
+    }
+
+    /// Attach shared session state so `append` stages into the active session
+    /// transaction instead of writing Redis directly. Use this when the outbox
+    /// write must commit atomically with other index writes; omit it for
+    /// standalone/direct writes (tests, wipe/trim).
+    pub fn with_session_state(mut self, session_state: Arc<GarnetSessionState>) -> Self {
+        self.session_state = Some(session_state);
+        self
     }
 
     /// Redis key for the outbox sorted set (hash-tagged for cluster).
@@ -60,10 +75,27 @@ impl GarnetOutboxWriter {
 impl OutboxWriter for GarnetOutboxWriter {
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let _ = query_id; // query_id is already bound in self
-        let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();
         let data_key = self.data_key();
         let seq_str = sequence.to_string();
+
+        if let Some(session_state) = &self.session_state {
+            if session_state
+                .with_active_buffer(|buffer| {
+                    buffer.zset_add(
+                        outbox_key.clone(),
+                        seq_str.as_bytes().to_vec(),
+                        sequence as f64,
+                    );
+                    buffer.hash_set(data_key.clone(), &seq_str, data.to_vec());
+                })?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+
+        let mut con = self.connection.clone();
 
         // Add sequence to sorted set (score = sequence for ordering).
         // Note: f64 scores lose precision above 2^53, but outbox sequences

@@ -606,6 +606,18 @@ impl GarnetSessionState {
             .lock()
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))
     }
+
+    /// Run `f` against the active session buffer.
+    ///
+    /// Returns `Ok(Some(r))` when a session is active, `Ok(None)` when it is not.
+    /// Callers fall back to a direct Redis write on `None`.
+    pub(crate) fn with_active_buffer<R>(
+        &self,
+        f: impl FnOnce(&mut WriteBuffer) -> R,
+    ) -> Result<Option<R>, IndexError> {
+        let mut guard = self.lock()?;
+        Ok(guard.as_mut().map(f))
+    }
 }
 
 impl Drop for GarnetSessionState {

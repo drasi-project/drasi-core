@@ -26,7 +26,9 @@ use drasi_core::{
     evaluation::functions::FunctionRegistry,
     evaluation::variable_value::VariableValue,
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
-    interface::{CheckpointStore, LiveResultsWriter, OutboxWriter, SessionControl},
+    interface::{
+        CheckpointStore, IndexError, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl,
+    },
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -273,27 +275,12 @@ enum BootstrapPhase {
     Completed,
 }
 
-/// Dispatch query evaluation results to the current result set and all subscribed reactions.
+/// Convert query evaluation results into `ResultDiff`s, filtering out Noops.
 ///
-/// Shared between the regular event processing path and the future queue drain path.
-/// Uses `QueryOutputState` for O(1) result-set updates keyed by `row_signature`,
-/// increments the sequence counter, and pushes to the outbox ring buffer.
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_query_results(
-    results: &[QueryPartEvaluationContext],
-    source_id: &str,
-    query_id: &str,
-    output_state: &RwLock<QueryOutputState>,
-    dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
-    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
-    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
-    checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
-    outbox_capacity: usize,
-    profiling: crate::profiling::ProfilingMetadata,
-    output_metrics: &Arc<QueryOutputMetrics>,
-) {
-    // Convert Drasi results to our QueryResult format, filtering out Noops
-    let converted_results: Vec<ResultDiff> = results
+/// Shared by `stage_durable_query_output` and `dispatch_query_results` so both
+/// paths derive the same diff view from the raw evaluation contexts.
+fn evaluation_contexts_to_diffs(results: &[QueryPartEvaluationContext]) -> Vec<ResultDiff> {
+    results
         .iter()
         .filter_map(|ctx| match ctx {
             QueryPartEvaluationContext::Adding {
@@ -342,144 +329,139 @@ async fn dispatch_query_results(
             }),
             QueryPartEvaluationContext::Noop => None,
         })
-        .collect();
+        .collect()
+}
 
-    // If all results were Noops, skip outbox/sequence advancement and dispatch
-    if converted_results.is_empty() {
-        return;
+fn output_persist_error(message: impl Into<String>) -> IndexError {
+    IndexError::other(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        message.into(),
+    ))
+}
+
+/// Threads the durable `QueryResult` from the pre-commit hook to post-commit
+/// dispatch so live delivery matches outbox replay.
+struct StagedOutputSequence {
+    inner: std::sync::Mutex<Option<QueryResult>>,
+}
+
+impl StagedOutputSequence {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: std::sync::Mutex::new(None),
+        })
     }
 
-    // Apply diffs to the output state, build QueryResult, increment sequence,
-    // push to outbox, and get back the Arc for zero-copy dispatch — all in one
-    // write-lock acquisition.
-    let arc_result = {
-        let tx_start = std::time::Instant::now();
-        let mut state = output_state.write().await;
-        state.apply_diffs(&converted_results);
+    fn record(&self, result: Option<QueryResult>) -> Result<(), IndexError> {
+        match self.inner.lock() {
+            Ok(mut slot) => {
+                *slot = result;
+                Ok(())
+            }
+            Err(_) => Err(output_persist_error("staged output sequence slot poisoned")),
+        }
+    }
 
-        let result_count = converted_results.len();
-        let query_result = QueryResult::with_profiling(
-            query_id.to_string(),
-            0, // sequence assigned by advance_sequence_and_push
-            chrono::Utc::now(),
-            converted_results,
-            {
-                let mut meta = HashMap::new();
-                meta.insert(
-                    "source_id".to_string(),
-                    serde_json::Value::String(source_id.to_string()),
-                );
-                meta.insert(
-                    "processed_by".to_string(),
-                    serde_json::Value::String("drasi-core".to_string()),
-                );
-                meta.insert(
-                    "result_count".to_string(),
-                    serde_json::Value::Number(result_count.into()),
-                );
-                meta
-            },
-            profiling,
-        );
+    fn take(&self) -> Option<QueryResult> {
+        self.inner.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
 
-        let result = state.advance_sequence_and_push(query_result);
+/// Stage result sequence, outbox, and live results into the active session.
+///
+/// Must run after index writes (and source checkpoint, when present) and before
+/// `SessionControl::commit`. Volatile queries skip this: they have no outbox or
+/// live-results writers, and their checkpoint store (if present) is the
+/// in-memory fallback, which is not durable. Any failure aborts the outer
+/// transaction.
+#[allow(clippy::too_many_arguments)]
+async fn stage_durable_query_output(
+    diffs: &[ResultDiff],
+    source_id: &str,
+    query_id: &str,
+    output_state: &RwLock<QueryOutputState>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
+    checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
+) -> Result<Option<QueryResult>, IndexError> {
+    if diffs.is_empty() {
+        return Ok(None);
+    }
+    // `checkpoint_store` is always populated (in-memory fallback for volatile
+    // queries). Only persist when there is durable output I/O: outbox, live
+    // results, or a persistent checkpoint store.
+    let checkpoint_persistent = checkpoint_store
+        .as_ref()
+        .is_some_and(|store| store.is_persistent());
+    if outbox_writer.is_none() && live_results_writer.is_none() && !checkpoint_persistent {
+        return Ok(None);
+    }
 
-        // Update query output metrics
-        let duration_ns = u64::try_from(tx_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        output_metrics.record_transaction_duration_ns(duration_ns);
-        output_metrics.record_seq_advance();
-        output_metrics.record_live_results_count(state.results_len());
-        let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
-        output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
+    let next_seq = output_state.read().await.as_of_sequence().saturating_add(1);
+    let query_result = QueryResult::with_profiling(
+        query_id.to_string(),
+        next_seq,
+        chrono::Utc::now(),
+        diffs.to_vec(),
+        {
+            let mut meta = HashMap::new();
+            meta.insert(
+                "source_id".to_string(),
+                serde_json::Value::String(source_id.to_string()),
+            );
+            meta.insert(
+                "processed_by".to_string(),
+                serde_json::Value::String("drasi-core".to_string()),
+            );
+            meta.insert(
+                "result_count".to_string(),
+                serde_json::Value::Number(diffs.len().into()),
+            );
+            meta
+        },
+        crate::profiling::ProfilingMetadata::new(),
+    );
 
-        result
-    };
-
-    // Persist to outbox and live results writers if available (best-effort).
-    // These writes are NOT transactional with the index updates — on crash between
-    // index commit and outbox write, reactions will re-read from checkpoint sequence.
-    let mut outbox_ok = true;
     if let Some(writer) = outbox_writer {
-        // Serialize the QueryResult for the outbox using MessagePack (compact binary)
-        match rmp_serde::to_vec(arc_result.as_ref()) {
-            Ok(data) => {
-                if let Err(e) = writer.append(query_id, arc_result.sequence, &data).await {
-                    warn!(
-                        "Query '{query_id}' failed to persist result seq={} to outbox: {e}",
-                        arc_result.sequence
-                    );
-                    outbox_ok = false;
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Query '{query_id}' failed to serialize result seq={} for outbox: {e}",
-                    arc_result.sequence
-                );
-                outbox_ok = false;
-            }
-        }
-
-        // Trim the persistent outbox to the configured capacity
-        if outbox_ok {
-            if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
-                warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
-            }
-        }
+        let data = rmp_serde::to_vec(&query_result).map_err(|e| {
+            output_persist_error(format!(
+                "Query '{query_id}' failed to serialize result seq={next_seq} for outbox: {e}"
+            ))
+        })?;
+        writer.append(query_id, next_seq, &data).await?;
     }
 
-    let mut live_results_ok = true;
     if let Some(writer) = live_results_writer {
-        use drasi_core::interface::RowMutation;
-
-        // Build serialized row data from the QueryResult's results (the diffs were moved
-        // into arc_result, so we read from there).
-        let serialized_data: Vec<(u64, Option<Vec<u8>>)> = arc_result
-            .results
-            .iter()
-            .filter_map(|diff| match diff {
+        let mut serialized_data: Vec<(u64, Option<Vec<u8>>)> = Vec::new();
+        for diff in diffs {
+            match diff {
                 ResultDiff::Add {
                     data,
                     row_signature,
-                } => match rmp_serde::to_vec(data) {
-                    Ok(serialized) => Some((*row_signature, Some(serialized))),
-                    Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to serialize Add row (sig={row_signature}) for live results: {e}"
-                        );
-                        None
-                    }
-                },
-                ResultDiff::Update {
-                    after,
+                }
+                | ResultDiff::Update {
+                    after: data,
                     row_signature,
                     ..
-                } => match rmp_serde::to_vec(after) {
-                    Ok(serialized) => Some((*row_signature, Some(serialized))),
-                    Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to serialize Update row (sig={row_signature}) for live results: {e}"
-                        );
-                        None
-                    }
-                },
-                ResultDiff::Aggregation {
-                    after,
+                }
+                | ResultDiff::Aggregation {
+                    after: data,
                     row_signature,
                     ..
-                } => match rmp_serde::to_vec(after) {
-                    Ok(serialized) => Some((*row_signature, Some(serialized))),
-                    Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to serialize Aggregation row (sig={row_signature}) for live results: {e}"
-                        );
-                        None
-                    }
-                },
-                ResultDiff::Delete { row_signature, .. } => Some((*row_signature, None)),
-                ResultDiff::Noop => None,
-            })
-            .collect();
+                } => {
+                    let serialized = rmp_serde::to_vec(data).map_err(|e| {
+                        output_persist_error(format!(
+                            "Query '{query_id}' failed to serialize live row (sig={row_signature}) for seq={next_seq}: {e}"
+                        ))
+                    })?;
+                    serialized_data.push((*row_signature, Some(serialized)));
+                }
+                ResultDiff::Delete { row_signature, .. } => {
+                    serialized_data.push((*row_signature, None));
+                }
+                ResultDiff::Noop => {}
+            }
+        }
 
         let row_mutations: Vec<RowMutation<'_>> = serialized_data
             .iter()
@@ -490,30 +472,92 @@ async fn dispatch_query_results(
             .collect();
 
         if !row_mutations.is_empty() {
-            if let Err(e) = writer.apply_mutations(query_id, &row_mutations).await {
-                warn!(
-                    "Query '{query_id}' failed to persist live results for seq={}: {e}",
-                    arc_result.sequence
-                );
-                live_results_ok = false;
-            }
+            writer.apply_mutations(query_id, &row_mutations).await?;
         }
     }
 
-    // Record the last persisted result sequence only if BOTH the outbox and
-    // live-results writes succeeded. Otherwise recovery may see this sequence
-    // as durable while the actual data is missing.
-    if outbox_ok && live_results_ok {
-        if let Some(store) = checkpoint_store {
-            if let Err(e) = store
-                .write_result_sequence(query_id, arc_result.sequence)
-                .await
-            {
-                warn!(
-                    "Query '{query_id}' failed to write result sequence {}: {e}",
-                    arc_result.sequence
-                );
-            }
+    if let Some(store) = checkpoint_store {
+        store.stage_result_sequence(query_id, next_seq).await?;
+    }
+
+    Ok(Some(query_result))
+}
+
+/// Apply committed diffs to in-memory output state and dispatch to reactions.
+///
+/// Durable output must already have been staged and committed. This path never
+/// writes durable state except a best-effort outbox trim after success.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_query_results(
+    results: &[QueryPartEvaluationContext],
+    source_id: &str,
+    query_id: &str,
+    output_state: &RwLock<QueryOutputState>,
+    dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    outbox_capacity: usize,
+    profiling: crate::profiling::ProfilingMetadata,
+    output_metrics: &Arc<QueryOutputMetrics>,
+    staged_result: Option<QueryResult>,
+) {
+    let converted_results = if let Some(staged) = &staged_result {
+        staged.results.clone()
+    } else {
+        evaluation_contexts_to_diffs(results)
+    };
+    if converted_results.is_empty() {
+        return;
+    }
+
+    let arc_result = {
+        let tx_start = std::time::Instant::now();
+        let mut state = output_state.write().await;
+
+        let result = if let Some(query_result) = staged_result {
+            let sequence = query_result.sequence;
+            state.apply_committed_sequence(sequence, &converted_results, query_result)
+        } else {
+            let result_count = converted_results.len();
+            let query_result = QueryResult::with_profiling(
+                query_id.to_string(),
+                0,
+                chrono::Utc::now(),
+                converted_results.clone(),
+                {
+                    let mut meta = HashMap::new();
+                    meta.insert(
+                        "source_id".to_string(),
+                        serde_json::Value::String(source_id.to_string()),
+                    );
+                    meta.insert(
+                        "processed_by".to_string(),
+                        serde_json::Value::String("drasi-core".to_string()),
+                    );
+                    meta.insert(
+                        "result_count".to_string(),
+                        serde_json::Value::Number(result_count.into()),
+                    );
+                    meta
+                },
+                profiling,
+            );
+            state.apply_diffs(&converted_results);
+            state.advance_sequence_and_push(query_result)
+        };
+
+        let duration_ns = u64::try_from(tx_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        output_metrics.record_transaction_duration_ns(duration_ns);
+        output_metrics.record_seq_advance();
+        output_metrics.record_live_results_count(state.results_len());
+        let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
+        output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
+
+        result
+    };
+
+    if let Some(writer) = outbox_writer {
+        if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
+            warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
         }
     }
 
@@ -523,7 +567,6 @@ async fn dispatch_query_results(
         arc_result.sequence
     );
 
-    // Dispatch query result to all subscribed reactions
     let dispatchers = dispatchers.read().await;
     for dispatcher in dispatchers.iter() {
         if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
@@ -2708,7 +2751,34 @@ impl Query for DrasiQuery {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
                                     // Drain all due futures atomically within sessions
                                     loop {
-                                        match continuous_query_for_processor.process_due_futures().await {
+                                        let outbox = outbox_writer_for_processor.clone();
+                                        let live = live_results_writer_for_processor.clone();
+                                        let checkpoint_for_output =
+                                            checkpoint_store_for_dispatch.clone();
+                                        let output_state_for_stage = output_state.clone();
+                                        let query_id_for_stage = query_id.clone();
+                                        let staged_seq = StagedOutputSequence::new();
+                                        let staged_seq_for_hook = staged_seq.clone();
+                                        match continuous_query_for_processor
+                                            .process_due_futures_with_hook(move |results, source_id| {
+                                                let diffs = evaluation_contexts_to_diffs(results);
+                                                let source_id = source_id.to_string();
+                                                async move {
+                                                    let staged = stage_durable_query_output(
+                                                        &diffs,
+                                                        &source_id,
+                                                        &query_id_for_stage,
+                                                        &output_state_for_stage,
+                                                        &outbox,
+                                                        &live,
+                                                        &checkpoint_for_output,
+                                                    )
+                                                    .await?;
+                                                    staged_seq_for_hook.record(staged)
+                                                }
+                                            })
+                                            .await
+                                        {
                                             Ok(Some(due_result)) => {
                                                 if !due_result.results.is_empty() {
                                                     let profiling = crate::profiling::ProfilingMetadata::new();
@@ -2719,18 +2789,23 @@ impl Query for DrasiQuery {
                                                         &output_state,
                                                         &base_dispatchers,
                                                         &outbox_writer_for_processor,
-                                                        &live_results_writer_for_processor,
-                                                        &checkpoint_store_for_dispatch,
                                                         outbox_capacity_for_processor,
                                                         profiling,
                                                         &output_metrics_for_processor,
+                                                        staged_seq.take(),
                                                     )
                                                     .await;
                                                 }
                                             }
                                             Ok(None) => break,
                                             Err(e) => {
-                                                error!("Query '{query_id}' failed to process due futures: {e}");
+                                                let msg = format!(
+                                                    "Query '{query_id}' failed to process due futures: {e}"
+                                                );
+                                                error!("{msg}");
+                                                reporter_for_processor
+                                                    .set_status(ComponentStatus::Error, Some(msg))
+                                                    .await;
                                                 break;
                                             }
                                         }
@@ -2743,12 +2818,22 @@ impl Query for DrasiQuery {
                                     profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
                                     profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
-                                    // Stage checkpoint inside the session via pre-commit hook.
-                                    // This ensures checkpoint persistence is atomic with index updates.
+                                    // Stage checkpoint and durable output inside the session.
+                                    // These writes commit atomically with index updates.
                                     let cp_store = checkpoint_store_for_processor.clone();
                                     let cp_source_id = source_id.clone();
                                     let cp_position = source_position.clone();
-                                    let hook = move || {
+                                    let outbox = outbox_writer_for_processor.clone();
+                                    let live = live_results_writer_for_processor.clone();
+                                    let checkpoint_for_output =
+                                        checkpoint_store_for_dispatch.clone();
+                                    let output_state_for_stage = output_state.clone();
+                                    let query_id_for_stage = query_id.clone();
+                                    let source_id_for_stage = source_id.clone();
+                                    let staged_seq = StagedOutputSequence::new();
+                                    let staged_seq_for_hook = staged_seq.clone();
+                                    let hook = move |results: &[QueryPartEvaluationContext]| {
+                                        let diffs = evaluation_contexts_to_diffs(results);
                                         async move {
                                             if let Some(seq) = sequence {
                                                 // Enforce position size limit at checkpoint time:
@@ -2762,7 +2847,17 @@ impl Query for DrasiQuery {
                                                     .stage_checkpoint(&cp_source_id, seq, pos_ref)
                                                     .await?;
                                             }
-                                            Ok(())
+                                            let staged = stage_durable_query_output(
+                                                &diffs,
+                                                &source_id_for_stage,
+                                                &query_id_for_stage,
+                                                &output_state_for_stage,
+                                                &outbox,
+                                                &live,
+                                                &checkpoint_for_output,
+                                            )
+                                            .await?;
+                                            staged_seq_for_hook.record(staged)
                                         }
                                     };
 
@@ -2791,17 +2886,23 @@ impl Query for DrasiQuery {
                                                     &output_state,
                                                     &base_dispatchers,
                                                     &outbox_writer_for_processor,
-                                                    &live_results_writer_for_processor,
-                                                    &checkpoint_store_for_dispatch,
                                                     outbox_capacity_for_processor,
                                                     profiling,
                                                     &output_metrics_for_processor,
+                                                    staged_seq.take(),
                                                 )
                                                 .await;
                                             }
                                         }
                                         Err(e) => {
-                                            error!("Query '{query_id}' failed to process source change: {e}");
+                                            let msg = format!(
+                                                "Query '{query_id}' failed to process source change: {e}"
+                                            );
+                                            error!("{msg}");
+                                            reporter_for_processor
+                                                .set_status(ComponentStatus::Error, Some(msg))
+                                                .await;
+                                            break;
                                         }
                                     }
                                 }
