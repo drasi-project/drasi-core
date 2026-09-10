@@ -38,8 +38,8 @@ pub use config_hash::compute_config_hash;
 pub use label_extractor::*;
 pub use manager::*;
 pub use output_state::{
-    DurableOutputInconsistency, FetchError, KeyedSnapshotRow, OutboxGap, OutboxResponse,
-    OutboxStream, QueryOutputState, SnapshotResponse, SnapshotStream,
+    output_epoch_hash, DurableOutputInconsistency, FetchError, KeyedSnapshotRow, OutboxGap,
+    OutboxResponse, OutboxStream, QueryOutputState, SnapshotResponse, SnapshotStream,
 };
 pub use priority_queue::*;
 pub use sequence_dedup::SequenceDedup;

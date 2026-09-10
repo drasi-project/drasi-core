@@ -69,6 +69,12 @@ pub struct QueryOutputState {
     outbox: VecDeque<Arc<QueryResult>>,
     /// Maximum number of entries retained in the outbox.
     outbox_capacity: usize,
+    /// True after startup hydrate/reset. Distinct from `as_of_sequence > 0`
+    /// because bootstrap can fill `results` while the sequence is still 0.
+    initialized: bool,
+    /// Bumped on each output wipe/rebuild so reactions can tell sequence 1
+    /// of a new generation from sequence 1 of a previous one.
+    generation: u64,
 }
 
 impl QueryOutputState {
@@ -88,6 +94,8 @@ impl QueryOutputState {
             // Pre-allocate up to 1024 slots; the deque grows automatically for larger capacities.
             outbox: VecDeque::with_capacity(effective_capacity.min(1024)),
             outbox_capacity: effective_capacity,
+            initialized: false,
+            generation: 0,
         }
     }
 
@@ -237,18 +245,19 @@ impl QueryOutputState {
     /// `outbox_capacity`, keeping the newest. Callers must validate durable
     /// consistency with [`reconcile_durable_output`] before invoking this.
     ///
-    /// Hydrate is a startup-only operation from empty state. A non-zero
-    /// `as_of_sequence` is a programming error (double-hydrate); debug builds
-    /// assert, and release builds still refuse to lower the sequence.
+    /// Hydrate is a startup-only operation from uninitialized state. Calling it
+    /// after [`initialized`](Self::initialized) is a programming error; debug
+    /// builds assert.
     pub fn hydrate(
         &mut self,
         results: im::HashMap<u64, serde_json::Value>,
         mut outbox: Vec<Arc<QueryResult>>,
         as_of_sequence: u64,
+        generation: u64,
     ) {
-        debug_assert_eq!(
-            self.as_of_sequence, 0,
-            "hydrate must run once from empty QueryOutputState"
+        debug_assert!(
+            !self.initialized,
+            "hydrate must run once from uninitialized QueryOutputState"
         );
         outbox.sort_by_key(|result| result.sequence);
         if outbox.len() > self.outbox_capacity {
@@ -259,14 +268,40 @@ impl QueryOutputState {
         self.results = results;
         self.outbox = VecDeque::from(outbox);
         self.as_of_sequence = self.as_of_sequence.max(as_of_sequence);
+        self.generation = generation;
+        self.initialized = true;
     }
 
     /// Clear live rows, outbox, and sequence (used by AutoReset output wipe).
+    ///
+    /// Bumps [`generation`](Self::generation) so reactions do not treat the new
+    /// sequence 1 as a duplicate of the previous generation.
     pub fn reset(&mut self) {
         self.results.clear();
         self.outbox.clear();
         self.as_of_sequence = 0;
+        self.generation = self.generation.saturating_add(1);
+        self.initialized = true;
     }
+
+    /// Whether startup hydrate (or a wipe/rebuild) has already initialized this state.
+    pub fn initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// Output generation. `0` until the first wipe/rebuild.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// Mix query identity hash with output generation.
+///
+/// Generation 0 returns `config_hash` unchanged so existing reaction
+/// checkpoints keep matching. A wipe/rebuild changes the value reactions
+/// compare, so they apply recovery policy instead of skipping 1..=N.
+pub fn output_epoch_hash(config_hash: u64, generation: u64) -> u64 {
+    config_hash.wrapping_add(generation.wrapping_mul(0x9E3779B97F4A7C15))
 }
 
 /// Inconsistency between durable result sequence, outbox, and live rows.
@@ -422,6 +457,8 @@ pub struct SnapshotResponse {
     pub as_of_sequence: u64,
     /// The query's configuration hash at the time of the snapshot.
     pub config_hash: u64,
+    /// Output generation at the time of the snapshot. `0` until a wipe/rebuild.
+    pub output_generation: u64,
 }
 
 impl SnapshotResponse {
@@ -435,7 +472,14 @@ impl SnapshotResponse {
             results,
             as_of_sequence,
             config_hash,
+            output_generation: 0,
         }
+    }
+
+    /// Set the output generation carried with this snapshot.
+    pub fn with_output_generation(mut self, generation: u64) -> Self {
+        self.output_generation = generation;
+        self
     }
 
     /// Return an async stream of the result values.
@@ -479,6 +523,8 @@ pub struct OutboxResponse {
     pub latest_sequence: u64,
     /// The query's configuration hash.
     pub config_hash: u64,
+    /// Output generation. `0` until a wipe/rebuild.
+    pub output_generation: u64,
 }
 
 /// Streaming snapshot response for the bootstrap path.
@@ -1068,7 +1114,7 @@ mod tests {
             })
             .collect();
 
-        state.hydrate(results.clone(), outbox.clone(), 2);
+        state.hydrate(results.clone(), outbox.clone(), 2, 0);
 
         assert_eq!(state.as_of_sequence(), 2);
         assert_eq!(state.results_len(), 1);
@@ -1084,7 +1130,7 @@ mod tests {
     fn hydrate_from_empty_installs_sequence() {
         let mut state = QueryOutputState::new(10);
         assert_eq!(state.as_of_sequence(), 0);
-        state.hydrate(im::HashMap::new(), Vec::new(), 4);
+        state.hydrate(im::HashMap::new(), Vec::new(), 4, 0);
         assert_eq!(state.as_of_sequence(), 4);
     }
 
@@ -1099,7 +1145,7 @@ mod tests {
             })
             .collect();
 
-        state.hydrate(im::HashMap::new(), outbox, 4);
+        state.hydrate(im::HashMap::new(), outbox, 4, 0);
         assert_eq!(state.outbox_len(), 2);
         assert_eq!(state.outbox_earliest_seq(), Some(3));
         assert_eq!(state.as_of_sequence(), 4);
@@ -1117,10 +1163,18 @@ mod tests {
         results.insert(1, serde_json::json!({"id": "p1"}));
         let mut result = make_query_result("q1", vec![]);
         result.sequence = 1;
-        state.hydrate(results, vec![Arc::new(result)], 1);
+        state.hydrate(results, vec![Arc::new(result)], 1, 0);
         state.reset();
         assert_eq!(state.as_of_sequence(), 0);
         assert_eq!(state.results_len(), 0);
         assert_eq!(state.outbox_len(), 0);
+        assert_eq!(state.generation(), 1);
+        assert!(state.initialized());
+    }
+
+    #[test]
+    fn output_epoch_hash_generation_zero_is_identity() {
+        assert_eq!(output_epoch_hash(42, 0), 42);
+        assert_ne!(output_epoch_hash(42, 1), 42);
     }
 }

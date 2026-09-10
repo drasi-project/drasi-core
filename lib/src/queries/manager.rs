@@ -237,6 +237,13 @@ pub trait Query: Send + Sync {
     /// `fetch_snapshot`.
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
 
+    /// Output generation used to distinguish sequence numbers after a wipe/rebuild.
+    ///
+    /// Default: `0` (never rebuilt).
+    async fn output_generation(&self) -> u64 {
+        0
+    }
+
     /// Get the query's output metrics (outbox health, sequence rate, snapshot tracking).
     ///
     /// Returns `None` for query implementations that don't support metrics.
@@ -538,9 +545,6 @@ fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
     !current_hash
 }
 
-/// Reject oversized durable payloads before MessagePack decode.
-const MAX_HYDRATE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-
 /// Load durable live rows, outbox entries, and result sequence into in-memory
 /// `QueryOutputState` before the query accepts subscriptions or processes events.
 ///
@@ -560,6 +564,7 @@ async fn load_durable_output(
         im::HashMap<u64, serde_json::Value>,
         Vec<Arc<crate::channels::QueryResult>>,
         u64,
+        u64,
     ),
     DurableOutputInconsistency,
 > {
@@ -570,6 +575,15 @@ async fn load_durable_output(
         .map_err(|e| DurableOutputInconsistency::ReadFailed {
             message: format!("failed to read persisted result sequence: {e}"),
         })?;
+
+    let stored_generation = stores
+        .checkpoint_store
+        .read_output_generation(query_id)
+        .await
+        .map_err(|e| DurableOutputInconsistency::ReadFailed {
+            message: format!("failed to read persisted output generation: {e}"),
+        })?
+        .unwrap_or(0);
 
     let (raw_outbox, outbox_sequences) = if let Some(writer) = &stores.outbox_writer {
         let latest = writer.read_latest_sequence(query_id).await.map_err(|e| {
@@ -620,15 +634,6 @@ async fn load_durable_output(
 
     let mut outbox_entries = Vec::with_capacity(raw_outbox.len());
     for (sequence, data) in raw_outbox {
-        if data.len() > MAX_HYDRATE_PAYLOAD_BYTES {
-            return Err(DurableOutputInconsistency::CorruptOutbox {
-                sequence,
-                message: format!(
-                    "payload {} bytes exceeds hydrate limit {MAX_HYDRATE_PAYLOAD_BYTES}",
-                    data.len()
-                ),
-            });
-        }
         let mut result =
             rmp_serde::from_slice::<crate::channels::QueryResult>(&data).map_err(|e| {
                 DurableOutputInconsistency::CorruptOutbox {
@@ -642,15 +647,6 @@ async fn load_durable_output(
 
     let mut results = im::HashMap::new();
     for (sig, data) in raw_live_rows {
-        if data.len() > MAX_HYDRATE_PAYLOAD_BYTES {
-            return Err(DurableOutputInconsistency::CorruptLiveRow {
-                row_signature: sig,
-                message: format!(
-                    "payload {} bytes exceeds hydrate limit {MAX_HYDRATE_PAYLOAD_BYTES}",
-                    data.len()
-                ),
-            });
-        }
         let value = rmp_serde::from_slice::<serde_json::Value>(&data).map_err(|e| {
             DurableOutputInconsistency::CorruptLiveRow {
                 row_signature: sig,
@@ -660,7 +656,7 @@ async fn load_durable_output(
         results.insert(sig, value);
     }
 
-    Ok((results, outbox_entries, as_of_sequence))
+    Ok((results, outbox_entries, as_of_sequence, stored_generation))
 }
 
 /// Clear durable outbox and live-results storage and reset the persisted
@@ -670,12 +666,21 @@ async fn load_durable_output(
 /// Sequence is reset first so a crash mid-wipe leaves `stored == 0` against
 /// leftover live rows, which `reconcile_durable_output` rejects instead of
 /// hydrating sequence 0 as a clean start.
-async fn wipe_durable_output(query_id: &str, stores: &DurableOutputStores) -> anyhow::Result<()> {
+async fn wipe_durable_output(
+    query_id: &str,
+    stores: &DurableOutputStores,
+    generation: u64,
+) -> anyhow::Result<()> {
     stores
         .checkpoint_store
         .write_result_sequence(query_id, 0)
         .await
         .with_context(|| format!("Query '{query_id}' failed to reset result sequence"))?;
+    stores
+        .checkpoint_store
+        .write_output_generation(query_id, generation)
+        .await
+        .with_context(|| format!("Query '{query_id}' failed to persist output generation"))?;
     if let Some(writer) = &stores.outbox_writer {
         writer
             .clear(query_id)
@@ -746,6 +751,7 @@ async fn wipe_indexes_and_checkpoints(
 async fn autoreset_rebuild_after_output_inconsistency(
     query_id: &str,
     current_hash: u64,
+    generation: u64,
     stores: &DurableOutputStores,
     session_control: &Option<Arc<dyn SessionControl>>,
     element_index: &Option<Arc<dyn drasi_core::interface::ElementIndex>>,
@@ -760,7 +766,7 @@ async fn autoreset_rebuild_after_output_inconsistency(
         .with_context(|| {
             format!("Query '{query_id}' failed to persist AutoReset in-progress marker")
         })?;
-    wipe_durable_output(query_id, stores).await?;
+    wipe_durable_output(query_id, stores, generation).await?;
     wipe_indexes_and_checkpoints(
         query_id,
         current_hash,
@@ -1265,7 +1271,14 @@ impl Query for DrasiQuery {
                         outbox_writer: self.outbox_writer.read().await.clone(),
                         live_results_writer: self.live_results_writer.read().await.clone(),
                     };
-                    if let Err(e) = wipe_durable_output(&self.base.config.id, &stores).await {
+                    let generation = {
+                        let mut state = self.output_state.write().await;
+                        state.reset();
+                        state.generation()
+                    };
+                    if let Err(e) =
+                        wipe_durable_output(&self.base.config.id, &stores, generation).await
+                    {
                         let msg = format!(
                             "Query '{}' failed to finish AutoReset output wipe: {e}",
                             self.base.config.id
@@ -1481,17 +1494,18 @@ impl Query for DrasiQuery {
         // subscriptions or reactions run. After this, fetch_snapshot/fetch_outbox
         // are memory-served; disk is write-only except this startup path.
         if hydrate_output {
-            let (already_populated_seq, outbox_capacity) = {
+            let (already_initialized, outbox_capacity) = {
                 let state = self.output_state.read().await;
-                (state.as_of_sequence(), state.outbox_capacity())
+                (state.initialized(), state.outbox_capacity())
             };
-            if already_populated_seq > 0 {
-                // Same-process stop/start retains in-memory output; do not re-read
-                // disk or reset the live sequence. A process crash constructs a
-                // new DrasiQuery with sequence 0 and takes the hydrate path.
+            if already_initialized {
+                // Same-process stop/start retains in-memory output, including a
+                // seq-0 snapshot populated by bootstrap. A new process constructs
+                // an uninitialized QueryOutputState and takes the hydrate path.
                 debug!(
-                    "Query '{}' skipping durable hydrate; in-memory output already at seq={already_populated_seq}",
-                    self.base.config.id
+                    "Query '{}' skipping durable hydrate; in-memory output already initialized (seq={})",
+                    self.base.config.id,
+                    self.output_state.read().await.as_of_sequence()
                 );
             } else {
                 let stores = DurableOutputStores {
@@ -1500,9 +1514,9 @@ impl Query for DrasiQuery {
                     live_results_writer: self.live_results_writer.read().await.clone(),
                 };
                 match load_durable_output(&self.base.config.id, &stores, outbox_capacity).await {
-                    Ok((results, outbox, as_of_sequence)) => {
+                    Ok((results, outbox, as_of_sequence, generation)) => {
                         let mut state = self.output_state.write().await;
-                        state.hydrate(results, outbox, as_of_sequence);
+                        state.hydrate(results, outbox, as_of_sequence, generation);
                         let earliest = state.outbox_earliest_seq().unwrap_or(0);
                         self.output_metrics
                             .record_live_results_count(state.results_len());
@@ -1551,9 +1565,15 @@ impl Query for DrasiQuery {
                                 self.base.config.id
                             );
                             let current_hash = super::compute_config_hash(&self.base.config);
+                            let generation = {
+                                let mut state = self.output_state.write().await;
+                                state.reset();
+                                state.generation()
+                            };
                             if let Err(e) = autoreset_rebuild_after_output_inconsistency(
                                 &self.base.config.id,
                                 current_hash,
+                                generation,
                                 &stores,
                                 &session_control,
                                 &element_index,
@@ -1574,7 +1594,6 @@ impl Query for DrasiQuery {
                                 return Err(anyhow::anyhow!(msg));
                             }
 
-                            self.output_state.write().await.reset();
                             checkpoint_sequences_per_source.clear();
                             for settings in &mut subscription_settings {
                                 settings.resume_from = None;
@@ -1934,6 +1953,47 @@ impl Query for DrasiQuery {
                                                             self.base.config.id
                                                         );
                                                     }
+                                                }
+
+                                                // Hydrate already ran; wipe live results/outbox so
+                                                // bootstrap does not keep stale snapshot rows.
+                                                let stores = DurableOutputStores {
+                                                    checkpoint_store: checkpoint_store.clone(),
+                                                    outbox_writer: self
+                                                        .outbox_writer
+                                                        .read()
+                                                        .await
+                                                        .clone(),
+                                                    live_results_writer: self
+                                                        .live_results_writer
+                                                        .read()
+                                                        .await
+                                                        .clone(),
+                                                };
+                                                let generation = {
+                                                    let mut state = self.output_state.write().await;
+                                                    state.reset();
+                                                    state.generation()
+                                                };
+                                                if let Err(e) = wipe_durable_output(
+                                                    &self.base.config.id,
+                                                    &stores,
+                                                    generation,
+                                                )
+                                                .await
+                                                {
+                                                    let msg = format!(
+                                                        "Query '{}' AutoReset failed to wipe query output: {e}",
+                                                        self.base.config.id
+                                                    );
+                                                    error!("{msg}");
+                                                    self.base
+                                                        .set_status(
+                                                            ComponentStatus::Error,
+                                                            Some(msg.clone()),
+                                                        )
+                                                        .await;
+                                                    return Err(anyhow::anyhow!(msg));
                                                 }
                                             }
 
@@ -2886,7 +2946,8 @@ impl Query for DrasiQuery {
             state.clone_results(),
             state.as_of_sequence(),
             self.config_hash,
-        ))
+        )
+        .with_output_generation(state.generation()))
     }
 
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
@@ -2904,7 +2965,12 @@ impl Query for DrasiQuery {
             latest_sequence: state.as_of_sequence(),
             results,
             config_hash: self.config_hash,
+            output_generation: state.generation(),
         })
+    }
+
+    async fn output_generation(&self) -> u64 {
+        self.output_state.read().await.generation()
     }
 
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {

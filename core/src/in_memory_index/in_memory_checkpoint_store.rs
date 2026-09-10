@@ -42,6 +42,7 @@ pub struct InMemoryCheckpointStore {
     checkpoints: RwLock<HashMap<String, CheckpointEntry>>,
     config_hash: RwLock<Option<u64>>,
     result_sequences: RwLock<HashMap<String, u64>>,
+    output_generations: RwLock<HashMap<String, u64>>,
 }
 
 impl Default for InMemoryCheckpointStore {
@@ -56,6 +57,7 @@ impl InMemoryCheckpointStore {
             checkpoints: RwLock::new(HashMap::new()),
             config_hash: RwLock::new(None),
             result_sequences: RwLock::new(HashMap::new()),
+            output_generations: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -117,6 +119,8 @@ impl CheckpointStore for InMemoryCheckpointStore {
         *hash = None;
         let mut seq = self.result_sequences.write().await;
         seq.clear();
+        let mut generations = self.output_generations.write().await;
+        generations.clear();
         Ok(())
     }
 
@@ -139,6 +143,21 @@ impl CheckpointStore for InMemoryCheckpointStore {
 
     async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         let data = self.result_sequences.read().await;
+        Ok(data.get(query_id).copied())
+    }
+
+    async fn write_output_generation(
+        &self,
+        query_id: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        let mut data = self.output_generations.write().await;
+        data.insert(query_id.to_string(), generation);
+        Ok(())
+    }
+
+    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        let data = self.output_generations.read().await;
         Ok(data.get(query_id).copied())
     }
 }

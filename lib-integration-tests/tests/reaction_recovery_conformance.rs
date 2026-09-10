@@ -42,7 +42,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const PHASE_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_PHASE";
 const ROCKS_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_ROCKS_PATH";
@@ -1211,14 +1211,16 @@ fn test_root() -> Result<PathBuf> {
         .parent()
         .context("lib-integration-tests must have a repository parent")?
         .to_path_buf();
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before UNIX epoch")?
-        .as_nanos();
-    Ok(repository
+    let parent = repository
         .join("target")
-        .join("reaction-recovery-conformance")
-        .join(format!("{}-{timestamp}", std::process::id())))
+        .join("reaction-recovery-conformance");
+    std::fs::create_dir_all(&parent)
+        .with_context(|| format!("create test root parent {}", parent.display()))?;
+    let dir = tempfile::Builder::new()
+        .prefix("rrc-")
+        .tempdir_in(&parent)
+        .context("allocate unique test root")?;
+    Ok(dir.keep())
 }
 
 fn run_phase(phase: &str, paths: &FixturePaths) -> Result<Output> {
