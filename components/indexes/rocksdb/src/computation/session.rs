@@ -22,7 +22,9 @@ use drasi_core::{
 
 use crate::RocksDbSessionState;
 
-use super::blocking::{BlockingFailures, BlockingScope};
+use drasi_core::computation::{
+    ComputationIoFailures as BlockingFailures, ComputationIoScope as BlockingScope,
+};
 
 pub(super) struct ComputationSession {
     pub(super) state: Arc<RocksDbSessionState>,

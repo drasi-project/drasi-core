@@ -20,7 +20,7 @@ use rocksdb::{Direction, IteratorMode};
 
 use crate::{live_results::LIVE_RESULTS_CF, outbox::OUTBOX_CF, IndexDb, RocksDbSessionState};
 
-use super::blocking::BlockingScope;
+use drasi_core::computation::ComputationIoScope as BlockingScope;
 
 fn prefix(query_id: &str) -> Result<Vec<u8>, IndexError> {
     if query_id.is_empty() || query_id.contains('\0') {

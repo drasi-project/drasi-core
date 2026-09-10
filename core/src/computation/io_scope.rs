@@ -19,13 +19,21 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard,
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
 
-use drasi_core::interface::IndexError;
+use crate::interface::IndexError;
 use tokio::{sync::oneshot, task::JoinHandle};
 
 type Job = JoinHandle<Result<(), IndexError>>;
+
+#[derive(Debug, thiserror::Error)]
+enum ScopeError {
+    #[error("computation provider I/O ownership poisoned: {0}")]
+    Poisoned(String),
+    #[error("computation resource scope is closed")]
+    Closed,
+}
 
 #[derive(Default)]
 struct Work {
@@ -43,7 +51,8 @@ impl Work {
     }
 
     fn reap_ready(&mut self) {
-        let mut context = Context::from_waker(Waker::noop());
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
         let mut index = 0;
         while index < self.jobs.len() {
             match Pin::new(&mut self.jobs[index]).poll(&mut context) {
@@ -60,7 +69,7 @@ impl Work {
 /// Owns blocking jobs independently of the awaiter receiving each result.
 /// Interrupted shutdown returns pending join handles to the owner.
 #[derive(Default)]
-pub(super) struct BlockingScope {
+pub struct BlockingScope {
     cancelled: Arc<AtomicBool>,
     work: Mutex<Work>,
     shutdown_lock: tokio::sync::Mutex<()>,
@@ -68,18 +77,16 @@ pub(super) struct BlockingScope {
 
 impl BlockingScope {
     fn lock(&self) -> Result<MutexGuard<'_, Work>, IndexError> {
-        self.work.lock().map_err(|error| {
-            IndexError::other(std::io::Error::other(format!(
-                "computation blocking-work registry poisoned: {error}"
-            )))
-        })
+        self.work
+            .lock()
+            .map_err(|error| IndexError::other(ScopeError::Poisoned(error.to_string())))
     }
 
-    pub(super) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    pub(super) async fn run<T, F>(&self, operation: F) -> Result<T, IndexError>
+    pub async fn run<T, F>(&self, operation: F) -> Result<T, IndexError>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T, IndexError> + Send + 'static,
@@ -110,7 +117,7 @@ impl BlockingScope {
 
     /// Keep an existing backend future alive until its own blocking work joins.
     /// This is provider I/O ownership, not a detached graph processing worker.
-    pub(super) async fn run_async<T, F>(&self, operation: F) -> Result<T, IndexError>
+    pub async fn run_async<T, F>(&self, operation: F) -> Result<T, IndexError>
     where
         T: Send + 'static,
         F: Future<Output = Result<T, IndexError>> + Send + 'static,
@@ -139,12 +146,12 @@ impl BlockingScope {
         result
     }
 
-    pub(super) async fn shutdown(&self) -> Result<(), IndexError> {
+    pub async fn shutdown(&self) -> Result<(), IndexError> {
         self.cancel();
         self.quiesce().await
     }
 
-    pub(super) async fn quiesce(&self) -> Result<(), IndexError> {
+    pub async fn quiesce(&self) -> Result<(), IndexError> {
         let _shutdown = self.shutdown_lock.lock().await;
         loop {
             let jobs = std::mem::take(&mut self.lock()?.jobs);
@@ -168,9 +175,7 @@ impl BlockingScope {
 }
 
 fn cancelled() -> IndexError {
-    IndexError::other(std::io::Error::other(
-        "computation resource scope is closed",
-    ))
+    IndexError::other(ScopeError::Closed)
 }
 
 struct CleanupPass<'a> {
@@ -195,7 +200,7 @@ impl Drop for CleanupPass<'_> {
 }
 
 #[derive(Debug)]
-pub(super) struct BlockingFailures(pub(super) Vec<IndexError>);
+pub struct BlockingFailures(pub Vec<IndexError>);
 
 impl std::fmt::Display for BlockingFailures {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -206,6 +211,19 @@ impl std::fmt::Display for BlockingFailures {
 impl std::error::Error for BlockingFailures {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.0.first().map(|error| error as _)
+    }
+}
+
+#[async_trait::async_trait]
+impl super::ComputationResourceCleanup for BlockingScope {
+    fn cancel(&self) {
+        BlockingScope::cancel(self);
+    }
+    async fn shutdown(&self) -> Result<(), IndexError> {
+        BlockingScope::shutdown(self).await
+    }
+    async fn quiesce(&self) -> Result<(), IndexError> {
+        BlockingScope::quiesce(self).await
     }
 }
 

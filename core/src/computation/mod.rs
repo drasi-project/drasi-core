@@ -23,6 +23,12 @@
 //! cannot substitute for its provider's asynchronous cleanup.
 
 mod indexes;
+mod io_scope;
+mod scoped_index;
+pub use io_scope::{
+    BlockingFailures as ComputationIoFailures, BlockingScope as ComputationIoScope,
+};
+pub use scoped_index::ScopedIndex;
 mod transaction;
 
 pub use crate::query::computation_exports::ComputationQuery;

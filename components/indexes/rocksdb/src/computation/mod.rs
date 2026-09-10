@@ -16,9 +16,7 @@
 //! Data lives below `computation-v1/<encoded graph>/<encoded query>`, never in a
 //! legacy query's database. Output staging requires this bundle's active session.
 
-mod blocking;
 mod checkpoint;
-mod indexes;
 mod output;
 mod session;
 
@@ -37,9 +35,8 @@ use crate::{
     result_index::RocksDbResultIndex, RocksDbSessionState, RocksIndexOptions,
 };
 
-use blocking::BlockingScope;
 use checkpoint::ComputationCheckpointStore;
-use indexes::ScopedIndex;
+use drasi_core::computation::{ComputationIoScope as BlockingScope, ScopedIndex};
 use output::{ComputationLiveResultsWriter, ComputationOutboxWriter};
 use session::ComputationSession;
 

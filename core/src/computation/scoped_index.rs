@@ -17,8 +17,7 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use drasi_core::{
+use crate::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
         AccumulatorIndex, ElementArchiveIndex, ElementIndex, ElementStream, FutureElementRef,
@@ -28,22 +27,32 @@ use drasi_core::{
     models::{Element, ElementReference, ElementTimestamp, QueryJoin, TimestampRange},
     path_solver::match_path::MatchPath,
 };
+use async_trait::async_trait;
 use futures::StreamExt;
 use ordered_float::OrderedFloat;
 
-use super::blocking::BlockingScope;
+use super::io_scope::BlockingScope;
 
-pub(super) struct ScopedIndex<T> {
+#[path = "scoped_output.rs"]
+mod output;
+
+pub struct ScopedIndex<T: ?Sized> {
     inner: Arc<T>,
     work: Arc<BlockingScope>,
 }
 
 impl<T> ScopedIndex<T> {
-    pub(super) fn new(inner: T, work: Arc<BlockingScope>) -> Self {
+    pub fn new(inner: T, work: Arc<BlockingScope>) -> Self {
         Self {
             inner: Arc::new(inner),
             work,
         }
+    }
+}
+
+impl<T: ?Sized> ScopedIndex<T> {
+    pub fn from_arc(inner: Arc<T>, work: Arc<BlockingScope>) -> Self {
+        Self { inner, work }
     }
 }
 
@@ -67,7 +76,7 @@ fn scoped_stream(stream: ElementStream, work: Arc<BlockingScope>) -> ElementStre
 }
 
 #[async_trait]
-impl<T: ElementIndex + 'static> ElementIndex for ScopedIndex<T> {
+impl<T: ElementIndex + ?Sized + 'static> ElementIndex for ScopedIndex<T> {
     async fn get_element(
         &self,
         element_ref: &ElementReference,
@@ -153,7 +162,7 @@ impl<T: ElementIndex + 'static> ElementIndex for ScopedIndex<T> {
 }
 
 #[async_trait]
-impl<T: ElementArchiveIndex + 'static> ElementArchiveIndex for ScopedIndex<T> {
+impl<T: ElementArchiveIndex + ?Sized + 'static> ElementArchiveIndex for ScopedIndex<T> {
     async fn get_element_as_at(
         &self,
         element_ref: &ElementReference,
@@ -189,7 +198,7 @@ impl<T: ElementArchiveIndex + 'static> ElementArchiveIndex for ScopedIndex<T> {
 }
 
 #[async_trait]
-impl<T: FutureQueue + 'static> FutureQueue for ScopedIndex<T> {
+impl<T: FutureQueue + ?Sized + 'static> FutureQueue for ScopedIndex<T> {
     async fn push(
         &self,
         push_type: PushType,
@@ -248,10 +257,10 @@ impl<T: FutureQueue + 'static> FutureQueue for ScopedIndex<T> {
     }
 }
 
-impl<T: ResultIndex + 'static> ResultIndex for ScopedIndex<T> {}
+impl<T: ResultIndex + ?Sized + 'static> ResultIndex for ScopedIndex<T> {}
 
 #[async_trait]
-impl<T: AccumulatorIndex + 'static> AccumulatorIndex for ScopedIndex<T> {
+impl<T: AccumulatorIndex + ?Sized + 'static> AccumulatorIndex for ScopedIndex<T> {
     async fn clear(&self) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         self.work
@@ -286,7 +295,7 @@ impl<T: AccumulatorIndex + 'static> AccumulatorIndex for ScopedIndex<T> {
 }
 
 #[async_trait]
-impl<T: LazySortedSetStore + 'static> LazySortedSetStore for ScopedIndex<T> {
+impl<T: LazySortedSetStore + ?Sized + 'static> LazySortedSetStore for ScopedIndex<T> {
     async fn get_next(
         &self,
         set_id: u64,
@@ -323,7 +332,7 @@ impl<T: LazySortedSetStore + 'static> LazySortedSetStore for ScopedIndex<T> {
 }
 
 #[async_trait]
-impl<T: ResultSequenceCounter + 'static> ResultSequenceCounter for ScopedIndex<T> {
+impl<T: ResultSequenceCounter + ?Sized + 'static> ResultSequenceCounter for ScopedIndex<T> {
     async fn apply_sequence(
         &self,
         sequence: u64,
@@ -354,7 +363,7 @@ mod tests {
         time::Duration,
     };
 
-    use drasi_core::models::{ElementMetadata, ElementPropertyMap};
+    use crate::models::{ElementMetadata, ElementPropertyMap};
     use tokio::sync::oneshot;
 
     use super::*;

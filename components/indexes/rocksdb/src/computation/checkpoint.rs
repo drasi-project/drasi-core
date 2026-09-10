@@ -21,7 +21,7 @@ use rocksdb::{Direction, IteratorMode, WriteBatchWithTransaction};
 
 use crate::{checkpoint::STREAM_STATE_CF, IndexDb, RocksDbSessionState};
 
-use super::blocking::BlockingScope;
+use drasi_core::computation::ComputationIoScope as BlockingScope;
 
 const SOURCE_SEQUENCE: &str = "source_sequence:";
 const SOURCE_POSITION: &str = "source_position:";
