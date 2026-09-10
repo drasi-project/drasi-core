@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct LifecycleMetrics {
     startup_rejection_durable_no_store: AtomicU64,
     startup_rejection_durable_on_volatile: AtomicU64,
+    startup_rejection_durable_on_volatile_query: AtomicU64,
     startup_rejection_snapshot_skip_gap: AtomicU64,
     startup_rejection_no_snapshot_auto_reset: AtomicU64,
     auto_reset_completions: AtomicU64,
@@ -36,6 +37,7 @@ pub struct LifecycleMetrics {
 pub enum StartupRejectionReason {
     DurableNoStore,
     DurableOnVolatile,
+    DurableOnVolatileQuery,
     SnapshotSkipGap,
     NoSnapshotAutoReset,
 }
@@ -46,6 +48,7 @@ impl LifecycleMetrics {
         Self {
             startup_rejection_durable_no_store: AtomicU64::new(0),
             startup_rejection_durable_on_volatile: AtomicU64::new(0),
+            startup_rejection_durable_on_volatile_query: AtomicU64::new(0),
             startup_rejection_snapshot_skip_gap: AtomicU64::new(0),
             startup_rejection_no_snapshot_auto_reset: AtomicU64::new(0),
             auto_reset_completions: AtomicU64::new(0),
@@ -62,6 +65,10 @@ impl LifecycleMetrics {
             }
             StartupRejectionReason::DurableOnVolatile => {
                 self.startup_rejection_durable_on_volatile
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StartupRejectionReason::DurableOnVolatileQuery => {
+                self.startup_rejection_durable_on_volatile_query
                     .fetch_add(1, Ordering::Relaxed);
             }
             StartupRejectionReason::SnapshotSkipGap => {
@@ -94,6 +101,9 @@ impl LifecycleMetrics {
             startup_rejection_durable_on_volatile: self
                 .startup_rejection_durable_on_volatile
                 .load(Ordering::Relaxed),
+            startup_rejection_durable_on_volatile_query: self
+                .startup_rejection_durable_on_volatile_query
+                .load(Ordering::Relaxed),
             startup_rejection_snapshot_skip_gap: self
                 .startup_rejection_snapshot_skip_gap
                 .load(Ordering::Relaxed),
@@ -119,6 +129,8 @@ pub struct LifecycleMetricsSnapshot {
     pub startup_rejection_durable_no_store: u64,
     /// Rejections due to durable reaction with a volatile (non-durable) state store.
     pub startup_rejection_durable_on_volatile: u64,
+    /// Rejections due to durable reaction subscribed to a volatile (non-durable) query.
+    pub startup_rejection_durable_on_volatile_query: u64,
     /// Rejections due to `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` policy.
     pub startup_rejection_snapshot_skip_gap: u64,
     /// Rejections due to `needs_snapshot_on_fresh_start=false` + `AutoReset` policy.
@@ -141,6 +153,7 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.startup_rejection_durable_no_store, 0);
         assert_eq!(snap.startup_rejection_durable_on_volatile, 0);
+        assert_eq!(snap.startup_rejection_durable_on_volatile_query, 0);
         assert_eq!(snap.startup_rejection_snapshot_skip_gap, 0);
         assert_eq!(snap.startup_rejection_no_snapshot_auto_reset, 0);
         assert_eq!(snap.auto_reset_completions, 0);
@@ -153,6 +166,7 @@ mod tests {
         m.record_startup_rejection(StartupRejectionReason::DurableNoStore);
         m.record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
         m.record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
+        m.record_startup_rejection(StartupRejectionReason::DurableOnVolatileQuery);
         m.record_auto_reset_completion();
         m.record_auto_reset_completion();
         m.record_auto_reset_completion();
@@ -164,6 +178,7 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.startup_rejection_durable_no_store, 1);
         assert_eq!(snap.startup_rejection_durable_on_volatile, 2);
+        assert_eq!(snap.startup_rejection_durable_on_volatile_query, 1);
         assert_eq!(snap.auto_reset_completions, 3);
         assert_eq!(snap.hash_mismatch_count, 4);
     }
