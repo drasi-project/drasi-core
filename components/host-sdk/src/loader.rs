@@ -532,6 +532,36 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
     let plugin_sdk_version = unsafe { meta.sdk_version.to_string() };
     let host_sdk_version = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
 
+    validate_sdk_version(&plugin_sdk_version, host_sdk_version, path)?;
+
+    // Check target triple compatibility
+    let plugin_target = unsafe { meta.target_triple.to_string() };
+    let host_target = drasi_plugin_sdk::ffi::metadata::TARGET_TRIPLE;
+    if plugin_target != host_target {
+        anyhow::bail!(
+            "Plugin '{}' target mismatch: plugin={}, host={}. \
+             Plugins must be built for the same target platform.",
+            path.display(),
+            plugin_target,
+            host_target,
+        );
+    }
+
+    log::debug!(
+        "Plugin '{}' version check passed: sdk={} target={}",
+        path.display(),
+        plugin_sdk_version,
+        plugin_target
+    );
+
+    Ok(Some(plugin_sdk_version))
+}
+
+fn validate_sdk_version(
+    plugin_sdk_version: &str,
+    host_sdk_version: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
     // Check major.minor compatibility
     let plugin_parts: Vec<&str> = plugin_sdk_version.split('.').collect();
     let host_parts: Vec<&str> = host_sdk_version.split('.').collect();
@@ -559,27 +589,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
         );
     }
 
-    // Check target triple compatibility
-    let plugin_target = unsafe { meta.target_triple.to_string() };
-    let host_target = drasi_plugin_sdk::ffi::metadata::TARGET_TRIPLE;
-    if plugin_target != host_target {
-        anyhow::bail!(
-            "Plugin '{}' target mismatch: plugin={}, host={}. \
-             Plugins must be built for the same target platform.",
-            path.display(),
-            plugin_target,
-            host_target,
-        );
-    }
-
-    log::debug!(
-        "Plugin '{}' version check passed: sdk={} target={}",
-        path.display(),
-        plugin_sdk_version,
-        plugin_target
-    );
-
-    Ok(Some(plugin_sdk_version))
+    Ok(())
 }
 
 /// Scan the plugin directory and group files by plugin base name.
@@ -1145,6 +1155,36 @@ mod tests {
         assert_eq!(parse_semver("0.6.0"), Some((0, 6, 0)));
         assert_eq!(parse_semver("1.2.3"), Some((1, 2, 3)));
         assert_eq!(parse_semver("10.20.30"), Some((10, 20, 30)));
+    }
+
+    #[test]
+    fn test_sdk_version_rejects_optional_sequence_payload_version() {
+        let error = validate_sdk_version("0.13.0", "0.14.0", Path::new("old-plugin"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SDK version mismatch"));
+        assert!(error.contains("plugin=0.13.0, host=0.14.0"));
+        assert!(validate_sdk_version(
+            "0.13.0",
+            drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION,
+            Path::new("old-plugin"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_sdk_version_accepts_patch_differences() {
+        for plugin_version in ["0.14.0", "0.14.1"] {
+            assert!(
+                validate_sdk_version(plugin_version, "0.14.0", Path::new("compatible-plugin"),)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn test_sdk_version_rejects_major_mismatch() {
+        assert!(validate_sdk_version("1.14.0", "0.14.0", Path::new("new-plugin")).is_err());
     }
 
     #[test]

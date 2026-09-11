@@ -251,8 +251,10 @@ mod tests {
     use drasi_core::interface::{FutureElementRef, IndexError, PushType};
     use drasi_core::models::{ElementReference, ElementTimestamp};
 
-    /// A minimal mock FutureQueue that always returns None from peek_due_time
-    struct MockFutureQueue;
+    #[derive(Default)]
+    struct MockFutureQueue {
+        due_time: Option<ElementTimestamp>,
+    }
 
     #[async_trait::async_trait]
     impl FutureQueue for MockFutureQueue {
@@ -281,7 +283,7 @@ mod tests {
         }
 
         async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
-            Ok(None)
+            Ok(self.due_time)
         }
 
         async fn clear(&self) -> Result<(), IndexError> {
@@ -290,8 +292,42 @@ mod tests {
     }
 
     fn make_source(query_id: &str) -> FutureQueueSource {
-        let fq = Arc::new(MockFutureQueue);
+        let fq = Arc::new(MockFutureQueue::default());
         FutureQueueSource::new(fq, query_id.to_string())
+    }
+
+    #[tokio::test]
+    async fn dispatched_signals_have_consecutive_sequences() {
+        let due_time = 1;
+        let source = FutureQueueSource::new(
+            Arc::new(MockFutureQueue {
+                due_time: Some(due_time),
+            }),
+            "sequence-test".to_string(),
+        );
+        let mut receiver = source.subscribe().await.unwrap();
+        source.start().await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut events = Vec::new();
+            for _ in 0..3 {
+                events.push(receiver.recv().await.unwrap());
+            }
+            events
+        })
+        .await;
+        source.stop().await;
+
+        let events = received.expect("due signals should be dispatched before the timeout");
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event.sequence, index as u64 + 1);
+            assert_eq!(event.source_id, FUTURE_QUEUE_SOURCE_ID);
+            assert_eq!(event.event, SourceEvent::Control(SourceControl::FuturesDue));
+            assert_eq!(
+                event.timestamp,
+                DateTime::from_timestamp_millis(due_time as i64).unwrap()
+            );
+        }
     }
 
     #[test]

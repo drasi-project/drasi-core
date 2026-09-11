@@ -148,7 +148,7 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
 /// every source gets a stable, distinct rank and cross-source ordering is
 /// deterministic. The returned vec is indexed by the source's list position:
 /// `ranks[i]` is the rank of the `i`-th declared source.
-fn compute_source_ranks(priorities: &[Option<i64>]) -> Vec<u32> {
+pub(super) fn compute_source_ranks(priorities: &[Option<i64>]) -> Vec<u32> {
     let effective: Vec<i64> = priorities
         .iter()
         .enumerate()

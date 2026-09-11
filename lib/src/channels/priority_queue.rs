@@ -25,8 +25,9 @@ use tokio::sync::{Mutex, Notify};
 /// `(timestamp, source_rank, sequence)`.
 ///
 /// - `timestamp` — event time; the primary ordering component.
-/// - `source_rank` — the source's position in the owning query's `sources`
-///   list, stamped by the per-source forwarder at enqueue time. It breaks ties
+/// - `source_rank` — a per-query, precomputed rank for the producing source,
+///   derived from the query's `sources` list and any explicit per-source priority.
+///   It is stamped by the per-source forwarder at enqueue time and breaks ties
 ///   between events from *different* sources so cross-source ordering is
 ///   deterministic. It is inert for single-source queries (every event has the
 ///   same rank).
@@ -207,10 +208,11 @@ where
 
     /// Enqueue an event into the priority queue
     ///
-    /// `source_rank` is the rank of the producing source within the owning
-    /// query (its position in `config.sources`); it is used as a tie-breaker
-    /// between events from different sources that share a timestamp. Pass `0`
-    /// for single-source queues where the rank is inert.
+    /// `source_rank` is the precomputed rank of the producing source within the
+    /// owning query, derived from `config.sources` and any explicit per-source
+    /// priority. It is used as a tie-breaker between events from different
+    /// sources that share a timestamp. Pass `0` for single-source queues where
+    /// the rank is inert.
     ///
     /// Returns true if enqueued, false if queue is at capacity
     pub async fn enqueue(&self, event: Arc<T>, source_rank: u32) -> bool {
@@ -475,7 +477,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::{SourceControl, SourceEvent, SourceEventDraft, StampedSourceEvent};
+    use crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
     use chrono::Utc;
+    use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
 
     #[derive(Debug, Clone)]
     struct TestEvent {
@@ -597,6 +602,49 @@ mod tests {
         assert_eq!(pq.try_dequeue().await.unwrap().id, "s1-a");
         assert_eq!(pq.try_dequeue().await.unwrap().id, "s1-b");
         assert_eq!(pq.try_dequeue().await.unwrap().id, "late");
+    }
+
+    #[tokio::test]
+    async fn test_futures_due_sorts_after_real_source_at_same_timestamp() {
+        let queue = PriorityQueue::new(3);
+        let timestamp = Utc::now();
+        let change = SourceEvent::Change(SourceChange::Delete {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("source", "node"),
+                labels: Arc::from([]),
+                effective_from: timestamp.timestamp_millis() as u64,
+            },
+        });
+        let real_event = Arc::new(StampedSourceEvent::stamp(
+            SourceEventDraft::new("source".to_string(), change.clone(), timestamp),
+            99,
+        ));
+        for sequence in [2, 1] {
+            let signal = Arc::new(StampedSourceEvent::stamp(
+                SourceEventDraft::new(
+                    FUTURE_QUEUE_SOURCE_ID.to_string(),
+                    SourceEvent::Control(SourceControl::FuturesDue),
+                    timestamp,
+                ),
+                sequence,
+            ));
+            queue.enqueue_wait(signal, u32::MAX).await;
+        }
+        queue.enqueue_wait(real_event, 0).await;
+
+        let first = queue.try_dequeue().await.unwrap();
+        assert_eq!(first.source_id, "source");
+        assert_eq!(first.event, change);
+        for sequence in [1, 2] {
+            let signal = queue.try_dequeue().await.unwrap();
+            assert_eq!(signal.source_id, FUTURE_QUEUE_SOURCE_ID);
+            assert_eq!(
+                signal.event,
+                SourceEvent::Control(SourceControl::FuturesDue)
+            );
+            assert_eq!(signal.sequence, sequence);
+        }
+        assert!(queue.try_dequeue().await.is_none());
     }
 
     #[tokio::test]

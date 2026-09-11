@@ -650,7 +650,7 @@ impl MockSource {
     ///
     /// # Returns
     ///
-    /// A boxed receiver that yields [`SourceEventDraft`](drasi_lib::channels::SourceEventDraft)
+    /// A boxed receiver that yields [`StampedSourceEvent`](drasi_lib::channels::StampedSourceEvent)
     /// for each event generated or injected.
     ///
     /// # Example
