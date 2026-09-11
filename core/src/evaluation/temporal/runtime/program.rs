@@ -19,10 +19,7 @@ use drasi_query_ast::ast::{
     UnaryExpression,
 };
 
-use crate::evaluation::{
-    functions::{FunctionEffect, FunctionRegistry},
-    EvaluationError,
-};
+use crate::evaluation::{functions::FunctionRegistry, EvaluationError};
 
 use super::super::PartId;
 
@@ -125,7 +122,7 @@ fn contains_temporal(expression: &Expression, registry: &FunctionRegistry) -> bo
     if let Expression::FunctionExpression(function) = expression {
         if registry
             .get_function(&function.name)
-            .is_some_and(|function| function.effect().is_temporal())
+            .is_some_and(|function| function.as_temporal().is_some())
         {
             return true;
         }
@@ -144,7 +141,6 @@ fn collect_effects(
         let registered = registry
             .get_function(&function.name)
             .ok_or_else(|| EvaluationError::UnknownFunction(function.name.to_string()))?;
-        let effect = registered.effect();
         if registered.is_lazy_temporal() {
             if function.args.len() != 2 {
                 return Err(EvaluationError::InvalidArgument);
@@ -165,7 +161,7 @@ fn collect_effects(
                 ),
             ));
         }
-        if effect != FunctionEffect::Pure {
+        if registered.as_temporal().is_some() || registered.is_aggregating() {
             effects.push(function.clone());
         }
     } else {

@@ -12,17 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::evaluation::QueryExecutionError;
-
 use chrono::NaiveTime;
 
 use crate::{
     evaluation::{
-        functions::Function,
-        temporal::{
-            FunctionCall, FunctionCell, FunctionCellId, FunctionState, Generation, HistoryCapture,
-            HistoryState, PredicateState, RetainedInput, TemporalStateError,
-        },
+        temporal::{FunctionCall, FunctionCellId, Generation, RetainedInput},
         variable_value::VariableValue,
         EvaluationError, FunctionError, FunctionEvaluationError,
     },
@@ -48,277 +42,25 @@ pub struct SettledFunction {
     pub tickets: Vec<RequestedTicket>,
 }
 
-pub fn settle_function(
-    function: &Function,
-    captured: &CapturedCall,
-    input: &mut RetainedInput,
-    cell: Option<&mut FunctionCell>,
-    capture_history: bool,
-) -> Result<SettledFunction, EvaluationError> {
-    if !function.effect().is_temporal() {
-        return Err(EvaluationError::from(
-            QueryExecutionError::UnsupportedTemporalEffect("non-temporal function settlement"),
-        ));
-    }
-    function.settle_temporal(captured, input, cell, capture_history)
-}
-
-#[derive(Clone, Copy)]
-enum DeadlineSettle {
-    Future,
-    Later,
-    Until,
-    NowOrLater,
-}
-
-pub(crate) fn settle_future(
-    captured: &CapturedCall,
-    input: &RetainedInput,
-) -> Result<SettledFunction, EvaluationError> {
-    settle_deadline(captured, input, DeadlineSettle::Future)
-}
-
-pub(crate) fn settle_true_later(
-    captured: &CapturedCall,
-    input: &RetainedInput,
-) -> Result<SettledFunction, EvaluationError> {
-    settle_deadline(captured, input, DeadlineSettle::Later)
-}
-
-pub(crate) fn settle_true_until(
-    captured: &CapturedCall,
-    input: &RetainedInput,
-) -> Result<SettledFunction, EvaluationError> {
-    settle_deadline(captured, input, DeadlineSettle::Until)
-}
-
-pub(crate) fn settle_true_now_or_later(
-    captured: &CapturedCall,
-    input: &RetainedInput,
-) -> Result<SettledFunction, EvaluationError> {
-    settle_deadline(captured, input, DeadlineSettle::NowOrLater)
-}
-
-fn settle_deadline(
-    captured: &CapturedCall,
-    input: &RetainedInput,
-    kind: DeadlineSettle,
-) -> Result<SettledFunction, EvaluationError> {
-    require_arguments(captured, 2)?;
-    let value = &captured.arguments[0];
-    if matches!(kind, DeadlineSettle::Future) {
-        let VariableValue::Element(element) = value else {
-            return Err(function_error(
-                captured,
-                FunctionEvaluationError::InvalidArgument(0),
-            ));
-        };
-        let due_time = deadline(captured, &captured.arguments[1])?;
-        if captured.context.clock.realtime >= due_time {
-            return Ok(settled(value.clone()));
-        }
-        let mut ticket = request(captured, input, due_time);
-        ticket.attribution = Some(element.get_reference().clone());
-        return Ok(SettledFunction {
-            value: VariableValue::Awaiting,
-            tickets: vec![ticket],
-        });
-    }
-
-    let condition = match value {
-        VariableValue::Bool(condition) => *condition,
-        VariableValue::Null => return Ok(settled(VariableValue::Null)),
-        _ => {
-            return Err(function_error(
-                captured,
-                FunctionEvaluationError::InvalidArgument(0),
-            ));
-        }
-    };
-    if matches!(kind, DeadlineSettle::NowOrLater) && condition {
-        return Ok(settled(VariableValue::Bool(true)));
-    }
-    if captured.arguments[1] == VariableValue::Null {
-        return Ok(settled(VariableValue::Null));
-    }
-    let due_time = deadline(captured, &captured.arguments[1])?;
-    if (matches!(kind, DeadlineSettle::Until) && !condition)
-        || captured.context.clock.realtime >= due_time
-    {
-        return Ok(settled(VariableValue::Bool(condition)));
-    }
-    Ok(SettledFunction {
-        value: VariableValue::Awaiting,
-        tickets: vec![request(captured, input, due_time)],
-    })
-}
-
-pub(crate) fn settle_true_for(
-    captured: &CapturedCall,
-    input: &RetainedInput,
-    cell: Option<&mut FunctionCell>,
-) -> Result<SettledFunction, EvaluationError> {
-    require_arguments(captured, 2)?;
-    let cell =
-        cell.ok_or_else(|| function_error(captured, FunctionEvaluationError::CorruptData))?;
-    let FunctionState::TrueFor(state) = &mut cell.state else {
-        return Err(function_error(
-            captured,
-            FunctionEvaluationError::CorruptData,
-        ));
-    };
-    let condition = match &captured.arguments[0] {
-        VariableValue::Bool(condition) => *condition,
-        VariableValue::Null => return Ok(settled(VariableValue::Null)),
-        _ => {
-            return Err(function_error(
-                captured,
-                FunctionEvaluationError::InvalidArgument(0),
-            ));
-        }
-    };
-    let Some(duration) = duration_millis(captured, &captured.arguments[1], 1)? else {
-        return Ok(settled(VariableValue::Null));
-    };
-    let mut next = state.clone();
-    next.settle(condition, captured.context.clock.realtime)
-        .map_err(|error| {
-            function_error(
-                captured,
-                match error {
-                    TemporalStateError::GenerationExhausted => {
-                        FunctionEvaluationError::OverflowError
-                    }
-                    _ => FunctionEvaluationError::CorruptData,
-                },
-            )
-        })?;
-    let result = match &next.predicate {
-        PredicateState::False => settled(VariableValue::Bool(false)),
-        PredicateState::True { since, activation } => {
-            let due_time = since
-                .checked_add(duration)
-                .ok_or_else(|| function_error(captured, FunctionEvaluationError::OverflowError))?;
-            if captured.context.clock.realtime >= due_time {
-                settled(VariableValue::Bool(true))
-            } else {
-                let mut ticket = request(captured, input, due_time);
-                ticket.cell = Some(cell.id.clone());
-                ticket.activation = *activation;
-                SettledFunction {
-                    value: VariableValue::Awaiting,
-                    tickets: vec![ticket],
-                }
-            }
-        }
-    };
-    *state = next;
-    Ok(result)
-}
-
-pub(crate) fn settle_history(
-    captured: &CapturedCall,
-    input: &mut RetainedInput,
-    cell: Option<&mut FunctionCell>,
-    capture_history: bool,
-    distinct: bool,
-) -> Result<SettledFunction, EvaluationError> {
-    let Some(current) = captured.arguments.first() else {
-        return Err(function_error(
-            captured,
-            FunctionEvaluationError::InvalidArgumentCount,
-        ));
-    };
-    let default = captured.arguments.get(1).unwrap_or(&VariableValue::Null);
-    let cell =
-        cell.ok_or_else(|| function_error(captured, FunctionEvaluationError::CorruptData))?;
-    let history = match &mut cell.state {
-        FunctionState::History(history) => Some(history),
-        FunctionState::UninitializedHistory => None,
-        _ => {
-            return Err(function_error(
-                captured,
-                FunctionEvaluationError::CorruptData,
-            ))
-        }
-    };
-    if let Some(saved) = input.history.get(&captured.call) {
-        if saved.revision > input.source_revision {
-            return Err(function_error(
-                captured,
-                FunctionEvaluationError::CorruptData,
-            ));
-        }
-        if !capture_history || saved.revision == input.source_revision {
-            return Ok(settled(saved.value.clone()));
+impl SettledFunction {
+    pub fn ready(value: VariableValue) -> Self {
+        Self {
+            value,
+            tickets: Vec::new(),
         }
     }
-    if !capture_history {
-        return Ok(settled(
-            history.map_or(default, |history| &history.previous).clone(),
-        ));
+}
+
+impl RequestedTicket {
+    pub fn from_capture(captured: &CapturedCall, input: &RetainedInput, due_time: u64) -> Self {
+        request(captured, input, due_time)
     }
-    let previous = match history {
-        Some(history) => {
-            if history.revision > input.source_revision {
-                return Err(function_error(
-                    captured,
-                    FunctionEvaluationError::CorruptData,
-                ));
-            }
-            if history.revision < input.source_revision {
-                if !distinct || *current != history.current {
-                    history.previous = history.current.clone();
-                }
-                history.current = current.clone();
-                history.revision = input.source_revision;
-            }
-            history.previous.clone()
-        }
-        None => {
-            cell.state = FunctionState::History(HistoryState {
-                revision: input.source_revision,
-                current: current.clone(),
-                previous: default.clone(),
-            });
-            default.clone()
-        }
-    };
-    input.history.insert(
-        captured.call.clone(),
-        HistoryCapture {
-            revision: input.source_revision,
-            value: previous.clone(),
-        },
-    );
-    Ok(settled(previous))
 }
 
-pub(crate) fn settle_window(
+pub(crate) fn deadline(
     captured: &CapturedCall,
-    input: &RetainedInput,
-) -> Result<SettledFunction, EvaluationError> {
-    require_arguments(captured, 1)?;
-    let Some(duration) = duration_millis(captured, &captured.arguments[0], 0)? else {
-        return Ok(settled(VariableValue::Null));
-    };
-    let due_time = input
-        .source_clock
-        .transaction_time
-        .checked_add(duration)
-        .ok_or_else(|| function_error(captured, FunctionEvaluationError::OverflowError))?;
-    let expired = captured.context.clock.realtime >= due_time;
-    Ok(SettledFunction {
-        value: VariableValue::Bool(expired),
-        tickets: if expired {
-            Vec::new()
-        } else {
-            vec![request(captured, input, due_time)]
-        },
-    })
-}
-
-fn deadline(captured: &CapturedCall, value: &VariableValue) -> Result<u64, EvaluationError> {
+    value: &VariableValue,
+) -> Result<u64, EvaluationError> {
     let millis = match value {
         VariableValue::Date(date) => date.and_time(NaiveTime::MIN).and_utc().timestamp_millis(),
         VariableValue::LocalDateTime(datetime) => datetime.and_utc().timestamp_millis(),
@@ -339,7 +81,7 @@ fn deadline(captured: &CapturedCall, value: &VariableValue) -> Result<u64, Evalu
         .map_err(|_| function_error(captured, FunctionEvaluationError::OverflowError))
 }
 
-fn duration_millis(
+pub(crate) fn duration_millis(
     captured: &CapturedCall,
     value: &VariableValue,
     argument: usize,
@@ -370,7 +112,11 @@ fn duration_millis(
         .map_err(|_| function_error(captured, FunctionEvaluationError::OverflowError))
 }
 
-fn request(captured: &CapturedCall, input: &RetainedInput, due_time: u64) -> RequestedTicket {
+pub(crate) fn request(
+    captured: &CapturedCall,
+    input: &RetainedInput,
+    due_time: u64,
+) -> RequestedTicket {
     RequestedTicket {
         call: captured.call.clone(),
         slot: 0,
@@ -386,14 +132,17 @@ fn request(captured: &CapturedCall, input: &RetainedInput, due_time: u64) -> Req
     }
 }
 
-fn settled(value: VariableValue) -> SettledFunction {
+pub(crate) fn settled(value: VariableValue) -> SettledFunction {
     SettledFunction {
         value,
         tickets: Vec::new(),
     }
 }
 
-fn require_arguments(captured: &CapturedCall, count: usize) -> Result<(), EvaluationError> {
+pub(crate) fn require_arguments(
+    captured: &CapturedCall,
+    count: usize,
+) -> Result<(), EvaluationError> {
     if captured.arguments.len() == count {
         Ok(())
     } else {
@@ -404,7 +153,10 @@ fn require_arguments(captured: &CapturedCall, count: usize) -> Result<(), Evalua
     }
 }
 
-fn function_error(captured: &CapturedCall, error: FunctionEvaluationError) -> EvaluationError {
+pub(crate) fn function_error(
+    captured: &CapturedCall,
+    error: FunctionEvaluationError,
+) -> EvaluationError {
     EvaluationError::FunctionError(FunctionError {
         function_name: captured.expression.name.to_string(),
         error,
@@ -421,9 +173,10 @@ mod tests {
     use super::*;
     use crate::{
         evaluation::{
-            functions::{future::RegisterFutureFunctions, FunctionEffect, FunctionRegistry},
+            functions::{future::RegisterFutureFunctions, FunctionRegistry},
             temporal::{
-                codec, fixtures, ContributionKey, Incarnation, SourceRevision, StateOwner,
+                codec, fixtures, ContributionKey, FunctionCell, FunctionState, HistoryCapture,
+                HistoryState, Incarnation, PredicateState, SourceRevision, StateOwner,
                 TemporalGroupId, TemporalRecord, TrueForState,
             },
             variable_value::{duration::Duration, float::Float, zoned_datetime::ZonedDateTime},
@@ -459,7 +212,6 @@ mod tests {
                 args: Vec::new(),
                 position_in_query: fixtures::call().site.position_in_query,
             },
-            effect: FunctionEffect::Temporal,
             arguments,
             key: ContributionKey::InputHash(13),
             context,
@@ -475,7 +227,10 @@ mod tests {
         let function = functions()
             .get_function(&captured.expression.name)
             .expect("registered test function");
-        settle_function(function.as_ref(), captured, input, cell, capture_history)
+        function
+            .as_temporal()
+            .expect("registered temporal function")
+            .settle(captured, input, cell, capture_history)
     }
 
     fn cell(state: FunctionState) -> FunctionCell {
@@ -1013,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn argument_validation_is_function_scoped_and_non_temporal_effects_are_rejected() {
+    fn argument_validation_is_function_scoped() {
         let mut input = fixtures::input();
         for (function, args, error) in [
             (
@@ -1066,11 +821,10 @@ mod tests {
             let captured = capture(function, args, 110);
             assert_error(settle_named(&captured, &mut input, None, true), error);
         }
-        let mut captured = capture("drasi.awaiting", vec![], 110);
-        captured.effect = FunctionEffect::Pure;
-        assert!(matches!(
-            settle_named(&captured, &mut input, None, true),
-            Err(error) if matches!(error.execution_error(), Some(QueryExecutionError::UnsupportedTemporalEffect(_)))
-        ));
+        assert!(functions()
+            .get_function("drasi.awaiting")
+            .expect("registered")
+            .as_temporal()
+            .is_none());
     }
 }

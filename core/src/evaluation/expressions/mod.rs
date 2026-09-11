@@ -41,7 +41,7 @@ use crate::{evaluation::variable_value::VariableValue, interface::ResultIndex};
 
 use super::{
     context::{ExpressionEvaluationContext, SideEffects},
-    functions::{Function, FunctionEffect, FunctionRegistry},
+    functions::{Function, FunctionRegistry},
     temporal::ContributionKey,
     EvaluationError, FunctionEvaluationError,
 };
@@ -1629,26 +1629,6 @@ impl ExpressionEvaluator {
         let result = match self.functions.get_function(&expression.name) {
             Some(function) => match function.as_ref() {
                 Function::Scalar(scalar) => {
-                    if let Some(temporal) =
-                        context.temporal().filter(|_| scalar.effect().is_temporal())
-                    {
-                        let call = temporal.call(expression);
-                        if temporal.is_settled(&call)? {
-                            return temporal.value(&call);
-                        }
-                        let mut values = Vec::new();
-                        for arg in &expression.args {
-                            values.push(self.evaluate_expression(context, arg).await?);
-                        }
-                        let key = self.resolve_context_result_key(context).await?;
-                        return temporal.capture(
-                            expression,
-                            scalar.effect(),
-                            values,
-                            ContributionKey::from(&key),
-                            context,
-                        );
-                    }
                     let mut values = Vec::new();
                     for arg in &expression.args {
                         values.push(self.evaluate_expression(context, arg).await?);
@@ -1658,44 +1638,62 @@ impl ExpressionEvaluator {
                         .await
                         .map_err(EvaluationError::FunctionError)?
                 }
-                Function::LazyScalar(scalar) => {
-                    if let Some(temporal) =
-                        context.temporal().filter(|_| scalar.effect().is_temporal())
-                    {
-                        if expression.args.len() != 2 {
-                            return Err(EvaluationError::InvalidArgument);
-                        }
-                        if matches!(context.get_side_effects(), SideEffects::Snapshot) {
-                            return self.evaluate_expression(context, &expression.args[1]).await;
-                        }
-                        let call = temporal.call(expression);
-                        if temporal.is_settled(&call)? {
-                            let VariableValue::Bool(expired) = temporal.value(&call)? else {
-                                return Err(EvaluationError::CorruptData);
-                            };
-                            let mut window_context = context.clone();
-                            if expired {
-                                window_context.set_side_effects(SideEffects::Snapshot);
-                            }
-                            return self
-                                .evaluate_expression(&window_context, &expression.args[1])
-                                .await;
-                        }
-                        let window = self
-                            .evaluate_expression(context, &expression.args[0])
-                            .await?;
-                        return temporal.capture(
-                            expression,
-                            scalar.effect(),
-                            vec![window],
-                            ContributionKey::InputHash(context.get_input_grouping_hash()),
-                            context,
-                        );
+                Function::LazyScalar(scalar) => scalar
+                    .call(context, expression, &expression.args)
+                    .await
+                    .map_err(EvaluationError::FunctionError)?,
+                Function::Temporal(_) => {
+                    let Some(temporal) = context.temporal() else {
+                        return Err(EvaluationError::InvalidContext);
+                    };
+                    let call = temporal.call(expression);
+                    if temporal.is_settled(&call)? {
+                        return temporal.value(&call);
                     }
-                    scalar
-                        .call(context, expression, &expression.args)
-                        .await
-                        .map_err(EvaluationError::FunctionError)?
+                    let mut values = Vec::new();
+                    for arg in &expression.args {
+                        values.push(self.evaluate_expression(context, arg).await?);
+                    }
+                    let key = self.resolve_context_result_key(context).await?;
+                    return temporal.capture(
+                        expression,
+                        values,
+                        ContributionKey::from(&key),
+                        context,
+                    );
+                }
+                Function::LazyTemporal(_) => {
+                    let Some(temporal) = context.temporal() else {
+                        return Err(EvaluationError::InvalidContext);
+                    };
+                    if expression.args.len() != 2 {
+                        return Err(EvaluationError::InvalidArgument);
+                    }
+                    if matches!(context.get_side_effects(), SideEffects::Snapshot) {
+                        return self.evaluate_expression(context, &expression.args[1]).await;
+                    }
+                    let call = temporal.call(expression);
+                    if temporal.is_settled(&call)? {
+                        let VariableValue::Bool(expired) = temporal.value(&call)? else {
+                            return Err(EvaluationError::CorruptData);
+                        };
+                        let mut window_context = context.clone();
+                        if expired {
+                            window_context.set_side_effects(SideEffects::Snapshot);
+                        }
+                        return self
+                            .evaluate_expression(&window_context, &expression.args[1])
+                            .await;
+                    }
+                    let window = self
+                        .evaluate_expression(context, &expression.args[0])
+                        .await?;
+                    return temporal.capture(
+                        expression,
+                        vec![window],
+                        ContributionKey::InputHash(context.get_input_grouping_hash()),
+                        context,
+                    );
                 }
                 Function::Aggregating(aggregate) => {
                     let mut values = Vec::new();
@@ -1723,7 +1721,6 @@ impl ExpressionEvaluator {
                         {
                             return temporal.capture(
                                 expression,
-                                FunctionEffect::Aggregate,
                                 values,
                                 ContributionKey::GroupBy(grouping_keys.as_ref().clone()),
                                 context,

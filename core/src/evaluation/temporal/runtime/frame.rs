@@ -22,8 +22,7 @@ use std::{
 use drasi_query_ast::ast::FunctionExpression;
 
 use crate::evaluation::{
-    functions::FunctionEffect, variable_value::VariableValue, EvaluationError,
-    ExpressionEvaluationContext,
+    variable_value::VariableValue, EvaluationError, ExpressionEvaluationContext,
 };
 
 use super::super::{
@@ -34,7 +33,6 @@ use super::super::{
 pub struct CapturedCall {
     pub call: FunctionCall,
     pub expression: FunctionExpression,
-    pub effect: FunctionEffect,
     pub arguments: Vec<VariableValue>,
     pub key: ContributionKey,
     pub context: SavedContext,
@@ -96,7 +94,6 @@ impl TemporalEvaluation {
     pub fn capture(
         &self,
         expression: &FunctionExpression,
-        effect: FunctionEffect,
         arguments: Vec<VariableValue>,
         key: ContributionKey,
         context: &ExpressionEvaluationContext<'_>,
@@ -123,7 +120,6 @@ impl TemporalEvaluation {
                     CapturedCall {
                         call,
                         expression: expression.clone(),
-                        effect,
                         arguments,
                         key,
                         context: saved,

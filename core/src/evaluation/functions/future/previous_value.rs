@@ -12,179 +12,114 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::Weak;
-
-use crate::evaluation::context::SideEffects;
-use crate::evaluation::functions::aggregation::ValueAccumulator;
-use crate::evaluation::functions::ScalarFunction;
+use crate::evaluation::functions::TemporalScalar;
 use crate::evaluation::temporal::runtime::frame::CapturedCall;
-use crate::evaluation::temporal::runtime::functions::{settle_history, SettledFunction};
-use crate::evaluation::temporal::{FunctionCell, FunctionState, RetainedInput};
+use crate::evaluation::temporal::runtime::functions::{function_error, settled, SettledFunction};
+use crate::evaluation::temporal::{
+    FunctionCell, FunctionState, HistoryCapture, HistoryState, RetainedInput,
+};
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::ExpressionEvaluationContext;
-use crate::evaluation::ExpressionEvaluator;
-use crate::evaluation::{EvaluationError, FunctionError, FunctionEvaluationError};
-use crate::interface::ResultIndex;
-use crate::interface::ResultOwner;
-use crate::models::ElementValue;
-use async_trait::async_trait;
-use drasi_query_ast::ast;
+use crate::evaluation::{EvaluationError, FunctionEvaluationError};
 
-pub struct PreviousValue {
-    result_index: Arc<dyn ResultIndex>,
-    expression_evaluator: Weak<ExpressionEvaluator>,
-}
+pub struct PreviousValue;
 
-impl PreviousValue {
-    pub fn new(
-        result_index: Arc<dyn ResultIndex>,
-        expression_evaluator: Weak<ExpressionEvaluator>,
-    ) -> Self {
-        Self {
-            result_index,
-            expression_evaluator,
-        }
-    }
-}
-
-#[async_trait]
-impl ScalarFunction for PreviousValue {
-    fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::Temporal
-    }
-
-    fn initial_temporal_state(&self) -> Option<FunctionState> {
+impl TemporalScalar for PreviousValue {
+    fn initial_cell(&self) -> Option<FunctionState> {
         Some(FunctionState::UninitializedHistory)
     }
 
-    fn settle_temporal(
+    fn accepts_cell(&self, state: &FunctionState) -> bool {
+        matches!(
+            state,
+            FunctionState::UninitializedHistory | FunctionState::History(_)
+        )
+    }
+
+    fn settle(
         &self,
         captured: &CapturedCall,
         input: &mut RetainedInput,
         cell: Option<&mut FunctionCell>,
         capture_history: bool,
     ) -> Result<SettledFunction, EvaluationError> {
-        settle_history(captured, input, cell, capture_history, false)
+        observe_history(captured, input, cell, capture_history, false)
     }
+}
 
-    async fn call(
-        &self,
-        context: &ExpressionEvaluationContext,
-        expression: &ast::FunctionExpression,
-        args: Vec<VariableValue>,
-    ) -> Result<VariableValue, FunctionError> {
-        if args.is_empty() {
-            return Err(FunctionError {
-                function_name: expression.name.to_string(),
-                error: FunctionEvaluationError::InvalidArgumentCount,
+pub(crate) fn observe_history(
+    captured: &CapturedCall,
+    input: &mut RetainedInput,
+    cell: Option<&mut FunctionCell>,
+    capture_history: bool,
+    distinct: bool,
+) -> Result<SettledFunction, EvaluationError> {
+    let Some(current) = captured.arguments.first() else {
+        return Err(function_error(
+            captured,
+            FunctionEvaluationError::InvalidArgumentCount,
+        ));
+    };
+    let default = captured.arguments.get(1).unwrap_or(&VariableValue::Null);
+    let cell =
+        cell.ok_or_else(|| function_error(captured, FunctionEvaluationError::CorruptData))?;
+    let history = match &mut cell.state {
+        FunctionState::History(history) => Some(history),
+        FunctionState::UninitializedHistory => None,
+        _ => {
+            return Err(function_error(
+                captured,
+                FunctionEvaluationError::CorruptData,
+            ))
+        }
+    };
+    if let Some(saved) = input.history.get(&captured.call) {
+        if saved.revision > input.source_revision {
+            return Err(function_error(
+                captured,
+                FunctionEvaluationError::CorruptData,
+            ));
+        }
+        if !capture_history || saved.revision == input.source_revision {
+            return Ok(settled(saved.value.clone()));
+        }
+    }
+    if !capture_history {
+        return Ok(settled(
+            history.map_or(default, |history| &history.previous).clone(),
+        ));
+    }
+    let previous = match history {
+        Some(history) => {
+            if history.revision > input.source_revision {
+                return Err(function_error(
+                    captured,
+                    FunctionEvaluationError::CorruptData,
+                ));
+            }
+            if history.revision < input.source_revision {
+                if !distinct || *current != history.current {
+                    history.previous = history.current.clone();
+                }
+                history.current = current.clone();
+                history.revision = input.source_revision;
+            }
+            history.previous.clone()
+        }
+        None => {
+            cell.state = FunctionState::History(HistoryState {
+                revision: input.source_revision,
+                current: current.clone(),
+                previous: default.clone(),
             });
+            default.clone()
         }
-
-        let result_owner = ResultOwner::Function(expression.position_in_query);
-        let value = &args[0];
-        let default_value: ElementValue = {
-            if args.len() > 1 {
-                &args[1]
-            } else {
-                &VariableValue::Null
-            }
-        }
-        .try_into()
-        .map_err(|_e| FunctionError {
-            function_name: expression.name.to_string(),
-            error: FunctionEvaluationError::InvalidType {
-                expected: "ElementValue".to_string(),
-            },
-        })?;
-
-        let expression_evaluator = match self.expression_evaluator.upgrade() {
-            Some(evaluator) => evaluator,
-            None => {
-                return Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::CorruptData,
-                })
-            }
-        };
-
-        let result_key = match expression_evaluator
-            .resolve_context_result_key(context)
-            .await
-        {
-            Ok(key) => key,
-            Err(e) => {
-                return Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::EvaluationError(Box::new(e)),
-                })
-            }
-        };
-
-        let current_value: ElementValue = value.try_into().map_err(|_e| FunctionError {
-            function_name: expression.name.to_string(),
-            error: FunctionEvaluationError::InvalidType {
-                expected: "ElementValue".to_string(),
-            },
-        })?;
-
-        let prev_values = match self.result_index.get(&result_key, &result_owner).await {
-            Ok(v) => match v {
-                Some(v) => match v {
-                    ValueAccumulator::Map(m) => (
-                        m.get("0").cloned().unwrap_or_default(),
-                        m.get("1").cloned().unwrap_or_default(),
-                    ),
-                    _ => {
-                        return Err(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::InvalidType {
-                                expected: "ElementValue".to_string(),
-                            },
-                        })
-                    }
-                },
-                None => (default_value.clone(), default_value.clone()),
-            },
-            Err(e) => {
-                return Err(FunctionError {
-                    function_name: expression.name.to_string(),
-                    error: FunctionEvaluationError::IndexError(e),
-                })
-            }
-        };
-
-        match context.get_side_effects() {
-            SideEffects::Apply => {
-                match self
-                    .result_index
-                    .set(
-                        result_key.clone(),
-                        result_owner,
-                        Some(ValueAccumulator::Map(
-                            BTreeMap::from([
-                                ("0".to_string(), current_value),
-                                ("1".to_string(), prev_values.0.clone()),
-                            ])
-                            .into(),
-                        )),
-                    )
-                    .await
-                {
-                    Ok(()) => (),
-                    Err(e) => {
-                        return Err(FunctionError {
-                            function_name: expression.name.to_string(),
-                            error: FunctionEvaluationError::IndexError(e),
-                        })
-                    }
-                };
-                Ok((&prev_values.0).into())
-            }
-            SideEffects::Snapshot => Ok((&prev_values.1).into()),
-            SideEffects::RevertForUpdate => Ok((&prev_values.1).into()),
-            SideEffects::RevertForDelete => Ok((&prev_values.1).into()),
-        }
-    }
+    };
+    input.history.insert(
+        captured.call.clone(),
+        HistoryCapture {
+            revision: input.source_revision,
+            value: previous.clone(),
+        },
+    );
+    Ok(settled(previous))
 }

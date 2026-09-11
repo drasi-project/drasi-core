@@ -19,18 +19,15 @@ use super::*;
 use crate::{
     evaluation::{
         context::QueryVariables,
-        functions::FunctionEffect,
+        functions::future::true_now_or_later::TrueNowOrLater,
+        functions::{Function, TemporalScalar},
         temporal::{
             fixtures,
-            runtime::{
-                frame::CapturedCall,
-                functions::{settle_true_now_or_later, SettledFunction},
-            },
+            runtime::{frame::CapturedCall, functions::SettledFunction},
             ClockStamp, ContributionKey, Generation, RetainedInput,
         },
         variable_value::VariableValue,
-        EvaluationError, ExpressionEvaluationContext, FunctionError, FunctionEvaluationError,
-        InstantQueryClock,
+        EvaluationError, ExpressionEvaluationContext, FunctionEvaluationError, InstantQueryClock,
     },
     in_memory_index::{
         in_memory_future_queue::InMemoryFutureQueue, in_memory_result_index::InMemoryResultIndex,
@@ -48,67 +45,55 @@ fn registry() -> FunctionRegistry {
     registry
 }
 
-const DECLARATIONS: [(&str, FunctionEffect); 8] = [
-    ("drasi.future", FunctionEffect::Temporal),
-    ("drasi.trueUntil", FunctionEffect::Temporal),
-    ("drasi.trueFor", FunctionEffect::Temporal),
-    ("drasi.trueLater", FunctionEffect::Temporal),
-    ("drasi.trueNowOrLater", FunctionEffect::Temporal),
-    ("drasi.previousValue", FunctionEffect::Temporal),
-    ("drasi.previousDistinctValue", FunctionEffect::Temporal),
-    ("drasi.slidingWindow", FunctionEffect::Temporal),
+const TEMPORAL: [&str; 7] = [
+    "drasi.future",
+    "drasi.trueUntil",
+    "drasi.trueFor",
+    "drasi.trueLater",
+    "drasi.trueNowOrLater",
+    "drasi.previousValue",
+    "drasi.previousDistinctValue",
 ];
 
 #[test]
-fn temporal_declarations_have_exact_effects_and_call_kinds() {
+fn temporal_declarations_use_temporal_variants() {
     let registry = registry();
-
-    for (name, expected) in DECLARATIONS {
+    for name in TEMPORAL {
         let function = registry.get_function(name).unwrap();
-        assert_eq!(function.effect(), expected, "{name}");
-        if name == "drasi.slidingWindow" {
-            assert!(function.is_lazy_temporal(), "{name}");
-        } else {
-            assert!(matches!(function.as_ref(), Function::Scalar(_)), "{name}");
-        }
+        assert!(matches!(function.as_ref(), Function::Temporal(_)), "{name}");
+        assert!(function.as_temporal().is_some(), "{name}");
+        assert!(!function.is_lazy_temporal(), "{name}");
     }
+    let window = registry.get_function("drasi.slidingWindow").unwrap();
+    assert!(matches!(window.as_ref(), Function::LazyTemporal(_)));
+    assert!(window.is_lazy_temporal());
+    assert!(window.as_temporal().is_some());
 }
 
-#[tokio::test]
-async fn temporal_functions_validate_arguments_without_retained_runtime() {
+#[test]
+fn temporal_functions_validate_arguments_through_settle() {
     let registry = registry();
-    let variables = QueryVariables::new();
-    let context =
-        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(1000, 2000)));
-
-    for (name, _) in DECLARATIONS {
+    for name in TEMPORAL.iter().copied().chain(["drasi.slidingWindow"]) {
         let function = registry.get_function(name).unwrap();
-        let expression = ast::FunctionExpression {
-            name: name.into(),
-            args: Vec::new(),
-            position_in_query: 10,
+        let (captured, mut input) = capture_named(name, Vec::new(), 0, 0);
+        let error = function
+            .as_temporal()
+            .unwrap()
+            .settle(&captured, &mut input, None, true)
+            .unwrap_err();
+        let EvaluationError::FunctionError(error) = error else {
+            panic!("{name} expected a function error");
         };
-        let result = match function.as_ref() {
-            Function::Scalar(function) => function.call(&context, &expression, Vec::new()).await,
-            Function::LazyScalar(function) => {
-                function.call(&context, &expression, &expression.args).await
-            }
-            _ => panic!("{name} must be a scalar declaration"),
-        };
-        let error = result.unwrap_err();
         assert_eq!(error.function_name, name);
-        assert!(
-            matches!(error.error, FunctionEvaluationError::InvalidArgumentCount),
-            "{name}"
-        );
+        assert_eq!(error.error, FunctionEvaluationError::InvalidArgumentCount);
     }
 }
 
 #[tokio::test]
-async fn awaiting_remains_pure_and_callable_without_retained_runtime() {
+async fn awaiting_remains_scalar_and_callable_without_retained_runtime() {
     let registry = registry();
     let function = registry.get_function("drasi.awaiting").unwrap();
-    assert_eq!(function.effect(), FunctionEffect::Pure);
+    assert!(function.as_temporal().is_none());
     let Function::Scalar(function) = function.as_ref() else {
         panic!("drasi.awaiting must remain scalar");
     };
@@ -129,6 +114,13 @@ async fn awaiting_remains_pure_and_callable_without_retained_runtime() {
     );
 }
 
+fn settle(
+    captured: &CapturedCall,
+    input: &mut RetainedInput,
+) -> Result<SettledFunction, EvaluationError> {
+    TrueNowOrLater.settle(captured, input, None, true)
+}
+
 #[test]
 fn test_true_now_or_later_invalid_args_count() {
     for arguments in [
@@ -142,7 +134,7 @@ fn test_true_now_or_later_invalid_args_count() {
     ] {
         let (captured, mut input) = capture(arguments, 0, 0);
         assert_function_error(
-            settle_true_now_or_later(&captured, &input),
+            settle(&captured, &mut input),
             FunctionEvaluationError::InvalidArgumentCount,
         );
     }
@@ -155,7 +147,7 @@ fn test_true_now_or_later_condition_true() {
         0,
         0,
     );
-    let result = settle_true_now_or_later(&captured, &input).unwrap();
+    let result = settle(&captured, &mut input).unwrap();
     assert_eq!(result.value, VariableValue::Bool(true));
     assert!(result.tickets.is_empty());
 }
@@ -167,7 +159,7 @@ fn test_true_now_or_later_due_time_passed() {
         800,
         1000,
     );
-    let result = settle_true_now_or_later(&captured, &input).unwrap();
+    let result = settle(&captured, &mut input).unwrap();
     assert_eq!(result.value, VariableValue::Bool(false));
     assert!(result.tickets.is_empty());
 }
@@ -179,7 +171,7 @@ fn test_true_now_or_later_schedule_future() {
         1000,
         1200,
     );
-    let result = settle_true_now_or_later(&captured, &input).unwrap();
+    let result = settle(&captured, &mut input).unwrap();
     assert_eq!(result.value, VariableValue::Awaiting);
     assert_requested_ticket(&result, &captured, 1000, 1500);
     assert!(input.tickets.is_empty());
@@ -201,7 +193,7 @@ fn test_true_now_or_later_with_date() {
         1000,
         2000,
     );
-    let result = settle_true_now_or_later(&captured, &input).unwrap();
+    let result = settle(&captured, &mut input).unwrap();
     assert_eq!(result.value, VariableValue::Awaiting);
     assert_requested_ticket(&result, &captured, 1000, expected_timestamp);
 }
@@ -214,7 +206,7 @@ fn test_true_now_or_later_invalid_condition_type() {
         0,
     );
     assert_function_error(
-        settle_true_now_or_later(&captured, &input),
+        settle(&captured, &mut input),
         FunctionEvaluationError::InvalidArgument(0),
     );
 }
@@ -226,7 +218,7 @@ fn test_true_now_or_later_null_arguments() {
         vec![VariableValue::Bool(false), VariableValue::Null],
     ] {
         let (captured, mut input) = capture(arguments, 0, 0);
-        let result = settle_true_now_or_later(&captured, &input).unwrap();
+        let result = settle(&captured, &mut input).unwrap();
         assert_eq!(result.value, VariableValue::Null);
         assert!(result.tickets.is_empty());
     }
@@ -242,7 +234,7 @@ fn retained_input_can_schedule_without_an_anchor() {
         );
         captured.context.anchor = None;
         input.context.anchor = None;
-        let result = settle_true_now_or_later(&captured, &input).unwrap();
+        let result = settle(&captured, &mut input).unwrap();
         if condition {
             assert_eq!(result.value, VariableValue::Bool(true));
             assert!(result.tickets.is_empty());
@@ -256,6 +248,15 @@ fn retained_input_can_schedule_without_an_anchor() {
 }
 
 fn capture(
+    arguments: Vec<VariableValue>,
+    transaction_time: u64,
+    realtime: u64,
+) -> (CapturedCall, RetainedInput) {
+    capture_named("function", arguments, transaction_time, realtime)
+}
+
+fn capture_named(
+    name: &str,
     arguments: Vec<VariableValue>,
     transaction_time: u64,
     realtime: u64,
@@ -282,11 +283,10 @@ fn capture(
     let captured = CapturedCall {
         call,
         expression: ast::FunctionExpression {
-            name: "function".into(),
+            name: name.into(),
             args: Vec::new(),
             position_in_query: 10,
         },
-        effect: FunctionEffect::Temporal,
         arguments,
         key: ContributionKey::InputHash(input.context.input_grouping_hash),
         context: input.context.clone(),

@@ -30,7 +30,7 @@ use hashers::jenkins::spooky_hash::SpookyHasher;
 use crate::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables, SideEffects},
-        functions::{FunctionEffect, FunctionRegistry},
+        functions::{Function, FunctionRegistry},
         temporal::*,
         variable_value::VariableValue,
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator,
@@ -42,7 +42,7 @@ use super::{
     deadlines::{load_due_target, DeadlineTarget},
     due::{DueCutoff, DueHead},
     frame::{EvaluationFrame, TemporalEvaluation},
-    functions::{settle_function, RequestedTicket},
+    functions::RequestedTicket,
     program::{ExpressionProgram, PartProgram, TemporalProgram},
 };
 
@@ -525,7 +525,7 @@ impl TemporalRuntime {
                 program
                     .effects
                     .iter()
-                    .any(|effect| self.effect(effect) == FunctionEffect::Aggregate)
+                    .any(|effect| self.is_aggregating(effect))
             });
         if !part.grouped && !aggregates {
             return Ok(());
@@ -557,11 +557,11 @@ impl TemporalRuntime {
             program
                 .effects
                 .iter()
-                .any(|effect| self.effect(effect) == FunctionEffect::Aggregate)
+                .any(|effect| self.is_aggregating(effect))
         });
         let temporal_reads_aggregate = part.projection.iter().any(|program| {
             program.effects.iter().any(|effect| {
-                self.effect(effect).is_temporal()
+                self.is_temporal(effect)
                     && expression_dependencies(
                         &Expression::FunctionExpression(effect.clone()),
                         &self.registry,
@@ -720,9 +720,7 @@ impl TemporalRuntime {
                 expression.effects.iter().any(|effect| {
                     self.registry
                         .get_function(&effect.name)
-                        .is_some_and(|function| {
-                            function.effect().is_temporal() && !function.is_lazy_temporal()
-                        })
+                        .is_some_and(|function| matches!(function.as_ref(), Function::Temporal(_)))
                 })
             })
         {
@@ -744,16 +742,38 @@ impl TemporalRuntime {
         Ok(())
     }
 
-    fn effect(&self, expression: &FunctionExpression) -> FunctionEffect {
-        self.registry
-            .get_function(&expression.name)
-            .map_or(FunctionEffect::Pure, |function| function.effect())
+    fn function(&self, expression: &FunctionExpression) -> Option<Arc<Function>> {
+        self.registry.get_function(&expression.name)
+    }
+
+    fn is_aggregating(&self, expression: &FunctionExpression) -> bool {
+        self.function(expression)
+            .is_some_and(|function| function.is_aggregating())
+    }
+
+    fn is_temporal(&self, expression: &FunctionExpression) -> bool {
+        self.function(expression)
+            .is_some_and(|function| function.as_temporal().is_some())
     }
 
     fn is_lazy_temporal(&self, expression: &FunctionExpression) -> bool {
-        self.registry
-            .get_function(&expression.name)
+        self.function(expression)
             .is_some_and(|function| function.is_lazy_temporal())
+    }
+
+    fn function_for_position(&self, position_in_query: usize) -> Option<Arc<Function>> {
+        self.program.parts.iter().find_map(|part| {
+            part.predicates
+                .iter()
+                .chain(&part.projection)
+                .find_map(|program| {
+                    program.effects.iter().find_map(|effect| {
+                        (effect.position_in_query == position_in_query)
+                            .then(|| self.registry.get_function(&effect.name))
+                            .flatten()
+                    })
+                })
+        })
     }
 
     async fn settle_expression(
@@ -789,13 +809,13 @@ impl TemporalRuntime {
                                 == Some(&QueryExecutionError::TemporalDeferred) => {}
                         Err(error) => return Err(error),
                     }
-                    if self.effect(expression) == FunctionEffect::Aggregate {
+                    if self.is_aggregating(expression) {
                         self.capture_snapshot_subscriptions(part, program, row)
                             .await?;
                     }
                 }
             }
-            if self.effect(expression) == FunctionEffect::Aggregate {
+            if self.is_aggregating(expression) {
                 self.settle_aggregate(expression, &site, predicate, work)
                     .await?;
             } else {
@@ -953,6 +973,7 @@ impl TemporalRuntime {
                     row,
                     id,
                     FunctionState::Aggregate,
+                    |state| matches!(state, FunctionState::Aggregate),
                     &mut work.cells,
                     &mut work.groups,
                 )?;
@@ -967,6 +988,7 @@ impl TemporalRuntime {
                     row,
                     id,
                     FunctionState::Aggregate,
+                    |state| matches!(state, FunctionState::Aggregate),
                     &mut work.cells,
                     &mut work.groups,
                 )?;
@@ -1010,10 +1032,10 @@ impl TemporalRuntime {
                     .ok_or_else(|| {
                         EvaluationError::UnknownFunction(capture.expression.name.to_string())
                     })?;
-                if !function.effect().is_temporal() {
+                let Some(temporal) = function.as_temporal() else {
                     return Err(EvaluationError::CorruptData);
-                }
-                let state = function.initial_temporal_state();
+                };
+                let state = temporal.initial_cell();
                 let id = if let Some(state) = state {
                     let (aggregate, free) = expression_dependencies(
                         &Expression::FunctionExpression(capture.expression.clone()),
@@ -1028,19 +1050,21 @@ impl TemporalRuntime {
                         owner,
                         call: capture.call.clone(),
                     };
-                    subscribe(row, id.clone(), state, &mut work.cells, &mut work.groups)?;
+                    subscribe(
+                        row,
+                        id.clone(),
+                        state,
+                        |state| temporal.accepts_cell(state),
+                        &mut work.cells,
+                        &mut work.groups,
+                    )?;
                     Some(id)
                 } else {
                     None
                 };
                 let cell = id.as_ref().and_then(|id| work.cells.get_mut(id));
-                let settled = settle_function(
-                    function.as_ref(),
-                    &capture,
-                    &mut row.input,
-                    cell,
-                    event.revision.is_some(),
-                )?;
+                let settled =
+                    temporal.settle(&capture, &mut row.input, cell, event.revision.is_some())?;
                 row.frame
                     .lock()
                     .map_err(|_| EvaluationError::CorruptData)?
@@ -1352,8 +1376,10 @@ impl TemporalRuntime {
                     batch.delete(TemporalKey::Cell(id)).map_err(index_error)?;
                     continue;
                 }
-                if let FunctionState::TrueFor(state) = &mut cell.state {
-                    state.settle(false, 0).map_err(index_error)?;
+                if let Some(function) = self.function_for_position(id.call.site.position_in_query) {
+                    if let Some(temporal) = function.as_temporal() {
+                        temporal.release_cell(cell);
+                    }
                 }
             }
             batch
@@ -1515,6 +1541,7 @@ fn subscribe(
     row: &mut WorkRow,
     id: FunctionCellId,
     initial: FunctionState,
+    accepts: impl Fn(&FunctionState) -> bool,
     cells: &mut BTreeMap<FunctionCellId, FunctionCell>,
     groups: &mut BTreeMap<TemporalGroupId, GroupState>,
 ) -> Result<(), EvaluationError> {
@@ -1526,14 +1553,8 @@ fn subscribe(
             .insert(id.clone());
     }
     if let Some(cell) = cells.get(&id) {
-        match (&initial, &cell.state) {
-            (FunctionState::Aggregate, FunctionState::Aggregate)
-            | (FunctionState::TrueFor(_), FunctionState::TrueFor(_))
-            | (
-                FunctionState::UninitializedHistory,
-                FunctionState::UninitializedHistory | FunctionState::History(_),
-            ) => {}
-            _ => return Err(EvaluationError::CorruptData),
+        if !accepts(&cell.state) {
+            return Err(EvaluationError::CorruptData);
         }
     }
     cells
@@ -1670,7 +1691,7 @@ fn expression_dependencies(expression: &Expression, registry: &FunctionRegistry)
     if let Expression::FunctionExpression(function) = expression {
         if registry
             .get_function(&function.name)
-            .is_some_and(|function| function.effect() == FunctionEffect::Aggregate)
+            .is_some_and(|function| function.is_aggregating())
         {
             return (true, false);
         }
