@@ -29,6 +29,73 @@ impl QueryConfiguration for TestConfig {
 
 static TEST_CONFIG: TestConfig = TestConfig {};
 
+#[test]
+fn bounded_match_scopes_and_property_order() {
+    let parser = GQLParser::new(Arc::new(TestConfig {}));
+    let source =
+        "MATCH (a)-[rs:R*2 {enabled: true}]->(b), (b)-[:S]->(c) MATCH (a)-[:R*1]->(b) RETURN a";
+    let parsed = parser.parse_scoped(source).unwrap();
+    assert_eq!(parsed.match_scopes, Some(vec![vec![0..2, 2..3]]));
+    assert_eq!(parsed.query, parser.parse(source).unwrap());
+    assert_eq!(
+        parsed.query.parts[0].match_clauses[0].path[0]
+            .0
+            .variable_length,
+        Some(VariableLengthMatch {
+            min_hops: Some(2),
+            max_hops: None
+        })
+    );
+    assert_eq!(
+        parsed.query.parts[0].match_clauses[0].path[0]
+            .0
+            .property_predicates
+            .len(),
+        1
+    );
+    assert!(parser
+        .parse("MATCH (a)-[:R {enabled: true}*2]->(b) RETURN b")
+        .is_ok());
+    assert!(parser.parse("MATCH (a)-[:R*2..]->(b) RETURN b").is_err());
+}
+
+#[test]
+fn bounded_match_scopes_follow_lowered_query_parts() {
+    let parser = GQLParser::new(Arc::new(TestConfig {}));
+    let parsed = parser
+        .parse_scoped("MATCH (a)-[:R*1]->(b), (b)-[:S]->(c) LET x = a RETURN x NEXT RETURN x")
+        .unwrap();
+    let scopes = parsed.match_scopes.unwrap();
+    assert_eq!(scopes.len(), parsed.query.parts.len());
+    assert_eq!(scopes[0], vec![0..2]);
+    assert!(scopes.iter().skip(1).all(Vec::is_empty));
+}
+
+#[test]
+fn relationship_bindings_survive_intermediate_statements() {
+    let parser = GQLParser::new(Arc::new(TestConfig {}));
+    for repetition in ["", "*1"] {
+        for statements in [
+            "FILTER true",
+            "LET x = 1",
+            "YIELD rs",
+            "LET x = 1 FILTER x = 1 YIELD rs",
+        ] {
+            let source = format!("MATCH (a)-[rs:R{repetition}]->(b) {statements} RETURN rs");
+            let parsed = parser.parse_scoped(&source).unwrap();
+            for part in &parsed.query.parts {
+                let ProjectionClause::Item(items) = &part.return_clause else {
+                    panic!("expected item projection for {source}");
+                };
+                assert!(
+                    items.contains(&UnaryExpression::ident("rs")),
+                    "relationship binding was dropped by {source}: {items:?}"
+                );
+            }
+        }
+    }
+}
+
 // GROUP BY tests
 #[test]
 fn implicit_grouping_with_one_key() {
@@ -2031,8 +2098,8 @@ fn yield_let_and_group_by_together() {
     // Equivalent Cypher:
     // MATCH (v:Vehicle)-[e:LOCATED_IN]->(z:Zone)
     // WHERE v.color = 'Red'
-    // WITH v, z, v.color = 'Red' AS isRed
-    // WITH v, z, isRed, v.price > 50000 AS isExpensive
+    // WITH v, e, z, v.color = 'Red' AS isRed
+    // WITH v, e, z, isRed, v.price > 50000 AS isExpensive
     // WITH z.type AS zone_type, v.color AS vehicle_color, isRed, isExpensive
     // WITH zone_type, isRed, isExpensive, count(1) AS vehicle_count
     // RETURN zone_type, isRed, vehicle_count
@@ -2086,6 +2153,7 @@ fn yield_let_and_group_by_together() {
                 )],
                 return_clause: ProjectionClause::Item(vec![
                     UnaryExpression::ident("v"),
+                    UnaryExpression::ident("e"),
                     UnaryExpression::ident("z"),
                     UnaryExpression::alias(
                         BinaryExpression::eq(
@@ -2104,6 +2172,7 @@ fn yield_let_and_group_by_together() {
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
                     UnaryExpression::ident("v"),
+                    UnaryExpression::ident("e"),
                     UnaryExpression::ident("z"),
                     UnaryExpression::ident("isRed"),
                     UnaryExpression::alias(

@@ -16,7 +16,9 @@
 mod auto_future_queue_consumer;
 mod continuous_query;
 mod query_builder;
+mod variable_length;
 
+pub use crate::path_solver::variable_length::VariableLengthMatchLimits;
 pub use auto_future_queue_consumer::AutoFutureQueueConsumer;
 pub use continuous_query::{ContinuousQuery, DueFutureResult};
 pub use query_builder::QueryBuilder;

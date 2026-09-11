@@ -23,10 +23,14 @@
 //! Keys are hash-tagged (`{<query_id>}`) for Redis Cluster slot compatibility.
 //! Note: u64 sequences above 2^53 lose precision when stored as f64 scores.
 
+use drasi_core::interface::SessionError;
+
+use crate::{GarnetSessionControl, GarnetSessionState};
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, OutboxWriter};
+use drasi_core::interface::{IndexError, OutboxWriter, SessionGuard};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
+use std::sync::Arc;
 
 /// Garnet/Redis-backed outbox writer.
 ///
@@ -34,13 +38,28 @@ use redis::{cmd, AsyncCommands};
 pub struct GarnetOutboxWriter {
     query_id: String,
     connection: MultiplexedConnection,
+    session_state: Arc<GarnetSessionState>,
 }
 
 impl GarnetOutboxWriter {
     pub fn new(query_id: &str, connection: MultiplexedConnection) -> Self {
+        let state = Arc::new(GarnetSessionState::new_for_query(
+            connection.clone(),
+            query_id,
+        ));
+        Self::new_with_session(query_id, connection, state)
+    }
+
+    pub fn new_with_session(
+        query_id: &str,
+        connection: MultiplexedConnection,
+        session_state: Arc<GarnetSessionState>,
+    ) -> Self {
+        session_state.register_query(query_id);
         Self {
             query_id: query_id.to_string(),
             connection,
+            session_state,
         }
     }
 
@@ -65,6 +84,16 @@ impl OutboxWriter for GarnetOutboxWriter {
         let data_key = self.data_key();
         let seq_str = sequence.to_string();
 
+        {
+            let mut session = self.session_state.lock()?;
+            if let Some(buffer) = session.as_mut() {
+                buffer.zset_add(outbox_key, seq_str.as_bytes().to_vec(), sequence as f64);
+                buffer.hash_set(data_key, &seq_str, data.to_vec());
+                return Ok(());
+            }
+        }
+        self.session_state.ensure_recovered().await?;
+
         // Add sequence to sorted set (score = sequence for ordering).
         // Note: f64 scores lose precision above 2^53, but outbox sequences
         // are monotonically increasing from 0 and won't reach that magnitude.
@@ -85,6 +114,7 @@ impl OutboxWriter for GarnetOutboxWriter {
         query_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        self.session_state.ensure_recovered().await?;
         let _ = query_id;
         let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();
@@ -103,6 +133,7 @@ impl OutboxWriter for GarnetOutboxWriter {
             .map_err(IndexError::other)?;
 
         if sequences.is_empty() {
+            self.session_state.ensure_recovered().await?;
             return Ok(Vec::new());
         }
 
@@ -123,10 +154,12 @@ impl OutboxWriter for GarnetOutboxWriter {
             }
         }
 
+        self.session_state.ensure_recovered().await?;
         Ok(entries)
     }
 
     async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        self.session_state.ensure_recovered().await?;
         let _ = query_id;
         let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();
@@ -140,6 +173,7 @@ impl OutboxWriter for GarnetOutboxWriter {
             .await
             .map_err(IndexError::other)?;
 
+        self.session_state.ensure_recovered().await?;
         match result.first() {
             Some(seq_str) => {
                 let seq: u64 = seq_str.parse().map_err(|e| {
@@ -155,22 +189,20 @@ impl OutboxWriter for GarnetOutboxWriter {
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
         let _ = query_id;
-        let mut con = self.connection.clone();
-        let outbox_key = self.outbox_key();
-        let data_key = self.data_key();
-
-        con.del::<&str, ()>(&outbox_key)
+        self.session_state
+            .clear(&[self.outbox_key(), self.data_key()], &[])
             .await
-            .map_err(IndexError::other)?;
-        con.del::<&str, ()>(&data_key)
-            .await
-            .map_err(IndexError::other)?;
-
-        Ok(())
     }
 
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let _ = query_id;
+        if self.session_state.lock()?.is_some() {
+            return Err(IndexError::NotSupported);
+        }
+        let root = SessionGuard::begin(Arc::new(GarnetSessionControl::new(
+            self.session_state.clone(),
+        )))
+        .await?;
         let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();
         let data_key = self.data_key();
@@ -196,17 +228,18 @@ impl OutboxWriter for GarnetOutboxWriter {
             .await
             .map_err(IndexError::other)?;
 
-        // Remove from sorted set (by rank)
-        con.zremrangebyrank::<&str, ()>(&outbox_key, 0, (to_remove - 1) as isize)
-            .await
-            .map_err(IndexError::other)?;
-
-        // Remove data entries from hash
-        for seq_str in &sequences_to_remove {
-            con.hdel::<&str, &str, ()>(&data_key, seq_str)
-                .await
-                .map_err(IndexError::other)?;
+        root.mark_dirty()?;
+        {
+            let mut inner = self.session_state.lock()?;
+            let buffer = inner
+                .as_mut()
+                .ok_or(IndexError::other(SessionError::InvalidSession))?;
+            for sequence in &sequences_to_remove {
+                buffer.zset_remove(outbox_key.clone(), sequence.as_bytes().to_vec());
+                buffer.hash_del(data_key.clone(), sequence);
+            }
         }
+        root.commit().await?;
 
         Ok(to_remove)
     }

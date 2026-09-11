@@ -51,6 +51,10 @@ impl TrueFor {
 
 #[async_trait]
 impl ScalarFunction for TrueFor {
+    fn effect(&self) -> super::super::FunctionEffect {
+        super::super::FunctionEffect::Temporal(super::super::TemporalFunction::TrueFor)
+    }
+
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,

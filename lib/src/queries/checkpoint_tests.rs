@@ -55,6 +55,7 @@ mod tests {
         provide_position_handle: bool,
         /// The position handle (shared with query manager after subscribe)
         position_handle: Arc<std::sync::atomic::AtomicU64>,
+        released_query_ids: RwLock<Vec<String>>,
     }
 
     impl CheckpointTestSource {
@@ -65,6 +66,7 @@ mod tests {
                 received_resume_from: Arc::new(RwLock::new(Vec::new())),
                 provide_position_handle: false,
                 position_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                released_query_ids: RwLock::new(Vec::new()),
             })
         }
 
@@ -175,6 +177,14 @@ mod tests {
 
         async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
             self.base.initialize(context).await;
+        }
+
+        async fn remove_position_handle(&self, query_id: &str) {
+            self.base.remove_position_handle(query_id).await;
+            self.released_query_ids
+                .write()
+                .await
+                .push(query_id.to_string());
         }
     }
 
@@ -1217,6 +1227,311 @@ mod tests {
     // Fix #7: Position handle update verification test
     // ========================================================================
 
+    #[tokio::test]
+    async fn excluded_events_advance_the_envelope_source_checkpoint() {
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        };
+        use std::time::Duration;
+
+        let (query_manager, source_manager, graph) = create_test_env().await;
+        let mut event_rx = graph.read().await.subscribe();
+        for id in ["first", "second"] {
+            add_source(
+                &source_manager,
+                &graph,
+                CheckpointTestSource::new(id)
+                    .unwrap()
+                    .with_position_handle(),
+            )
+            .await
+            .unwrap();
+            source_manager.start_source(id.to_string()).await.unwrap();
+            wait_for_component_status(
+                &mut event_rx,
+                id,
+                ComponentStatus::Running,
+                Duration::from_secs(5),
+            )
+            .await;
+        }
+        let mut config =
+            create_query_config("excluded-query", vec!["first".into(), "second".into()]);
+        config.query = "MATCH (a:Start)-[:R*2]->(b:End) RETURN b".into();
+        config.sources[1].nodes = vec!["Foreign".into()];
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("excluded-query".into())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "excluded-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let source = source_manager.get_source_instance("first").await.unwrap();
+        let source = source
+            .as_any()
+            .downcast_ref::<CheckpointTestSource>()
+            .unwrap();
+        let query = query_manager
+            .get_query_instance("excluded-query")
+            .await
+            .unwrap();
+        let checkpoints = query
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .unwrap()
+            .get_checkpoint_store()
+            .await
+            .unwrap();
+        let position = Bytes::from_static(b"excluded-position");
+        source
+            .inject_change_with_position(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new("second", "foreign"),
+                            labels: Arc::new([Arc::from("Foreign")]),
+                            effective_from: 1,
+                        },
+                        properties: ElementPropertyMap::new(),
+                    },
+                },
+                Some(position.clone()),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source.get_position_handle_value() != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let checkpoint = checkpoints.read_checkpoint("first").await.unwrap().unwrap();
+        assert_eq!(checkpoint.sequence, 1);
+        assert_eq!(checkpoint.source_position, Some(position));
+        assert!(checkpoints
+            .read_checkpoint("second")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(query_manager
+            .get_query_results("excluded-query")
+            .await
+            .unwrap()
+            .is_empty());
+        query_manager
+            .stop_query("excluded-query".into())
+            .await
+            .unwrap();
+        for id in ["first", "second"] {
+            source_manager.stop_source(id.to_string()).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_source_change_stops_before_the_next_checkpoint() {
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        };
+        use std::time::Duration;
+
+        let (query_manager, source_manager, graph) = create_test_env().await;
+        let mut event_rx = graph.read().await.subscribe();
+        add_source(
+            &source_manager,
+            &graph,
+            CheckpointTestSource::new("source")
+                .unwrap()
+                .with_position_handle(),
+        )
+        .await
+        .unwrap();
+        source_manager.start_source("source".into()).await.unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "source",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+        let mut config = create_query_config("failed-query", vec!["source".into()]);
+        config.query = "MATCH (a:Start)-[:R*1]->(b:End) RETURN 1 / b.divisor AS value".into();
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("failed-query".into())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "failed-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+        let source = source_manager.get_source_instance("source").await.unwrap();
+        let source = source
+            .as_any()
+            .downcast_ref::<CheckpointTestSource>()
+            .unwrap();
+        let query = query_manager
+            .get_query_instance("failed-query")
+            .await
+            .unwrap();
+        let checkpoints = query
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .unwrap()
+            .get_checkpoint_store()
+            .await
+            .unwrap();
+        let metadata = |id, label| ElementMetadata {
+            reference: ElementReference::new("source", id),
+            labels: Arc::new([Arc::from(label)]),
+            effective_from: 1,
+        };
+        for (id, label) in [("a", "Start"), ("b", "End")] {
+            source
+                .inject_change_with_position(
+                    SourceChange::Insert {
+                        element: Element::Node {
+                            metadata: metadata(id, label),
+                            properties: ElementPropertyMap::from(serde_json::json!({"divisor": 0})),
+                        },
+                    },
+                    Some(Bytes::from_static(b"before-failure")),
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source.get_position_handle_value() != 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        for change in [
+            SourceChange::Insert {
+                element: Element::Relation {
+                    metadata: metadata("edge", "R"),
+                    in_node: ElementReference::new("source", "a"),
+                    out_node: ElementReference::new("source", "b"),
+                    properties: ElementPropertyMap::new(),
+                },
+            },
+            SourceChange::Update {
+                element: Element::Node {
+                    metadata: metadata("b", "End"),
+                    properties: ElementPropertyMap::from(serde_json::json!({"divisor": 1})),
+                },
+            },
+        ] {
+            source
+                .inject_change_with_position(change, Some(Bytes::from_static(b"after-failure")))
+                .await
+                .unwrap();
+        }
+        wait_for_component_status(
+            &mut event_rx,
+            "failed-query",
+            ComponentStatus::Error,
+            Duration::from_secs(5),
+        )
+        .await;
+        let checkpoint = checkpoints
+            .read_checkpoint("source")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.sequence, 2);
+        assert_eq!(
+            checkpoint.source_position,
+            Some(Bytes::from_static(b"before-failure"))
+        );
+        assert_eq!(source.get_position_handle_value(), 2);
+        query_manager
+            .start_query("failed-query".into())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "failed-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(query.subscription_count().await, 2);
+        assert_eq!(*source.released_query_ids.read().await, ["failed-query"]);
+        for element in [
+            Element::Node {
+                metadata: metadata("a", "Start"),
+                properties: ElementPropertyMap::new(),
+            },
+            Element::Relation {
+                metadata: metadata("edge", "R"),
+                in_node: ElementReference::new("source", "a"),
+                out_node: ElementReference::new("source", "b"),
+                properties: ElementPropertyMap::new(),
+            },
+        ] {
+            source
+                .inject_change_with_position(SourceChange::Insert { element }, None)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source.get_position_handle_value() != 6 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let runtime = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        assert!(
+            runtime.get_current_results().await.is_empty(),
+            "The queued pre-restart update must not reach the new graph"
+        );
+        source
+            .inject_change_with_position(
+                SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: metadata("b", "End"),
+                        properties: ElementPropertyMap::from(serde_json::json!({"divisor": 1})),
+                    },
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source.get_position_handle_value() != 7 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            runtime.get_current_results().await,
+            vec![serde_json::json!({"value": 1.0})]
+        );
+        query_manager
+            .teardown_query("failed-query".into())
+            .await
+            .unwrap();
+        assert_eq!(query.subscription_count().await, 0);
+        assert_eq!(
+            *source.released_query_ids.read().await,
+            ["failed-query", "failed-query"]
+        );
+        source_manager.stop_source("source".into()).await.unwrap();
+    }
+
     /// Test that the position handle (AtomicU64) is updated with the correct
     /// sequence number after successful checkpoint persistence.
     #[tokio::test]
@@ -1410,6 +1725,21 @@ mod tests {
         async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_config_hash().await
         }
+
+        async fn write_result_sequence(
+            &self,
+            query_id: &str,
+            sequence: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner.write_result_sequence(query_id, sequence).await
+        }
+
+        async fn read_result_sequence(
+            &self,
+            query_id: &str,
+        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+            self.inner.read_result_sequence(query_id).await
+        }
     }
 
     /// Mock persistent plugin that gives each query its own
@@ -1418,12 +1748,16 @@ mod tests {
     /// persistent storage), while different queries are isolated.
     struct MockPersistentPlugin {
         stores: RwLock<std::collections::HashMap<String, Arc<PersistentInMemoryCheckpointStore>>>,
+        snapshots: Arc<
+            drasi_core::in_memory_index::in_memory_live_results_writer::InMemoryLiveResultsWriter,
+        >,
     }
 
     impl MockPersistentPlugin {
         fn new() -> Self {
             Self {
                 stores: RwLock::new(std::collections::HashMap::new()),
+                snapshots: Arc::new(drasi_core::in_memory_index::in_memory_live_results_writer::InMemoryLiveResultsWriter::new()),
             }
         }
     }
@@ -1457,7 +1791,7 @@ mod tests {
                     session_control: Arc::new(NoOpSessionControl),
                 },
                 checkpoint_store: Some(checkpoint_store),
-                live_results_writer: None,
+                live_results_writer: Some(self.snapshots.clone()),
                 outbox_writer: None,
             })
         }
@@ -1644,6 +1978,17 @@ mod tests {
             "Checkpoint should exist after processing event"
         );
         let cp_seq_before = cp.unwrap().sequence;
+        let output_before = query_instance
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .unwrap()
+            .get_current_results()
+            .await;
+        assert!(!output_before.is_empty());
+        assert_eq!(
+            cp_store.read_result_sequence("hash-query").await.unwrap(),
+            Some(1)
+        );
 
         // Stop query
         query_manager
@@ -1703,6 +2048,19 @@ mod tests {
         assert_eq!(
             cp.sequence, cp_seq_before,
             "Checkpoint sequence should be preserved"
+        );
+        assert_eq!(
+            cp_store.read_result_sequence("hash-query").await.unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            query_instance
+                .as_any()
+                .downcast_ref::<DrasiQuery>()
+                .unwrap()
+                .get_current_results()
+                .await,
+            output_before,
         );
     }
 
@@ -2296,10 +2654,8 @@ mod tests {
         (query_manager, source_manager, graph)
     }
 
-    /// Test: when read_config_hash() fails, the query should still start
-    /// (falling through to full bootstrap) and NOT use stale checkpoints.
     #[tokio::test]
-    async fn test_config_hash_read_failure_falls_through() {
+    async fn test_config_hash_read_failure_preserves_state_and_stops() {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
@@ -2328,29 +2684,29 @@ mod tests {
         // Make read_config_hash fail
         store.set_fail_read_config_hash(true);
 
-        // Start query — should handle the error gracefully
         let config = create_persistent_query_config("fail-query", vec!["fail-src".to_string()]);
         add_query(&query_manager, &graph, config).await.unwrap();
-        query_manager
+        let error = query_manager
             .start_query("fail-query".to_string())
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("injected read_config_hash failure"));
         wait_for_component_status(
             &mut event_rx,
             "fail-query",
-            ComponentStatus::Running,
+            ComponentStatus::Error,
             std::time::Duration::from_secs(5),
         )
         .await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // After startup, the stale checkpoint should have been cleared
-        // (because hash read failure triggers clear_checkpoints)
-        let cp = store.read_checkpoint("fail-src").await.unwrap();
-        assert!(
-            cp.is_none(),
-            "Stale checkpoint should be cleared after config hash read failure"
-        );
+        let cp = store.read_checkpoint("fail-src").await.unwrap().unwrap();
+        assert_eq!(cp.sequence, 42);
+        store.set_fail_read_config_hash(false);
+        assert_eq!(store.read_config_hash().await.unwrap(), Some(12345));
+        query_manager
+            .teardown_query("fail-query".into())
+            .await
+            .unwrap();
+        source_manager.stop_source("fail-src".into()).await.unwrap();
     }
 
     /// Test: when clear_checkpoints() fails on config hash mismatch,
@@ -2427,6 +2783,7 @@ mod orchestration_tests {
 
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::queries::manager::DrasiQuery;
     use crate::recovery::RecoveryPolicy;
     use crate::sources::base::{SourceBase, SourceBaseParams};
     use crate::sources::Source;
@@ -3108,6 +3465,24 @@ mod orchestration_tests {
             std::time::Duration::from_secs(5),
         )
         .await;
+        let query_instance = query_manager
+            .get_query_instance("reset-query")
+            .await
+            .unwrap();
+        let hash = query_instance
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .unwrap()
+            .get_checkpoint_store()
+            .await
+            .expect("Should have checkpoint store")
+            .read_config_hash()
+            .await
+            .unwrap();
+        assert!(
+            hash.is_some(),
+            "Config hash should be written only after AutoReset bootstrap completes"
+        );
         query_manager
             .stop_query("reset-query".to_string())
             .await

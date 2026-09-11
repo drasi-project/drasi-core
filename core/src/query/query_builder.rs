@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use drasi_query_ast::api::QueryParser;
 
@@ -21,7 +24,13 @@ use crate::{
         functions::{
             future::RegisterFutureFunctions, past::RegisterPastFunctions, FunctionRegistry,
         },
-        ExpressionEvaluator, QueryPartEvaluator,
+        temporal::{
+            result_index::{consume_empty_store_marker, ResultTemporalIndex},
+            runtime::{
+                program::TemporalProgram, startup::open_namespace, TemporalRuntime, TemporalStartup,
+            },
+        },
+        EvaluationError, ExpressionEvaluator, QueryPartEvaluator,
     },
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
@@ -29,18 +38,23 @@ use crate::{
     },
     index_cache::shadowed_future_queue::ShadowedFutureQueue,
     interface::{
-        ElementArchiveIndex, ElementIndex, FutureQueue, MiddlewareSetupError, NoOpSessionControl,
-        QueryBuilderError, ResultIndex, SessionControl,
+        ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, MiddlewareSetupError,
+        NoOpSessionControl, QueryBuilderError, ResultIndex, SessionControl, TemporalIndex,
     },
     middleware::{
         MiddlewareContainer, MiddlewareTypeRegistry, SourceMiddlewarePipeline,
         SourceMiddlewarePipelineCollection,
     },
     models::{QueryJoin, SourceMiddlewareConfig},
-    path_solver::{match_path::MatchPath, MatchPathSolver},
+    path_solver::{
+        match_path::MatchPath, variable_length::VariableLengthMatchPlan, MatchPathSolver,
+    },
 };
 
-use super::ContinuousQuery;
+use super::{
+    continuous_query::{FixedMatcher, Matcher},
+    ContinuousQuery, VariableLengthMatchLimits,
+};
 
 pub struct QueryBuilder {
     function_registry: Option<Arc<FunctionRegistry>>,
@@ -49,12 +63,15 @@ pub struct QueryBuilder {
     archive_index: Option<Arc<dyn ElementArchiveIndex>>,
     result_index: Option<Arc<dyn ResultIndex>>,
     future_queue: Option<Arc<dyn FutureQueue>>,
+    temporal_index: Option<Arc<dyn TemporalIndex>>,
+    temporal_startup: Option<TemporalStartup>,
     part_evaluator: Option<Arc<QueryPartEvaluator>>,
     joins: Vec<Arc<QueryJoin>>,
     middleware_registry: Option<Arc<MiddlewareTypeRegistry>>,
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
     source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
     session_control: Option<Arc<dyn SessionControl>>,
+    variable_length_limits: VariableLengthMatchLimits,
 
     query_source: String,
     query_parser: Arc<dyn QueryParser>,
@@ -69,12 +86,15 @@ impl QueryBuilder {
             archive_index: None,
             result_index: None,
             future_queue: None,
+            temporal_index: None,
+            temporal_startup: None,
             part_evaluator: None,
             joins: Vec::new(),
             middleware_registry: None,
             source_middleware: Vec::new(),
             source_pipelines: HashMap::new(),
             session_control: None,
+            variable_length_limits: VariableLengthMatchLimits::default(),
             query_source: query.into(),
             query_parser: parser,
         }
@@ -140,8 +160,25 @@ impl QueryBuilder {
         self
     }
 
+    pub fn with_temporal_index(mut self, temporal_index: Arc<dyn TemporalIndex>) -> Self {
+        self.temporal_index = Some(temporal_index);
+        self
+    }
+
+    /// Select Create only for fresh indexes or an explicit, coordinated history reset.
+    pub fn with_temporal_startup(mut self, startup: TemporalStartup) -> Self {
+        self.temporal_startup = Some(startup);
+        self
+    }
+
     pub fn with_session_control(mut self, sc: Arc<dyn SessionControl>) -> Self {
         self.session_control = Some(sc);
+        self
+    }
+
+    /// Configure bounded variable-length MATCH preparation. A limit error occurs before graph writes.
+    pub fn with_variable_length_match_limits(mut self, limits: VariableLengthMatchLimits) -> Self {
+        self.variable_length_limits = limits;
         self
     }
 
@@ -154,14 +191,34 @@ impl QueryBuilder {
     }
 
     pub async fn try_build(mut self) -> Result<ContinuousQuery, QueryBuilderError> {
+        let injected_indexes = self.element_index.is_some()
+            || self.result_index.is_some()
+            || self.future_queue.is_some()
+            || self.temporal_index.is_some();
         let function_registry = match self.function_registry.take() {
             Some(registry) => registry,
             None => Arc::new(FunctionRegistry::new()),
         };
 
-        let query = self.query_parser.parse(self.query_source.as_str())?;
-
-        let match_path = Arc::new(MatchPath::from_query(&query.parts[0])?);
+        let parsed = self.query_parser.parse_scoped(self.query_source.as_str())?;
+        let variable_length_plan = VariableLengthMatchPlan::compile(
+            &parsed,
+            !self.joins.is_empty(),
+            !self.source_middleware.is_empty()
+                || self
+                    .source_pipelines
+                    .values()
+                    .any(|pipeline| !pipeline.is_empty()),
+            self.variable_length_limits,
+        )?;
+        let query = parsed.query;
+        let match_path = match &variable_length_plan {
+            Some(_) => MatchPath {
+                slots: Vec::new(),
+                optional_paths: HashSet::new(),
+            },
+            None => MatchPath::from_query(&query.parts[0])?,
+        };
 
         let element_index = match self.element_index.take() {
             Some(index) => index,
@@ -182,7 +239,14 @@ impl QueryBuilder {
             None => Arc::new(InMemoryFutureQueue::new()),
         };
 
-        let future_queue = Arc::new(ShadowedFutureQueue::new(future_queue));
+        let session_control = match self.session_control.take() {
+            Some(sc) => sc,
+            None => Arc::new(NoOpSessionControl),
+        };
+        let future_queue = Arc::new(ShadowedFutureQueue::new_with_session(
+            future_queue,
+            session_control.clone(),
+        ));
 
         let expr_evaluator = match self.expr_evaluator.take() {
             Some(evaluator) => evaluator,
@@ -200,13 +264,13 @@ impl QueryBuilder {
             )),
         };
 
-        let path_solver = Arc::new(MatchPathSolver::new(element_index.clone()));
-
         function_registry.register_future_functions(
             future_queue.clone(),
             result_index.clone(),
-            Arc::downgrade(&expr_evaluator.clone()),
+            Arc::downgrade(&expr_evaluator),
         );
+
+        let temporal_program = TemporalProgram::compile(&query, &function_registry)?;
 
         let source_pipelines: SourceMiddlewarePipelineCollection = {
             if self.source_middleware.is_empty() {
@@ -229,23 +293,63 @@ impl QueryBuilder {
             }
         }?;
 
-        let session_control = match self.session_control.take() {
-            Some(sc) => sc,
-            None => Arc::new(NoOpSessionControl),
+        let fresh_store = if injected_indexes {
+            consume_empty_store_marker(result_index.clone(), session_control.clone())
+                .await
+                .map_err(EvaluationError::IndexError)?
+        } else {
+            true
+        };
+        let temporal = match temporal_program {
+            Some(program) => {
+                let index = self
+                    .temporal_index
+                    .take()
+                    .unwrap_or_else(|| Arc::new(ResultTemporalIndex::new(result_index.clone())));
+                let startup = match self.temporal_startup {
+                    Some(startup) => startup,
+                    None if fresh_store => TemporalStartup::Create,
+                    None => TemporalStartup::Reopen,
+                };
+                let namespace = open_namespace(
+                    index.as_ref(),
+                    session_control.clone(),
+                    startup,
+                    &self.query_source,
+                )
+                .await
+                .map_err(|error| EvaluationError::IndexError(IndexError::other(error)))?;
+                Some(TemporalRuntime::new(
+                    program,
+                    namespace,
+                    index,
+                    expr_evaluator.clone(),
+                    future_queue.clone(),
+                    function_registry.clone(),
+                ))
+            }
+            None => None,
         };
 
         element_index.set_joins(&match_path, &self.joins).await;
 
-        Ok(ContinuousQuery::new(
+        let matcher = match variable_length_plan {
+            Some(plan) => Matcher::VariableLength(plan),
+            None => Matcher::Fixed(FixedMatcher {
+                match_path: Arc::new(match_path),
+                path_solver: Arc::new(MatchPathSolver::new(element_index.clone())),
+            }),
+        };
+        Ok(ContinuousQuery::new_with_matcher(
             Arc::new(query),
-            match_path,
+            matcher,
             expr_evaluator,
             element_index,
-            path_solver,
             part_evaluator,
             future_queue,
             source_pipelines,
             session_control,
+            temporal,
         ))
     }
 }

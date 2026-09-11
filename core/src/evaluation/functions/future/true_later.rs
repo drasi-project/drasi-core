@@ -37,6 +37,10 @@ impl TrueLater {
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[async_trait]
 impl ScalarFunction for TrueLater {
+    fn effect(&self) -> super::super::FunctionEffect {
+        super::super::FunctionEffect::Temporal(super::super::TemporalFunction::TrueLater)
+    }
+
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,

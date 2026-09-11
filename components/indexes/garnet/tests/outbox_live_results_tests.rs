@@ -19,9 +19,14 @@
 //! Requires a running Redis instance. Uses testcontainers via `shared_tests::redis_helpers`.
 //! Tests are marked `#[ignore]` for CI environments without Docker.
 
-use drasi_core::interface::{LiveResultsWriter, OutboxWriter, RowMutation};
-use drasi_index_garnet::{GarnetLiveResultsWriter, GarnetOutboxWriter};
+use drasi_core::interface::{
+    LiveResultsWriter, OutboxWriter, RootOutcome, RowMutation, SessionGuard,
+};
+use drasi_index_garnet::{
+    GarnetLiveResultsWriter, GarnetOutboxWriter, GarnetSessionControl, GarnetSessionState,
+};
 use shared_tests::redis_helpers::{setup_redis, RedisGuard};
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -46,6 +51,135 @@ fn unique_query_id() -> String {
     format!("test-{}", Uuid::new_v4())
 }
 
+fn outbox_writer(
+    query_id: &str,
+    connection: redis::aio::MultiplexedConnection,
+) -> GarnetOutboxWriter {
+    let state = Arc::new(GarnetSessionState::new_for_query(
+        connection.clone(),
+        query_id,
+    ));
+    GarnetOutboxWriter::new_with_session(query_id, connection, state)
+}
+
+fn live_results_writer(
+    query_id: &str,
+    connection: redis::aio::MultiplexedConnection,
+) -> GarnetLiveResultsWriter {
+    let state = Arc::new(GarnetSessionState::new_for_query(
+        connection.clone(),
+        query_id,
+    ));
+    GarnetLiveResultsWriter::new_with_session(query_id, connection, state)
+}
+
+#[tokio::test]
+#[ignore]
+async fn root_live_results_commit_and_rollback_with_clear() {
+    let connection = get_connection().await;
+    let qid = unique_query_id();
+    let state = Arc::new(GarnetSessionState::new_for_query(connection.clone(), &qid));
+    let control = Arc::new(GarnetSessionControl::new(state.clone()));
+    let writer = GarnetLiveResultsWriter::new_with_session(&qid, connection, state);
+    let baseline = BTreeMap::from([(1, b"old".to_vec()), (2, b"keep".to_vec())]);
+    writer
+        .apply_mutations(
+            &qid,
+            &[
+                RowMutation {
+                    row_signature: 1,
+                    data: Some(b"old"),
+                },
+                RowMutation {
+                    row_signature: 2,
+                    data: Some(b"keep"),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let root = SessionGuard::begin(control.clone()).await.unwrap();
+    writer
+        .apply_mutations(
+            &qid,
+            &[
+                RowMutation {
+                    row_signature: 1,
+                    data: Some(b"new"),
+                },
+                RowMutation {
+                    row_signature: 2,
+                    data: None,
+                },
+                RowMutation {
+                    row_signature: 3,
+                    data: Some(b"tentative"),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        writer
+            .read_snapshot(&qid)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        baseline
+    );
+    assert_eq!(writer.row_count(&qid).await.unwrap(), 2);
+    assert_eq!(root.rollback().unwrap(), RootOutcome::RolledBack);
+    assert_eq!(
+        writer
+            .read_snapshot(&qid)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        baseline
+    );
+
+    let root = SessionGuard::begin(control).await.unwrap();
+    writer
+        .apply_mutations(
+            &qid,
+            &[RowMutation {
+                row_signature: 3,
+                data: Some(b"also cleared"),
+            }],
+        )
+        .await
+        .unwrap();
+    writer.clear(&qid).await.unwrap();
+    writer
+        .apply_mutations(
+            &qid,
+            &[RowMutation {
+                row_signature: 4,
+                data: Some(b"committed"),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        writer
+            .read_snapshot(&qid)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        baseline
+    );
+    root.commit().await.unwrap();
+    assert_eq!(
+        writer.read_snapshot(&qid).await.unwrap(),
+        vec![(4, b"committed".to_vec())]
+    );
+    assert_eq!(writer.row_count(&qid).await.unwrap(), 1);
+}
+
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -53,7 +187,7 @@ fn unique_query_id() -> String {
 async fn test_garnet_outbox_append_and_read() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetOutboxWriter::new(&qid, con);
+    let writer = outbox_writer(&qid, con);
 
     writer.append(&qid, 1, b"hello").await.unwrap();
     writer.append(&qid, 2, b"world").await.unwrap();
@@ -80,7 +214,7 @@ async fn test_garnet_outbox_append_and_read() {
 async fn test_garnet_outbox_read_latest_sequence() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetOutboxWriter::new(&qid, con);
+    let writer = outbox_writer(&qid, con);
 
     assert_eq!(writer.read_latest_sequence(&qid).await.unwrap(), None);
 
@@ -94,7 +228,7 @@ async fn test_garnet_outbox_read_latest_sequence() {
 async fn test_garnet_outbox_clear() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetOutboxWriter::new(&qid, con);
+    let writer = outbox_writer(&qid, con);
 
     writer.append(&qid, 1, b"data1").await.unwrap();
     writer.append(&qid, 2, b"data2").await.unwrap();
@@ -110,7 +244,7 @@ async fn test_garnet_outbox_clear() {
 async fn test_garnet_outbox_trim_to_capacity() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetOutboxWriter::new(&qid, con);
+    let writer = outbox_writer(&qid, con);
 
     for i in 1..=10 {
         writer.append(&qid, i, b"data").await.unwrap();
@@ -132,7 +266,7 @@ async fn test_garnet_outbox_trim_to_capacity() {
 async fn test_garnet_outbox_trim_no_op() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetOutboxWriter::new(&qid, con);
+    let writer = outbox_writer(&qid, con);
 
     writer.append(&qid, 1, b"data").await.unwrap();
     let removed = writer.trim_to_capacity(&qid, 5).await.unwrap();
@@ -145,8 +279,8 @@ async fn test_garnet_outbox_isolation_between_queries() {
     let con = get_connection().await;
     let qid1 = unique_query_id();
     let qid2 = unique_query_id();
-    let writer1 = GarnetOutboxWriter::new(&qid1, con.clone());
-    let writer2 = GarnetOutboxWriter::new(&qid2, con);
+    let writer1 = outbox_writer(&qid1, con.clone());
+    let writer2 = outbox_writer(&qid2, con);
 
     writer1.append(&qid1, 1, b"q1-data").await.unwrap();
     writer2.append(&qid2, 1, b"q2-data").await.unwrap();
@@ -163,7 +297,7 @@ async fn test_garnet_outbox_isolation_between_queries() {
 async fn test_garnet_live_results_apply_upserts() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetLiveResultsWriter::new(&qid, con);
+    let writer = live_results_writer(&qid, con);
 
     let mutations = vec![
         RowMutation {
@@ -187,7 +321,7 @@ async fn test_garnet_live_results_apply_upserts() {
 async fn test_garnet_live_results_apply_delete() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetLiveResultsWriter::new(&qid, con);
+    let writer = live_results_writer(&qid, con);
 
     writer
         .apply_mutations(
@@ -219,7 +353,7 @@ async fn test_garnet_live_results_apply_delete() {
 async fn test_garnet_live_results_upsert_overwrites() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetLiveResultsWriter::new(&qid, con);
+    let writer = live_results_writer(&qid, con);
 
     writer
         .apply_mutations(
@@ -252,7 +386,7 @@ async fn test_garnet_live_results_upsert_overwrites() {
 async fn test_garnet_live_results_clear() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetLiveResultsWriter::new(&qid, con);
+    let writer = live_results_writer(&qid, con);
 
     writer
         .apply_mutations(
@@ -275,8 +409,8 @@ async fn test_garnet_live_results_isolation_between_queries() {
     let con = get_connection().await;
     let qid1 = unique_query_id();
     let qid2 = unique_query_id();
-    let writer1 = GarnetLiveResultsWriter::new(&qid1, con.clone());
-    let writer2 = GarnetLiveResultsWriter::new(&qid2, con);
+    let writer1 = live_results_writer(&qid1, con.clone());
+    let writer2 = live_results_writer(&qid2, con);
 
     writer1
         .apply_mutations(
@@ -309,7 +443,7 @@ async fn test_garnet_live_results_isolation_between_queries() {
 async fn test_garnet_live_results_atomic_batch() {
     let con = get_connection().await;
     let qid = unique_query_id();
-    let writer = GarnetLiveResultsWriter::new(&qid, con);
+    let writer = live_results_writer(&qid, con);
 
     // Insert 3 rows
     writer

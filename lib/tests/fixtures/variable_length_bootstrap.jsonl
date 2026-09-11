@@ -1,0 +1,12 @@
+{"kind":"Header","start_time":"2026-01-01T00:00:00Z"}
+{"kind":"Node","id":"a","labels":["Start"],"properties":{"id":"a"}}
+{"kind":"Node","id":"middle","labels":["Transit"],"properties":{"id":"middle"}}
+{"kind":"Node","id":"b","labels":["End"],"properties":{"id":"b"}}
+{"kind":"Node","id":"c","labels":["Start"],"properties":{"id":"c"}}
+{"kind":"Node","id":"foreign","labels":["Foreign"],"properties":{"id":"foreign"}}
+{"kind":"Node","id":"d","labels":["End"],"properties":{"id":"d"}}
+{"kind":"Relation","id":"am","labels":["R"],"start_id":"a","end_id":"middle","properties":{}}
+{"kind":"Relation","id":"mb","labels":["R"],"start_id":"middle","end_id":"b","properties":{}}
+{"kind":"Relation","id":"cf","labels":["R"],"start_id":"c","end_id":"foreign","properties":{}}
+{"kind":"Relation","id":"fd","labels":["R"],"start_id":"foreign","end_id":"d","properties":{}}
+{"kind":"Finish"}

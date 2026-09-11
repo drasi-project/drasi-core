@@ -80,7 +80,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
         owner: &ResultOwner,
     ) -> Result<Option<ValueAccumulator>, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
+        let session_state = self.session_state.operation()?;
         let set_id = get_hash_key(owner, key);
 
         let task = task::spawn_blocking(move || {
@@ -120,7 +120,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
         value: Option<ValueAccumulator>,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
+        let session_state = self.session_state.operation()?;
         let set_id = get_hash_key(&owner, &key);
 
         let task = task::spawn_blocking(move || {
@@ -148,30 +148,33 @@ impl AccumulatorIndex for RocksDbResultIndex {
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
         let options = self.options.clone();
+        let session = self.session_state.operation()?;
         let task = task::spawn_blocking(move || {
-            let block_cache = options.memory_budget().block_cache();
-            if let Err(err) = db.drop_cf(VALUES_CF) {
-                return Err(IndexError::other(err));
-            }
+            session.clear_ranges_or(&[(VALUES_CF, &[]), (SETS_CF, &[])], &[], |_| {
+                let block_cache = options.memory_budget().block_cache();
+                if let Err(err) = db.drop_cf(VALUES_CF) {
+                    return Err(IndexError::other(err));
+                }
 
-            if let Err(err) = db.create_cf(
-                VALUES_CF,
-                &crate::sizing::sized(VALUES_CF, get_value_cf_options(block_cache), &options),
-            ) {
-                return Err(IndexError::other(err));
-            }
+                if let Err(err) = db.create_cf(
+                    VALUES_CF,
+                    &crate::sizing::sized(VALUES_CF, get_value_cf_options(block_cache), &options),
+                ) {
+                    return Err(IndexError::other(err));
+                }
 
-            if let Err(err) = db.drop_cf(SETS_CF) {
-                return Err(IndexError::other(err));
-            }
+                if let Err(err) = db.drop_cf(SETS_CF) {
+                    return Err(IndexError::other(err));
+                }
 
-            if let Err(err) = db.create_cf(
-                SETS_CF,
-                &crate::sizing::sized(SETS_CF, get_lss_cf_options(block_cache), &options),
-            ) {
-                return Err(IndexError::other(err));
-            }
-            Ok(())
+                if let Err(err) = db.create_cf(
+                    SETS_CF,
+                    &crate::sizing::sized(SETS_CF, get_lss_cf_options(block_cache), &options),
+                ) {
+                    return Err(IndexError::other(err));
+                }
+                Ok(())
+            })
         });
 
         match task.await {
@@ -190,7 +193,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         value: Option<OrderedFloat<f64>>,
     ) -> Result<Option<(OrderedFloat<f64>, isize)>, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
+        let session_state = self.session_state.operation()?;
 
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
@@ -257,7 +260,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         value: OrderedFloat<f64>,
     ) -> Result<isize, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
+        let session_state = self.session_state.operation()?;
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let key = encode_set_value_key(set_id, value);
@@ -286,7 +289,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
         delta: isize,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
+        let session_state = self.session_state.operation()?;
 
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
@@ -315,7 +318,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
         source_change_id: &str,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
+        let session_state = self.session_state.operation()?;
         let source_change_id = source_change_id.to_string();
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
@@ -340,7 +343,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
 
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
+        let session_state = self.session_state.operation()?;
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
 

@@ -17,8 +17,7 @@
 //! Uses a dedicated `live_results` column family with keys formatted as:
 //! `{query_id}\x00{row_signature_u64_be}` (8-byte big-endian suffix).
 //!
-//! Writes are standalone (not part of the session transaction) since live results
-//! persistence happens after the index transaction commits.
+//! Mutations inside an active root commit with its graph, checkpoint and outbox.
 
 use std::sync::Arc;
 
@@ -69,14 +68,23 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// RocksDB-backed live results writer.
 ///
 /// Stores serialized row data keyed by `(query_id, row_signature)`.
-/// Uses WriteBatch for atomic multi-row mutations.
+/// Uses the active session transaction, or a standalone atomic write batch.
 pub struct RocksDbLiveResultsWriter {
     db: Arc<IndexDb>,
+    session_state: Arc<crate::RocksDbSessionState>,
 }
 
 impl RocksDbLiveResultsWriter {
     pub fn new(db: Arc<IndexDb>) -> Self {
-        Self { db }
+        let session_state = Arc::new(crate::RocksDbSessionState::new(db.clone()));
+        Self::new_with_session(db, session_state)
+    }
+
+    pub fn new_with_session(
+        db: Arc<IndexDb>,
+        session_state: Arc<crate::RocksDbSessionState>,
+    ) -> Self {
+        Self { db, session_state }
     }
 }
 
@@ -88,6 +96,7 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session = self.session_state.operation()?;
         // Collect owned mutation data for the blocking task
         let owned_mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = mutations
             .iter()
@@ -103,14 +112,28 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
                 .cf_handle(LIVE_RESULTS_CF)
                 .expect("live_results cf not found");
 
-            let mut batch = WriteBatchWithTransaction::<true>::default();
-            for (key, data) in &owned_mutations {
-                match data {
-                    Some(value) => batch.put_cf(&cf, key, value),
-                    None => batch.delete_cf(&cf, key),
-                }
-            }
-            db.write(batch).map_err(IndexError::other)
+            session.with_txn_or_db(
+                |txn| {
+                    for (key, data) in &owned_mutations {
+                        match data {
+                            Some(value) => txn.put_cf(&cf, key, value),
+                            None => txn.delete_cf(&cf, key),
+                        }
+                        .map_err(IndexError::other)?;
+                    }
+                    Ok(())
+                },
+                |db| {
+                    let mut batch = WriteBatchWithTransaction::<true>::default();
+                    for (key, data) in &owned_mutations {
+                        match data {
+                            Some(value) => batch.put_cf(&cf, key, value),
+                            None => batch.delete_cf(&cf, key),
+                        }
+                    }
+                    db.write(batch).map_err(IndexError::other)
+                },
+            )
         })
         .await
         .map_err(IndexError::other)?
@@ -150,34 +173,12 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        let db = self.db.clone();
+        let session = self.session_state.operation()?;
         let prefix = make_prefix(query_id);
 
-        task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(LIVE_RESULTS_CF)
-                .expect("live_results cf not found");
-            let iter = db.iterator_cf(
-                &cf,
-                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-
-            let mut batch = WriteBatchWithTransaction::<true>::default();
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        batch.delete_cf(&cf, &key);
-                    }
-                    Err(e) => return Err(IndexError::other(e)),
-                }
-            }
-            db.write(batch).map_err(IndexError::other)
-        })
-        .await
-        .map_err(IndexError::other)?
+        task::spawn_blocking(move || session.clear_ranges(&[(LIVE_RESULTS_CF, &prefix)], &[]))
+            .await
+            .map_err(IndexError::other)?
     }
 
     async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {

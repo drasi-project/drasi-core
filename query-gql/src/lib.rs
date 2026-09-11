@@ -361,13 +361,19 @@ peg::parser! {
 
         // e.g. '-', '<-', '-[ name:KIND ]-', '<-[name]-'
         rule relation() -> RelationMatch
-            =  "-[" _* element:element_match() _* vl:variable_length()? _* "]->" {
+            =  "-[" _* element:element_match() _* vl:variable_length()? _* p:property_map_predicate()? _* "]->" {
+                let mut element = element;
+                element.2.extend(p.unwrap_or_default());
                 RelationMatch::right(element.0, element.1, element.2, vl)
             }
-            /  "-[" _* element:element_match() _* vl:variable_length()? _* "]-"  {
+            /  "-[" _* element:element_match() _* vl:variable_length()? _* p:property_map_predicate()? _* "]-"  {
+                let mut element = element;
+                element.2.extend(p.unwrap_or_default());
                 RelationMatch::either(element.0, element.1, element.2, vl)
             }
-            / "<-[" _* element:element_match() _* vl:variable_length()? _* "]-"  {
+            / "<-[" _* element:element_match() _* vl:variable_length()? _* p:property_map_predicate()? _* "]-"  {
+                let mut element = element;
+                element.2.extend(p.unwrap_or_default());
                 RelationMatch::left(element.0, element.1, element.2, vl)
             }
             / "<-" { RelationMatch::left(Annotation::empty(), Vec::new(), Vec::new(), None) }
@@ -413,11 +419,11 @@ peg::parser! {
             = kw_group() __+ kw_by() __+ "(" __* ")" { Vec::new() }  // Handle GROUP BY ()
             / kw_group() __+ kw_by() __+ items:( expression() ++ (__* "," __*) ) { items }
 
-        rule match_with_where() -> (Vec<MatchClause>, Vec<Expression>)
+        rule match_with_where() -> (Vec<Vec<MatchClause>>, Vec<Expression>)
             = ms:(match_clause() ++ (__+)) __*
-            w:where_clause()? { (ms.into_iter().flatten().collect(), w.into_iter().collect()) }
+            w:where_clause()? { (ms, w.into_iter().collect()) }
 
-        rule part(config: &dyn QueryConfiguration) -> Vec<QueryPart>
+        rule part(config: &dyn QueryConfiguration) -> (Vec<QueryPart>, Vec<std::ops::Range<usize>>)
               = __*
                 match_and_where:(match_with_where() ** (__+))
                 statement_clauses:( __* s:statement_clause() __* { s } )*
@@ -425,17 +431,27 @@ peg::parser! {
                 __* group_by:group_by_clause()?
                 __*
                   {?
-                    build_query_parts(
-                        match_and_where,
+                    let mut offset = 0;
+                    let scopes = match_and_where.iter().flat_map(|(groups, _)| groups).map(|group| {
+                        let start = offset;
+                        offset += group.len();
+                        start..offset
+                    }).collect();
+                    let parts = build_query_parts(
+                        match_and_where.into_iter().map(|(groups, ws)| (groups.into_iter().flatten().collect(), ws)).collect(),
                         statement_clauses,
                         final_return,
                         group_by,
                         None,
                         config
-                    ).map_err(|e| e.as_peg_error())
+                    ).map_err(|e| e.as_peg_error())?;
+                    Ok((parts, scopes))
                   }
 
         pub rule query(config: &dyn QueryConfiguration) -> Query
+            = scoped:scoped_query(config) { scoped.query }
+
+        pub rule scoped_query(config: &dyn QueryConfiguration) -> drasi_query_ast::api::ScopedQuery
             = __*
                 first_parts:part(config)
                 next_segments:(
@@ -446,7 +462,7 @@ peg::parser! {
                     { (s, r, g) }
                 )*
                 __* {?
-                    let mut all_parts = first_parts;
+                    let (mut all_parts, scopes) = first_parts;
 
                     for (statements, return_expr, group_by) in next_segments {
                         let previous_projection = all_parts.last().map(|p| &p.return_clause);
@@ -469,7 +485,14 @@ peg::parser! {
                         all_parts.extend(next_parts);
                     }
 
-                    Ok(Query { parts: all_parts })
+                    let match_scopes = all_parts.iter().map(|part| {
+                        if part.match_clauses.is_empty() { Vec::new() } else { scopes.clone() }
+                    }).collect();
+                    Ok(drasi_query_ast::api::ScopedQuery {
+                        query: Query { parts: all_parts },
+                        match_scopes: Some(match_scopes),
+                        has_mutations: false,
+                    })
                 }
     }
 
@@ -677,7 +700,12 @@ fn get_starting_scope(match_clauses: &[MatchClause]) -> Vec<Expression> {
                 expressions.push(UnaryExpression::ident(name.as_ref()));
             }
         }
-        for (_rel, node) in &clause.path {
+        for (relation, node) in &clause.path {
+            if let Some(name) = &relation.annotation.name {
+                if seen.insert(name.clone()) {
+                    expressions.push(UnaryExpression::ident(name.as_ref()));
+                }
+            }
             if let Some(name) = &node.annotation.name {
                 if seen.insert(name.clone()) {
                     expressions.push(UnaryExpression::ident(name.as_ref()));
@@ -887,5 +915,13 @@ impl QueryParser for GQLParser {
             Ok(query) => Ok(query),
             Err(e) => Err(QueryParseError::ParserError(Box::new(e))),
         }
+    }
+
+    fn parse_scoped(
+        &self,
+        input: &str,
+    ) -> Result<drasi_query_ast::api::ScopedQuery, QueryParseError> {
+        gql::scoped_query(input, &*self.config)
+            .map_err(|e| QueryParseError::ParserError(Box::new(e)))
     }
 }

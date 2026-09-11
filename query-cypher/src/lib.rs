@@ -328,13 +328,19 @@ peg::parser! {
 
         // e.g. '-', '<-', '-[ name:KIND ]-', '<-[name]-'
         rule relation() -> RelationMatch
-            =  "-[" _* element:element_match() _* vl:variable_length()? _* "]->" {
+            =  "-[" _* element:element_match() _* vl:variable_length()? _* p:property_map_predicate()? _* "]->" {
+                let mut element = element;
+                element.2.extend(p.unwrap_or_default());
                 RelationMatch::right(element.0, element.1, element.2, vl)
             }
-            /  "-[" _* element:element_match() _* vl:variable_length()? _* "]-"  {
+            /  "-[" _* element:element_match() _* vl:variable_length()? _* p:property_map_predicate()? _* "]-"  {
+                let mut element = element;
+                element.2.extend(p.unwrap_or_default());
                 RelationMatch::either(element.0, element.1, element.2, vl)
             }
-            / "<-[" _* element:element_match() _* vl:variable_length()? _* "]-"  {
+            / "<-[" _* element:element_match() _* vl:variable_length()? _* p:property_map_predicate()? _* "]-"  {
+                let mut element = element;
+                element.2.extend(p.unwrap_or_default());
                 RelationMatch::left(element.0, element.1, element.2, vl)
             }
             / "<-" { RelationMatch::left(Annotation::empty(), Vec::new(), Vec::new(), None) }
@@ -393,27 +399,38 @@ peg::parser! {
             = w:with_clause() { w }
             / r:return_clause() { r }
 
-        rule part(config: &dyn QueryConfiguration) -> QueryPart
-            = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_else(Vec::new).into_iter().flatten().collect() } )
+        rule part(config: &dyn QueryConfiguration) -> (QueryPart, Vec<std::ops::Range<usize>>, bool)
+            = match_groups:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_else(Vec::new) } )
                 where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_else(Vec::new) } )
                 //create_clauses:( __* c:(create_clause() ** (__+) )? { c.unwrap_or_else(Vec::new) } )
                 set_clauses:( __* s:(set_clause() ** (__+) )? { s.unwrap_or_else(Vec::new) } )
                 delete_clauses:( __* d:(delete_clause() ** (__+) )? { d.unwrap_or_else(Vec::new) } )
-                return_clause:( with_or_return() )
+                __* return_clause:( with_or_return() )
                 {
-                    QueryPart {
-                        match_clauses,
+                    let mut offset = 0;
+                    let scopes = match_groups.iter().map(|group| {
+                        let start = offset;
+                        offset += group.len();
+                        start..offset
+                    }).collect();
+                    (QueryPart {
+                        match_clauses: match_groups.into_iter().flatten().collect(),
                         where_clauses,
                         return_clause: return_clause.into_projection_clause(config),
-                    }
+                    }, scopes, !set_clauses.is_empty() || !delete_clauses.is_empty())
                 }
 
         pub rule query(config: &dyn QueryConfiguration) -> Query
+            = scoped:scoped_query(config) { scoped.query }
+
+        pub rule scoped_query(config: &dyn QueryConfiguration) -> drasi_query_ast::api::ScopedQuery
             = __*
               parts:(w:( part(config)+ ) { w } )
               __* {
-                Query {
-                    parts,
+                drasi_query_ast::api::ScopedQuery {
+                    has_mutations: parts.iter().any(|p| p.2),
+                    match_scopes: Some(parts.iter().map(|p| p.1.clone()).collect()),
+                    query: Query { parts: parts.into_iter().map(|p| p.0).collect() },
                 }
             }
     }
@@ -496,5 +513,13 @@ impl QueryParser for CypherParser {
             Ok(query) => Ok(query),
             Err(e) => Err(QueryParseError::ParserError(Box::new(e))),
         }
+    }
+
+    fn parse_scoped(
+        &self,
+        input: &str,
+    ) -> Result<drasi_query_ast::api::ScopedQuery, QueryParseError> {
+        cypher::scoped_query(input, &*self.config)
+            .map_err(|e| QueryParseError::ParserError(Box::new(e)))
     }
 }

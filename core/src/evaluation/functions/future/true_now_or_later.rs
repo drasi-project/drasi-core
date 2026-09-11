@@ -37,6 +37,10 @@ impl TrueNowOrLater {
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 #[async_trait]
 impl ScalarFunction for TrueNowOrLater {
+    fn effect(&self) -> super::super::FunctionEffect {
+        super::super::FunctionEffect::Temporal(super::super::TemporalFunction::TrueNowOrLater)
+    }
+
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,

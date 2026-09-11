@@ -22,6 +22,7 @@ mod query_clock;
 mod result_index;
 mod session_control;
 mod source_middleware;
+mod temporal_index;
 
 use std::error::Error;
 use std::fmt::Display;
@@ -54,10 +55,15 @@ pub use result_index::ResultSequenceCounter;
 pub use session_control::NoOpSessionControl;
 pub use session_control::SessionControl;
 pub use session_control::SessionGuard;
+pub use session_control::{
+    session_tracker, CacheGeneration, ChildSession, CommitReceipt, Provisional, RollbackSupport,
+    RootHandle, RootId, RootOutcome, SessionError, SessionTracker,
+};
 pub use source_middleware::MiddlewareError;
 pub use source_middleware::MiddlewareSetupError;
 pub use source_middleware::SourceMiddleware;
 pub use source_middleware::SourceMiddlewareFactory;
+pub use temporal_index::TemporalIndex;
 use thiserror::Error;
 
 use crate::evaluation::EvaluationError;
@@ -118,6 +124,13 @@ impl Error for IndexError {
 }
 
 impl IndexError {
+    pub fn session_error(&self) -> Option<SessionError> {
+        match self {
+            Self::Other(error) => error.downcast_ref::<SessionError>().copied(),
+            _ => None,
+        }
+    }
+
     pub fn other<E: std::error::Error + Send + Sync + 'static>(e: E) -> Self {
         IndexError::Other(Box::new(e))
     }

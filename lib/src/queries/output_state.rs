@@ -89,6 +89,41 @@ impl QueryOutputState {
         }
     }
 
+    pub(super) fn from_persisted(
+        rows: Vec<(u64, serde_json::Value)>,
+        sequence: u64,
+        outbox: Vec<QueryResult>,
+        capacity: usize,
+    ) -> anyhow::Result<Self> {
+        let mut state = Self::new(capacity);
+        for (signature, value) in rows {
+            anyhow::ensure!(
+                state.results.insert(signature, value).is_none(),
+                "Persisted snapshot contains duplicate row signatures"
+            );
+        }
+        let mut previous: Option<u64> = None;
+        for result in outbox {
+            anyhow::ensure!(
+                result.sequence > 0
+                    && result.sequence <= sequence
+                    && previous.map_or(true, |last| last.checked_add(1) == Some(result.sequence)),
+                "Persisted outbox has an invalid result sequence"
+            );
+            previous = Some(result.sequence);
+            if state.outbox.len() >= state.outbox_capacity {
+                state.outbox.pop_front();
+            }
+            state.outbox.push_back(Arc::new(result));
+        }
+        anyhow::ensure!(
+            previous.map_or(true, |last| last == sequence),
+            "Persisted outbox and snapshot sequences disagree"
+        );
+        state.as_of_sequence = sequence;
+        Ok(state)
+    }
+
     /// Apply a set of result diffs to the live result set using O(1) HashMap operations.
     ///
     /// This does NOT increment the sequence or push to the outbox — that is done

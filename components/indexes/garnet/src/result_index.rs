@@ -33,7 +33,6 @@ use redis::{aio::MultiplexedConnection, AsyncCommands};
 use crate::{
     session_state::{BufferReadResult, GarnetSessionState},
     storage_models::StoredValueAccumulator,
-    ClearByPattern,
 };
 
 /// Redis key structure (hash-tagged for cluster compatibility):
@@ -53,6 +52,7 @@ impl GarnetResultIndex {
         connection: MultiplexedConnection,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
+        session_state.register_query(query_id);
         GarnetResultIndex {
             query_id: Arc::from(query_id),
             connection,
@@ -142,8 +142,8 @@ impl AccumulatorIndex for GarnetResultIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        self.connection
-            .clear(format!("ari:{{{}}}:*", self.query_id))
+        self.session_state
+            .clear(&[], &[format!("ari:{{{}}}:", self.query_id)])
             .await
     }
 }

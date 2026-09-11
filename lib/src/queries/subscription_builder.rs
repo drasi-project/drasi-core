@@ -13,19 +13,28 @@
 // limitations under the License.
 
 use anyhow::{bail, Result};
+use std::collections::HashMap;
 
 use crate::config::{QueryConfig, SourceSubscriptionConfig, SourceSubscriptionSettings};
 use crate::queries::QueryLabels;
+
+use super::source_selection::{LabelSelection, SourceSelection};
+
+#[derive(Debug)]
+pub struct SubscriptionPlan {
+    pub settings: Vec<SourceSubscriptionSettings>,
+    pub selections: HashMap<String, SourceSelection>,
+}
 
 /// Builder for creating SourceSubscriptionSettings from QueryConfig
 pub struct SubscriptionSettingsBuilder;
 
 impl SubscriptionSettingsBuilder {
-    /// Build subscription settings for each source based on query config and extracted labels
-    pub fn build_subscription_settings(
+    /// Build bootstrap requests and exact per-query event selections.
+    pub fn build_subscriptions(
         query_config: &QueryConfig,
         query_labels: &QueryLabels,
-    ) -> Result<Vec<SourceSubscriptionSettings>> {
+    ) -> Result<SubscriptionPlan> {
         // Create a Vec of SourceSubscriptionSettings, one for each unique SourceSubscriptionConfig
         let mut settings_vec: Vec<SourceSubscriptionSettings> = query_config
             .sources
@@ -53,7 +62,97 @@ impl SubscriptionSettingsBuilder {
             &query_config.joins,
         )?;
 
-        Ok(settings_vec)
+        let node_owners = if query_labels.all_node_labels {
+            Some(Self::label_owners(
+                &query_config.sources,
+                |source| &source.nodes,
+                "Node",
+            )?)
+        } else {
+            None
+        };
+        let relation_owners = if query_labels.all_relation_labels {
+            Some(Self::label_owners(
+                &query_config.sources,
+                |source| &source.relations,
+                "Relation",
+            )?)
+        } else {
+            None
+        };
+        let mut selections = HashMap::new();
+        for (settings, source) in settings_vec.iter_mut().zip(&query_config.sources) {
+            let selection = SourceSelection {
+                nodes: Self::selection(&settings.source_id, &settings.nodes, node_owners.as_ref()),
+                relations: Self::selection(
+                    &settings.source_id,
+                    &settings.relations,
+                    relation_owners.as_ref(),
+                ),
+            };
+            if source.pipeline.is_empty() {
+                settings.nodes = selection.nodes.bootstrap_labels();
+                settings.relations = selection.relations.bootstrap_labels();
+            } else {
+                // Middleware can change both labels and element kinds.
+                settings.nodes.clear();
+                settings.relations.clear();
+            }
+            if selection.nodes.is_empty() && selection.relations.is_empty() {
+                settings.enable_bootstrap = false;
+            }
+            if selections
+                .insert(settings.source_id.clone(), selection)
+                .is_some()
+            {
+                bail!(
+                    "Source '{}' is subscribed more than once",
+                    settings.source_id
+                );
+            }
+        }
+
+        Ok(SubscriptionPlan {
+            settings: settings_vec,
+            selections,
+        })
+    }
+
+    fn label_owners(
+        sources: &[SourceSubscriptionConfig],
+        labels: fn(&SourceSubscriptionConfig) -> &[String],
+        kind: &str,
+    ) -> Result<HashMap<String, String>> {
+        let mut owners = HashMap::new();
+        for source in sources {
+            for label in labels(source) {
+                if let Some(previous) = owners.insert(label.clone(), source.source_id.clone()) {
+                    if previous != source.source_id {
+                        bail!(
+                            "{kind} label '{label}' is configured in multiple sources. Each {kind} label must be assigned to exactly one source."
+                        );
+                    }
+                }
+            }
+        }
+        Ok(owners)
+    }
+
+    fn selection(
+        source_id: &str,
+        labels: &std::collections::HashSet<String>,
+        all_owners: Option<&HashMap<String, String>>,
+    ) -> LabelSelection {
+        match all_owners {
+            Some(owners) => LabelSelection::AllExcept(
+                owners
+                    .iter()
+                    .filter(|(_, owner)| owner.as_str() != source_id)
+                    .map(|(label, _)| label.clone())
+                    .collect(),
+            ),
+            None => LabelSelection::Labels(labels.clone()),
+        }
     }
 
     /// Allocate node labels to the correct source subscription settings
@@ -188,6 +287,139 @@ mod tests {
     }
 
     #[test]
+    fn repetition_requests_intermediate_node_types() {
+        for repetition in ["*2", "*0..2", "*..2", "*1..3"] {
+            let mut query = create_test_query_config(vec![SourceSubscriptionConfig {
+                source_id: "source".into(),
+                nodes: vec![],
+                relations: vec![],
+                pipeline: vec![],
+            }]);
+            query.query = format!("MATCH (a:Start)-[:R{repetition}]->(b:End) RETURN b");
+            let labels = crate::queries::LabelExtractor::extract_labels(
+                &query.query,
+                &QueryLanguage::Cypher,
+            )
+            .unwrap();
+            let settings = SubscriptionSettingsBuilder::build_subscriptions(&query, &labels)
+                .unwrap()
+                .settings;
+            assert!(
+                settings[0].nodes.is_empty(),
+                "{repetition} must request unknown intermediate node types"
+            );
+        }
+    }
+
+    #[test]
+    fn unrestricted_nodes_preserve_label_ownership() {
+        let mut query = create_test_query_config(vec![
+            SourceSubscriptionConfig {
+                source_id: "first".into(),
+                nodes: vec!["Start".into()],
+                relations: vec!["R".into()],
+                pipeline: vec![],
+            },
+            SourceSubscriptionConfig {
+                source_id: "second".into(),
+                nodes: vec!["Foreign".into()],
+                relations: vec![],
+                pipeline: vec![],
+            },
+        ]);
+        query.query = "MATCH (a:Start)-[:R*2]->(b:End) RETURN b".into();
+        let labels =
+            crate::queries::LabelExtractor::extract_labels(&query.query, &QueryLanguage::Cypher)
+                .unwrap();
+        let plan = SubscriptionSettingsBuilder::build_subscriptions(&query, &labels).unwrap();
+        let first = &plan.selections["first"];
+        let second = &plan.selections["second"];
+        assert!(first.nodes.matches(&[std::sync::Arc::from("Transit")]));
+        assert!(!first.nodes.matches(&[std::sync::Arc::from("Foreign")]));
+        assert!(!second.nodes.matches(&[std::sync::Arc::from("Start")]));
+        assert!(first.nodes.matches(&[]));
+        assert!(second.nodes.matches(&[]));
+        assert!(first.relations.matches(&[std::sync::Arc::from("R")]));
+        assert!(second.relations.is_empty());
+        assert!(plan
+            .settings
+            .iter()
+            .all(|settings| settings.nodes.is_empty()));
+    }
+
+    #[test]
+    fn unneeded_source_does_not_bootstrap_everything() {
+        let query = create_test_query_config(vec![
+            SourceSubscriptionConfig {
+                source_id: "first".into(),
+                nodes: vec!["Person".into()],
+                relations: vec![],
+                pipeline: vec![],
+            },
+            SourceSubscriptionConfig {
+                source_id: "second".into(),
+                nodes: vec![],
+                relations: vec![],
+                pipeline: vec![],
+            },
+        ]);
+        let labels =
+            crate::queries::LabelExtractor::extract_labels(&query.query, &QueryLanguage::Cypher)
+                .unwrap();
+        let plan = SubscriptionSettingsBuilder::build_subscriptions(&query, &labels).unwrap();
+        assert!(plan.settings[0].enable_bootstrap);
+        assert!(!plan.settings[1].enable_bootstrap);
+        assert!(plan.selections["second"].nodes.is_empty());
+        assert!(plan.selections["second"].relations.is_empty());
+    }
+
+    #[test]
+    fn wildcard_detects_conflicting_owners_of_intermediate_labels() {
+        let mut query = create_test_query_config(
+            ["first", "second"]
+                .iter()
+                .map(|source_id| SourceSubscriptionConfig {
+                    source_id: (*source_id).into(),
+                    nodes: vec!["Transit".into()],
+                    relations: vec![],
+                    pipeline: vec![],
+                })
+                .collect(),
+        );
+        query.query = "MATCH (a:Start)-[:R*2]->(b:End) RETURN b".into();
+        let labels =
+            crate::queries::LabelExtractor::extract_labels(&query.query, &QueryLanguage::Cypher)
+                .unwrap();
+        let error = SubscriptionSettingsBuilder::build_subscriptions(&query, &labels).unwrap_err();
+        assert!(error.to_string().contains("Transit"));
+        assert!(error.to_string().contains("multiple sources"));
+    }
+
+    #[test]
+    fn middleware_bootstraps_raw_inputs_before_exact_selection() {
+        let query = create_test_query_config(vec![SourceSubscriptionConfig {
+            source_id: "source".into(),
+            nodes: vec![],
+            relations: vec![],
+            pipeline: vec!["rename".into()],
+        }]);
+        let labels =
+            crate::queries::LabelExtractor::extract_labels(&query.query, &QueryLanguage::Cypher)
+                .unwrap();
+        let plan = SubscriptionSettingsBuilder::build_subscriptions(&query, &labels).unwrap();
+        assert!(plan.settings[0].enable_bootstrap);
+        assert!(plan.settings[0].nodes.is_empty());
+        assert!(plan.settings[0].relations.is_empty());
+        assert!(plan.selections["source"]
+            .nodes
+            .matches(&[std::sync::Arc::from("Person")]));
+        assert!(!plan.selections["source"]
+            .nodes
+            .matches(&[std::sync::Arc::from("Raw")]));
+        assert!(plan.selections["source"].relations.is_empty());
+    }
+
+    #[test]
     fn test_node_label_in_one_source() {
         let sources = vec![SourceSubscriptionConfig {
             source_id: "source1".to_string(),
@@ -200,13 +432,13 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec!["Person".to_string()],
             relation_labels: vec![],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_ok());
 
-        let settings = result.unwrap();
+        let settings = result.unwrap().settings;
         assert_eq!(settings.len(), 1);
         assert!(settings[0].nodes.contains("Person"));
     }
@@ -232,13 +464,13 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec!["Person".to_string()],
             relation_labels: vec![],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_ok());
 
-        let settings = result.unwrap();
+        let settings = result.unwrap().settings;
         assert_eq!(settings.len(), 2);
         assert!(settings[0].nodes.contains("Person"));
         assert!(settings[1].nodes.contains("Person"));
@@ -265,10 +497,10 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec!["Person".to_string()],
             relation_labels: vec![],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("multiple sources"));
     }
@@ -286,13 +518,13 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec![],
             relation_labels: vec!["KNOWS".to_string()],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_ok());
 
-        let settings = result.unwrap();
+        let settings = result.unwrap().settings;
         assert_eq!(settings.len(), 1);
         assert!(settings[0].relations.contains("KNOWS"));
     }
@@ -318,13 +550,13 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec![],
             relation_labels: vec!["KNOWS".to_string()],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_ok());
 
-        let settings = result.unwrap();
+        let settings = result.unwrap().settings;
         assert_eq!(settings.len(), 2);
         assert!(settings[0].relations.contains("KNOWS"));
         assert!(settings[1].relations.contains("KNOWS"));
@@ -351,10 +583,10 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec![],
             relation_labels: vec!["KNOWS".to_string()],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("multiple sources"));
     }
@@ -386,13 +618,13 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec!["Order".to_string(), "Customer".to_string()],
             relation_labels: vec!["CUSTOMER".to_string()],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_ok());
 
-        let settings = result.unwrap();
+        let settings = result.unwrap().settings;
         assert_eq!(settings.len(), 1);
         // CUSTOMER should not be in relations since it's a join
         assert!(!settings[0].relations.contains("CUSTOMER"));
@@ -428,11 +660,11 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec!["Order".to_string(), "Customer".to_string()],
             relation_labels: vec!["CUSTOMER".to_string()],
+            ..Default::default()
         };
 
-        let error =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels)
-                .unwrap_err();
+        let error = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels)
+            .unwrap_err();
 
         assert!(error
             .to_string()
@@ -469,10 +701,12 @@ mod tests {
             let query_labels = QueryLabels {
                 node_labels: vec!["orders".to_string(), "vehicles".to_string()],
                 relation_labels: vec!["PICKUP_BY".to_string(), "CONTAINS".to_string()],
+                ..Default::default()
             };
 
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels)
+            SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels)
                 .unwrap()
+                .settings
         }
 
         let forward = build(&["physical-ops", "retail-ops"]);
@@ -524,10 +758,10 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec!["Order".to_string()], // Customer is missing
             relation_labels: vec!["CUSTOMER".to_string()],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -570,13 +804,13 @@ mod tests {
         let query_labels = QueryLabels {
             node_labels: vec!["Order".to_string(), "Customer".to_string(), "Product".to_string()],
             relation_labels: vec!["PLACED_BY".to_string(), "CONTAINS".to_string()],
+            ..Default::default()
         };
 
-        let result =
-            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels);
+        let result = SubscriptionSettingsBuilder::build_subscriptions(&query_config, &query_labels);
         assert!(result.is_ok());
 
-        let settings = result.unwrap();
+        let settings = result.unwrap().settings;
         assert_eq!(settings.len(), 2);
 
         // Order should be in first source

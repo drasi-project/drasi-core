@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod root_session_tests;
 mod row_signature_tests;
+mod variable_length_tests;
+
+use crate::evaluation::QueryExecutionError;
 
 use std::sync::Arc;
 
@@ -58,13 +62,9 @@ async fn dependency_leaks() {
     assert_eq!(Arc::strong_count(&future_queue), 1);
 }
 
-/// Test that `process_source_change_with_hook` rolls back when the hook fails.
-///
-/// The hook returns an error AFTER the index updates have been applied inside
-/// the session. Because the error propagates before commit, the session must
-/// roll back, leaving the index unchanged.
+/// Memory cannot undo a failed hook's preceding writes, so recovery needs new indexes.
 #[tokio::test]
-async fn hook_failure_rolls_back_session() {
+async fn hook_failure_fences_memory_until_reconstruction() {
     let query_str = "MATCH (n:Person) RETURN n.name";
     let function_registry = Arc::new(FunctionRegistry::new());
     let parser = Arc::new(CypherParser::new(function_registry.clone()));
@@ -132,14 +132,6 @@ async fn hook_failure_rolls_back_session() {
         .await;
     assert!(result.is_err(), "Hook failure should propagate as error");
 
-    // After the hook failure, verify the element was NOT committed by trying
-    // to process a change that references n2. Since the in-memory index doesn't
-    // use real transactions (writes are immediate), we verify by checking that
-    // the error was propagated correctly — the key contract of the function.
-    // For real transactional backends (RocksDB, Garnet), the session rollback
-    // ensures the element index is not modified.
-
-    // Verify a successful hook works after a failure
     let insert3 = SourceChange::Insert {
         element: Element::Node {
             metadata: ElementMetadata {
@@ -160,6 +152,15 @@ async fn hook_failure_rolls_back_session() {
 
     let ok_hook = || async { Ok(()) };
     let result = query
+        .process_source_change_with_hook(insert3.clone(), ok_hook)
+        .await;
+    assert!(matches!(
+        result,
+        Err(error) if error.execution_error() == Some(&QueryExecutionError::QueryRequiresRebuild)
+    ));
+    let parser = Arc::new(CypherParser::new(Arc::new(FunctionRegistry::new())));
+    let rebuilt = QueryBuilder::new(query_str, parser).build().await;
+    let result = rebuilt
         .process_source_change_with_hook(insert3, ok_hook)
         .await;
     assert!(

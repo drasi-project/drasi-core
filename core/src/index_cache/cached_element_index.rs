@@ -12,28 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use async_stream::stream;
+use async_stream::try_stream;
 use async_trait::async_trait;
-use caches::{lru::CacheError, Cache, DefaultHashBuilder, LRUCache};
-use tokio::sync::RwLock;
+use caches::lru::CacheError;
 use tokio_stream::StreamExt;
 
+use super::generation_cache::GenerationCache;
 use crate::{
-    interface::{ElementIndex, ElementStream, IndexError},
+    interface::{CacheGeneration, ElementIndex, ElementStream, IndexError, SessionControl},
     models::{Element, ElementReference, QueryJoin},
     path_solver::match_path::MatchPath,
 };
 
+type AdjacencyCache = GenerationCache<(ElementReference, usize), Vec<ElementReference>>;
+
 pub struct CachedElementIndex {
     element_index: Arc<dyn ElementIndex>,
-    element_cache: Arc<RwLock<LRUCache<ElementReference, Arc<Element>, DefaultHashBuilder>>>,
-    slot_cache: Arc<RwLock<LRUCache<ElementReference, HashMap<usize, bool>, DefaultHashBuilder>>>,
-    inbound_cache:
-        Arc<RwLock<LRUCache<(ElementReference, usize), Vec<ElementReference>, DefaultHashBuilder>>>,
-    outbound_cache:
-        Arc<RwLock<LRUCache<(ElementReference, usize), Vec<ElementReference>, DefaultHashBuilder>>>,
+    element_cache: Arc<GenerationCache<ElementReference, Arc<Element>>>,
+    slot_cache: GenerationCache<(ElementReference, usize), bool>,
+    inbound_cache: Arc<AdjacencyCache>,
+    outbound_cache: Arc<AdjacencyCache>,
 }
 
 impl CachedElementIndex {
@@ -41,27 +41,80 @@ impl CachedElementIndex {
         element_index: Arc<dyn ElementIndex>,
         cache_size: usize,
     ) -> Result<Self, CacheError> {
-        log::info!("using cached element index with size {cache_size}");
+        Self::with_control(element_index, cache_size, None)
+    }
 
-        let element_cache = LRUCache::new(cache_size)?;
-        let element_cache = Arc::new(RwLock::new(element_cache));
+    pub fn new_with_session(
+        element_index: Arc<dyn ElementIndex>,
+        cache_size: usize,
+        session_control: Arc<dyn SessionControl>,
+    ) -> Result<Self, CacheError> {
+        Self::with_control(element_index, cache_size, Some(session_control))
+    }
 
-        let slot_cache = LRUCache::new(cache_size)?;
-        let slot_cache = Arc::new(RwLock::new(slot_cache));
-
-        let inbound_cache = LRUCache::new(cache_size)?;
-        let inbound_cache = Arc::new(RwLock::new(inbound_cache));
-
-        let outbound_cache = LRUCache::new(cache_size)?;
-        let outbound_cache = Arc::new(RwLock::new(outbound_cache));
-
+    fn with_control(
+        element_index: Arc<dyn ElementIndex>,
+        cache_size: usize,
+        session_control: Option<Arc<dyn SessionControl>>,
+    ) -> Result<Self, CacheError> {
         Ok(Self {
             element_index,
-            element_cache,
-            slot_cache,
-            inbound_cache,
-            outbound_cache,
+            element_cache: Arc::new(GenerationCache::new(cache_size, session_control.clone())?),
+            slot_cache: GenerationCache::new(cache_size, session_control.clone())?,
+            inbound_cache: Arc::new(GenerationCache::new(cache_size, session_control.clone())?),
+            outbound_cache: Arc::new(GenerationCache::new(cache_size, session_control)?),
         })
+    }
+
+    async fn invalidate(&self, generation: CacheGeneration) -> Result<(), IndexError> {
+        self.element_cache.clear(generation).await?;
+        self.slot_cache.clear(generation).await?;
+        self.inbound_cache.clear(generation).await?;
+        self.outbound_cache.clear(generation).await
+    }
+
+    async fn adjacent(
+        &self,
+        slot: usize,
+        reference: &ElementReference,
+        inbound: bool,
+    ) -> Result<ElementStream, IndexError> {
+        let cache = if inbound {
+            &self.inbound_cache
+        } else {
+            &self.outbound_cache
+        }
+        .clone();
+        let key = (reference.clone(), slot);
+        let (generation, cached) = cache.get(&key).await?;
+        let index = self.element_index.clone();
+        let elements = self.element_cache.clone();
+        Ok(Box::pin(try_stream! {
+            cache.check(generation)?;
+            if let Some(references) = cached {
+                for reference in references {
+                    let element = get_element_internal(&index, &elements, &reference).await?;
+                    cache.check(generation)?;
+                    if let Some(element) = element {
+                        yield element;
+                    }
+                }
+            } else {
+                let mut source = if inbound {
+                    index.get_slot_elements_by_inbound(slot, &key.0).await?
+                } else {
+                    index.get_slot_elements_by_outbound(slot, &key.0).await?
+                };
+                let mut references = Vec::new();
+                while let Some(element) = source.next().await {
+                    let element = element?;
+                    cache.check(generation)?;
+                    references.push(element.get_reference().clone());
+                    yield element;
+                }
+                cache.put(generation, key, references).await?;
+            }
+        }))
     }
 }
 
@@ -71,10 +124,7 @@ impl ElementIndex for CachedElementIndex {
         &self,
         element_ref: &ElementReference,
     ) -> Result<Option<Arc<Element>>, IndexError> {
-        let element_index = self.element_index.clone();
-        let cache = self.element_cache.clone();
-
-        get_element_internal(element_index, cache, element_ref).await
+        get_element_internal(&self.element_index, &self.element_cache, element_ref).await
     }
 
     async fn set_element(
@@ -82,41 +132,24 @@ impl ElementIndex for CachedElementIndex {
         element: &Element,
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
+        let generation = self.element_cache.generation()?;
         self.element_index
             .set_element(element, slot_affinity)
             .await?;
-
-        let mut element_cache = self.element_cache.write().await;
-        element_cache.put(element.get_reference().clone(), Arc::new(element.clone()));
-
-        let mut slot_cache = self.slot_cache.write().await;
-        slot_cache.remove(element.get_reference());
-
-        let mut inbound_cache = self.inbound_cache.write().await;
-        inbound_cache.purge();
-
-        let mut outbound_cache = self.outbound_cache.write().await;
-        outbound_cache.purge();
-
-        Ok(())
+        self.invalidate(generation).await?;
+        self.element_cache
+            .put(
+                generation,
+                element.get_reference().clone(),
+                Arc::new(element.clone()),
+            )
+            .await
     }
 
     async fn delete_element(&self, element_ref: &ElementReference) -> Result<(), IndexError> {
+        let generation = self.element_cache.generation()?;
         self.element_index.delete_element(element_ref).await?;
-
-        let mut element_cache = self.element_cache.write().await;
-        element_cache.remove(element_ref);
-
-        let mut slot_cache = self.slot_cache.write().await;
-        slot_cache.remove(element_ref);
-
-        let mut inbound_cache = self.inbound_cache.write().await;
-        inbound_cache.purge();
-
-        let mut outbound_cache = self.outbound_cache.write().await;
-        outbound_cache.purge();
-
-        Ok(())
+        self.invalidate(generation).await
     }
 
     async fn get_slot_element_by_ref(
@@ -124,48 +157,24 @@ impl ElementIndex for CachedElementIndex {
         slot: usize,
         element_ref: &ElementReference,
     ) -> Result<Option<Arc<Element>>, IndexError> {
-        let mut slot_cache = self.slot_cache.write().await;
-        let slot_elements = slot_cache.get_mut(element_ref);
-
-        match slot_elements {
-            Some(slot_elements) => {
-                let slot_element = slot_elements.get(&slot);
-                match slot_element {
-                    Some(slot_element) => {
-                        if *slot_element {
-                            self.get_element(element_ref).await
-                        } else {
-                            Ok(None)
-                        }
-                    }
-                    None => {
-                        let result = self
-                            .element_index
-                            .get_slot_element_by_ref(slot, element_ref)
-                            .await?;
-                        slot_elements.insert(slot, result.is_some());
-
-                        Ok(result)
-                    }
-                }
-            }
+        let key = (element_ref.clone(), slot);
+        let (generation, cached) = self.slot_cache.get(&key).await?;
+        let result = match cached {
+            Some(false) => None,
+            Some(true) => self.get_element(element_ref).await?,
             None => {
-                drop(slot_cache);
                 let result = self
                     .element_index
                     .get_slot_element_by_ref(slot, element_ref)
                     .await?;
-
-                let mut slot_set = HashMap::new();
-                slot_set.insert(slot, result.is_some());
-
-                let mut slot_cache = self.slot_cache.write().await;
-                slot_cache.put(element_ref.clone(), slot_set);
-                drop(slot_cache);
-
-                Ok(result)
+                self.slot_cache
+                    .put(generation, key, result.is_some())
+                    .await?;
+                result
             }
-        }
+        };
+        self.slot_cache.check(generation)?;
+        Ok(result)
     }
 
     async fn get_slot_elements_by_inbound(
@@ -173,51 +182,7 @@ impl ElementIndex for CachedElementIndex {
         slot: usize,
         inbound_ref: &ElementReference,
     ) -> Result<ElementStream, IndexError> {
-        let mut inbound_cache = self.inbound_cache.write().await;
-        let key = (inbound_ref.clone(), slot);
-        match inbound_cache.get(&key) {
-            Some(elements) => {
-                let elements = elements.clone();
-                drop(inbound_cache);
-                let element_cache = self.element_cache.clone();
-                let element_index = self.element_index.clone();
-                let stream = stream! {
-                    for element_ref in elements {
-                        match get_element_internal(element_index.clone(), element_cache.clone(), &element_ref).await? {
-                            Some(element) => yield Ok(element),
-                            None => continue,
-                        }
-                    }
-                };
-                Ok(Box::pin(stream))
-            }
-            None => {
-                drop(inbound_cache);
-                let cache_source = self.inbound_cache.clone();
-                let element_index = self.element_index.clone();
-                let inbound_ref = inbound_ref.clone();
-                let stream = stream! {
-                    let mut element_stream = element_index.get_slot_elements_by_inbound(slot, &inbound_ref).await?;
-                    let mut elements = Vec::new();
-                    while let Some(element) = element_stream.next().await {
-                        match element {
-                            Ok(element) => {
-                                elements.push(element.get_reference().clone());
-                                yield Ok(element);
-                            },
-                            Err(err) => {
-                                yield Err(err);
-                            }
-                        };
-                    }
-
-                    let mut inbound_cache = cache_source.write().await;
-                    inbound_cache.put((inbound_ref, slot), elements);
-                    drop(inbound_cache);
-                };
-                Ok(Box::pin(stream))
-            }
-        }
+        self.adjacent(slot, inbound_ref, true).await
     }
 
     async fn get_slot_elements_by_outbound(
@@ -225,69 +190,13 @@ impl ElementIndex for CachedElementIndex {
         slot: usize,
         outbound_ref: &ElementReference,
     ) -> Result<ElementStream, IndexError> {
-        let mut outbound_cache = self.outbound_cache.write().await;
-        let key = (outbound_ref.clone(), slot);
-        match outbound_cache.get(&key) {
-            Some(elements) => {
-                let elements = elements.clone();
-                drop(outbound_cache);
-                let element_cache = self.element_cache.clone();
-                let element_index = self.element_index.clone();
-                let stream = stream! {
-                    for element_ref in elements {
-                        match get_element_internal(element_index.clone(), element_cache.clone(), &element_ref).await? {
-                            Some(element) => yield Ok(element),
-                            None => continue,
-                        }
-                    }
-                };
-                Ok(Box::pin(stream))
-            }
-            None => {
-                drop(outbound_cache);
-                let cache_source = self.outbound_cache.clone();
-                let element_index = self.element_index.clone();
-                let outbound_ref = outbound_ref.clone();
-                let stream = stream! {
-                    let mut element_stream = element_index.get_slot_elements_by_outbound(slot, &outbound_ref).await?;
-                    let mut elements = Vec::new();
-                    while let Some(element) = element_stream.next().await {
-                        match element {
-                            Ok(element) => {
-                                elements.push(element.get_reference().clone());
-                                yield Ok(element);
-                            },
-                            Err(err) => {
-                                yield Err(err);
-                            }
-                        };
-                    }
-
-                    let mut outbound_cache = cache_source.write().await;
-                    outbound_cache.put((outbound_ref, slot), elements);
-                    drop(outbound_cache);
-                };
-                Ok(Box::pin(stream))
-            }
-        }
+        self.adjacent(slot, outbound_ref, false).await
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
+        let generation = self.element_cache.generation()?;
         self.element_index.clear().await?;
-
-        let mut element_cache = self.element_cache.write().await;
-        element_cache.purge();
-
-        let mut slot_cache = self.slot_cache.write().await;
-        slot_cache.purge();
-
-        let mut inbound_cache = self.inbound_cache.write().await;
-        inbound_cache.purge();
-
-        let mut outbound_cache = self.outbound_cache.write().await;
-        outbound_cache.purge();
-
-        Ok(())
+        self.invalidate(generation).await
     }
 
     async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
@@ -296,25 +205,20 @@ impl ElementIndex for CachedElementIndex {
 }
 
 async fn get_element_internal(
-    element_index: Arc<dyn ElementIndex>,
-    cache: Arc<RwLock<LRUCache<ElementReference, Arc<Element>, DefaultHashBuilder>>>,
-    element_ref: &ElementReference,
+    index: &Arc<dyn ElementIndex>,
+    cache: &GenerationCache<ElementReference, Arc<Element>>,
+    reference: &ElementReference,
 ) -> Result<Option<Arc<Element>>, IndexError> {
-    let mut element_cache = cache.write().await;
-    let element = element_cache.get(element_ref);
-    match element {
-        Some(element) => Ok(Some(element.clone())),
-        None => {
-            drop(element_cache);
-            let element = element_index.get_element(element_ref).await?;
-            match element {
-                Some(element) => {
-                    let mut element_cache = cache.write().await;
-                    element_cache.put(element_ref.clone(), element.clone());
-                    Ok(Some(element))
-                }
-                None => Ok(None),
-            }
-        }
+    let (generation, cached) = cache.get(reference).await?;
+    if cached.is_some() {
+        return Ok(cached);
     }
+    let result = index.get_element(reference).await?;
+    cache.check(generation)?;
+    if let Some(element) = &result {
+        cache
+            .put(generation, reference.clone(), element.clone())
+            .await?;
+    }
+    Ok(result)
 }

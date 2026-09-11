@@ -42,6 +42,25 @@ pub struct MatchPathSolution {
 }
 
 impl MatchPathSolution {
+    pub(crate) fn temporal_identity(
+        &self,
+    ) -> Result<crate::evaluation::temporal::MatchIdentity, crate::evaluation::EvaluationError>
+    {
+        let slots = (0..self.total_slots)
+            .map(|slot| {
+                self.solved_slots
+                    .get(&slot)
+                    .map(|element| {
+                        element
+                            .as_ref()
+                            .map(|element| element.get_reference().clone())
+                    })
+                    .ok_or(crate::evaluation::EvaluationError::CorruptData)
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(crate::evaluation::temporal::MatchIdentity::Fixed { slots })
+    }
+
     pub fn new(total_slots: usize, anchor_slot: usize) -> Self {
         let mut queued_slots = Vec::new();
         queued_slots.resize(total_slots, false);

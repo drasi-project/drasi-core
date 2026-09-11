@@ -54,8 +54,42 @@ pub enum Function {
     ContextMutator(Arc<dyn ContextMutatorFunction>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalFunction {
+    TrueFor,
+    TrueLater,
+    TrueUntil,
+    TrueNowOrLater,
+    Future,
+    PreviousValue,
+    PreviousDistinctValue,
+    SlidingWindow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionEffect {
+    Pure,
+    Aggregate,
+    Temporal(TemporalFunction),
+}
+
+impl Function {
+    pub fn effect(&self) -> FunctionEffect {
+        match self {
+            Self::Scalar(function) => function.effect(),
+            Self::LazyScalar(function) => function.effect(),
+            Self::Aggregating(_) => FunctionEffect::Aggregate,
+            Self::ContextMutator(_) => FunctionEffect::Pure,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ScalarFunction: Send + Sync {
+    fn effect(&self) -> FunctionEffect {
+        FunctionEffect::Pure
+    }
+
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,
@@ -66,6 +100,10 @@ pub trait ScalarFunction: Send + Sync {
 
 #[async_trait]
 pub trait LazyScalarFunction: Send + Sync {
+    fn effect(&self) -> FunctionEffect {
+        FunctionEffect::Pure
+    }
+
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,

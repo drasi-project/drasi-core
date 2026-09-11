@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use drasi_core::interface::{ElementArchiveIndex, IndexError, SessionControl};
+use drasi_core::interface::{ElementArchiveIndex, IndexError, SessionGuard};
 use drasi_core::models::{ElementReference, TimestampBound, TimestampRange};
 use drasi_index_garnet::{
     element_index::GarnetElementIndex, GarnetSessionControl, GarnetSessionState,
@@ -39,7 +39,10 @@ async fn build_index(query_id: &str, archive_enabled: bool) -> GarnetElementInde
     let redis = shared_redis().await;
     let client = redis::Client::open(redis.url()).unwrap();
     let connection = client.get_multiplexed_async_connection().await.unwrap();
-    let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+    let session_state = Arc::new(GarnetSessionState::new_for_query(
+        connection.clone(),
+        query_id,
+    ));
     GarnetElementIndex::new(query_id, connection, archive_enabled, session_state)
 }
 
@@ -74,12 +77,15 @@ async fn archive_reads_with_archive_enabled() {
     let redis = shared_redis().await;
     let client = redis::Client::open(redis.url()).unwrap();
     let connection = client.get_multiplexed_async_connection().await.unwrap();
-    let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
-    let session_control = GarnetSessionControl::new(session_state.clone());
+    let session_state = Arc::new(GarnetSessionState::new_for_query(
+        connection.clone(),
+        "archive-enabled",
+    ));
+    let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
     let index = GarnetElementIndex::new("archive-enabled", connection, true, session_state);
 
     // Reads require an active session.
-    session_control.begin().await.unwrap();
+    let _guard = SessionGuard::begin(session_control).await.unwrap();
 
     let as_at = index
         .get_element_as_at(&ElementReference::new("source1", "node1"), 1000)

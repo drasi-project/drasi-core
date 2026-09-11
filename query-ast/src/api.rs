@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Range};
 use thiserror::Error;
 
 use crate::ast;
@@ -24,6 +24,25 @@ const ERR_ID_NOT_IN_SCOPE: &str = "Identifier not found in current scope";
 
 pub trait QueryParser: Send + Sync {
     fn parse(&self, input: &str) -> Result<ast::Query, QueryParseError>;
+
+    /// Preserve syntactic MATCH boundaries without changing the public AST.
+    /// Custom parsers must provide this metadata to use variable-length MATCH.
+    fn parse_scoped(&self, input: &str) -> Result<ScopedQuery, QueryParseError> {
+        Ok(ScopedQuery {
+            query: self.parse(input)?,
+            match_scopes: None,
+            has_mutations: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopedQuery {
+    pub query: ast::Query,
+    /// One list per query part; each range indexes its flattened match_clauses.
+    pub match_scopes: Option<Vec<Vec<Range<usize>>>>,
+    /// Syntax accepted by a parser but not represented by the read-only AST.
+    pub has_mutations: bool,
 }
 
 pub trait QueryConfiguration: Send + Sync {

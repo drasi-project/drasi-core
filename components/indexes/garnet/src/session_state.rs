@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_core::interface::SessionError;
+
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, SessionControl};
+use drasi_core::interface::{
+    IndexError, RollbackSupport, SessionControl, SessionGuard, SessionTracker,
+};
 use redis::{aio::MultiplexedConnection, Pipeline, ToRedisArgs};
 
 /// Result of checking the write buffer for a key/field.
@@ -464,29 +468,151 @@ impl SessionInner {
 /// All Garnet index types (element, result, future_queue) share a single
 /// `Arc<GarnetSessionState>` so that a session transaction spans all indexes atomically.
 ///
-/// # Nested Transactions
-///
-/// Supports nesting via a depth counter. Only the outermost `begin()`/`commit()` pair
-/// creates and commits the real write buffer. Inner calls are no-ops that
-/// increment/decrement the depth counter. `rollback()` at any depth drops the buffer
-/// and resets depth to 0.
+/// `SessionGuard` owns the root outcome. Child leases share the active buffer
+/// without opening or committing another backend transaction.
 ///
 /// The `connection` field is used solely for commit (MULTI/EXEC pipeline execution).
 /// Each index keeps its own connection for non-session Redis reads.
 pub struct GarnetSessionState {
     connection: MultiplexedConnection,
     inner: Mutex<SessionInner>,
+    tracker: SessionTracker,
+    recovery_keys: Mutex<BTreeSet<String>>,
 }
 
 impl GarnetSessionState {
     pub fn new(connection: MultiplexedConnection) -> Self {
         Self {
             connection,
+            tracker: SessionTracker::default(),
+            recovery_keys: Mutex::new(BTreeSet::new()),
             inner: Mutex::new(SessionInner {
                 buffer: None,
                 depth: 0,
             }),
         }
+    }
+
+    pub fn new_for_query(connection: MultiplexedConnection, query_id: &str) -> Self {
+        let state = Self::new(connection);
+        state.register_query(query_id);
+        state
+    }
+
+    pub(crate) fn register_query(&self, query_id: &str) {
+        match self.recovery_keys.lock() {
+            Ok(mut keys) => {
+                keys.insert(format!("drasi:{{{query_id}}}:transaction-recovery"));
+            }
+            Err(error) => log::error!("Cannot register Garnet transaction namespace: {error}"),
+        }
+    }
+
+    fn recovery_keys(&self) -> Result<Vec<String>, IndexError> {
+        self.recovery_keys
+            .lock()
+            .map(|keys| keys.iter().cloned().collect())
+            .map_err(|_| IndexError::other(SessionError::SessionFenced))
+    }
+
+    pub(crate) async fn ensure_recovered(&self) -> Result<(), IndexError> {
+        let generation = self.tracker.cache_generation()?;
+        let mut connection = self.connection.clone();
+        let mut fenced = false;
+        for key in self.recovery_keys()? {
+            fenced |= redis::cmd("EXISTS")
+                .arg(key)
+                .query_async::<_, bool>(&mut connection)
+                .await
+                .map_err(IndexError::other)?;
+        }
+        self.tracker.with_generation(generation, || {
+            if fenced {
+                Err(IndexError::other(SessionError::SessionFenced))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    pub(crate) async fn clear(
+        self: &Arc<Self>,
+        exact_keys: &[String],
+        prefixes: &[String],
+    ) -> Result<(), IndexError> {
+        let mut generation = self.tracker.cache_generation()?;
+        let buffered = self.tracker.with_generation(generation, || {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
+            Ok(inner.buffer.is_some())
+        })?;
+        let root = if buffered {
+            None
+        } else {
+            let root =
+                SessionGuard::begin(Arc::new(GarnetSessionControl::new(self.clone()))).await?;
+            generation = self.tracker.cache_generation()?;
+            Some(root)
+        };
+        self.ensure_recovered().await?;
+
+        let mut keys: HashSet<String> = exact_keys.iter().cloned().collect();
+        let mut connection = self.connection.clone();
+        for prefix in prefixes {
+            let mut pattern = String::new();
+            for ch in prefix.chars() {
+                if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+                    pattern.push('\\');
+                }
+                pattern.push(ch);
+            }
+            pattern.push('*');
+            let mut cursor = 0u64;
+            loop {
+                let (next, found): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut connection)
+                    .await
+                    .map_err(IndexError::other)?;
+                keys.extend(found.into_iter().filter(|key| key.starts_with(prefix)));
+                cursor = next;
+                if cursor == 0 {
+                    break;
+                }
+            }
+        }
+
+        self.tracker.with_generation(generation, || {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
+            let buffer = inner
+                .buffer
+                .as_mut()
+                .ok_or(IndexError::other(SessionError::InvalidSession))?;
+            keys.extend(
+                buffer
+                    .keys
+                    .keys()
+                    .filter(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)))
+                    .cloned(),
+            );
+            for key in keys {
+                buffer.del(key);
+            }
+            Ok(())
+        })?;
+        if let Some(root) = root {
+            root.commit().await?;
+        }
+        Ok(())
     }
 
     /// Begin a new session-scoped transaction, or nest into an existing one.
@@ -524,9 +650,8 @@ impl GarnetSessionState {
     ///   pipeline (MULTI/EXEC), and executes it.
     /// - If depth == 0, returns an error (no active session).
     ///
-    /// Note: the buffer is consumed before the pipeline executes. If the
-    /// pipeline fails, the buffer cannot be retried — the caller must
-    /// retry the entire source change.
+    /// Once dispatched, a failed pipeline is indeterminate. Its recovery fence
+    /// remains until an explicit rebuild or external recovery resolves the data.
     pub(crate) async fn commit(&self) -> Result<(), IndexError> {
         let mut buffer = {
             let mut guard = self
@@ -566,10 +691,33 @@ impl GarnetSessionState {
         buffer.drain_into_pipeline(&mut pipeline);
 
         let mut con = self.connection.clone();
+        // This fence is written before EXEC and removed only after every reply
+        // succeeds. An EXEC containing command errors cannot certify itself.
+        let recovery_keys = self.recovery_keys()?;
+        for key in &recovery_keys {
+            let acquired: Option<String> = redis::cmd("SET")
+                .arg(key)
+                .arg("commit-in-progress")
+                .arg("NX")
+                .query_async(&mut con)
+                .await
+                .map_err(IndexError::other)?;
+            if acquired.is_none() {
+                return Err(IndexError::other(SessionError::SessionFenced));
+            }
+        }
         pipeline
             .query_async::<_, ()>(&mut con)
             .await
-            .map_err(IndexError::other)
+            .map_err(IndexError::other)?;
+        for key in &recovery_keys {
+            redis::cmd("DEL")
+                .arg(key)
+                .query_async::<_, ()>(&mut con)
+                .await
+                .map_err(IndexError::other)?;
+        }
+        Ok(())
     }
 
     /// Roll back the session-scoped transaction.
@@ -602,6 +750,7 @@ impl GarnetSessionState {
     /// and `DerefMut`, so callers can use `guard.as_ref()`, `guard.as_mut()`,
     /// `guard.is_some()`, etc. directly.
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, SessionInner>, IndexError> {
+        self.tracker.cache_generation()?;
         self.inner
             .lock()
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))
@@ -630,9 +779,8 @@ impl Drop for GarnetSessionState {
 
 /// `SessionControl` implementation backed by `GarnetSessionState`.
 ///
-/// Unlike RocksDB (which uses `spawn_blocking`), Garnet's `begin`/`rollback`
-/// are sync (in-memory only) and `commit` is naturally async (Redis pipeline).
-/// No `spawn_blocking` needed.
+/// Begin checks the durable recovery fence before creating a buffer. Commit
+/// runs in the root's owned finalizer; caller cancellation cannot roll it back.
 pub struct GarnetSessionControl {
     state: Arc<GarnetSessionState>,
 }
@@ -641,11 +789,74 @@ impl GarnetSessionControl {
     pub fn new(state: Arc<GarnetSessionState>) -> Self {
         Self { state }
     }
+    pub(crate) async fn query_store_is_empty(&self) -> Result<Option<bool>, IndexError> {
+        self.state.ensure_recovered().await?;
+        let generation = self.state.tracker.cache_generation()?;
+        let keys = self.state.recovery_keys()?;
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        {
+            let inner = self.state.inner.lock().map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
+            if inner.buffer.is_some() {
+                return Err(IndexError::other(SessionError::SessionBusy));
+            }
+        }
+        let mut connection = self.state.connection.clone();
+        let mut empty = true;
+        for key in keys {
+            let namespace = key
+                .strip_prefix("drasi:")
+                .and_then(|key| key.strip_suffix(":transaction-recovery"))
+                .ok_or(IndexError::CorruptedData)?;
+            let mut pattern = String::from("*:");
+            for ch in namespace.chars() {
+                if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+                    pattern.push('\\');
+                }
+                pattern.push(ch);
+            }
+            pattern.push('*');
+            let mut cursor = 0u64;
+            loop {
+                let (next, found): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut connection)
+                    .await
+                    .map_err(IndexError::other)?;
+                if !found.is_empty() {
+                    empty = false;
+                    break;
+                }
+                cursor = next;
+                if cursor == 0 {
+                    break;
+                }
+            }
+            if !empty {
+                break;
+            }
+        }
+        self.state.tracker.with_generation(generation, || Ok(Some(empty)))
+    }
 }
 
 #[async_trait]
 impl SessionControl for GarnetSessionControl {
+    fn root_tracker(&self) -> Option<&SessionTracker> {
+        Some(&self.state.tracker)
+    }
+
+    fn rollback_support(&self) -> RollbackSupport {
+        RollbackSupport::Complete
+    }
+
     async fn begin(&self) -> Result<(), IndexError> {
+        self.state.ensure_recovered().await?;
         self.state.begin()
     }
 
@@ -683,6 +894,464 @@ impl std::error::Error for SessionStateError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn root_partial_exec_is_indeterminate_and_fenced_after_restart() {
+        use drasi_core::interface::{LiveResultsWriter, RootOutcome, RowMutation, SessionGuard};
+
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let mut connection = client.get_multiplexed_async_connection().await.unwrap();
+        redis::cmd("SET")
+            .arg("wrong-type")
+            .arg("string")
+            .query_async::<_, ()>(&mut connection)
+            .await
+            .unwrap();
+        let state = Arc::new(GarnetSessionState::new_for_query(
+            connection.clone(),
+            "partial-exec",
+        ));
+        let control = Arc::new(GarnetSessionControl::new(state.clone()));
+        let live_results = crate::GarnetLiveResultsWriter::new_with_session(
+            "partial-exec",
+            connection.clone(),
+            state.clone(),
+        );
+        let guard = SessionGuard::begin(control.clone()).await.unwrap();
+        let root = guard.root();
+        live_results
+            .apply_mutations(
+                "partial-exec",
+                &[RowMutation {
+                    row_signature: 1,
+                    data: Some(b"tentative"),
+                }],
+            )
+            .await
+            .unwrap();
+        {
+            let mut inner = state.lock().unwrap();
+            let buffer = inner.as_mut().unwrap();
+            buffer.string_set("committed-sibling".into(), b"written".to_vec());
+            buffer.hash_set("wrong-type".into(), "field", b"rejected".to_vec());
+        }
+        assert!(guard.commit().await.is_err());
+        assert_eq!(root.outcome(), RootOutcome::Indeterminate);
+        assert!(matches!(
+            live_results.read_snapshot("partial-exec").await,
+            Err(error) if error.session_error() == Some(SessionError::SessionFenced)
+        ));
+        assert!(matches!(
+            live_results.row_count("partial-exec").await,
+            Err(error) if error.session_error() == Some(SessionError::SessionFenced)
+        ));
+        let written: String = redis::cmd("GET")
+            .arg("committed-sibling")
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(written, "written");
+        let fenced: bool = redis::cmd("EXISTS")
+            .arg(state.recovery_keys().unwrap())
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert!(fenced);
+        drop(live_results);
+        drop(control);
+        drop(state);
+        let restarted_state = Arc::new(GarnetSessionState::new_for_query(
+            connection.clone(),
+            "partial-exec",
+        ));
+        let restarted_live_results = crate::GarnetLiveResultsWriter::new_with_session(
+            "partial-exec",
+            connection.clone(),
+            restarted_state.clone(),
+        );
+        assert!(matches!(
+            restarted_live_results.read_snapshot("partial-exec").await,
+            Err(error) if error.session_error() == Some(SessionError::SessionFenced)
+        ));
+        assert!(matches!(
+            restarted_live_results.row_count("partial-exec").await,
+            Err(error) if error.session_error() == Some(SessionError::SessionFenced)
+        ));
+        let restarted = Arc::new(GarnetSessionControl::new(restarted_state));
+        assert!(matches!(
+            SessionGuard::begin(restarted).await,
+            Err(error) if error.session_error() == Some(SessionError::SessionFenced)
+        ));
+        let independent = Arc::new(GarnetSessionControl::new(Arc::new(
+            GarnetSessionState::new_for_query(connection, "different-query"),
+        )));
+        drop(SessionGuard::begin(independent).await.unwrap());
+        redis.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn root_recovery_check_rejects_a_changed_generation() {
+        use drasi_core::interface::{RootOutcome, SessionGuard};
+
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = Arc::new(GarnetSessionState::new_for_query(
+            connection,
+            "delayed-recovery",
+        ));
+        let control = Arc::new(GarnetSessionControl::new(state.clone()));
+        let root = SessionGuard::begin(control).await.unwrap();
+
+        let mut recovery = Box::pin(state.ensure_recovered());
+        assert!(futures::poll!(recovery.as_mut()).is_pending());
+        assert_eq!(root.rollback().unwrap(), RootOutcome::RolledBack);
+        assert!(matches!(
+            recovery.await,
+            Err(error) if error.session_error() == Some(SessionError::StaleCacheGeneration)
+        ));
+        state.ensure_recovered().await.unwrap();
+        redis.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn root_administrative_reset_is_atomic() {
+        use drasi_core::interface::{
+            AccumulatorIndex, CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue,
+            LiveResultsWriter, OutboxWriter, RootOutcome, RowMutation,
+        };
+        use redis::AsyncCommands;
+
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let mut connection = client.get_multiplexed_async_connection().await.unwrap();
+        for commit in [false, true] {
+            let qid = format!("reset[?*]-{}", uuid::Uuid::new_v4());
+            let state = Arc::new(GarnetSessionState::new_for_query(connection.clone(), &qid));
+            let control = Arc::new(GarnetSessionControl::new(state.clone()));
+            let elements = crate::element_index::GarnetElementIndex::new(
+                &qid,
+                connection.clone(),
+                true,
+                state.clone(),
+            );
+            let results = crate::result_index::GarnetResultIndex::new(
+                &qid,
+                connection.clone(),
+                state.clone(),
+            );
+            let queue = crate::future_queue::GarnetFutureQueue::new(
+                &qid,
+                connection.clone(),
+                state.clone(),
+            );
+            let checkpoints =
+                crate::GarnetCheckpointStore::new(&qid, connection.clone(), state.clone());
+            let outbox = crate::GarnetOutboxWriter::new_with_session(
+                &qid,
+                connection.clone(),
+                state.clone(),
+            );
+            let live = crate::GarnetLiveResultsWriter::new_with_session(
+                &qid,
+                connection.clone(),
+                state.clone(),
+            );
+            let prefixes: Vec<_> = ["ei", "archive", "ari", "fqi"]
+                .map(|name| format!("{name}:{{{qid}}}:"))
+                .into();
+            let main_queue = format!("fqi:{{{qid}}}");
+            let mut committed_keys: Vec<_> = prefixes
+                .iter()
+                .map(|prefix| format!("{prefix}committed"))
+                .collect();
+            committed_keys.push(main_queue.clone());
+            for key in &committed_keys {
+                connection
+                    .set::<_, _, ()>(key, b"original".as_slice())
+                    .await
+                    .unwrap();
+            }
+            let neighbor = format!("ei:{{{qid}-other}}:committed");
+            connection
+                .set::<_, _, ()>(&neighbor, b"untouched".as_slice())
+                .await
+                .unwrap();
+            let baseline = SessionGuard::begin(control.clone()).await.unwrap();
+            checkpoints
+                .stage_checkpoint("original", 7, Some(&bytes::Bytes::from_static(b"position")))
+                .await
+                .unwrap();
+            checkpoints.write_config_hash(7).await.unwrap();
+            checkpoints.write_result_sequence(&qid, 7).await.unwrap();
+            outbox.append(&qid, 7, b"original").await.unwrap();
+            live.apply_mutations(
+                &qid,
+                &[RowMutation {
+                    row_signature: 7,
+                    data: Some(b"original"),
+                }],
+            )
+            .await
+            .unwrap();
+            baseline.commit().await.unwrap();
+
+            let root = SessionGuard::begin(control).await.unwrap();
+            root.mark_dirty().unwrap();
+            assert!(matches!(
+                outbox.trim_to_capacity(&qid, 0).await,
+                Err(IndexError::NotSupported)
+            ));
+            let tentative_keys: Vec<_> = prefixes
+                .iter()
+                .map(|prefix| format!("{prefix}tentative"))
+                .collect();
+            {
+                let mut inner = state.lock().unwrap();
+                let buffer = inner.as_mut().unwrap();
+                for key in &tentative_keys {
+                    buffer.string_set(key.clone(), b"discard".to_vec());
+                }
+            }
+            checkpoints
+                .stage_checkpoint("tentative", 9, None)
+                .await
+                .unwrap();
+            outbox.append(&qid, 9, b"discard").await.unwrap();
+            live.apply_mutations(
+                &qid,
+                &[RowMutation {
+                    row_signature: 9,
+                    data: Some(b"discard"),
+                }],
+            )
+            .await
+            .unwrap();
+
+            ElementIndex::clear(&elements).await.unwrap();
+            ElementArchiveIndex::clear(&elements).await.unwrap();
+            results.clear().await.unwrap();
+            queue.clear().await.unwrap();
+            checkpoints.clear_checkpoints().await.unwrap();
+            outbox.clear(&qid).await.unwrap();
+            live.clear(&qid).await.unwrap();
+            for key in &committed_keys {
+                assert_eq!(
+                    connection.get::<_, Option<Vec<u8>>>(key).await.unwrap(),
+                    Some(b"original".to_vec()),
+                    "{key} bypassed root"
+                );
+            }
+            {
+                let inner = state.lock().unwrap();
+                let buffer = inner.as_ref().unwrap();
+                for key in committed_keys.iter().chain(&tentative_keys) {
+                    assert!(
+                        matches!(buffer.string_get(key), BufferReadResult::KeyDeleted),
+                        "{key}"
+                    );
+                }
+            }
+            assert!(checkpoints.read_all_checkpoints().await.unwrap().is_empty());
+            assert_eq!(checkpoints.read_config_hash().await.unwrap(), None);
+            assert_eq!(
+                checkpoints.read_result_sequence(&qid).await.unwrap(),
+                Some(7)
+            );
+            assert_eq!(
+                outbox.read_from(&qid, 0).await.unwrap(),
+                vec![(7, b"original".to_vec())]
+            );
+            assert_eq!(
+                live.read_snapshot(&qid).await.unwrap(),
+                vec![(7, b"original".to_vec())]
+            );
+            checkpoints
+                .stage_checkpoint("replacement", 88, None)
+                .await
+                .unwrap();
+            checkpoints.write_config_hash(88).await.unwrap();
+            checkpoints.write_result_sequence(&qid, 88).await.unwrap();
+            assert_eq!(checkpoints.read_config_hash().await.unwrap(), Some(88));
+            assert_eq!(
+                checkpoints.read_result_sequence(&qid).await.unwrap(),
+                Some(88)
+            );
+            outbox.append(&qid, 88, b"replacement").await.unwrap();
+            live.apply_mutations(
+                &qid,
+                &[RowMutation {
+                    row_signature: 88,
+                    data: Some(b"replacement"),
+                }],
+            )
+            .await
+            .unwrap();
+            if commit {
+                root.commit().await.unwrap();
+            } else {
+                assert_eq!(root.rollback().unwrap(), RootOutcome::RolledBack);
+            }
+            for key in &committed_keys {
+                assert_eq!(
+                    connection.get::<_, Option<Vec<u8>>>(key).await.unwrap(),
+                    (!commit).then(|| b"original".to_vec()),
+                    "{key}"
+                );
+            }
+            for key in &tentative_keys {
+                assert!(
+                    connection
+                        .get::<_, Option<Vec<u8>>>(key)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "{key}"
+                );
+            }
+            let expected = if commit {
+                (88, b"replacement".to_vec())
+            } else {
+                (7, b"original".to_vec())
+            };
+            assert_eq!(
+                checkpoints.read_config_hash().await.unwrap(),
+                Some(expected.0)
+            );
+            assert_eq!(
+                checkpoints.read_result_sequence(&qid).await.unwrap(),
+                Some(expected.0)
+            );
+            let checkpoint = checkpoints
+                .read_checkpoint(if commit { "replacement" } else { "original" })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(checkpoint.sequence, expected.0);
+            if !commit {
+                assert_eq!(
+                    checkpoint.source_position,
+                    Some(bytes::Bytes::from_static(b"position"))
+                );
+            }
+            assert!(checkpoints
+                .read_checkpoint("tentative")
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                outbox.read_from(&qid, 0).await.unwrap(),
+                vec![expected.clone()]
+            );
+            assert_eq!(live.read_snapshot(&qid).await.unwrap(), vec![expected]);
+            assert_eq!(
+                connection
+                    .get::<_, Option<Vec<u8>>>(&neighbor)
+                    .await
+                    .unwrap(),
+                Some(b"untouched".to_vec())
+            );
+        }
+        redis.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn root_cancelled_clear_cannot_delete_a_newer_root() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = Arc::new(GarnetSessionState::new_for_query(
+            connection,
+            "cancelled-clear",
+        ));
+        let control = Arc::new(GarnetSessionControl::new(state.clone()));
+        let old = SessionGuard::begin(control.clone()).await.unwrap();
+        let keys = [String::from("cancelled-clear-key")];
+        let mut clear = Box::pin(state.clear(&keys, &[]));
+        assert!(futures::poll!(clear.as_mut()).is_pending());
+        old.rollback().unwrap();
+        let newer = SessionGuard::begin(control).await.unwrap();
+        state
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .string_set(keys[0].clone(), b"newer".to_vec());
+        assert!(
+            matches!(clear.await, Err(error) if error.session_error() == Some(SessionError::StaleCacheGeneration))
+        );
+        assert!(
+            matches!(state.lock().unwrap().as_ref().unwrap().string_get(&keys[0]), BufferReadResult::Found(value) if value == b"newer")
+        );
+        newer.commit().await.unwrap();
+        redis.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn root_queue_shadow_tracks_child_pops_and_rollback() {
+        use drasi_core::{
+            index_cache::shadowed_future_queue::ShadowedFutureQueue,
+            interface::{FutureQueue, OutboxWriter, PushType, RootOutcome, SessionGuard},
+            models::ElementReference,
+        };
+
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = Arc::new(GarnetSessionState::new_for_query(
+            connection.clone(),
+            "root-queue",
+        ));
+        let control: Arc<dyn SessionControl> = Arc::new(GarnetSessionControl::new(state.clone()));
+        let outbox = crate::GarnetOutboxWriter::new_with_session(
+            "root-queue",
+            connection.clone(),
+            state.clone(),
+        );
+        let queue = ShadowedFutureQueue::new_with_session(
+            Arc::new(crate::future_queue::GarnetFutureQueue::new(
+                "root-queue",
+                connection,
+                state,
+            )),
+            control.clone(),
+        );
+        let reference = ElementReference::new("source", "element");
+        let initial = SessionGuard::begin(control.clone()).await.unwrap();
+        queue
+            .push(PushType::Always, 1, 1, &reference, 1, 10)
+            .await
+            .unwrap();
+        queue
+            .push(PushType::Always, 1, 2, &reference, 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(queue.peek_due_time().await.unwrap(), Some(10));
+        initial.commit().await.unwrap();
+
+        let mut outer = SessionGuard::begin(control.clone()).await.unwrap();
+        let root = outer.root();
+        let child = outer.child(&control).unwrap();
+        outbox.append("root-queue", 1, b"tentative").await.unwrap();
+        assert!(outbox.read_from("root-queue", 0).await.unwrap().is_empty());
+        assert_eq!(queue.pop().await.unwrap().unwrap().due_time, 10);
+        let _first = child.complete(()).unwrap();
+        let child = outer.child(&control).unwrap();
+        assert_eq!(queue.peek_due_time().await.unwrap(), Some(20));
+        assert_eq!(queue.pop().await.unwrap().unwrap().due_time, 20);
+        assert_eq!(queue.peek_due_time().await.unwrap(), None);
+        let _second = child.complete(()).unwrap();
+        drop(outer);
+        assert_eq!(root.outcome(), RootOutcome::RolledBack);
+        assert!(outbox.read_from("root-queue", 0).await.unwrap().is_empty());
+        let retry = SessionGuard::begin(control).await.unwrap();
+        assert_eq!(queue.peek_due_time().await.unwrap(), Some(10));
+        assert_eq!(queue.pop().await.unwrap().unwrap().due_time, 10);
+        retry.commit().await.unwrap();
+        assert_eq!(queue.peek_due_time().await.unwrap(), Some(20));
+        redis.cleanup().await;
+    }
 
     // --- WriteBuffer: String operations ---
 
@@ -1048,7 +1717,7 @@ mod tests {
         let redis = setup_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection);
+        let state = GarnetSessionState::new_for_query(connection, "test");
         state.begin().expect("begin should succeed");
         assert!(state.lock().expect("lock").is_some());
         redis.cleanup().await;
@@ -1060,7 +1729,7 @@ mod tests {
         let redis = setup_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection);
+        let state = GarnetSessionState::new_for_query(connection, "test");
         state.begin().expect("first begin");
         state.begin().expect("second begin should succeed (nested)");
         // Buffer should still be present
@@ -1074,7 +1743,7 @@ mod tests {
         let redis = setup_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection);
+        let state = GarnetSessionState::new_for_query(connection, "test");
         state.begin().expect("begin");
         state.rollback().expect("rollback");
         assert!(state.lock().expect("lock").is_none());
@@ -1087,7 +1756,7 @@ mod tests {
         let redis = setup_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection);
+        let state = GarnetSessionState::new_for_query(connection, "test");
         state.begin().expect("begin");
         drop(state); // Should warn but not panic
         redis.cleanup().await;
@@ -1185,7 +1854,7 @@ mod tests {
         let redis_guard = setup_redis().await;
         let client = redis::Client::open(redis_guard.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection.clone());
+        let state = GarnetSessionState::new_for_query(connection.clone(), "test");
 
         state.begin().expect("outer begin"); // depth 0→1
         state.begin().expect("inner begin"); // depth 1→2
@@ -1235,7 +1904,7 @@ mod tests {
         let redis_guard = setup_redis().await;
         let client = redis::Client::open(redis_guard.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection.clone());
+        let state = GarnetSessionState::new_for_query(connection.clone(), "test");
 
         state.begin().expect("outer begin");
         state.begin().expect("inner begin");
@@ -1269,7 +1938,7 @@ mod tests {
         let redis_guard = setup_redis().await;
         let client = redis::Client::open(redis_guard.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection);
+        let state = GarnetSessionState::new_for_query(connection, "test");
 
         state.begin().expect("outer begin");
         state.begin().expect("inner begin");
@@ -1300,7 +1969,7 @@ mod tests {
         let redis_guard = setup_redis().await;
         let client = redis::Client::open(redis_guard.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection.clone());
+        let state = GarnetSessionState::new_for_query(connection.clone(), "test");
 
         state.begin().expect("begin 1"); // depth 1
         state.begin().expect("begin 2"); // depth 2
@@ -1335,7 +2004,7 @@ mod tests {
         let redis_guard = setup_redis().await;
         let client = redis::Client::open(redis_guard.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection);
+        let state = GarnetSessionState::new_for_query(connection, "test");
         assert!(state.commit().await.is_err());
         redis_guard.cleanup().await;
     }
@@ -1346,7 +2015,7 @@ mod tests {
         let redis_guard = setup_redis().await;
         let client = redis::Client::open(redis_guard.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let state = GarnetSessionState::new(connection);
+        let state = GarnetSessionState::new_for_query(connection, "test");
         assert!(state.rollback().is_ok());
         redis_guard.cleanup().await;
     }

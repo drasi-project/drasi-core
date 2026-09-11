@@ -19,6 +19,99 @@ use drasi_core::{
     models::ElementReference,
 };
 
+pub async fn pop_due_respects_deadline(
+    subject: &impl FutureQueue,
+    control: &Arc<dyn SessionControl>,
+) {
+    let root = drasi_core::interface::SessionGuard::begin(control.clone())
+        .await
+        .unwrap();
+    root.mark_dirty().unwrap();
+    let reference = ElementReference::new("source", "node");
+    for due in [10, 20] {
+        subject
+            .push(PushType::Always, 0, 1, &reference, 0, due)
+            .await
+            .unwrap();
+    }
+    while subject
+        .peek_due_time()
+        .await
+        .unwrap()
+        .is_some_and(|due| due <= 10)
+    {
+        assert_eq!(subject.pop().await.unwrap().unwrap().due_time, 10);
+    }
+    assert_eq!(subject.peek_due_time().await.unwrap(), Some(20));
+    root.commit().await.unwrap();
+}
+
+pub async fn equal_deadlines_preserve_tickets(
+    subject: &impl FutureQueue,
+    control: &Arc<dyn SessionControl>,
+) {
+    let root = drasi_core::interface::SessionGuard::begin(control.clone())
+        .await
+        .unwrap();
+    root.mark_dirty().unwrap();
+    for id in ["first", "second"] {
+        subject
+            .push(
+                PushType::Always,
+                0,
+                1,
+                &ElementReference::new("source", id),
+                0,
+                20,
+            )
+            .await
+            .unwrap();
+    }
+    let first = subject.pop().await.unwrap().unwrap();
+    let second = subject.pop().await.unwrap().unwrap();
+    assert_ne!(first.element_ref, second.element_ref);
+    assert_eq!((first.due_time, second.due_time), (20, 20));
+    assert!(subject.pop().await.unwrap().is_none());
+    root.commit().await.unwrap();
+}
+
+pub async fn remove_preserves_other_occurrences(
+    subject: &impl FutureQueue,
+    control: &Arc<dyn SessionControl>,
+) {
+    let root = drasi_core::interface::SessionGuard::begin(control.clone())
+        .await
+        .unwrap();
+    root.mark_dirty().unwrap();
+    for (group, id) in [(1, "first"), (1, "second"), (2, "other")] {
+        subject
+            .push(
+                PushType::Always,
+                0,
+                group,
+                &ElementReference::new("source", id),
+                0,
+                20,
+            )
+            .await
+            .unwrap();
+    }
+    subject.remove(0, 1).await.unwrap();
+    assert_eq!(
+        subject
+            .pop()
+            .await
+            .unwrap()
+            .unwrap()
+            .element_ref
+            .element_id
+            .as_ref(),
+        "other"
+    );
+    assert!(subject.pop().await.unwrap().is_none());
+    root.commit().await.unwrap();
+}
+
 pub async fn push_always(subject: &impl FutureQueue, session_control: &Arc<dyn SessionControl>) {
     let func1 = 1;
     let group1 = 1;

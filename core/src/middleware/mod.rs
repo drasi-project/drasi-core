@@ -14,6 +14,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+mod tracked_element_index;
+pub(crate) use tracked_element_index::TrackedElementIndex;
+
 use crate::{
     interface::{
         ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,

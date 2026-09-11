@@ -478,7 +478,7 @@ impl AggregatingFunction for Min {
         };
 
         return match &args[0] {
-            VariableValue::Float(_) => Ok(VariableValue::Float(match Float::from_f64(value) {
+            VariableValue::Float(_) | VariableValue::Integer(_) => Ok(VariableValue::Float(match Float::from_f64(value) {
                 Some(f) => f,
                 None => {
                     return Err(FunctionError {
@@ -487,7 +487,6 @@ impl AggregatingFunction for Min {
                     })
                 }
             })),
-            VariableValue::Integer(_) => Ok(VariableValue::Integer((value as i64).into())),
             VariableValue::ZonedDateTime(_) => Ok(VariableValue::ZonedDateTime(
                 ZonedDateTime::from_epoch_millis(value as i64),
             )),

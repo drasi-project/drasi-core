@@ -34,6 +34,8 @@ mod true_now_or_later;
 mod true_until;
 
 #[cfg(test)]
+mod retained_tests;
+#[cfg(test)]
 mod tests;
 
 pub trait RegisterFutureFunctions {

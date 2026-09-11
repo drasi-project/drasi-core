@@ -52,6 +52,10 @@ impl SlidingWindow {
 
 #[async_trait]
 impl LazyScalarFunction for SlidingWindow {
+    fn effect(&self) -> super::super::FunctionEffect {
+        super::super::FunctionEffect::Temporal(super::super::TemporalFunction::SlidingWindow)
+    }
+
     async fn call(
         &self,
         context: &ExpressionEvaluationContext,

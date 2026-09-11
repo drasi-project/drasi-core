@@ -66,7 +66,8 @@ pub trait FutureQueueConsumer: Send + Sync {
     /// internally, which atomically pops and processes within a session.
     async fn on_items_due(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-    /// Called when `on_items_due` returns an error.
+    /// Called when `on_items_due` fails or the queue requires transaction recovery.
+    /// Polling stops after a `SessionFenced` queue error.
     async fn on_error(&self, error: Box<dyn std::error::Error + Send + Sync>);
 
     /// Returns the current time in milliseconds since epoch.

@@ -16,9 +16,11 @@ pub mod base;
 pub mod config_hash;
 pub mod label_extractor;
 pub mod manager;
+mod output_delivery;
 pub mod output_state;
 pub mod priority_queue;
 pub mod sequence_dedup;
+pub mod source_selection;
 pub mod subscription_builder;
 
 #[cfg(test)]
