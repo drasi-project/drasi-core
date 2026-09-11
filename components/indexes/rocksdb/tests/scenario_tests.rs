@@ -33,6 +33,8 @@ struct RocksDbQueryConfig {
     pub url: String,
 }
 
+shared_tests::variable_length_match_tests!(variable_length_match, super::RocksDbQueryConfig::new());
+
 impl RocksDbQueryConfig {
     pub fn new() -> Self {
         let base_path = match env::var("ROCKS_PATH") {

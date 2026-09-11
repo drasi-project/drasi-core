@@ -121,6 +121,7 @@ pub struct ExpressionEvaluationContext<'a> {
     clock: Arc<dyn QueryClock>,
     solution_signature: Option<SolutionSignature>,
     anchor_element: Option<Arc<Element>>,
+    future_group_signature: Option<u64>,
 }
 
 impl<'a> ExpressionEvaluationContext<'a> {
@@ -136,6 +137,7 @@ impl<'a> ExpressionEvaluationContext<'a> {
             clock,
             solution_signature: None,
             anchor_element: None,
+            future_group_signature: None,
         }
     }
 
@@ -152,6 +154,7 @@ impl<'a> ExpressionEvaluationContext<'a> {
             clock,
             solution_signature: None,
             anchor_element: None,
+            future_group_signature: None,
         }
     }
 
@@ -172,6 +175,7 @@ impl<'a> ExpressionEvaluationContext<'a> {
                 ProjectionClause::GroupBy { grouping, .. } => Some(grouping),
                 _ => None,
             },
+            future_group_signature: change_context.future_group_signature,
         }
     }
 
@@ -191,6 +195,7 @@ impl<'a> ExpressionEvaluationContext<'a> {
                 ProjectionClause::GroupBy { grouping, .. } => Some(grouping),
                 _ => None,
             },
+            future_group_signature: change_context.future_group_signature,
         }
     }
 
@@ -245,6 +250,11 @@ impl<'a> ExpressionEvaluationContext<'a> {
     pub fn get_input_grouping_hash(&self) -> u64 {
         self.input_grouping_hash
     }
+
+    pub fn is_this_future_wake(&self, input_signature: u64) -> bool {
+        self.future_group_signature
+            .is_none_or(|wake| wake == input_signature)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -257,6 +267,7 @@ pub struct ChangeContext {
     pub is_future_reprocess: bool,
     pub before_grouping_hash: u64,
     pub after_grouping_hash: u64,
+    pub future_group_signature: Option<u64>,
 }
 
 fn extract_element_reference_hash(element_reference: &ElementReference) -> u64 {

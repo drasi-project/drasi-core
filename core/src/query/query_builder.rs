@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use drasi_query_ast::api::QueryParser;
 
@@ -37,10 +40,15 @@ use crate::{
         SourceMiddlewarePipelineCollection,
     },
     models::{QueryJoin, SourceMiddlewareConfig},
-    path_solver::{match_path::MatchPath, MatchPathSolver},
+    path_solver::{
+        match_path::MatchPath, variable_length::VariableLengthMatchPlan, MatchPathSolver,
+    },
 };
 
-use super::ContinuousQuery;
+use super::{
+    continuous_query::{FixedMatcher, Matcher},
+    ContinuousQuery, VariableLengthMatchLimits,
+};
 
 pub struct QueryBuilder {
     function_registry: Option<Arc<FunctionRegistry>>,
@@ -55,6 +63,7 @@ pub struct QueryBuilder {
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
     source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
     session_control: Option<Arc<dyn SessionControl>>,
+    variable_length_limits: VariableLengthMatchLimits,
 
     query_source: String,
     query_parser: Arc<dyn QueryParser>,
@@ -75,6 +84,7 @@ impl QueryBuilder {
             source_middleware: Vec::new(),
             source_pipelines: HashMap::new(),
             session_control: None,
+            variable_length_limits: VariableLengthMatchLimits::default(),
             query_source: query.into(),
             query_parser: parser,
         }
@@ -145,6 +155,12 @@ impl QueryBuilder {
         self
     }
 
+    /// Configure bounded variable-length MATCH preparation. A limit error occurs before graph writes.
+    pub fn with_variable_length_match_limits(mut self, limits: VariableLengthMatchLimits) -> Self {
+        self.variable_length_limits = limits;
+        self
+    }
+
     pub fn get_joins(&self) -> &Vec<Arc<QueryJoin>> {
         &self.joins
     }
@@ -159,9 +175,25 @@ impl QueryBuilder {
             None => Arc::new(FunctionRegistry::new()),
         };
 
-        let query = self.query_parser.parse(self.query_source.as_str())?;
-
-        let match_path = Arc::new(MatchPath::from_query(&query.parts[0])?);
+        let parsed = self.query_parser.parse_scoped(self.query_source.as_str())?;
+        let variable_length_plan = VariableLengthMatchPlan::compile(
+            &parsed,
+            !self.joins.is_empty(),
+            !self.source_middleware.is_empty()
+                || self
+                    .source_pipelines
+                    .values()
+                    .any(|pipeline| !pipeline.is_empty()),
+            self.variable_length_limits,
+        )?;
+        let query = parsed.query;
+        let match_path = match &variable_length_plan {
+            Some(_) => MatchPath {
+                slots: Vec::new(),
+                optional_paths: HashSet::new(),
+            },
+            None => MatchPath::from_query(&query.parts[0])?,
+        };
 
         let element_index = match self.element_index.take() {
             Some(index) => index,
@@ -184,6 +216,11 @@ impl QueryBuilder {
 
         let future_queue = Arc::new(ShadowedFutureQueue::new(future_queue));
 
+        let session_control = match self.session_control.take() {
+            Some(sc) => sc,
+            None => Arc::new(NoOpSessionControl),
+        };
+
         let expr_evaluator = match self.expr_evaluator.take() {
             Some(evaluator) => evaluator,
             None => Arc::new(ExpressionEvaluator::new(
@@ -200,12 +237,10 @@ impl QueryBuilder {
             )),
         };
 
-        let path_solver = Arc::new(MatchPathSolver::new(element_index.clone()));
-
         function_registry.register_future_functions(
             future_queue.clone(),
             result_index.clone(),
-            Arc::downgrade(&expr_evaluator.clone()),
+            Arc::downgrade(&expr_evaluator),
         );
 
         let source_pipelines: SourceMiddlewarePipelineCollection = {
@@ -229,19 +264,20 @@ impl QueryBuilder {
             }
         }?;
 
-        let session_control = match self.session_control.take() {
-            Some(sc) => sc,
-            None => Arc::new(NoOpSessionControl),
-        };
-
         element_index.set_joins(&match_path, &self.joins).await;
 
-        Ok(ContinuousQuery::new(
+        let matcher = match variable_length_plan {
+            Some(plan) => Matcher::VariableLength(plan),
+            None => Matcher::Fixed(FixedMatcher {
+                match_path: Arc::new(match_path),
+                path_solver: Arc::new(MatchPathSolver::new(element_index.clone())),
+            }),
+        };
+        Ok(ContinuousQuery::new_with_matcher(
             Arc::new(query),
-            match_path,
+            matcher,
             expr_evaluator,
             element_index,
-            path_solver,
             part_evaluator,
             future_queue,
             source_pipelines,

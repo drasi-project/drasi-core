@@ -44,6 +44,7 @@ use crate::{
     path_solver::{
         match_path::{MatchPath, SlotElementSpec},
         solution::{MatchPathSolution, SolutionSignature},
+        variable_length::VariableLengthMatchPlan,
         MatchPathSolver, MatchSolveContext,
     },
 };
@@ -51,18 +52,28 @@ use crate::{
 /// Result of processing a due future item.
 /// Contains the evaluation results and the source_id from the popped future's element_ref,
 /// needed by the lib crate to record provenance in QueryResult metadata.
+#[derive(Debug)]
 pub struct DueFutureResult {
     pub results: Vec<QueryPartEvaluationContext>,
     /// The source_id from the popped future's element_ref.
     pub source_id: Arc<str>,
 }
 
+pub(super) struct FixedMatcher {
+    pub match_path: Arc<MatchPath>,
+    pub path_solver: Arc<MatchPathSolver>,
+}
+
+pub(super) enum Matcher {
+    Fixed(FixedMatcher),
+    VariableLength(VariableLengthMatchPlan),
+}
+
 pub struct ContinuousQuery {
     expression_evaluator: Arc<ExpressionEvaluator>,
     part_evaluator: Arc<QueryPartEvaluator>,
     element_index: Arc<dyn ElementIndex>,
-    path_solver: Arc<MatchPathSolver>,
-    match_path: Arc<MatchPath>,
+    matcher: Matcher,
     query: Arc<Query>,
     future_consumer_shutdown_request: Arc<Notify>,
     future_queue: Arc<dyn FutureQueue>,
@@ -85,11 +96,36 @@ impl ContinuousQuery {
         source_pipelines: SourceMiddlewarePipelineCollection,
         session_control: Arc<dyn SessionControl>,
     ) -> Self {
+        Self::new_with_matcher(
+            query,
+            Matcher::Fixed(FixedMatcher {
+                match_path,
+                path_solver,
+            }),
+            expression_evaluator,
+            element_index,
+            part_evaluator,
+            future_queue,
+            source_pipelines,
+            session_control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_matcher(
+        query: Arc<Query>,
+        matcher: Matcher,
+        expression_evaluator: Arc<ExpressionEvaluator>,
+        element_index: Arc<dyn ElementIndex>,
+        part_evaluator: Arc<QueryPartEvaluator>,
+        future_queue: Arc<dyn FutureQueue>,
+        source_pipelines: SourceMiddlewarePipelineCollection,
+        session_control: Arc<dyn SessionControl>,
+    ) -> Self {
         Self {
             expression_evaluator,
             element_index,
-            path_solver,
-            match_path,
+            matcher,
             part_evaluator,
             query,
             future_consumer_shutdown_request: Arc::new(Notify::new()),
@@ -187,6 +223,10 @@ impl ContinuousQuery {
         let mut result = Vec::new();
 
         for change in changes {
+            let future_group_signature = match &change {
+                SourceChange::Future { future_ref } => Some(future_ref.group_signature),
+                _ => None,
+            };
             let base_variables = QueryVariables::new(); //todo: get query parameters
             let after_clock = Arc::new(InstantQueryClock::from_source_change(&change));
 
@@ -200,7 +240,9 @@ impl ContinuousQuery {
 
             let mut aggregation_results = CollapsedAggregationResults::new();
 
-            for (solution_signature, part_context) in solution_changes.changes {
+            for change in solution_changes.changes {
+                let solution_signature = change.signature;
+                let part_context = change.context;
                 let change_results = match self
                     .project_solution(
                         part_context,
@@ -213,12 +255,15 @@ impl ContinuousQuery {
                             is_future_reprocess: solution_changes.is_future_reprocess,
                             before_grouping_hash: solution_signature,
                             after_grouping_hash: solution_signature,
+                            future_group_signature,
                         },
                     )
                     .await
                 {
                     Ok(results) => results,
-                    Err(EvaluationError::DivideByZero) => {
+                    Err(EvaluationError::DivideByZero)
+                        if matches!(&self.matcher, Matcher::Fixed(_)) =>
+                    {
                         log::debug!("Skipping solution due to DivideByZero in projection");
                         continue;
                     }
@@ -266,6 +311,30 @@ impl ContinuousQuery {
         change: SourceChange,
         clock: Arc<dyn QueryClock>,
     ) -> Result<SolutionChangesResult, EvaluationError> {
+        let fixed = match &self.matcher {
+            Matcher::VariableLength(plan) => {
+                let prepared = super::variable_length::prepare(
+                    plan,
+                    self.element_index.as_ref(),
+                    self.expression_evaluator.as_ref(),
+                    change,
+                    clock,
+                    base_variables,
+                )
+                .await?;
+                match prepared.write {
+                    super::variable_length::IndexWrite::Set(element, slots) => {
+                        self.element_index.set_element(&element, &slots).await?;
+                    }
+                    super::variable_length::IndexWrite::Delete(reference) => {
+                        self.element_index.delete_element(&reference).await?;
+                    }
+                    super::variable_length::IndexWrite::None => {}
+                }
+                return Ok(prepared.solutions);
+            }
+            Matcher::Fixed(fixed) => fixed,
+        };
         let mut result = SolutionChangesResult::new();
         let mut before_change_solutions = HashMap::new();
         let mut after_change_solutions = HashMap::new();
@@ -274,15 +343,15 @@ impl ContinuousQuery {
             SourceChange::Insert { element } => {
                 let element = Arc::new(element);
                 let affinity_slots = self
-                    .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
+                    .get_slots_with_affinity(fixed, base_variables, element.clone(), clock.clone())
                     .await?;
                 let solutions = self
-                    .resolve_solutions(element.clone(), affinity_slots, true)
+                    .resolve_solutions(fixed, element.clone(), affinity_slots, true)
                     .await?;
 
                 for (signature, solution) in solutions {
                     if let Some(blank_optional_solution) =
-                        solution.get_empty_optional_solution(&self.match_path)
+                        solution.get_empty_optional_solution(&fixed.match_path)
                     {
                         before_change_solutions.insert(signature, blank_optional_solution);
                     }
@@ -302,13 +371,14 @@ impl ContinuousQuery {
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
                     let affinity_slots = self
                         .get_slots_with_affinity(
+                            fixed,
                             base_variables,
                             prev_version.clone(),
                             before_clock.clone(),
                         )
                         .await?;
                     let solutions = self
-                        .resolve_solutions(prev_version.clone(), affinity_slots, false)
+                        .resolve_solutions(fixed, prev_version.clone(), affinity_slots, false)
                         .await?;
                     for (signature, solution) in solutions {
                         before_change_solutions.insert(signature, solution);
@@ -320,10 +390,10 @@ impl ContinuousQuery {
 
                 let element = Arc::new(element);
                 let affinity_slots = self
-                    .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
+                    .get_slots_with_affinity(fixed, base_variables, element.clone(), clock.clone())
                     .await?;
                 let solutions = self
-                    .resolve_solutions(element.clone(), affinity_slots, true)
+                    .resolve_solutions(fixed, element.clone(), affinity_slots, true)
                     .await?;
 
                 for (signature, solution) in solutions {
@@ -339,17 +409,18 @@ impl ContinuousQuery {
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
                     let affinity_slots = self
                         .get_slots_with_affinity(
+                            fixed,
                             base_variables,
                             element.clone(),
                             before_clock.clone(),
                         )
                         .await?;
                     let solutions = self
-                        .resolve_solutions(element.clone(), affinity_slots, false)
+                        .resolve_solutions(fixed, element.clone(), affinity_slots, false)
                         .await?;
                     for (signature, solution) in solutions {
                         if let Some(blank_optional_solution) =
-                            solution.get_empty_optional_solution(&self.match_path)
+                            solution.get_empty_optional_solution(&fixed.match_path)
                         {
                             after_change_solutions.insert(signature, blank_optional_solution);
                         }
@@ -372,44 +443,37 @@ impl ContinuousQuery {
                     .get_element(&future_ref.element_ref)
                     .await?
                 {
-                    let prev_timestamp = element.get_effective_from();
-                    if prev_timestamp >= future_ref.due_time {
-                        // element already processed with due time expired, don't duplicate
+                    let timestamp = element.get_effective_from();
+                    if timestamp >= future_ref.due_time {
                         return Ok(result);
                     }
-
-                    let before_clock =
-                        Arc::new(InstantQueryClock::new(prev_timestamp, prev_timestamp));
-
-                    let affinity_slots = self
+                    let before_clock = Arc::new(InstantQueryClock::new(timestamp, timestamp));
+                    let slots = self
                         .get_slots_with_affinity(
+                            fixed,
                             base_variables,
                             element.clone(),
                             before_clock.clone(),
                         )
                         .await?;
-
-                    let before_solutions = self
-                        .resolve_solutions(element.clone(), affinity_slots, false)
-                        .await?;
-                    for (signature, solution) in before_solutions {
-                        before_change_solutions.insert(signature, solution);
-                    }
-
+                    before_change_solutions.extend(
+                        self.resolve_solutions(fixed, element.clone(), slots, false)
+                            .await?,
+                    );
                     result.before_clock = Some(before_clock);
                     result.before_anchor_element = Some(element.clone());
-
-                    let affinity_slots = self
-                        .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
+                    let slots = self
+                        .get_slots_with_affinity(
+                            fixed,
+                            base_variables,
+                            element.clone(),
+                            clock.clone(),
+                        )
                         .await?;
-
-                    let after_solutions = self
-                        .resolve_solutions(element.clone(), affinity_slots, false)
-                        .await?;
-                    for (signature, solution) in after_solutions {
-                        after_change_solutions.insert(signature, solution);
-                    }
-
+                    after_change_solutions.extend(
+                        self.resolve_solutions(fixed, element.clone(), slots, false)
+                            .await?,
+                    );
                     result.anchor_element = Some(element);
                 }
             }
@@ -417,33 +481,33 @@ impl ContinuousQuery {
 
         for (sig, before_sol) in &before_change_solutions {
             match after_change_solutions.get(sig) {
-                Some(after_sol) => result.changes.push((
-                    *sig,
-                    QueryPartEvaluationContext::Updating {
-                        before: before_sol.into_query_variables(&self.match_path, base_variables),
-                        after: after_sol.into_query_variables(&self.match_path, base_variables),
+                Some(after_sol) => result.changes.push(SolutionChange {
+                    signature: *sig,
+                    context: QueryPartEvaluationContext::Updating {
+                        before: before_sol.into_query_variables(&fixed.match_path, base_variables),
+                        after: after_sol.into_query_variables(&fixed.match_path, base_variables),
                         row_signature: 0,
                     },
-                )),
-                None => result.changes.push((
-                    *sig,
-                    QueryPartEvaluationContext::Removing {
-                        before: before_sol.into_query_variables(&self.match_path, base_variables),
+                }),
+                None => result.changes.push(SolutionChange {
+                    signature: *sig,
+                    context: QueryPartEvaluationContext::Removing {
+                        before: before_sol.into_query_variables(&fixed.match_path, base_variables),
                         row_signature: 0,
                     },
-                )),
+                }),
             }
         }
 
         for (sig, after_sol) in &after_change_solutions {
             if !before_change_solutions.contains_key(sig) {
-                result.changes.push((
-                    *sig,
-                    QueryPartEvaluationContext::Adding {
-                        after: after_sol.into_query_variables(&self.match_path, base_variables),
+                result.changes.push(SolutionChange {
+                    signature: *sig,
+                    context: QueryPartEvaluationContext::Adding {
+                        after: after_sol.into_query_variables(&fixed.match_path, base_variables),
                         row_signature: 0,
                     },
-                ))
+                })
             }
         }
 
@@ -452,6 +516,7 @@ impl ContinuousQuery {
 
     async fn resolve_solutions(
         &self,
+        fixed: &FixedMatcher,
         anchor_element: Arc<Element>,
         affinity_slots: Vec<usize>,
         update_index: bool,
@@ -465,9 +530,9 @@ impl ContinuousQuery {
         let mut result = HashMap::new();
 
         for slot_num in affinity_slots {
-            let solution = self
+            let solution = fixed
                 .path_solver
-                .solve(self.match_path.clone(), anchor_element.clone(), slot_num)
+                .solve(fixed.match_path.clone(), anchor_element.clone(), slot_num)
                 .await?;
             result.extend(solution);
         }
@@ -477,6 +542,7 @@ impl ContinuousQuery {
 
     async fn get_slots_with_affinity(
         &self,
+        fixed: &FixedMatcher,
         variables: &QueryVariables,
         anchor_element: Arc<Element>,
         clock: Arc<dyn QueryClock>,
@@ -485,7 +551,7 @@ impl ContinuousQuery {
 
         let mut affinity_slots = Vec::new();
 
-        for (slot_num, slot) in self.match_path.slots.iter().enumerate() {
+        for (slot_num, slot) in fixed.match_path.slots.iter().enumerate() {
             if self
                 .match_element_to_slot(&context, &slot.spec, anchor_element.clone())
                 .await?
@@ -749,8 +815,13 @@ impl Debug for ContinuousQuery {
     }
 }
 
-struct SolutionChangesResult {
-    pub changes: Vec<(SolutionSignature, QueryPartEvaluationContext)>,
+pub(super) struct SolutionChange {
+    pub signature: SolutionSignature,
+    pub context: QueryPartEvaluationContext,
+}
+
+pub(super) struct SolutionChangesResult {
+    pub changes: Vec<SolutionChange>,
     pub anchor_element: Option<Arc<Element>>,
     pub before_clock: Option<Arc<dyn QueryClock>>,
     pub before_anchor_element: Option<Arc<Element>>,
@@ -758,7 +829,7 @@ struct SolutionChangesResult {
 }
 
 impl SolutionChangesResult {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             changes: Vec::new(),
             before_clock: None,

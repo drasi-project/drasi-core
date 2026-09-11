@@ -149,6 +149,13 @@ Result: [Removing {
 
 More examples can be found under the [examples](examples) folder.
 
+### Variable-length patterns
+
+Continuous queries support bounded patterns such as
+`MATCH (a)-[relationships:R*1..3]->(b)`. The relationship variable binds to an
+ordered list. See [Variable-length MATCH](docs/variable-length-match.md) for
+bounds, path semantics, and supported combinations.
+
 ## Dynamic Plugins
 
 Drasi Core includes an `xtask` build tool for building, listing, and publishing dynamic plugins — shared libraries (`.so`/`.dylib`/`.dll`) loaded at runtime by [Drasi Server](https://github.com/drasi-project/drasi-server).

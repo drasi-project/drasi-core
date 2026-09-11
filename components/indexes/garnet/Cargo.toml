@@ -58,6 +58,7 @@ plugin-descriptor = ["dep:drasi-plugin-sdk", "dep:utoipa", "dep:anyhow"]
 
 [dev-dependencies]
 shared-tests = { path = "../../../shared-tests" }
+drasi-query-cypher.workspace = true
 uuid = { version = "0.8.2", features = ["serde", "v4"] }
 redis = { version = "0.25", features = ["tokio-comp"] }
 serial_test = "3"

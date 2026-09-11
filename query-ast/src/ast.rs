@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::hash::Hasher;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     pub parts: Vec<QueryPart>,
@@ -210,10 +212,10 @@ impl RelationMatch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Literal {
     Integer(i64),
-    Real(f64),
+    Real(#[serde(with = "real_bits")] f64),
     Boolean(bool),
     Text(Arc<str>),
     Date(Arc<str>),
@@ -253,7 +255,7 @@ pub trait ParentExpression {
     fn get_children(&self) -> Vec<&Expression>;
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub enum Expression {
     UnaryExpression(UnaryExpression),
     BinaryExpression(BinaryExpression),
@@ -278,7 +280,7 @@ impl ParentExpression for Expression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub enum UnaryExpression {
     Not(Box<Expression>),
     Exists(Box<Expression>),
@@ -389,7 +391,7 @@ impl ParentExpression for UnaryExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub enum BinaryExpression {
     And(Box<Expression>, Box<Expression>),
     Or(Box<Expression>, Box<Expression>),
@@ -524,7 +526,7 @@ impl ParentExpression for BinaryExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub struct FunctionExpression {
     pub name: Arc<str>,
     pub args: Vec<Expression>,
@@ -551,7 +553,7 @@ impl ParentExpression for FunctionExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub struct CaseExpression {
     pub match_: Option<Box<Expression>>,
     pub when: Vec<(Expression, Expression)>,
@@ -589,7 +591,7 @@ impl ParentExpression for CaseExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub struct ObjectExpression {
     pub elements: BTreeMap<Arc<str>, Expression>,
 }
@@ -616,7 +618,7 @@ impl ParentExpression for ObjectExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub struct ListExpression {
     pub elements: Vec<Expression>,
 }
@@ -638,7 +640,7 @@ impl ParentExpression for ListExpression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 pub struct IteratorExpression {
     pub item_identifier: Arc<str>,
     pub list_expression: Box<Expression>,
@@ -705,5 +707,54 @@ impl ParentExpression for IteratorExpression {
             children.push(filter);
         }
         children
+    }
+}
+
+mod real_bits {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.to_bits())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        u64::deserialize(deserializer).map(f64::from_bits)
+    }
+}
+
+#[cfg(test)]
+mod temporal_serde_tests {
+    use super::*;
+
+    #[test]
+    fn real_literals_preserve_all_bits() {
+        for bits in [0_u64, 1 << 63, 1, 0x7ff8_0000_0000_1234, u64::MAX] {
+            let literal = Literal::Real(f64::from_bits(bits));
+            let encoded = serde_json::to_vec(&literal).unwrap();
+            let Literal::Real(decoded) = serde_json::from_slice(&encoded).unwrap() else {
+                panic!("lost real literal");
+            };
+            assert_eq!(decoded.to_bits(), bits);
+        }
+    }
+
+    #[test]
+    fn nested_expressions_preserve_function_positions() {
+        let call = FunctionExpression::function(
+            "f".into(),
+            vec![UnaryExpression::literal(Literal::Expression(Box::new(
+                UnaryExpression::ident("x"),
+            )))],
+            83,
+        );
+        let expression = IteratorExpression::map_with_filter(
+            "x".into(),
+            ListExpression::list(vec![UnaryExpression::literal(Literal::Null)]),
+            ObjectExpression::object_from_vec(vec![("value".into(), call.clone())]),
+            CaseExpression::case(None, vec![(call.clone(), call.clone())], Some(call)),
+        );
+        let encoded = serde_json::to_vec(&expression).unwrap();
+        let decoded: Expression = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, expression);
     }
 }

@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 pub mod match_path;
 pub mod solution;
+pub(crate) mod variable_length;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
