@@ -16,6 +16,17 @@ Continuous Queries are implemented as graph queries written in the Cypher Query 
 
 Drasi-core is the internal library used by [Drasi](https://github.com/drasi-project/drasi-platform) to implement continuous queries. Drasi itself is a much broader solution with many more moving parts.  Drasi-core can be used stand-alone from Drasi for embedded scenarios, where continuous queries could run in-process inside an application.
 
+## Standalone host and WorkGraph
+
+For an executable host rather than an embedded library, follow
+[Drasi Server setup](https://github.com/drasi-project/drasi-server/blob/workgraph-generic-recovery/docs/setup.md).
+For the current WorkGraph prototype, use
+[WorkGraph setup](https://github.com/drasi-project/drasi-workgraph/blob/workgraph-generic-recovery/docs/setup/README.md)
+and its [sandbox guide](https://github.com/drasi-project/drasi-workgraph/blob/workgraph-generic-recovery/docs/setup/sandbox.md).
+Those guides target the compatible `workgraph-generic-recovery` checkouts.
+Core supplies generic query, state, and SDK infrastructure; WorkGraph owns its
+protocol, compiler, Source/Reaction plugins, and reusable repository kit.
+
 ## Example
 
 In this scenario, we have a set of `Vehicles` and a set of `Zones` where vehicles can be.  The conceptual data model in Drasi is a labeled property graph, so we will add the vehicles and zones as nodes in the graph and we will connect them with a `LOCATED_IN` relationship.
@@ -368,4 +379,5 @@ The drasi-core library is one component of an early release of Drasi which enabl
 
 ## Contributing
 
-Please see the [Contribution guide](CONTRIBUTING.md)
+Please see the [Drasi contribution guide](https://github.com/drasi-project/.github/blob/main/CONTRIBUTING.md)
+for the shared contribution process and DCO requirements.

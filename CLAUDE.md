@@ -13,9 +13,9 @@ This is a Cargo workspace with the following key components:
 - **core** - Main library with query evaluation engine, in-memory indexing, and continuous query processing
 - **query-ast** - Abstract syntax tree for query parsing
 - **query-cypher** - Cypher query language parser and compiler  
-- **query-gql** - GraphQL query support
+- **query-gql** - GQL (Graph Query Language) parser
 - **functions-cypher** - Built-in Cypher functions
-- **functions-gql** - Built-in GraphQL functions
+- **functions-gql** - Built-in GQL functions
 - **index-rocksdb** - RocksDB persistent storage backend
 - **index-garnet** - Garnet (Redis-compatible) storage backend
 - **middleware** - Query middleware components
@@ -69,7 +69,7 @@ The main query evaluation logic is in `core/src/evaluation/` which processes con
 
 ### Query Languages
 - **Cypher**: Primary query language for graph traversal and pattern matching
-- **GraphQL**: Alternative query interface with GraphQL-to-Cypher compilation
+- **GQL**: Alternative graph query parser targeting the shared query AST; this is not GraphQL
 
 ### Storage Architecture
 - Default: In-memory indexes for development and testing
