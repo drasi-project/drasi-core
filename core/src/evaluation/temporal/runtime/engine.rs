@@ -30,7 +30,7 @@ use hashers::jenkins::spooky_hash::SpookyHasher;
 use crate::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables, SideEffects},
-        functions::{FunctionEffect, FunctionRegistry, TemporalFunction},
+        functions::{FunctionEffect, FunctionRegistry},
         temporal::*,
         variable_value::VariableValue,
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator,
@@ -561,7 +561,7 @@ impl TemporalRuntime {
         });
         let temporal_reads_aggregate = part.projection.iter().any(|program| {
             program.effects.iter().any(|effect| {
-                matches!(self.effect(effect), FunctionEffect::Temporal(_))
+                self.effect(effect).is_temporal()
                     && expression_dependencies(
                         &Expression::FunctionExpression(effect.clone()),
                         &self.registry,
@@ -717,13 +717,10 @@ impl TemporalRuntime {
     ) -> Result<(), EvaluationError> {
         if !part.grouped
             || part.projection.iter().any(|expression| {
-                expression
-                    .effects
-                    .iter()
-                    .any(|effect| matches!(
-                        self.effect(effect),
-                        FunctionEffect::Temporal(function) if function != TemporalFunction::SlidingWindow
-                    ))
+                expression.effects.iter().any(|effect| {
+                    let effect = self.effect(effect);
+                    effect.is_temporal() && effect != FunctionEffect::SlidingWindow
+                })
             })
         {
             return Ok(());
@@ -813,9 +810,7 @@ impl TemporalRuntime {
         let windows: BTreeSet<_> = program
             .effects
             .iter()
-            .filter(|expression| {
-                self.effect(expression) == FunctionEffect::Temporal(TemporalFunction::SlidingWindow)
-            })
+            .filter(|expression| self.effect(expression) == FunctionEffect::SlidingWindow)
             .map(|expression| FunctionSite {
                 part: part.id,
                 position_in_query: expression.position_in_query,
@@ -1000,14 +995,14 @@ impl TemporalRuntime {
                 .captured
                 .clone();
             for capture in captures.into_values() {
-                let FunctionEffect::Temporal(function) = capture.effect else {
+                if !capture.effect.is_temporal() {
                     return Err(EvaluationError::CorruptData);
-                };
-                let state = match function {
-                    TemporalFunction::TrueFor => {
+                }
+                let state = match capture.effect {
+                    FunctionEffect::TrueFor => {
                         Some(FunctionState::TrueFor(TrueForState::default()))
                     }
-                    TemporalFunction::PreviousValue | TemporalFunction::PreviousDistinctValue => {
+                    FunctionEffect::PreviousValue | FunctionEffect::PreviousDistinctValue => {
                         Some(FunctionState::UninitializedHistory)
                     }
                     _ => None,

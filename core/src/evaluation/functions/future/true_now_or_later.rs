@@ -38,7 +38,7 @@ impl TrueNowOrLater {
 #[async_trait]
 impl ScalarFunction for TrueNowOrLater {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::Temporal(super::super::TemporalFunction::TrueNowOrLater)
+        super::super::FunctionEffect::TrueNowOrLater
     }
 
     async fn call(

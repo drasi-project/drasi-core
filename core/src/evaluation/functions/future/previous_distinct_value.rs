@@ -49,9 +49,7 @@ impl PreviousDistinctValue {
 #[async_trait]
 impl ScalarFunction for PreviousDistinctValue {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::Temporal(
-            super::super::TemporalFunction::PreviousDistinctValue,
-        )
+        super::super::FunctionEffect::PreviousDistinctValue
     }
 
     async fn call(

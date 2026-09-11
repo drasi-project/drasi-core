@@ -37,7 +37,7 @@ impl FutureElement {
 #[async_trait]
 impl ScalarFunction for FutureElement {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::Temporal(super::super::TemporalFunction::Future)
+        super::super::FunctionEffect::Future
     }
 
     async fn call(

@@ -20,7 +20,7 @@ use drasi_query_ast::ast::{
 };
 
 use crate::evaluation::{
-    functions::{FunctionEffect, FunctionRegistry, TemporalFunction},
+    functions::{FunctionEffect, FunctionRegistry},
     EvaluationError,
 };
 
@@ -125,7 +125,7 @@ fn contains_temporal(expression: &Expression, registry: &FunctionRegistry) -> bo
     if let Expression::FunctionExpression(function) = expression {
         if registry
             .get_function(&function.name)
-            .is_some_and(|function| matches!(function.effect(), FunctionEffect::Temporal(_)))
+            .is_some_and(|function| function.effect().is_temporal())
         {
             return true;
         }
@@ -145,7 +145,7 @@ fn collect_effects(
             .get_function(&function.name)
             .ok_or_else(|| EvaluationError::UnknownFunction(function.name.to_string()))?
             .effect();
-        if effect == FunctionEffect::Temporal(TemporalFunction::SlidingWindow) {
+        if effect == FunctionEffect::SlidingWindow {
             if function.args.len() != 2 {
                 return Err(EvaluationError::InvalidArgument);
             }

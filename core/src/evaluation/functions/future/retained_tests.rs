@@ -19,7 +19,7 @@ use super::*;
 use crate::{
     evaluation::{
         context::QueryVariables,
-        functions::{FunctionEffect, TemporalFunction},
+        functions::FunctionEffect,
         temporal::{
             fixtures,
             runtime::{
@@ -48,18 +48,18 @@ fn registry() -> FunctionRegistry {
     registry
 }
 
-const DECLARATIONS: [(&str, TemporalFunction); 8] = [
-    ("drasi.future", TemporalFunction::Future),
-    ("drasi.trueUntil", TemporalFunction::TrueUntil),
-    ("drasi.trueFor", TemporalFunction::TrueFor),
-    ("drasi.trueLater", TemporalFunction::TrueLater),
-    ("drasi.trueNowOrLater", TemporalFunction::TrueNowOrLater),
-    ("drasi.previousValue", TemporalFunction::PreviousValue),
+const DECLARATIONS: [(&str, FunctionEffect); 8] = [
+    ("drasi.future", FunctionEffect::Future),
+    ("drasi.trueUntil", FunctionEffect::TrueUntil),
+    ("drasi.trueFor", FunctionEffect::TrueFor),
+    ("drasi.trueLater", FunctionEffect::TrueLater),
+    ("drasi.trueNowOrLater", FunctionEffect::TrueNowOrLater),
+    ("drasi.previousValue", FunctionEffect::PreviousValue),
     (
         "drasi.previousDistinctValue",
-        TemporalFunction::PreviousDistinctValue,
+        FunctionEffect::PreviousDistinctValue,
     ),
-    ("drasi.slidingWindow", TemporalFunction::SlidingWindow),
+    ("drasi.slidingWindow", FunctionEffect::SlidingWindow),
 ];
 
 #[test]
@@ -68,12 +68,8 @@ fn temporal_declarations_have_exact_effects_and_call_kinds() {
 
     for (name, expected) in DECLARATIONS {
         let function = registry.get_function(name).unwrap();
-        assert_eq!(
-            function.effect(),
-            FunctionEffect::Temporal(expected),
-            "{name}"
-        );
-        if expected == TemporalFunction::SlidingWindow {
+        assert_eq!(function.effect(), expected, "{name}");
+        if expected == FunctionEffect::SlidingWindow {
             assert!(
                 matches!(function.as_ref(), Function::LazyScalar(_)),
                 "{name}"
@@ -296,7 +292,7 @@ fn capture(
             args: Vec::new(),
             position_in_query: 10,
         },
-        effect: FunctionEffect::Temporal(TemporalFunction::TrueNowOrLater),
+        effect: FunctionEffect::TrueNowOrLater,
         arguments,
         key: ContributionKey::InputHash(input.context.input_grouping_hash),
         context: input.context.clone(),

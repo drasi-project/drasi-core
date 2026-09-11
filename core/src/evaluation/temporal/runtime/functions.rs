@@ -18,7 +18,7 @@ use chrono::NaiveTime;
 
 use crate::{
     evaluation::{
-        functions::{FunctionEffect, TemporalFunction},
+        functions::FunctionEffect,
         temporal::{
             FunctionCall, FunctionCell, FunctionCellId, FunctionState, Generation, HistoryCapture,
             HistoryState, PredicateState, RetainedInput, TemporalStateError,
@@ -54,38 +54,34 @@ pub fn settle_function(
     cell: Option<&mut FunctionCell>,
     capture_history: bool,
 ) -> Result<SettledFunction, EvaluationError> {
-    let FunctionEffect::Temporal(function) = captured.effect else {
-        return Err(EvaluationError::from(
+    match captured.effect {
+        FunctionEffect::TrueFor => settle_true_for(captured, input, cell),
+        FunctionEffect::PreviousValue | FunctionEffect::PreviousDistinctValue => settle_history(
+            captured,
+            input,
+            cell,
+            capture_history,
+            captured.effect == FunctionEffect::PreviousDistinctValue,
+        ),
+        FunctionEffect::SlidingWindow => settle_window(captured, input),
+        FunctionEffect::Future
+        | FunctionEffect::TrueLater
+        | FunctionEffect::TrueUntil
+        | FunctionEffect::TrueNowOrLater => settle_at(captured, input, captured.effect),
+        FunctionEffect::Pure | FunctionEffect::Aggregate => Err(EvaluationError::from(
             QueryExecutionError::UnsupportedTemporalEffect("non-temporal function settlement"),
-        ));
-    };
-    match function {
-        TemporalFunction::TrueFor => settle_true_for(captured, input, cell),
-        TemporalFunction::PreviousValue | TemporalFunction::PreviousDistinctValue => {
-            settle_history(
-                captured,
-                input,
-                cell,
-                capture_history,
-                function == TemporalFunction::PreviousDistinctValue,
-            )
-        }
-        TemporalFunction::SlidingWindow => settle_window(captured, input),
-        TemporalFunction::Future
-        | TemporalFunction::TrueLater
-        | TemporalFunction::TrueUntil
-        | TemporalFunction::TrueNowOrLater => settle_at(captured, input, function),
+        )),
     }
 }
 
 fn settle_at(
     captured: &CapturedCall,
     input: &RetainedInput,
-    function: TemporalFunction,
+    function: FunctionEffect,
 ) -> Result<SettledFunction, EvaluationError> {
     require_arguments(captured, 2)?;
     let value = &captured.arguments[0];
-    if function == TemporalFunction::Future {
+    if function == FunctionEffect::Future {
         let VariableValue::Element(element) = value else {
             return Err(function_error(
                 captured,
@@ -114,7 +110,7 @@ fn settle_at(
             ));
         }
     };
-    if function == TemporalFunction::TrueNowOrLater && condition {
+    if function == FunctionEffect::TrueNowOrLater && condition {
         return Ok(settled(VariableValue::Bool(true)));
     }
     if captured.arguments[1] == VariableValue::Null {
@@ -122,7 +118,7 @@ fn settle_at(
     }
     let due_time = deadline(captured, &captured.arguments[1])?;
     // trueUntil keeps its existing meaning: false is immediate, true waits for the deadline.
-    if (function == TemporalFunction::TrueUntil && !condition)
+    if (function == FunctionEffect::TrueUntil && !condition)
         || captured.context.clock.realtime >= due_time
     {
         return Ok(settled(VariableValue::Bool(condition)));
@@ -411,7 +407,7 @@ mod tests {
     };
 
     fn capture(
-        function: TemporalFunction,
+        function: FunctionEffect,
         arguments: Vec<VariableValue>,
         realtime: u64,
     ) -> CapturedCall {
@@ -424,7 +420,7 @@ mod tests {
                 args: Vec::new(),
                 position_in_query: fixtures::call().site.position_in_query,
             },
-            effect: FunctionEffect::Temporal(function),
+            effect: function,
             arguments,
             key: ContributionKey::InputHash(13),
             context,
@@ -502,7 +498,7 @@ mod tests {
         let mut input = fixtures::input();
         let mut cell = cell(FunctionState::TrueFor(TrueForState::default()));
         let mut captured = capture(
-            TemporalFunction::TrueFor,
+            FunctionEffect::TrueFor,
             vec![VariableValue::Bool(true), VariableValue::from(20)],
             110,
         );
@@ -558,7 +554,7 @@ mod tests {
             vec![VariableValue::Null, VariableValue::from("ignored")],
             vec![VariableValue::Bool(true), VariableValue::Null],
         ] {
-            let captured = capture(TemporalFunction::TrueFor, args, 110);
+            let captured = capture(FunctionEffect::TrueFor, args, 110);
             let before = cell_bytes(&cell);
             let result = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
             assert_eq!(result.value, VariableValue::Null);
@@ -566,7 +562,7 @@ mod tests {
             assert_eq!(cell_bytes(&cell), before);
         }
         let captured = capture(
-            TemporalFunction::TrueFor,
+            FunctionEffect::TrueFor,
             vec![VariableValue::Bool(true), VariableValue::from(0)],
             110,
         );
@@ -578,8 +574,8 @@ mod tests {
     #[test]
     fn shared_history_advances_once_per_revision_without_losing_native_values() {
         for function in [
-            TemporalFunction::PreviousValue,
-            TemporalFunction::PreviousDistinctValue,
+            FunctionEffect::PreviousValue,
+            FunctionEffect::PreviousDistinctValue,
         ] {
             let mut first = fixtures::input();
             first.source_revision = SourceRevision(0);
@@ -622,8 +618,8 @@ mod tests {
     #[test]
     fn history_refresh_uses_input_capture_and_never_writes_history() {
         for function in [
-            TemporalFunction::PreviousValue,
-            TemporalFunction::PreviousDistinctValue,
+            FunctionEffect::PreviousValue,
+            FunctionEffect::PreviousDistinctValue,
         ] {
             let mut input = fixtures::input();
             let saved = native_value();
@@ -677,7 +673,7 @@ mod tests {
             (5, VariableValue::from("b"), VariableValue::Null),
         ] {
             input.source_revision = SourceRevision(revision);
-            let captured = capture(TemporalFunction::PreviousDistinctValue, vec![current], 110);
+            let captured = capture(FunctionEffect::PreviousDistinctValue, vec![current], 110);
             let result = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
             assert_eq!(result.value, previous);
         }
@@ -687,9 +683,9 @@ mod tests {
     fn missing_wrong_and_regressing_history_state_are_errors() {
         let mut input = fixtures::input();
         for function in [
-            TemporalFunction::TrueFor,
-            TemporalFunction::PreviousValue,
-            TemporalFunction::PreviousDistinctValue,
+            FunctionEffect::TrueFor,
+            FunctionEffect::PreviousValue,
+            FunctionEffect::PreviousDistinctValue,
         ] {
             let captured = capture(
                 function,
@@ -700,7 +696,7 @@ mod tests {
                 settle_function(&captured, &mut input, None, true),
                 FunctionEvaluationError::CorruptData,
             );
-            let wrong = if function == TemporalFunction::TrueFor {
+            let wrong = if function == FunctionEffect::TrueFor {
                 FunctionState::UninitializedHistory
             } else {
                 FunctionState::TrueFor(TrueForState::default())
@@ -716,7 +712,7 @@ mod tests {
             previous: VariableValue::Null,
         }));
         let captured = capture(
-            TemporalFunction::PreviousValue,
+            FunctionEffect::PreviousValue,
             vec![VariableValue::Null],
             110,
         );
@@ -732,10 +728,10 @@ mod tests {
     #[test]
     fn later_values_wait_until_the_deadline_without_an_anchor() {
         for (function, condition) in [
-            (TemporalFunction::TrueLater, true),
-            (TemporalFunction::TrueLater, false),
-            (TemporalFunction::TrueUntil, true),
-            (TemporalFunction::TrueNowOrLater, false),
+            (FunctionEffect::TrueLater, true),
+            (FunctionEffect::TrueLater, false),
+            (FunctionEffect::TrueUntil, true),
+            (FunctionEffect::TrueNowOrLater, false),
         ] {
             let mut input = fixtures::input();
             let mut captured = capture(
@@ -770,19 +766,19 @@ mod tests {
         let mut input = fixtures::input();
         for (function, condition, due, expected) in [
             (
-                TemporalFunction::TrueUntil,
+                FunctionEffect::TrueUntil,
                 false,
                 VariableValue::from(200),
                 VariableValue::Bool(false),
             ),
             (
-                TemporalFunction::TrueUntil,
+                FunctionEffect::TrueUntil,
                 false,
                 VariableValue::Null,
                 VariableValue::Null,
             ),
             (
-                TemporalFunction::TrueNowOrLater,
+                FunctionEffect::TrueNowOrLater,
                 true,
                 VariableValue::from("not a deadline"),
                 VariableValue::Bool(true),
@@ -794,9 +790,9 @@ mod tests {
             assert!(result.tickets.is_empty());
         }
         for function in [
-            TemporalFunction::TrueLater,
-            TemporalFunction::TrueUntil,
-            TemporalFunction::TrueNowOrLater,
+            FunctionEffect::TrueLater,
+            FunctionEffect::TrueUntil,
+            FunctionEffect::TrueNowOrLater,
         ] {
             let captured = capture(
                 function,
@@ -814,7 +810,7 @@ mod tests {
         let mut input = fixtures::input();
         let target = element("target");
         let mut captured = capture(
-            TemporalFunction::Future,
+            FunctionEffect::Future,
             vec![
                 VariableValue::Element(target.clone()),
                 VariableValue::from(200),
@@ -857,7 +853,7 @@ mod tests {
             (VariableValue::from(u64::MAX), u64::MAX),
         ] {
             let captured = capture(
-                TemporalFunction::TrueLater,
+                FunctionEffect::TrueLater,
                 vec![VariableValue::Bool(true), deadline],
                 110,
             );
@@ -884,7 +880,7 @@ mod tests {
             )),
         ] {
             let captured = capture(
-                TemporalFunction::TrueLater,
+                FunctionEffect::TrueLater,
                 vec![VariableValue::Bool(true), deadline],
                 110,
             );
@@ -899,8 +895,8 @@ mod tests {
             VariableValue::from(u64::MAX),
             VariableValue::Duration(Duration::new(chrono::Duration::nanoseconds(-1), 0, 0)),
         ] {
-            for function in [TemporalFunction::TrueFor, TemporalFunction::SlidingWindow] {
-                let args = if function == TemporalFunction::TrueFor {
+            for function in [FunctionEffect::TrueFor, FunctionEffect::SlidingWindow] {
+                let args = if function == FunctionEffect::TrueFor {
                     vec![VariableValue::Bool(true), duration.clone()]
                 } else {
                     vec![duration.clone()]
@@ -931,7 +927,7 @@ mod tests {
             ),
         ] {
             let captured = capture(
-                TemporalFunction::TrueFor,
+                FunctionEffect::TrueFor,
                 vec![VariableValue::Bool(true), VariableValue::from(1)],
                 realtime,
             );
@@ -949,7 +945,7 @@ mod tests {
     fn sliding_window_uses_source_time_and_stops_scheduling_when_expired() {
         let mut input = fixtures::input();
         let mut captured = capture(
-            TemporalFunction::SlidingWindow,
+            FunctionEffect::SlidingWindow,
             vec![VariableValue::Duration(Duration::new(
                 chrono::Duration::milliseconds(20),
                 0,
@@ -984,27 +980,27 @@ mod tests {
         let mut input = fixtures::input();
         for (function, args, error) in [
             (
-                TemporalFunction::TrueLater,
+                FunctionEffect::TrueLater,
                 vec![],
                 FunctionEvaluationError::InvalidArgumentCount,
             ),
             (
-                TemporalFunction::TrueLater,
+                FunctionEffect::TrueLater,
                 vec![VariableValue::Awaiting, VariableValue::from(200)],
                 FunctionEvaluationError::InvalidArgument(0),
             ),
             (
-                TemporalFunction::TrueUntil,
+                FunctionEffect::TrueUntil,
                 vec![VariableValue::Bool(false), VariableValue::from("bad time")],
                 FunctionEvaluationError::InvalidArgument(1),
             ),
             (
-                TemporalFunction::Future,
+                FunctionEffect::Future,
                 vec![VariableValue::Null, VariableValue::from(200)],
                 FunctionEvaluationError::InvalidArgument(0),
             ),
             (
-                TemporalFunction::Future,
+                FunctionEffect::Future,
                 vec![
                     VariableValue::Element(element("target")),
                     VariableValue::Null,
@@ -1012,12 +1008,12 @@ mod tests {
                 FunctionEvaluationError::InvalidArgument(1),
             ),
             (
-                TemporalFunction::SlidingWindow,
+                FunctionEffect::SlidingWindow,
                 vec![VariableValue::from("bad duration")],
                 FunctionEvaluationError::InvalidArgument(0),
             ),
             (
-                TemporalFunction::SlidingWindow,
+                FunctionEffect::SlidingWindow,
                 vec![
                     VariableValue::from(10),
                     VariableValue::from("lazy expression"),
@@ -1025,7 +1021,7 @@ mod tests {
                 FunctionEvaluationError::InvalidArgumentCount,
             ),
             (
-                TemporalFunction::PreviousValue,
+                FunctionEffect::PreviousValue,
                 vec![],
                 FunctionEvaluationError::InvalidArgumentCount,
             ),
@@ -1033,7 +1029,7 @@ mod tests {
             let captured = capture(function, args, 110);
             assert_error(settle_function(&captured, &mut input, None, true), error);
         }
-        let mut captured = capture(TemporalFunction::TrueLater, vec![], 110);
+        let mut captured = capture(FunctionEffect::TrueLater, vec![], 110);
         captured.effect = FunctionEffect::Pure;
         assert!(matches!(
             settle_function(&captured, &mut input, None, true),

@@ -55,7 +55,9 @@ pub enum Function {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TemporalFunction {
+pub enum FunctionEffect {
+    Pure,
+    Aggregate,
     TrueFor,
     TrueLater,
     TrueUntil,
@@ -66,11 +68,10 @@ pub enum TemporalFunction {
     SlidingWindow,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FunctionEffect {
-    Pure,
-    Aggregate,
-    Temporal(TemporalFunction),
+impl FunctionEffect {
+    pub fn is_temporal(self) -> bool {
+        !matches!(self, Self::Pure | Self::Aggregate)
+    }
 }
 
 impl Function {

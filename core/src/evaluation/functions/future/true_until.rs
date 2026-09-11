@@ -37,7 +37,7 @@ impl TrueUntil {
 #[async_trait]
 impl ScalarFunction for TrueUntil {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::Temporal(super::super::TemporalFunction::TrueUntil)
+        super::super::FunctionEffect::TrueUntil
     }
 
     async fn call(

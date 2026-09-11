@@ -41,7 +41,7 @@ use crate::{evaluation::variable_value::VariableValue, interface::ResultIndex};
 
 use super::{
     context::{ExpressionEvaluationContext, SideEffects},
-    functions::{Function, FunctionEffect, FunctionRegistry, TemporalFunction},
+    functions::{Function, FunctionEffect, FunctionRegistry},
     temporal::ContributionKey,
     EvaluationError, FunctionEvaluationError,
 };
@@ -1629,8 +1629,8 @@ impl ExpressionEvaluator {
         let result = match self.functions.get_function(&expression.name) {
             Some(function) => match function.as_ref() {
                 Function::Scalar(scalar) => {
-                    if let (Some(temporal), FunctionEffect::Temporal(_)) =
-                        (context.temporal(), scalar.effect())
+                    if let Some(temporal) =
+                        context.temporal().filter(|_| scalar.effect().is_temporal())
                     {
                         let call = temporal.call(expression);
                         if temporal.is_settled(&call)? {
@@ -1659,10 +1659,9 @@ impl ExpressionEvaluator {
                         .map_err(EvaluationError::FunctionError)?
                 }
                 Function::LazyScalar(scalar) => {
-                    if let (
-                        Some(temporal),
-                        FunctionEffect::Temporal(TemporalFunction::SlidingWindow),
-                    ) = (context.temporal(), scalar.effect())
+                    if let Some(temporal) = context
+                        .temporal()
+                        .filter(|_| scalar.effect() == FunctionEffect::SlidingWindow)
                     {
                         if expression.args.len() != 2 {
                             return Err(EvaluationError::InvalidArgument);
