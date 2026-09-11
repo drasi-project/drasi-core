@@ -23,10 +23,7 @@ pub use async_trait::async_trait;
 pub use drasi_query_ast::api::QueryConfiguration;
 pub use drasi_query_ast::ast;
 
-use super::{EvaluationError, ExpressionEvaluationContext, FunctionError};
-use crate::evaluation::temporal::runtime::frame::CapturedCall;
-use crate::evaluation::temporal::runtime::functions::SettledFunction;
-use crate::evaluation::temporal::{FunctionCell, FunctionState, RetainedInput};
+use super::{ExpressionEvaluationContext, FunctionError};
 use crate::evaluation::variable_value::VariableValue;
 use crate::interface::ResultIndex;
 
@@ -55,50 +52,6 @@ pub enum Function {
     LazyScalar(Arc<dyn LazyScalarFunction>),
     Aggregating(Arc<dyn AggregatingFunction>),
     ContextMutator(Arc<dyn ContextMutatorFunction>),
-    Temporal(Arc<dyn TemporalScalar>),
-    LazyTemporal(Arc<dyn TemporalScalar>),
-}
-
-impl Function {
-    pub fn as_temporal(&self) -> Option<&dyn TemporalScalar> {
-        match self {
-            Self::Temporal(function) | Self::LazyTemporal(function) => Some(function.as_ref()),
-            _ => None,
-        }
-    }
-
-    pub fn is_aggregating(&self) -> bool {
-        matches!(self, Self::Aggregating(_))
-    }
-
-    pub fn is_lazy_temporal(&self) -> bool {
-        matches!(self, Self::LazyTemporal(_))
-    }
-}
-
-pub trait TemporalScalar: Send + Sync {
-    fn initial_cell(&self) -> Option<FunctionState> {
-        None
-    }
-
-    fn accepts_cell(&self, state: &FunctionState) -> bool {
-        match self.initial_cell() {
-            Some(initial) => std::mem::discriminant(&initial) == std::mem::discriminant(state),
-            None => false,
-        }
-    }
-
-    fn release_cell(&self, cell: &mut FunctionCell) {
-        let _ = cell;
-    }
-
-    fn settle(
-        &self,
-        captured: &CapturedCall,
-        input: &mut RetainedInput,
-        cell: Option<&mut FunctionCell>,
-        capture_history: bool,
-    ) -> Result<SettledFunction, EvaluationError>;
 }
 
 #[async_trait]

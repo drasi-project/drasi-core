@@ -51,6 +51,7 @@ pub(super) async fn prepare(
     let reference = change.get_reference().clone();
     let before = index.get_element(&reference).await?;
     let mut result = SolutionChangesResult::new();
+    let mut future_original_time = None;
     let (after, write) = match change {
         SourceChange::Insert { element } => {
             let slots = plan.affinity(&element);
@@ -69,19 +70,30 @@ pub(super) async fn prepare(
             (Some(element.clone()), IndexWrite::Set(element, slots))
         }
         SourceChange::Delete { .. } => (None, IndexWrite::Delete(reference.clone())),
-        SourceChange::Future { .. } => {
-            return Err(crate::interface::IndexError::other(
-                crate::evaluation::temporal::codec::TemporalCodecError::MigrationRequired,
-            )
-            .into());
+        SourceChange::Future { future_ref } => {
+            result.is_future_reprocess = true;
+            future_original_time = Some(future_ref.original_time);
+            match &before {
+                Some(element) => (Some(element.clone()), IndexWrite::None),
+                None => {
+                    return Ok(PreparedChange {
+                        solutions: result,
+                        write: IndexWrite::None,
+                    });
+                }
+            }
         }
     };
-    let before_clock: Arc<dyn QueryClock> = match &before {
-        Some(element) => Arc::new(InstantQueryClock::new(
-            element.get_effective_from(),
-            after_clock.get_realtime(),
-        )),
-        None => after_clock.clone(),
+    let before_clock: Arc<dyn QueryClock> = if let Some(original_time) = future_original_time {
+        Arc::new(InstantQueryClock::new(original_time, original_time))
+    } else {
+        match &before {
+            Some(element) => Arc::new(InstantQueryClock::new(
+                element.get_effective_from(),
+                after_clock.get_realtime(),
+            )),
+            None => after_clock.clone(),
+        }
     };
     let old_solutions = match &before {
         Some(element) => {
@@ -98,9 +110,14 @@ pub(super) async fn prepare(
     };
     let mut new_solutions = match &after {
         Some(element) => {
+            let graph = if result.is_future_reprocess {
+                GraphView::current(index)
+            } else {
+                GraphView::changed(index, &reference, element.clone())
+            };
             VariableLengthSolver {
                 plan,
-                graph: GraphView::changed(index, &reference, element.clone()),
+                graph,
                 evaluator,
                 clock: after_clock,
             }
@@ -124,22 +141,14 @@ pub(super) async fn prepare(
                 row_signature: 0,
             },
         };
-        let after = match &context {
-            QueryPartEvaluationContext::Updating { .. } => Some(key.temporal_identity()),
-            _ => None,
-        };
         result.changes.push(SolutionChange {
             signature: key.signature(),
-            before: Some(key.temporal_identity()),
-            after,
             context,
         });
     }
     for (key, after) in new_solutions {
         result.changes.push(SolutionChange {
             signature: key.signature(),
-            before: None,
-            after: Some(key.temporal_identity()),
             context: QueryPartEvaluationContext::Adding {
                 after: after.variables(plan, base),
                 row_signature: 0,

@@ -17,7 +17,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use drasi_core::{
-    evaluation::temporal::runtime::TemporalStartup,
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
     interface::{NoOpSessionControl, SessionControl},
     query::QueryBuilder,
@@ -51,7 +50,6 @@ impl QueryTestConfig for InMemoryQueryConfig {
             builder
                 .with_element_index(element_index.clone())
                 .with_archive_index(element_index)
-                .with_temporal_startup(TemporalStartup::Create)
                 .with_session_control(session_control.clone()),
             session_control,
         )

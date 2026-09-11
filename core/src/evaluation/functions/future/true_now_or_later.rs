@@ -12,49 +12,126 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::evaluation::functions::TemporalScalar;
-use crate::evaluation::temporal::runtime::frame::CapturedCall;
-use crate::evaluation::temporal::runtime::functions::{
-    deadline, function_error, request, require_arguments, settled, SettledFunction,
-};
-use crate::evaluation::temporal::{FunctionCell, RetainedInput};
+use std::sync::Arc;
+
+use crate::evaluation::context::SideEffects;
+use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::variable_value::VariableValue;
-use crate::evaluation::{EvaluationError, FunctionEvaluationError};
+use crate::evaluation::ExpressionEvaluationContext;
+use crate::evaluation::{FunctionError, FunctionEvaluationError};
+use crate::interface::{FutureQueue, PushType};
+use async_trait::async_trait;
+use chrono::NaiveTime;
+use drasi_query_ast::ast;
 
-pub struct TrueNowOrLater;
+pub struct TrueNowOrLater {
+    future_queue: Arc<dyn FutureQueue>,
+}
 
-impl TemporalScalar for TrueNowOrLater {
-    fn settle(
+impl TrueNowOrLater {
+    pub fn new(future_queue: Arc<dyn FutureQueue>) -> Self {
+        TrueNowOrLater { future_queue }
+    }
+}
+
+#[allow(clippy::print_stdout, clippy::unwrap_used)]
+#[async_trait]
+impl ScalarFunction for TrueNowOrLater {
+    async fn call(
         &self,
-        captured: &CapturedCall,
-        input: &mut RetainedInput,
-        _cell: Option<&mut FunctionCell>,
-        _capture_history: bool,
-    ) -> Result<SettledFunction, EvaluationError> {
-        require_arguments(captured, 2)?;
-        let condition = match &captured.arguments[0] {
-            VariableValue::Bool(condition) => *condition,
-            VariableValue::Null => return Ok(settled(VariableValue::Null)),
-            _ => {
-                return Err(function_error(
-                    captured,
-                    FunctionEvaluationError::InvalidArgument(0),
-                ));
+        context: &ExpressionEvaluationContext,
+        expression: &ast::FunctionExpression,
+        args: Vec<VariableValue>,
+    ) -> Result<VariableValue, FunctionError> {
+        if args.len() != 2 {
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
+        }
+
+        let anchor_ref = match context.get_anchor_element() {
+            Some(anchor) => anchor.get_reference().clone(),
+            None => {
+                return Ok(VariableValue::Null);
             }
         };
-        if condition {
-            return Ok(settled(VariableValue::Bool(true)));
+
+        let condition = match &args[0] {
+            VariableValue::Bool(b) => b,
+            VariableValue::Null => return Ok(VariableValue::Null),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(0),
+                })
+            }
+        };
+
+        if *condition {
+            return Ok(VariableValue::Bool(true));
         }
-        if captured.arguments[1] == VariableValue::Null {
-            return Ok(settled(VariableValue::Null));
+
+        let due_time = match &args[1] {
+            VariableValue::Date(d) => {
+                d.and_time(NaiveTime::MIN).and_utc().timestamp_millis() as u64
+            }
+            VariableValue::LocalDateTime(d) => d.and_utc().timestamp_millis() as u64,
+            VariableValue::ZonedDateTime(d) => d.datetime().timestamp_millis() as u64,
+            VariableValue::Integer(n) => match n.as_u64() {
+                Some(u) => u,
+                None => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::OverflowError,
+                    })
+                }
+            },
+            VariableValue::Null => return Ok(VariableValue::Null),
+            _ => {
+                return Err(FunctionError {
+                    function_name: expression.name.to_string(),
+                    error: FunctionEvaluationError::InvalidArgument(1),
+                })
+            }
+        };
+
+        let group_signature = context.get_input_grouping_hash();
+
+        if context.is_empty_group() {
+            return Ok(VariableValue::Null);
         }
-        let due_time = deadline(captured, &captured.arguments[1])?;
-        if captured.context.clock.realtime >= due_time {
-            return Ok(settled(VariableValue::Bool(condition)));
+
+        if due_time <= context.get_realtime() {
+            if !context.is_this_future_wake(group_signature) {
+                return Ok(VariableValue::Awaiting);
+            }
+            return Ok(VariableValue::Bool(*condition));
         }
-        Ok(SettledFunction {
-            value: VariableValue::Awaiting,
-            tickets: vec![request(captured, input, due_time)],
-        })
+
+        if let SideEffects::Apply = context.get_side_effects() {
+            match self
+                .future_queue
+                .push(
+                    PushType::Overwrite,
+                    expression.position_in_query,
+                    group_signature,
+                    &anchor_ref,
+                    context.get_transaction_time(),
+                    due_time,
+                )
+                .await
+            {
+                Ok(_) => (),
+                Err(e) => {
+                    return Err(FunctionError {
+                        function_name: expression.name.to_string(),
+                        error: FunctionEvaluationError::IndexError(e),
+                    })
+                }
+            }
+        }
+
+        Ok(VariableValue::Awaiting)
     }
 }

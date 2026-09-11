@@ -19,6 +19,8 @@ use crate::{
     interface::{FutureQueue, ResultIndex},
 };
 
+use self::{future_element::FutureElement, true_for::TrueFor, true_until::TrueUntil};
+
 use super::{Function, FunctionRegistry};
 
 mod awaiting;
@@ -31,8 +33,6 @@ mod true_later;
 mod true_now_or_later;
 mod true_until;
 
-#[cfg(test)]
-mod retained_tests;
 #[cfg(test)]
 mod tests;
 
@@ -48,45 +48,71 @@ pub trait RegisterFutureFunctions {
 impl RegisterFutureFunctions for FunctionRegistry {
     fn register_future_functions(
         &self,
-        _future_queue: Arc<dyn FutureQueue>,
-        _result_index: Arc<dyn ResultIndex>,
-        _expression_evaluator: Weak<ExpressionEvaluator>,
+        future_queue: Arc<dyn FutureQueue>,
+        result_index: Arc<dyn ResultIndex>,
+        expression_evaluator: Weak<ExpressionEvaluator>,
     ) {
         self.register_function(
             "drasi.awaiting",
             Function::Scalar(Arc::new(awaiting::Awaiting::new())),
         );
+
         self.register_function(
             "drasi.future",
-            Function::Temporal(Arc::new(future_element::FutureElement)),
+            Function::Scalar(Arc::new(FutureElement::new(future_queue.clone()))),
         );
+
         self.register_function(
             "drasi.trueUntil",
-            Function::Temporal(Arc::new(true_until::TrueUntil)),
+            Function::Scalar(Arc::new(TrueUntil::new(future_queue.clone()))),
         );
+
         self.register_function(
             "drasi.trueFor",
-            Function::Temporal(Arc::new(true_for::TrueFor)),
+            Function::Scalar(Arc::new(TrueFor::new(
+                future_queue.clone(),
+                result_index.clone(),
+                expression_evaluator.clone(),
+            ))),
         );
+
         self.register_function(
             "drasi.trueLater",
-            Function::Temporal(Arc::new(true_later::TrueLater)),
+            Function::Scalar(Arc::new(true_later::TrueLater::new(future_queue.clone()))),
         );
+
         self.register_function(
             "drasi.trueNowOrLater",
-            Function::Temporal(Arc::new(true_now_or_later::TrueNowOrLater)),
+            Function::Scalar(Arc::new(true_now_or_later::TrueNowOrLater::new(
+                future_queue.clone(),
+            ))),
         );
+
         self.register_function(
             "drasi.previousValue",
-            Function::Temporal(Arc::new(previous_value::PreviousValue)),
+            Function::Scalar(Arc::new(previous_value::PreviousValue::new(
+                result_index.clone(),
+                expression_evaluator.clone(),
+            ))),
         );
+
         self.register_function(
             "drasi.previousDistinctValue",
-            Function::Temporal(Arc::new(previous_distinct_value::PreviousDistinctValue)),
+            Function::Scalar(Arc::new(
+                previous_distinct_value::PreviousDistinctValue::new(
+                    result_index.clone(),
+                    expression_evaluator.clone(),
+                ),
+            )),
         );
+
         self.register_function(
             "drasi.slidingWindow",
-            Function::LazyTemporal(Arc::new(sliding_window::SlidingWindow)),
+            Function::LazyScalar(Arc::new(sliding_window::SlidingWindow::new(
+                future_queue.clone(),
+                result_index.clone(),
+                expression_evaluator.clone(),
+            ))),
         );
     }
 }

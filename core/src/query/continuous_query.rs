@@ -21,8 +21,8 @@ use std::{
     fmt::Debug,
     future::Future,
     hash::{Hash, Hasher},
-    sync::{Arc, RwLock, Weak},
-    time::{Duration, SystemTime},
+    sync::Arc,
+    time::Duration,
 };
 
 use drasi_query_ast::ast::Query;
@@ -36,14 +36,6 @@ use tokio::{
 use crate::{
     evaluation::{
         context::{ChangeContext, QueryPartEvaluationContext, QueryVariables},
-        temporal::{
-            codec::TemporalCodecError,
-            runtime::{
-                due::{DueCutoff, DueHead},
-                TemporalInputChange, TemporalRuntime,
-            },
-            ClockStamp, InputOrigin, MatchIdentity, SavedContext,
-        },
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
@@ -93,8 +85,6 @@ pub struct ContinuousQuery {
     change_lock: Mutex<()>,
     source_pipelines: SourceMiddlewarePipelineCollection,
     session_control: Arc<dyn SessionControl>,
-    temporal: Option<TemporalRuntime>,
-    future_clock: RwLock<Option<Weak<dyn FutureQueueConsumer>>>,
 }
 
 impl ContinuousQuery {
@@ -122,7 +112,6 @@ impl ContinuousQuery {
             future_queue,
             source_pipelines,
             session_control,
-            None,
         )
     }
 
@@ -136,7 +125,6 @@ impl ContinuousQuery {
         future_queue: Arc<dyn FutureQueue>,
         source_pipelines: SourceMiddlewarePipelineCollection,
         session_control: Arc<dyn SessionControl>,
-        temporal: Option<TemporalRuntime>,
     ) -> Self {
         Self {
             expression_evaluator,
@@ -150,8 +138,6 @@ impl ContinuousQuery {
             change_lock: Mutex::new(()),
             source_pipelines,
             session_control,
-            temporal,
-            future_clock: RwLock::new(None),
         }
     }
 
@@ -345,51 +331,14 @@ impl ContinuousQuery {
     }
 
     async fn process_due_futures_inner(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
-        let clock = self
-            .future_clock
-            .read()
-            .map_err(|_| EvaluationError::CorruptData)?
-            .clone();
-        let cutoff = match clock {
-            Some(clock) => clock
-                .upgrade()
-                .ok_or(EvaluationError::InvalidContext)?
-                .now(),
-            None => u64::try_from(
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map_err(IndexError::other)?
-                    .as_millis(),
-            )
-            .map_err(|_| EvaluationError::OverflowError)?,
-        };
-        let DueHead::Ready(head) =
-            DueCutoff::new(cutoff).inspect(self.future_queue.peek_due_time().await?)
-        else {
+        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
+        let Some(entry) = self.future_queue.pop().await? else {
             return Ok(None);
         };
-        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
-        let popped = self.future_queue.pop().await?;
-        head.confirm_pop(popped.as_ref().map(|ticket| ticket.due_time))
-            .map_err(IndexError::other)?;
-        let Some(entry) = popped else {
-            return Err(EvaluationError::CorruptData);
-        };
-        let Some(temporal) = self.temporal.as_ref() else {
-            let source_id = entry.element_ref.source_id.clone();
-            let results = self
-                .process_changes_inner(vec![SourceChange::Future { future_ref: entry }])
-                .await?;
-            return Ok(Some(DueFutureResult { results, source_id }));
-        };
-        let ticket = crate::evaluation::temporal::queue::decode(entry)?;
-        let source_id = ticket
-            .attribution
-            .as_ref()
-            .ok_or(EvaluationError::InvalidContext)?
-            .source_id
-            .clone();
-        let results = temporal.process_ticket(ticket, cutoff).await?;
+        let source_id = entry.element_ref.source_id.clone();
+        let results = self
+            .process_changes_inner(vec![SourceChange::Future { future_ref: entry }])
+            .await?;
         Ok(Some(DueFutureResult { results, source_id }))
     }
 
@@ -406,16 +355,12 @@ impl ContinuousQuery {
         changes: Vec<SourceChange>,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let mut result = Vec::new();
-        let mut temporal_changes = Vec::new();
 
         for change in changes {
-            if let (Some(temporal), SourceChange::Future { future_ref }) = (&self.temporal, &change)
-            {
-                let ticket = crate::evaluation::temporal::queue::decode(future_ref.clone())?;
-                let cutoff = ticket.due_time;
-                result.extend(temporal.process_ticket(ticket, cutoff).await?);
-                continue;
-            }
+            let future_group_signature = match &change {
+                SourceChange::Future { future_ref } => Some(future_ref.group_signature),
+                _ => None,
+            };
             let base_variables = QueryVariables::new(); //todo: get query parameters
             let after_clock = Arc::new(InstantQueryClock::from_source_change(&change));
 
@@ -426,25 +371,6 @@ impl ContinuousQuery {
                 Some(before_clock) => before_clock,
                 None => after_clock.clone(),
             };
-
-            if self.temporal.is_some() {
-                let context = SavedContext {
-                    clock: ClockStamp {
-                        transaction_time: after_clock.get_transaction_time(),
-                        realtime: after_clock.get_realtime(),
-                    },
-                    input_grouping_hash: 0,
-                    solution_signature: None,
-                    anchor: solution_changes
-                        .anchor_element
-                        .clone()
-                        .or_else(|| solution_changes.before_anchor_element.clone()),
-                };
-                for change in solution_changes.changes {
-                    change.into_temporal(context.clone(), &mut temporal_changes)?;
-                }
-                continue;
-            }
 
             let mut aggregation_results = CollapsedAggregationResults::new();
 
@@ -464,6 +390,7 @@ impl ContinuousQuery {
                             is_future_reprocess: solution_changes.is_future_reprocess,
                             before_grouping_hash: solution_signature,
                             after_grouping_hash: solution_signature,
+                            future_group_signature,
                         },
                     )
                     .await
@@ -509,12 +436,6 @@ impl ContinuousQuery {
             }
         }
 
-        if let Some(temporal) = &self.temporal {
-            if !temporal_changes.is_empty() {
-                crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
-                return temporal.process_changes(temporal_changes).await;
-            }
-        }
         Ok(result)
     }
 
@@ -703,8 +624,6 @@ impl ContinuousQuery {
             match after_change_solutions.get(sig) {
                 Some(after_sol) => result.changes.push(SolutionChange {
                     signature: *sig,
-                    before: Some(before_sol.temporal_identity()?),
-                    after: Some(after_sol.temporal_identity()?),
                     context: QueryPartEvaluationContext::Updating {
                         before: before_sol.into_query_variables(&fixed.match_path, base_variables),
                         after: after_sol.into_query_variables(&fixed.match_path, base_variables),
@@ -713,8 +632,6 @@ impl ContinuousQuery {
                 }),
                 None => result.changes.push(SolutionChange {
                     signature: *sig,
-                    before: Some(before_sol.temporal_identity()?),
-                    after: None,
                     context: QueryPartEvaluationContext::Removing {
                         before: before_sol.into_query_variables(&fixed.match_path, base_variables),
                         row_signature: 0,
@@ -727,8 +644,6 @@ impl ContinuousQuery {
             if !before_change_solutions.contains_key(sig) {
                 result.changes.push(SolutionChange {
                     signature: *sig,
-                    before: None,
-                    after: Some(after_sol.temporal_identity()?),
                     context: QueryPartEvaluationContext::Adding {
                         after: after_sol.into_query_variables(&fixed.match_path, base_variables),
                         row_signature: 0,
@@ -938,9 +853,7 @@ impl ContinuousQuery {
                     inner: self.element_index.clone(),
                     tracker: crate::interface::session_tracker(&self.session_control)?,
                 });
-                pipeline
-                    .process(input.change, index)
-                    .await?
+                pipeline.process(input.change, index).await?
             }
             None => vec![input.change],
         };
@@ -961,15 +874,6 @@ impl ContinuousQuery {
 
         let queue = self.future_queue.clone();
         let shutdown_request = self.future_consumer_shutdown_request.clone();
-        let clock_update = self
-            .future_clock
-            .write()
-            .map(|mut clock| *clock = Some(Arc::downgrade(&consumer)))
-            .map_err(|_| EvaluationError::CorruptData);
-        if let Err(error) = clock_update {
-            consumer.on_error(Box::new(error)).await;
-            return;
-        }
 
         let task = tokio::spawn(async move {
             let idle_interval = Duration::from_secs(1);
@@ -1061,58 +965,7 @@ impl Debug for ContinuousQuery {
 
 pub(super) struct SolutionChange {
     pub signature: SolutionSignature,
-    pub before: Option<MatchIdentity>,
-    pub after: Option<MatchIdentity>,
     pub context: QueryPartEvaluationContext,
-}
-
-impl SolutionChange {
-    fn into_temporal(
-        self,
-        mut context: SavedContext,
-        output: &mut Vec<TemporalInputChange>,
-    ) -> Result<(), EvaluationError> {
-        context.input_grouping_hash = self.signature;
-        context.solution_signature = Some(self.signature);
-        let (before, after) = match self.context {
-            QueryPartEvaluationContext::Adding { after, .. } => (None, Some(after)),
-            QueryPartEvaluationContext::Updating { before, after, .. } => {
-                (Some(before), Some(after))
-            }
-            QueryPartEvaluationContext::Removing { before, .. } => (Some(before), None),
-            _ => return Err(EvaluationError::InvalidContext),
-        };
-        if self.before == self.after {
-            let origin = self.after.ok_or(EvaluationError::InvalidContext)?;
-            output.push(TemporalInputChange {
-                origin: InputOrigin::Match(origin),
-                before,
-                after,
-                context,
-                row_signature: self.signature,
-            });
-        } else {
-            if let Some(origin) = self.before {
-                output.push(TemporalInputChange {
-                    origin: InputOrigin::Match(origin),
-                    before: Some(before.ok_or(EvaluationError::InvalidContext)?),
-                    after: None,
-                    context: context.clone(),
-                    row_signature: self.signature,
-                });
-            }
-            if let Some(origin) = self.after {
-                output.push(TemporalInputChange {
-                    origin: InputOrigin::Match(origin),
-                    before: None,
-                    after: Some(after.ok_or(EvaluationError::InvalidContext)?),
-                    context,
-                    row_signature: self.signature,
-                });
-            }
-        }
-        Ok(())
-    }
 }
 
 pub(super) struct SolutionChangesResult {

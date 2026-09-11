@@ -789,60 +789,6 @@ impl GarnetSessionControl {
     pub fn new(state: Arc<GarnetSessionState>) -> Self {
         Self { state }
     }
-    pub(crate) async fn query_store_is_empty(&self) -> Result<Option<bool>, IndexError> {
-        self.state.ensure_recovered().await?;
-        let generation = self.state.tracker.cache_generation()?;
-        let keys = self.state.recovery_keys()?;
-        if keys.is_empty() {
-            return Ok(None);
-        }
-        {
-            let inner = self.state.inner.lock().map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
-            if inner.buffer.is_some() {
-                return Err(IndexError::other(SessionError::SessionBusy));
-            }
-        }
-        let mut connection = self.state.connection.clone();
-        let mut empty = true;
-        for key in keys {
-            let namespace = key
-                .strip_prefix("drasi:")
-                .and_then(|key| key.strip_suffix(":transaction-recovery"))
-                .ok_or(IndexError::CorruptedData)?;
-            let mut pattern = String::from("*:");
-            for ch in namespace.chars() {
-                if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
-                    pattern.push('\\');
-                }
-                pattern.push(ch);
-            }
-            pattern.push('*');
-            let mut cursor = 0u64;
-            loop {
-                let (next, found): (u64, Vec<String>) = redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(&pattern)
-                    .arg("COUNT")
-                    .arg(100)
-                    .query_async(&mut connection)
-                    .await
-                    .map_err(IndexError::other)?;
-                if !found.is_empty() {
-                    empty = false;
-                    break;
-                }
-                cursor = next;
-                if cursor == 0 {
-                    break;
-                }
-            }
-            if !empty {
-                break;
-            }
-        }
-        self.state.tracker.with_generation(generation, || Ok(Some(empty)))
-    }
 }
 
 #[async_trait]

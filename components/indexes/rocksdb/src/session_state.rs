@@ -365,30 +365,6 @@ impl RocksDbSessionControl {
     pub fn new(state: Arc<RocksDbSessionState>) -> Self {
         Self { state }
     }
-    pub(crate) async fn query_store_is_empty(&self) -> Result<Option<bool>, IndexError> {
-        let state = self.state.clone();
-        let generation = state.tracker.cache_generation()?;
-        tokio::task::spawn_blocking(move || {
-            state.tracker.with_generation(generation, || {
-                let inner = state.inner.lock().map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
-                if inner.txn.is_some() {
-                    return Err(IndexError::other(SessionError::SessionBusy));
-                }
-                let families = rocksdb::DB::list_cf(&rocksdb::Options::default(), state.db.path())
-                    .map_err(IndexError::other)?;
-                for name in families {
-                    let family = state.db.cf_handle(&name).ok_or(IndexError::CorruptedData)?;
-                    if let Some(entry) = state.db.iterator_cf(&family, IteratorMode::Start).next() {
-                        entry.map_err(IndexError::other)?;
-                        return Ok(Some(false));
-                    }
-                }
-                Ok(Some(true))
-            })
-        })
-        .await
-        .map_err(IndexError::other)?
-    }
 }
 
 #[async_trait]

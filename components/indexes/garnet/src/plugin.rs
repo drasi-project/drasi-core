@@ -170,14 +170,6 @@ impl IndexBackendPlugin for GarnetIndexProvider {
             session_state,
         ));
 
-        if session_control.query_store_is_empty().await? == Some(true) {
-            drasi_core::evaluation::temporal::initialize_empty_query_store(
-                result_index.clone(),
-                session_control.clone(),
-            )
-            .await?;
-        }
-
         Ok(CreatedIndexes {
             set: IndexSet {
                 element_index: element_index.clone(),

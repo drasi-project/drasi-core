@@ -22,7 +22,6 @@ mod query_clock;
 mod result_index;
 mod session_control;
 mod source_middleware;
-mod temporal_index;
 
 use std::error::Error;
 use std::fmt::Display;
@@ -63,7 +62,6 @@ pub use source_middleware::MiddlewareError;
 pub use source_middleware::MiddlewareSetupError;
 pub use source_middleware::SourceMiddleware;
 pub use source_middleware::SourceMiddlewareFactory;
-pub use temporal_index::TemporalIndex;
 use thiserror::Error;
 
 use crate::evaluation::EvaluationError;

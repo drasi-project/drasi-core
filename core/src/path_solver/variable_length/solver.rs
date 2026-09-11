@@ -260,21 +260,6 @@ pub(crate) struct VariableLengthMatchKey {
 }
 
 impl VariableLengthMatchKey {
-    pub fn temporal_identity(&self) -> crate::evaluation::temporal::MatchIdentity {
-        use crate::evaluation::temporal::{MatchIdentity, PathIdentity};
-        MatchIdentity::Bounded {
-            nodes: self.nodes.clone(),
-            paths: self
-                .segments
-                .iter()
-                .map(|segment| PathIdentity {
-                    nodes: segment.nodes.clone(),
-                    relationships: segment.relationships.clone(),
-                })
-                .collect(),
-        }
-    }
-
     pub fn signature(&self) -> u64 {
         let mut hasher = SpookyHasher::default();
         // Keep the hash domain stable across internal matcher renames.

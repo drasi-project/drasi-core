@@ -52,6 +52,7 @@ async fn process_solution(
         is_future_reprocess: false,
         before_grouping_hash: 0,
         after_grouping_hash: 0,
+        future_group_signature: None,
     };
 
     let mut part_num = 0;

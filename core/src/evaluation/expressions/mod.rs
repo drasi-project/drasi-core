@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod aggregate;
 #[cfg(test)]
 mod tests;
-
-use crate::evaluation::QueryExecutionError;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,8 +38,7 @@ use crate::{evaluation::variable_value::VariableValue, interface::ResultIndex};
 
 use super::{
     context::{ExpressionEvaluationContext, SideEffects},
-    functions::{Function, FunctionRegistry},
-    temporal::ContributionKey,
+    functions::{aggregation::Accumulator, Function, FunctionRegistry},
     EvaluationError, FunctionEvaluationError,
 };
 
@@ -1642,59 +1638,6 @@ impl ExpressionEvaluator {
                     .call(context, expression, &expression.args)
                     .await
                     .map_err(EvaluationError::FunctionError)?,
-                Function::Temporal(_) => {
-                    let Some(temporal) = context.temporal() else {
-                        return Err(EvaluationError::InvalidContext);
-                    };
-                    let call = temporal.call(expression);
-                    if temporal.is_settled(&call)? {
-                        return temporal.value(&call);
-                    }
-                    let mut values = Vec::new();
-                    for arg in &expression.args {
-                        values.push(self.evaluate_expression(context, arg).await?);
-                    }
-                    let key = self.resolve_context_result_key(context).await?;
-                    return temporal.capture(
-                        expression,
-                        values,
-                        ContributionKey::from(&key),
-                        context,
-                    );
-                }
-                Function::LazyTemporal(_) => {
-                    let Some(temporal) = context.temporal() else {
-                        return Err(EvaluationError::InvalidContext);
-                    };
-                    if expression.args.len() != 2 {
-                        return Err(EvaluationError::InvalidArgument);
-                    }
-                    if matches!(context.get_side_effects(), SideEffects::Snapshot) {
-                        return self.evaluate_expression(context, &expression.args[1]).await;
-                    }
-                    let call = temporal.call(expression);
-                    if temporal.is_settled(&call)? {
-                        let VariableValue::Bool(expired) = temporal.value(&call)? else {
-                            return Err(EvaluationError::CorruptData);
-                        };
-                        let mut window_context = context.clone();
-                        if expired {
-                            window_context.set_side_effects(SideEffects::Snapshot);
-                        }
-                        return self
-                            .evaluate_expression(&window_context, &expression.args[1])
-                            .await;
-                    }
-                    let window = self
-                        .evaluate_expression(context, &expression.args[0])
-                        .await?;
-                    return temporal.capture(
-                        expression,
-                        vec![window],
-                        ContributionKey::InputHash(context.get_input_grouping_hash()),
-                        context,
-                    );
-                }
                 Function::Aggregating(aggregate) => {
                     let mut values = Vec::new();
                     for arg in &expression.args {
@@ -1713,29 +1656,59 @@ impl ExpressionEvaluator {
                         None => Vec::new(),
                     });
 
-                    let mut aggregate_context = context.clone();
-                    if let Some(temporal) = context.temporal() {
-                        let call = temporal.call(expression);
-                        if !matches!(context.get_side_effects(), SideEffects::Snapshot)
-                            && !temporal.is_settled(&call)?
-                        {
-                            return temporal.capture(
-                                expression,
-                                values,
-                                ContributionKey::GroupBy(grouping_keys.as_ref().clone()),
+                    let result_key = ResultKey::GroupBy(grouping_keys.clone());
+                    let result_owner = ResultOwner::Function(expression.position_in_query);
+
+                    let mut accumulator = {
+                        if aggregate.accumulator_is_lazy() {
+                            aggregate.initialize_accumulator(
                                 context,
-                            );
+                                expression,
+                                &grouping_keys,
+                                self.result_index.clone(),
+                            )
+                        } else {
+                            match self.result_index.get(&result_key, &result_owner).await? {
+                                Some(acc) => Accumulator::Value(acc),
+                                None => aggregate.initialize_accumulator(
+                                    context,
+                                    expression,
+                                    &grouping_keys,
+                                    self.result_index.clone(),
+                                ),
+                            }
                         }
-                        aggregate_context.set_side_effects(SideEffects::Snapshot);
-                    }
-                    self.evaluate_aggregate(
-                        &aggregate_context,
-                        expression,
-                        aggregate.as_ref(),
-                        values,
-                        grouping_keys,
-                    )
-                    .await?
+                    };
+
+                    let result = match context.get_side_effects() {
+                        SideEffects::Apply => aggregate
+                            .apply(context, values, &mut accumulator)
+                            .await
+                            .map_err(EvaluationError::FunctionError)?,
+                        SideEffects::RevertForUpdate | SideEffects::RevertForDelete => aggregate
+                            .revert(context, values, &mut accumulator)
+                            .await
+                            .map_err(EvaluationError::FunctionError)?,
+                        SideEffects::Snapshot => aggregate
+                            .snapshot(context, values, &accumulator)
+                            .await
+                            .map_err(EvaluationError::FunctionError)?,
+                    };
+
+                    //println!("{:?} {}{} : {:?}", context.get_side_effects(), expression.name, expression.position_in_query, result);
+
+                    match accumulator {
+                        super::functions::aggregation::Accumulator::Value(va) => {
+                            self.result_index
+                                .set(result_key, result_owner, Some(va))
+                                .await?
+                        }
+                        super::functions::aggregation::Accumulator::LazySortedSet(
+                            mut accumulator,
+                        ) => accumulator.commit().await?,
+                    };
+
+                    result
                 }
                 Function::ContextMutator(context_mutator) => {
                     if expression.args.is_empty() {
@@ -1880,49 +1853,31 @@ impl ExpressionEvaluator {
             VariableValue::List(items) => {
                 let mut result = Vec::new();
                 let mut variables = context.clone_variables();
-                let mut deferred = false;
-                for (ordinal, item) in items.into_iter().enumerate() {
-                    variables.insert(expression.item_identifier.to_string().into(), item.clone());
-                    let mut local_context = context.with_variables(&variables);
-                    local_context.enter_iteration(ordinal)?;
+                for item in items {
                     if let Some(filter) = &expression.filter {
-                        match self.evaluate_predicate(&local_context, filter).await {
-                            Ok(true) => {}
-                            Ok(false) => continue,
-                            Err(error)
-                                if error.execution_error()
-                                    == Some(&QueryExecutionError::TemporalDeferred) =>
-                            {
-                                deferred = true;
-                                continue;
-                            }
-                            Err(error) => return Err(error),
+                        variables
+                            .insert(expression.item_identifier.to_string().into(), item.clone());
+                        let local_context =
+                            ExpressionEvaluationContext::new(&variables, context.get_clock());
+                        if !self.evaluate_predicate(&local_context, filter).await? {
+                            continue;
                         }
                     }
 
                     if let Some(map_expression) = &expression.map_expression {
-                        match self
+                        variables
+                            .insert(expression.item_identifier.to_string().into(), item.clone());
+                        let local_context =
+                            ExpressionEvaluationContext::new(&variables, context.get_clock());
+                        let item_result = self
                             .evaluate_expression(&local_context, map_expression)
-                            .await
-                        {
-                            Ok(value) => result.push(value),
-                            Err(error)
-                                if error.execution_error()
-                                    == Some(&QueryExecutionError::TemporalDeferred) =>
-                            {
-                                deferred = true
-                            }
-                            Err(error) => return Err(error),
-                        }
+                            .await?;
+                        result.push(item_result);
                     } else {
                         result.push(item);
                     }
                 }
-                if deferred {
-                    Err(EvaluationError::from(QueryExecutionError::TemporalDeferred))
-                } else {
-                    Ok(VariableValue::List(result))
-                }
+                Ok(VariableValue::List(result))
             }
             _ => Err(EvaluationError::InvalidType {
                 expected: "List".to_string(),

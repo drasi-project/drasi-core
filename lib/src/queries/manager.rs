@@ -26,7 +26,6 @@ use tokio::sync::{Notify, RwLock};
 use drasi_core::{
     evaluation::context::{QueryPartEvaluationContext, QueryVariables},
     evaluation::functions::FunctionRegistry,
-    evaluation::temporal::initialize_empty_query_store,
     evaluation::variable_value::VariableValue,
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
     interface::{
@@ -608,11 +607,6 @@ async fn rebuild_persistent_query_store(
         .commit()
         .await
         .context("Failed to commit persistent query rebuild")?;
-    if let Some(index) = result_index {
-        initialize_empty_query_store(index.clone(), session_control)
-            .await
-            .with_context(|| format!("Query '{query_id}' failed to mark the store empty"))?;
-    }
     Ok(())
 }
 
@@ -1203,8 +1197,10 @@ impl Query for DrasiQuery {
                                             }
 
                                             if has_persistent_backend {
-                                                let outbox = self.outbox_writer.read().await.clone();
-                                                let live = self.live_results_writer.read().await.clone();
+                                                let outbox =
+                                                    self.outbox_writer.read().await.clone();
+                                                let live =
+                                                    self.live_results_writer.read().await.clone();
                                                 if let Err(error) = rebuild_persistent_query_store(
                                                     &self.base.config.id,
                                                     &element_index,

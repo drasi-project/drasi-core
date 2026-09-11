@@ -18,7 +18,6 @@ pub mod context;
 pub mod functions;
 pub mod instant_query_clock;
 pub mod parts;
-pub mod temporal;
 pub mod temporal_constants;
 pub mod variable_value;
 
@@ -56,10 +55,6 @@ pub enum EvaluationError {
 /// Execution failures carried through `EvaluationError::IndexError`.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum QueryExecutionError {
-    #[error("temporal evaluation is waiting for effect settlement")]
-    TemporalDeferred,
-    #[error("unsupported temporal effect: {0}")]
-    UnsupportedTemporalEffect(&'static str),
     #[error("variable-length MATCH exceeded {resource} limit {limit}")]
     MatchResourceLimit { resource: &'static str, limit: u64 },
     #[error("the query and its indexes require rebuilding")]

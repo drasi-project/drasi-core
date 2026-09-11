@@ -17,7 +17,6 @@ use std::{env, sync::Arc};
 use async_trait::async_trait;
 
 use drasi_core::{
-    evaluation::temporal::runtime::TemporalStartup,
     index_cache::{
         cached_element_index::CachedElementIndex, cached_result_index::CachedResultIndex,
     },
@@ -137,7 +136,6 @@ impl QueryTestConfig for RocksDbQueryConfig {
             builder
                 .with_archive_index(archive_index)
                 .with_future_queue(Arc::new(fqi))
-                .with_temporal_startup(TemporalStartup::Create)
                 .with_session_control(session_control.clone()),
             session_control,
         )

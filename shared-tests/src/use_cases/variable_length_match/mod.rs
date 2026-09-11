@@ -984,7 +984,12 @@ pub async fn empty_groups_do_not_contribute_to_later_aggregates(
         assert_eq!(count, 2);
         record_count(
             &mut count,
-            query.process_source_change(delete("xb")).await.unwrap(),
+            query
+                .process_source_change(SourceChange::Delete {
+                    metadata: metadata("xb", "", 20),
+                })
+                .await
+                .unwrap(),
         );
         assert_eq!(count, 1, "an empty group must not count as another input");
         record_count(

@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::evaluation::temporal::{runtime::frame::TemporalEvaluation, SavedContext};
 use crate::evaluation::variable_value::VariableValue;
 use crate::interface::QueryClock;
 use crate::models::{Element, ElementReference, ElementTimestamp};
@@ -122,7 +121,8 @@ pub struct ExpressionEvaluationContext<'a> {
     clock: Arc<dyn QueryClock>,
     solution_signature: Option<SolutionSignature>,
     anchor_element: Option<Arc<Element>>,
-    temporal: Option<TemporalEvaluation>,
+    future_group_signature: Option<u64>,
+    empty_group: bool,
 }
 
 impl<'a> ExpressionEvaluationContext<'a> {
@@ -138,7 +138,8 @@ impl<'a> ExpressionEvaluationContext<'a> {
             clock,
             solution_signature: None,
             anchor_element: None,
-            temporal: None,
+            future_group_signature: None,
+            empty_group: false,
         }
     }
 
@@ -155,7 +156,8 @@ impl<'a> ExpressionEvaluationContext<'a> {
             clock,
             solution_signature: None,
             anchor_element: None,
-            temporal: None,
+            future_group_signature: None,
+            empty_group: false,
         }
     }
 
@@ -172,11 +174,12 @@ impl<'a> ExpressionEvaluationContext<'a> {
             clock: change_context.before_clock.clone(),
             solution_signature: Some(change_context.solution_signature),
             anchor_element: change_context.before_anchor_element.clone(),
-            temporal: None,
             output_grouping_key: match &query_part.return_clause {
                 ProjectionClause::GroupBy { grouping, .. } => Some(grouping),
                 _ => None,
             },
+            future_group_signature: change_context.future_group_signature,
+            empty_group: false,
         }
     }
 
@@ -192,63 +195,17 @@ impl<'a> ExpressionEvaluationContext<'a> {
             clock: change_context.after_clock.clone(),
             solution_signature: Some(change_context.solution_signature),
             anchor_element: change_context.after_anchor_element.clone(),
-            temporal: None,
             output_grouping_key: match &query_part.return_clause {
                 ProjectionClause::GroupBy { grouping, .. } => Some(grouping),
                 _ => None,
             },
+            future_group_signature: change_context.future_group_signature,
+            empty_group: false,
         }
     }
 
     pub fn replace_variables(&mut self, new_data: &'a QueryVariables) {
         self.variables = new_data;
-    }
-
-    pub fn from_saved(variables: &'a QueryVariables, saved: &SavedContext) -> Self {
-        Self {
-            variables,
-            side_effects: SideEffects::Apply,
-            output_grouping_key: None,
-            input_grouping_hash: saved.input_grouping_hash,
-            clock: Arc::new(super::InstantQueryClock::new(
-                saved.clock.transaction_time,
-                saved.clock.realtime,
-            )),
-            solution_signature: saved.solution_signature,
-            anchor_element: saved.anchor.clone(),
-            temporal: None,
-        }
-    }
-
-    pub fn with_variables<'b>(
-        &'b self,
-        variables: &'b QueryVariables,
-    ) -> ExpressionEvaluationContext<'b> {
-        ExpressionEvaluationContext {
-            variables,
-            side_effects: self.side_effects.clone(),
-            output_grouping_key: self.output_grouping_key,
-            input_grouping_hash: self.input_grouping_hash,
-            clock: self.clock.clone(),
-            solution_signature: self.solution_signature,
-            anchor_element: self.anchor_element.clone(),
-            temporal: self.temporal.clone(),
-        }
-    }
-
-    pub fn set_temporal(&mut self, temporal: TemporalEvaluation) {
-        self.temporal = Some(temporal);
-    }
-
-    pub fn temporal(&self) -> Option<&TemporalEvaluation> {
-        self.temporal.as_ref()
-    }
-
-    pub fn enter_iteration(&mut self, ordinal: usize) -> Result<(), super::EvaluationError> {
-        if let Some(temporal) = self.temporal.as_mut() {
-            temporal.enter_iteration(ordinal)?;
-        }
-        Ok(())
     }
 
     pub fn get_variable(&self, name: Arc<str>) -> Option<&VariableValue> {
@@ -298,6 +255,19 @@ impl<'a> ExpressionEvaluationContext<'a> {
     pub fn get_input_grouping_hash(&self) -> u64 {
         self.input_grouping_hash
     }
+
+    pub fn is_this_future_wake(&self, input_signature: u64) -> bool {
+        self.future_group_signature
+            .is_none_or(|wake| wake == input_signature)
+    }
+
+    pub fn set_empty_group(&mut self, empty_group: bool) {
+        self.empty_group = empty_group;
+    }
+
+    pub fn is_empty_group(&self) -> bool {
+        self.empty_group
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +280,7 @@ pub struct ChangeContext {
     pub is_future_reprocess: bool,
     pub before_grouping_hash: u64,
     pub after_grouping_hash: u64,
+    pub future_group_signature: Option<u64>,
 }
 
 fn extract_element_reference_hash(element_reference: &ElementReference) -> u64 {
