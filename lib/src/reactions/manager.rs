@@ -1888,9 +1888,8 @@ mod tests {
     async fn config_hash_mismatch_with_auto_reset_triggers_bootstrap() {
         let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let core = build_core_with_store(store.clone()).await;
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",
@@ -1946,9 +1945,8 @@ mod tests {
     async fn config_hash_mismatch_with_strict_fails_startup() {
         let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let core = build_core_with_store(store.clone()).await;
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",
@@ -1988,9 +1986,8 @@ mod tests {
     async fn outbox_catchup_replays_entries_to_reaction() {
         let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let core = build_core_with_store(store.clone()).await;
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",
@@ -2186,9 +2183,8 @@ mod tests {
     async fn forwarder_filters_stale_events_after_gate_opens() {
         let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let core = build_core_with_store(store.clone()).await;
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",

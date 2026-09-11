@@ -35,6 +35,23 @@ pub struct LegacyIndexProviderAdapter {
 }
 
 impl LegacyIndexProviderAdapter {
+    pub(crate) fn storage_key(namespace: Option<&str>, graph: &str, query: &str) -> String {
+        let encode = |value: &str| {
+            value
+                .bytes()
+                .map(|value| format!("{value:02x}"))
+                .collect::<String>()
+        };
+        match namespace {
+            Some(scope) => format!(
+                "computation-v2-{}-{}-{}",
+                encode(scope),
+                encode(graph),
+                encode(query)
+            ),
+            None => format!("computation-v1-{}-{}", encode(graph), encode(query)),
+        }
+    }
     pub fn new(provider: Arc<dyn IndexBackendPlugin>) -> Arc<Self> {
         Arc::new(Self {
             provider,
@@ -83,22 +100,7 @@ impl ComputationIndexProvider for LegacyIndexProviderAdapter {
     ) -> Result<ComputationIndexes, IndexError> {
         super::data::validate_identifier("graph", graph).map_err(IndexError::other)?;
         super::data::validate_identifier("query", query).map_err(IndexError::other)?;
-        let encode = |value: &str| {
-            value
-                .bytes()
-                .map(|value| format!("{value:02x}"))
-                .collect::<String>()
-        };
-        let key = if let Some(scope) = &self.namespace {
-            format!(
-                "computation-v2-{}-{}-{}",
-                encode(scope),
-                encode(graph),
-                encode(query)
-            )
-        } else {
-            format!("computation-v1-{}-{}", encode(graph), encode(query))
-        };
+        let key = Self::storage_key(self.namespace.as_deref(), graph, query);
         let provider = self.provider.clone();
         let original = self
             .construction

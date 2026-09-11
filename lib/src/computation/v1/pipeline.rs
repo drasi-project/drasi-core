@@ -62,6 +62,7 @@ pub struct ComputationPipelineBuilder {
     queries: Vec<QueryConfig>,
     reactions: Vec<(Arc<ReactionPluginHost>, bool)>,
     overrides: BTreeMap<String, (Arc<dyn ComputationIndexProvider>, QueryPublicationMode)>,
+    runtime_compatibility: bool,
 }
 
 fn encoded(value: &str) -> String {
@@ -97,7 +98,12 @@ impl ComputationPipelineBuilder {
             queries: Vec::new(),
             reactions: Vec::new(),
             overrides: BTreeMap::new(),
+            runtime_compatibility: false,
         })
+    }
+    pub(crate) fn for_runtime(mut self) -> Self {
+        self.runtime_compatibility = true;
+        self
     }
     pub fn catalog(&self) -> QueryResultsCatalog {
         self.catalog.clone()
@@ -157,7 +163,14 @@ impl ComputationPipelineBuilder {
         Ok(self)
     }
     pub fn build(self) -> GraphResult<ComputationGraph> {
+        self.build_with_subscriptions().map(|(graph, _)| graph)
+    }
+
+    pub(crate) fn build_with_subscriptions(
+        self,
+    ) -> GraphResult<(ComputationGraph, Vec<Arc<LegacySourceSubscription>>)> {
         let invalid = |reason: String| GraphError::Topology { reason };
+        let mut all_subscriptions = Vec::new();
         let mut query_ids = BTreeSet::new();
         let mut prepared = Vec::new();
         let mut subscribers: BTreeMap<String, usize> = BTreeMap::new();
@@ -177,8 +190,12 @@ impl ComputationPipelineBuilder {
             execution
                 .validate(Some(&self.middleware))
                 .map_err(|error| invalid(format!("{error:#}")))?;
-            let settings = QueryExecutionSettings::legacy_subscriptions(query)
-                .map_err(|error| invalid(format!("{error:#}")))?;
+            let settings = if self.runtime_compatibility && query.sources.is_empty() {
+                Vec::new()
+            } else {
+                QueryExecutionSettings::legacy_subscriptions(query)
+                    .map_err(|error| invalid(format!("{error:#}")))?
+            };
             for setting in &settings {
                 if !self.sources.contains_key(&setting.source_id) {
                     return Err(invalid(format!("unknown source {}", setting.source_id)));
@@ -187,7 +204,7 @@ impl ComputationPipelineBuilder {
                     *subscribers.entry(setting.source_id.clone()).or_default() += 1;
                 }
             }
-            if settings.is_empty() {
+            if settings.is_empty() && !self.runtime_compatibility {
                 return Err(invalid("compatibility query requires sources".into()));
             }
             if !self.overrides.contains_key(&query.id) {
@@ -288,21 +305,51 @@ impl ComputationPipelineBuilder {
         let query_factory = Arc::new(ContinuousQueryFactory::default());
         let outlet_id = ComponentId::try_new("__computation_results__")?;
         let outlet_factory = Arc::new(QueryResultsOutletFactory::default());
-        builder = builder.component(
-            ComponentSpecification {
-                descriptor: QueryResultsOutlet::new(outlet_id.clone(), self.catalog.clone())
-                    .descriptor()
-                    .clone(),
-                role: ComponentRole::Sink,
-                completion: Some(SinkCompletion::Handled),
-                implementation: outlet_factory.descriptor().implementation.clone(),
-                configuration_version: 1,
-                configuration: BTreeMap::new(),
-                dependencies: BTreeMap::from([(Arc::from("catalog"), vec![catalog_id.clone()])]),
-            },
-            outlet_factory,
-        );
+        builder = builder
+            .component(
+                ComponentSpecification {
+                    descriptor: QueryResultsOutlet::new(outlet_id.clone(), self.catalog.clone())
+                        .descriptor()
+                        .clone(),
+                    role: ComponentRole::Sink,
+                    completion: Some(SinkCompletion::Handled),
+                    implementation: outlet_factory.descriptor().implementation.clone(),
+                    configuration_version: 1,
+                    configuration: BTreeMap::new(),
+                    dependencies: BTreeMap::from([(
+                        Arc::from("catalog"),
+                        vec![catalog_id.clone()],
+                    )]),
+                },
+                outlet_factory,
+            )
+            .lifecycle_policy(
+                outlet_id.clone(),
+                LifecyclePolicy {
+                    auto_start: !self.runtime_compatibility,
+                },
+            );
         for (config, (query_id, execution, settings)) in self.queries.iter().zip(prepared) {
+            if settings.is_empty() {
+                builder = builder.unbound(DesiredRelationship {
+                    definition: EdgeDefinition::new(
+                        endpoint(
+                            ComponentId::try_new(format!("unbound-input/{}", encoded(&config.id)))?,
+                            "out",
+                        ),
+                        endpoint(query_id.clone(), "in"),
+                    ),
+                    policy: RelationshipPolicy {
+                        required_for_creation: false,
+                        required_for_binding: false,
+                        orphan_permitted: true,
+                        ..Default::default()
+                    },
+                    pipe: DesiredPipe::Bounded {
+                        capacity: self.input_capacity,
+                    },
+                });
+            }
             let progress = Arc::new(QuerySourceProgress::new(
                 self.graph_id.as_str(),
                 query_id.clone(),
@@ -334,13 +381,24 @@ impl ComputationPipelineBuilder {
                     bootstrap_timeout_secs: config.bootstrap_timeout_secs,
                     ..options.clone()
                 };
-                let subscription = LegacySourceSubscription::new(
-                    host.clone(),
-                    options,
-                    stream.clone(),
-                    Some(progress.clone()),
-                )
+                let subscription = if self.runtime_compatibility {
+                    LegacySourceSubscription::for_runtime(
+                        host.clone(),
+                        options,
+                        stream.clone(),
+                        Some(progress.clone()),
+                        &config.id,
+                    )
+                } else {
+                    LegacySourceSubscription::new(
+                        host.clone(),
+                        options,
+                        stream.clone(),
+                        Some(progress.clone()),
+                    )
+                }
                 .map_err(|error| invalid(format!("{error:#}")))?;
+                all_subscriptions.push(subscription.clone());
                 let subscription_id = ResourceId::try_new(format!(
                     "subscription/{}/{}",
                     encoded(&config.id),
@@ -407,7 +465,7 @@ impl ComputationPipelineBuilder {
                     .lifecycle_policy(
                         source_id.clone(),
                         LifecyclePolicy {
-                            auto_start: config.auto_start,
+                            auto_start: config.auto_start && !self.runtime_compatibility,
                         },
                     )
                     .bind_stream(endpoint(source_id.clone(), "out"), stream);
@@ -516,6 +574,18 @@ impl ComputationPipelineBuilder {
                         configuration_version: 1,
                         configuration: BTreeMap::from([
                             (
+                                Arc::from("defer_build"),
+                                ConfigurationValue::Literal(self.runtime_compatibility.into()),
+                            ),
+                            (
+                                Arc::from("reset_configuration"),
+                                ConfigurationValue::Literal(self.runtime_compatibility.into()),
+                            ),
+                            (
+                                Arc::from("runtime_compatibility"),
+                                ConfigurationValue::Literal(self.runtime_compatibility.into()),
+                            ),
+                            (
                                 Arc::from("query"),
                                 ConfigurationValue::Literal(config.query.clone().into()),
                             ),
@@ -583,7 +653,7 @@ impl ComputationPipelineBuilder {
                 .lifecycle_policy(
                     query_id.clone(),
                     LifecyclePolicy {
-                        auto_start: config.auto_start,
+                        auto_start: config.auto_start && !self.runtime_compatibility,
                     },
                 )
                 .bind_stream(endpoint(query_id.clone(), "out"), stream)
@@ -682,6 +752,6 @@ impl ComputationPipelineBuilder {
         for (name, count) in subscribers {
             self.sources[&name].0.expected_subscriptions(count.max(1));
         }
-        Ok(graph)
+        Ok((graph, all_subscriptions))
     }
 }

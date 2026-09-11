@@ -1393,7 +1393,7 @@ pub(super) async fn execute(
         .collect();
     if !start.is_empty() {
         let (reply, receiver) = oneshot::channel();
-        operations.begin_start(graph, start, Some(reply));
+        operations.begin_start(graph, start, Some(reply), false);
         report.startup = Some(
             drive(graph, operations, controls, cancel, async {
                 receiver.await.map_err(|_| GraphError::ControllerClosed)?

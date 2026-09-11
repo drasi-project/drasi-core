@@ -41,6 +41,52 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
+pub(crate) mod checkpoints;
+pub(crate) mod managers;
+mod runtime_parity;
+
+#[cfg(feature = "computation")]
+pub(crate) fn native_query_value(
+    value: &drasi_core::evaluation::variable_value::VariableValue,
+) -> serde_json::Value {
+    use crate::computation::v1::*;
+    use drasi_core::evaluation::context::QueryPartEvaluationContext;
+    let query = ComponentId::try_new("codec-parity").unwrap();
+    let envelope = QueryChangeCodec::encode_evaluation(
+        None,
+        &query,
+        SystemMetadata::new(StreamId::try_new("codec-parity/out").unwrap(), 1),
+        &[QueryPartEvaluationContext::Adding {
+            after: [("value".into(), value.clone())].into_iter().collect(),
+            row_signature: 1,
+        }],
+        QueryOutputMetadata {
+            query_id: query.to_string(),
+            source_id: None,
+            timestamp: chrono::Utc::now(),
+            metadata: Default::default(),
+            profiling: None,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let result = QueryChangeCodec::to_legacy_result(&envelope).unwrap();
+    let crate::channels::ResultDiff::Add { data, .. } = &result.results[0] else {
+        panic!("expected a projected query row");
+    };
+    data["value"].clone()
+}
+
+pub(crate) fn execution_mode() -> crate::ExecutionMode {
+    match std::env::var("DRASI_TEST_EXECUTION").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("component") => {
+            crate::ExecutionMode::ComponentGraph
+        }
+        #[cfg(feature = "computation")]
+        Ok("computation") => crate::ExecutionMode::ComputationGraph,
+        mode => panic!("unsupported test execution mode: {mode:?}"),
+    }
+}
 
 /// Wait for a specific component to reach a target status via the broadcast channel.
 ///

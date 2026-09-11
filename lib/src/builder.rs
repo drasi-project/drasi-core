@@ -120,6 +120,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 /// # }
 /// ```
 pub struct DrasiLibBuilder {
+    execution_mode: crate::ExecutionMode,
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
@@ -161,6 +162,12 @@ impl Default for DrasiLibBuilder {
 }
 
 impl DrasiLibBuilder {
+    /// Select the implementation behind the normal source/query/reaction APIs.
+    /// The default remains ComponentGraph even when computation is enabled.
+    pub fn with_execution_mode(mut self, mode: crate::ExecutionMode) -> Self {
+        self.execution_mode = mode;
+        self
+    }
     /// Register a parallel computation graph with instance-owned execution.
     /// It does not add its nodes to the existing ComponentGraph.
     #[cfg(feature = "computation")]
@@ -176,6 +183,10 @@ impl DrasiLibBuilder {
     /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
+            #[cfg(test)]
+            execution_mode: crate::test_helpers::execution_mode(),
+            #[cfg(not(test))]
+            execution_mode: crate::ExecutionMode::default(),
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -628,6 +639,17 @@ impl DrasiLibBuilder {
             self.default_recovery_policy,
             self.default_index_backend,
         ));
+        #[cfg(feature = "computation")]
+        if self.execution_mode == crate::ExecutionMode::ComputationGraph {
+            return crate::computation::compatibility::build(
+                runtime_config,
+                self.source_instances,
+                self.reaction_instances,
+                self.bootstrap_metadata,
+                self.wal_provider,
+            )
+            .await;
+        }
         let mut core = DrasiLib::new(runtime_config);
 
         // Inject state store before provisioning sources (they need it for initialization)

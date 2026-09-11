@@ -26,11 +26,63 @@ pub(super) struct CatalogQuery {
     pub config_hash: u64,
     pub results: QueryResults,
     pub progress: Option<Arc<QuerySourceProgress>>,
-    pub incarnation: Option<uuid::Uuid>,
+    pub incarnation: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
+    pub status: Option<watch::Receiver<crate::ComponentStatus>>,
+    pub checkpoint: Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
 }
 struct CatalogState {
     entries: BTreeMap<ComponentId, CatalogQuery>,
     next_generation: u64,
+    delivery: BTreeMap<ComponentId, DeliveryConfiguration>,
+    subscribers: BTreeMap<(ComponentId, u64), Subscriber>,
+    next_subscriber: u64,
+}
+struct DeliveryConfiguration {
+    mode: crate::DispatchMode,
+    capacity: usize,
+    hash: u64,
+    metrics: Arc<crate::metrics::QueryOutputMetrics>,
+    status: watch::Receiver<crate::ComponentStatus>,
+}
+#[derive(Clone)]
+enum Subscriber {
+    Channel(tokio::sync::mpsc::Sender<ChangeEnvelope>),
+    Broadcast(tokio::sync::broadcast::Sender<ChangeEnvelope>),
+}
+enum SubscriberReceiver {
+    Channel(tokio::sync::mpsc::Receiver<ChangeEnvelope>),
+    Broadcast(tokio::sync::broadcast::Receiver<ChangeEnvelope>),
+}
+pub(crate) struct CatalogSubscription {
+    receiver: SubscriberReceiver,
+    catalog: Weak<CatalogInner>,
+    key: (ComponentId, u64),
+}
+impl CatalogSubscription {
+    pub(crate) async fn receive(&mut self) -> anyhow::Result<ChangeEnvelope> {
+        match &mut self.receiver {
+            SubscriberReceiver::Channel(receiver) => receiver
+                .recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("query output subscription closed")),
+            SubscriberReceiver::Broadcast(receiver) => receiver.recv().await.map_err(Into::into),
+        }
+    }
+}
+impl Drop for CatalogSubscription {
+    fn drop(&mut self) {
+        if let Some(catalog) = self.catalog.upgrade() {
+            catalog
+                .state
+                .lock()
+                .unwrap_or_else(|error| {
+                    log::error!("Removing subscription from poisoned query catalogue: {error}");
+                    error.into_inner()
+                })
+                .subscribers
+                .remove(&self.key);
+        }
+    }
 }
 struct CatalogInner {
     graph: Arc<str>,
@@ -48,6 +100,9 @@ pub(super) struct QueryRegistration {
     catalog: Weak<CatalogInner>,
     id: ComponentId,
     generation: u64,
+}
+pub(crate) struct CatalogLink {
+    _registration: QueryRegistration,
 }
 impl Drop for QueryRegistration {
     fn drop(&mut self) {
@@ -77,6 +132,9 @@ impl QueryResultsCatalog {
             state: Mutex::new(CatalogState {
                 entries: BTreeMap::new(),
                 next_generation: 1,
+                delivery: BTreeMap::new(),
+                subscribers: BTreeMap::new(),
+                next_subscriber: 1,
             }),
             changed: watch::channel(0).0,
             events: tokio::sync::broadcast::channel(256).0,
@@ -88,10 +146,41 @@ impl QueryResultsCatalog {
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ChangeEnvelope> {
         self.0.events.subscribe()
     }
-    pub(super) fn publish(&self, envelope: ChangeEnvelope) -> anyhow::Result<()> {
+    pub(super) async fn publish(&self, envelope: ChangeEnvelope) -> anyhow::Result<()> {
         let id = ComponentId::try_new(QueryChangeCodec::metadata(&envelope)?.query_id)?;
         if self.get(&id)?.is_none() {
             anyhow::bail!("query publication is not registered in this catalogue");
+        }
+        let subscribers: Vec<_> = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
+            .subscribers
+            .iter()
+            .filter(|((query, _), _)| query == &id)
+            .map(|(key, subscriber)| (key.clone(), subscriber.clone()))
+            .collect();
+        let deliveries = subscribers.into_iter().map(|(key, subscriber)| {
+            let envelope = envelope.clone();
+            async move {
+                let closed = match subscriber {
+                    Subscriber::Channel(sender) => sender.send(envelope).await.is_err(),
+                    Subscriber::Broadcast(sender) => sender.send(envelope).is_err(),
+                };
+                (key, closed)
+            }
+        });
+        for (key, closed) in futures::future::join_all(deliveries).await {
+            if closed {
+                self.0
+                    .state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
+                    .subscribers
+                    .remove(&key);
+                log::trace!("Retired a closed native query output subscription");
+            }
         }
         if self.0.events.send(envelope).is_err() {
             log::trace!("Native query publication has no live subscribers; retained results remain available");
@@ -100,6 +189,122 @@ impl QueryResultsCatalog {
     }
     pub(super) fn same_registry(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub(crate) fn configure_delivery(
+        &self,
+        id: &str,
+        mode: crate::DispatchMode,
+        capacity: usize,
+        hash: u64,
+        metrics: Arc<crate::metrics::QueryOutputMetrics>,
+        status: watch::Receiver<crate::ComponentStatus>,
+    ) -> anyhow::Result<()> {
+        if capacity == 0 {
+            anyhow::bail!("query delivery capacity must be nonzero");
+        }
+        self.0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
+            .delivery
+            .insert(
+                ComponentId::try_new(id)?,
+                DeliveryConfiguration {
+                    mode,
+                    capacity,
+                    hash,
+                    metrics,
+                    status,
+                },
+            );
+        Ok(())
+    }
+    pub(crate) fn subscribe_query(&self, id: &str) -> anyhow::Result<CatalogSubscription> {
+        let id = ComponentId::try_new(id)?;
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
+        let configuration = state
+            .delivery
+            .get(&id)
+            .ok_or_else(|| anyhow::anyhow!("query delivery is not configured"))?;
+        let (subscriber, receiver) = match configuration.mode {
+            crate::DispatchMode::Channel => {
+                let (sender, receiver) = tokio::sync::mpsc::channel(configuration.capacity);
+                (
+                    Subscriber::Channel(sender),
+                    SubscriberReceiver::Channel(receiver),
+                )
+            }
+            crate::DispatchMode::Broadcast => {
+                let (sender, receiver) = tokio::sync::broadcast::channel(configuration.capacity);
+                (
+                    Subscriber::Broadcast(sender),
+                    SubscriberReceiver::Broadcast(receiver),
+                )
+            }
+        };
+        let sequence = state.next_subscriber;
+        state.next_subscriber = sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("subscriber generation exhausted"))?;
+        let key = (id, sequence);
+        state.subscribers.insert(key.clone(), subscriber);
+        Ok(CatalogSubscription {
+            receiver,
+            catalog: Arc::downgrade(&self.0),
+            key,
+        })
+    }
+    pub(super) fn configured_metrics(
+        &self,
+        id: &ComponentId,
+    ) -> anyhow::Result<Option<Arc<crate::metrics::QueryOutputMetrics>>> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
+            .delivery
+            .get(id)
+            .map(|config| config.metrics.clone()))
+    }
+    pub(super) fn configured_hash(&self, id: &ComponentId) -> anyhow::Result<Option<u64>> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
+            .delivery
+            .get(id)
+            .map(|config| config.hash))
+    }
+    pub(crate) fn checkpoint_store(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<Arc<dyn drasi_core::interface::CheckpointStore>>> {
+        let Some(entry) = self.get(&ComponentId::try_new(id)?)? else {
+            return Ok(None);
+        };
+        let checkpoint = entry
+            .checkpoint
+            .read()
+            .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))?
+            .clone();
+        Ok(checkpoint)
+    }
+    pub(crate) fn current_sequence(&self, id: &str) -> anyhow::Result<u64> {
+        let query = self
+            .get(&ComponentId::try_new(id)?)?
+            .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
+        let state = query
+            .results
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+        Ok(state.sequence)
     }
 }
 
@@ -142,7 +347,7 @@ impl EnvelopeSink for QueryResultsOutlet {
         SinkCompletion::Handled
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        self.catalog.publish(input.envelope)
+        self.catalog.publish(input.envelope).await
     }
 }
 
@@ -232,7 +437,8 @@ impl QueryResultsCatalog {
         results: QueryResults,
         progress: Option<Arc<QuerySourceProgress>>,
         config_hash: u64,
-        volatile: bool,
+        incarnation: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
+        checkpoint: Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
     ) -> anyhow::Result<QueryRegistration> {
         let mut state = self
             .0
@@ -243,6 +449,11 @@ impl QueryResultsCatalog {
         state.next_generation = generation
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("query reader generation exhausted"))?;
+        let config_hash = state
+            .delivery
+            .get(&id)
+            .map_or(config_hash, |config| config.hash);
+        let status = state.delivery.get(&id).map(|config| config.status.clone());
         state.entries.insert(
             id.clone(),
             CatalogQuery {
@@ -250,7 +461,9 @@ impl QueryResultsCatalog {
                 config_hash,
                 results,
                 progress,
-                incarnation: volatile.then(uuid::Uuid::new_v4),
+                incarnation,
+                status,
+                checkpoint,
             },
         );
         self.0.changed.send_modify(|version| *version += 1);
@@ -260,7 +473,70 @@ impl QueryResultsCatalog {
             generation,
         })
     }
-    fn get(&self, id: &ComponentId) -> anyhow::Result<Option<CatalogQuery>> {
+    pub(crate) fn link_query(&self, id: &str, source: &Self) -> anyhow::Result<CatalogLink> {
+        let id = ComponentId::try_new(id)?;
+        let mut entry = source
+            .get(&id)?
+            .ok_or_else(|| anyhow::anyhow!("native query reader has not been created"))?;
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
+        let generation = state.next_generation;
+        state.next_generation = generation
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("query generation exhausted"))?;
+        entry.generation = generation;
+        state.entries.insert(id.clone(), entry);
+        self.0.changed.send_modify(|version| *version += 1);
+        Ok(CatalogLink {
+            _registration: QueryRegistration {
+                catalog: Arc::downgrade(&self.0),
+                id,
+                generation,
+            },
+        })
+    }
+    pub(crate) async fn legacy_snapshot(
+        &self,
+        id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<crate::queries::SnapshotResponse> {
+        let entry = self.ready(id, timeout).await?;
+        if let Some(metrics) = self.configured_metrics(&ComponentId::try_new(id)?)? {
+            metrics.record_snapshot_fetch();
+        }
+        super::plugin_reaction::snapshot_response(id, &super::plugin_reaction::output_view(&entry)?)
+    }
+    pub(crate) async fn legacy_outbox(
+        &self,
+        id: &str,
+        after: u64,
+        timeout: Duration,
+    ) -> std::result::Result<crate::queries::OutboxResponse, crate::queries::FetchError> {
+        let entry = self.ready(id, timeout).await.map_err(|error| {
+            log::warn!("Native outbox is not available: {error:#}");
+            if error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+            {
+                crate::queries::FetchError::TimedOut
+            } else {
+                crate::queries::FetchError::NotRunning {
+                    status: crate::ComponentStatus::Error,
+                }
+            }
+        })?;
+        let view = super::plugin_reaction::output_view(&entry).map_err(|error| {
+            log::error!("Cannot read native output state: {error:#}");
+            crate::queries::FetchError::NotRunning {
+                status: crate::ComponentStatus::Error,
+            }
+        })?;
+        super::plugin_reaction::outbox_response(&view, after)
+    }
+    pub(super) fn get(&self, id: &ComponentId) -> anyhow::Result<Option<CatalogQuery>> {
         Ok(self
             .0
             .state
@@ -277,6 +553,9 @@ impl QueryResultsCatalog {
             loop {
                 let entry = self.get(&id)?;
                 if let Some(entry) = entry {
+                    if entry.status.as_ref().is_some_and(|status| !matches!(*status.borrow(), crate::ComponentStatus::Starting | crate::ComponentStatus::Running)) {
+                        anyhow::bail!("query is not running");
+                    }
                     let wait = async {
                         if let Some(progress) = &entry.progress { progress.wait_ready().await?; }
                         entry.results.wait_ready().await?;
@@ -288,6 +567,11 @@ impl QueryResultsCatalog {
                             if self.get(&id)?.is_some_and(|current| current.generation == entry.generation) { return Ok(entry); }
                         }
                         result = changed.changed() => { result?; }
+                        _ = async {
+                            if let Some(mut status) = entry.status.clone() {
+                                let _ = status.wait_for(|status| !matches!(status, crate::ComponentStatus::Starting | crate::ComponentStatus::Running)).await;
+                            } else { std::future::pending::<()>().await; }
+                        } => anyhow::bail!("query stopped while waiting for output"),
                     }
                 } else { changed.changed().await?; }
             }

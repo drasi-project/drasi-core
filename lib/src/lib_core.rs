@@ -185,6 +185,8 @@ pub struct DrasiLib {
     pub(crate) graph_update_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     #[cfg(feature = "computation")]
     pub(crate) computation_registry: Arc<crate::computation::instance::ComputationRegistry>,
+    #[cfg(feature = "computation")]
+    pub(crate) computation_runtime: Option<Arc<crate::computation::compatibility::Runtime>>,
 }
 
 impl Clone for DrasiLib {
@@ -206,11 +208,20 @@ impl Clone for DrasiLib {
             graph_update_handle: Arc::clone(&self.graph_update_handle),
             #[cfg(feature = "computation")]
             computation_registry: self.computation_registry.clone(),
+            #[cfg(feature = "computation")]
+            computation_runtime: self.computation_runtime.clone(),
         }
     }
 }
 
 impl DrasiLib {
+    pub fn execution_mode(&self) -> crate::ExecutionMode {
+        #[cfg(feature = "computation")]
+        if self.computation_runtime.is_some() {
+            return crate::ExecutionMode::ComputationGraph;
+        }
+        crate::ExecutionMode::ComponentGraph
+    }
     // ============================================================================
     // Construction and Initialization
     // ============================================================================
@@ -393,6 +404,8 @@ impl DrasiLib {
             computation_registry: Arc::new(crate::computation::instance::ComputationRegistry::new(
                 instance_id,
             )),
+            #[cfg(feature = "computation")]
+            computation_runtime: None,
         }
     }
 
@@ -569,7 +582,21 @@ impl DrasiLib {
         // Capture the result but always mark as stopped — partial shutdown is
         // preferable to leaving the running flag set after a partial failure.
         #[cfg(feature = "computation")]
-        let computation_result = self.computation_registry.stop_all().await;
+        let computation_result = self
+            .computation_registry
+            .stop_all_except(
+                self.computation_runtime
+                    .as_ref()
+                    .map(|_| "__drasi_lib_runtime__"),
+            )
+            .await;
+        #[cfg(feature = "computation")]
+        let result = if let Some(runtime) = &self.computation_runtime {
+            runtime.stop_all().await
+        } else {
+            self.lifecycle.stop_all_components().await
+        };
+        #[cfg(not(feature = "computation"))]
         let result = self.lifecycle.stop_all_components().await;
         #[cfg(feature = "computation")]
         let result = match (result, computation_result) {
@@ -640,6 +667,11 @@ impl DrasiLib {
 
         #[cfg(feature = "computation")]
         let computation_shutdown = self.computation_registry.shutdown().await;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            runtime.shutdown().await?;
+            *self.running.write().await = false;
+        }
         // Stop components if still running (tolerate stop errors during shutdown)
         if self.is_running().await {
             if let Err(e) = self.stop_unlocked().await {

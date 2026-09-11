@@ -27,7 +27,7 @@ pub(super) struct ResetMarker {
 
 impl ContinuousQueryTransformer {
     fn reset_key(&self) -> String {
-        format!("computation-reset-v1:{}", self.definition.id)
+        super::query_reset_key(self.definition.id.as_str())
     }
 
     pub(super) async fn read_reset_marker(&self) -> anyhow::Result<Option<ResetMarker>> {
@@ -52,7 +52,13 @@ impl ContinuousQueryTransformer {
         if volatile_failed {
             self.reset_for_bootstrap().await?;
         } else if let Err(error) = self.recover().await {
+            let explicit_configuration_reset = self.reset_configuration
+                && matches!(
+                    error.downcast_ref::<QueryRecoveryError>(),
+                    Some(QueryRecoveryError::ConfigurationChanged)
+                );
             if self.options.recovery != QueryRecoveryPolicy::AutoReset
+                && !explicit_configuration_reset
                 || error.downcast_ref::<QueryRecoveryError>().is_none()
             {
                 return Err(error);
@@ -154,7 +160,15 @@ impl ContinuousQueryTransformer {
         query
             .resource_transaction(|| async {
                 resources.indexes().element_index.clear().await?;
-                resources.indexes().archive_index.clear().await?;
+                match resources.indexes().archive_index.clear().await {
+                    Err(IndexError::NotSupported) if self.runtime_compatibility => {
+                        log::debug!(
+                            "Query {} has no clearable archive index",
+                            self.definition.id
+                        );
+                    }
+                    result => result?,
+                }
                 resources.indexes().result_index.clear().await?;
                 query.future_queue().clear().await?;
                 if let Some(outbox) = resources.outbox_writer() {
@@ -168,6 +182,11 @@ impl ContinuousQueryTransformer {
                     checkpoint
                         .stage_checkpoint(CONFIGURATION, 1, Some(&config))
                         .await?;
+                    if self.runtime_compatibility {
+                        if let Some(hash) = self.legacy_hash {
+                            checkpoint.write_config_hash(hash).await?;
+                        }
+                    }
                     checkpoint.stage_checkpoint(BOOTSTRAP, 0, None).await?;
                     checkpoint
                         .write_result_sequence(self.definition.id.as_str(), highwater)
@@ -247,7 +266,7 @@ impl ContinuousQueryTransformer {
                             },
                         )
                         .map_err(IndexError::other)?;
-                        if !self.provider.is_volatile()
+                        if self.output_persistent
                             && self.options.publication == QueryPublicationMode::Atomic
                         {
                             if let Some(output) = &output {
@@ -258,9 +277,7 @@ impl ContinuousQueryTransformer {
                         Ok(())
                     }
                 };
-            if self.options.publication == QueryPublicationMode::Atomic
-                && !self.provider.is_volatile()
-            {
+            if self.options.publication == QueryPublicationMode::Atomic && self.output_persistent {
                 query
                     .process_source_changes_with_result_hook(
                         changes,
@@ -277,7 +294,7 @@ impl ContinuousQueryTransformer {
                 .into_inner()
                 .map_err(|_| anyhow::anyhow!("bootstrap output poisoned"))?
             {
-                if !self.provider.is_volatile()
+                if self.output_persistent
                     && self.options.publication == QueryPublicationMode::NonAtomic
                 {
                     query
@@ -358,9 +375,7 @@ impl ContinuousQueryTransformer {
     }
 
     pub(super) async fn begin_non_atomic(&self) -> anyhow::Result<()> {
-        if self.provider.is_volatile()
-            || self.options.publication != QueryPublicationMode::NonAtomic
-        {
+        if !self.output_persistent || self.options.publication != QueryPublicationMode::NonAtomic {
             return Ok(());
         }
         let query = self.query()?;

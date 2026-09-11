@@ -136,12 +136,19 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::convert_variable_value_to_json;
     use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
     use drasi_core::evaluation::variable_value::{
         duration::Duration as VarDuration, zoned_datetime::ZonedDateTime as VarZonedDateTime,
         zoned_time::ZonedTime as VarZonedTime, VariableValue,
     };
+
+    fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
+        #[cfg(feature = "computation")]
+        if crate::test_helpers::execution_mode() == crate::ExecutionMode::ComputationGraph {
+            return crate::test_helpers::native_query_value(value);
+        }
+        super::convert_variable_value_to_json(value)
+    }
 
     #[test]
     fn temporal_values_serialize_as_plain_strings() {

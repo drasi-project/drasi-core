@@ -71,6 +71,10 @@ const INPUT_PREFIX: &str = "computation:input:";
 const BOOTSTRAP: &str = "\0computation:query-bootstrap:v1";
 const PENDING_OUTPUT: &str = "\0computation:pending-output:v1";
 
+pub(crate) fn query_reset_key(query: &str) -> String {
+    format!("computation-reset-v1:{query}")
+}
+
 #[path = "query_recovery.rs"]
 mod recovery;
 
@@ -149,13 +153,16 @@ fn parser(language: ComputationQueryLanguage) -> (Arc<dyn QueryParser>, Arc<Func
     }
 }
 
-struct FutureWakeup(Arc<dyn FutureQueue>);
+struct FutureWakeup {
+    queue: Arc<dyn FutureQueue>,
+    keep_alive: bool,
+}
 
 #[async_trait]
 impl WakeupSource for FutureWakeup {
     async fn wait(&self) -> anyhow::Result<()> {
         loop {
-            if let Some(due) = self.0.peek_due_time().await? {
+            if let Some(due) = self.queue.peek_due_time().await? {
                 let now = u64::try_from(Utc::now().timestamp_millis())
                     .map_err(|_| anyhow::anyhow!("clock before epoch"))?;
                 if due <= now {
@@ -168,7 +175,7 @@ impl WakeupSource for FutureWakeup {
         }
     }
     async fn has_pending(&self) -> anyhow::Result<bool> {
-        Ok(self.0.peek_due_time().await?.is_some())
+        Ok(self.keep_alive || self.queue.peek_due_time().await?.is_some())
     }
 }
 
@@ -184,6 +191,21 @@ impl Drop for ProcessingGuard {
             if let Some(progress) = &self.progress {
                 progress.fail();
             }
+        }
+    }
+}
+
+struct TransactionTimer {
+    metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
+    started: std::time::Instant,
+}
+
+impl Drop for TransactionTimer {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_transaction_duration_ns(
+                self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            );
         }
     }
 }
@@ -229,7 +251,7 @@ fn input_progress(input: &super::ChangeEnvelope) -> anyhow::Result<InputProgress
     })
 }
 
-fn progress_key(stream: &str, source: Option<&str>) -> String {
+pub(crate) fn progress_key(stream: &str, source: Option<&str>) -> String {
     let key = match source {
         Some(source) => format!("source:{source}"),
         None => format!("stream:{stream}"),
@@ -242,7 +264,7 @@ fn progress_key(stream: &str, source: Option<&str>) -> String {
     )
 }
 
-fn progress_identity(key: &str) -> anyhow::Result<SourceProgressKey> {
+pub(crate) fn progress_identity(key: &str) -> anyhow::Result<SourceProgressKey> {
     let key = key
         .strip_prefix(INPUT_PREFIX)
         .ok_or_else(|| anyhow::anyhow!("invalid source checkpoint prefix"))?;
@@ -297,6 +319,13 @@ pub struct ContinuousQueryTransformer {
     execution: QueryExecutionSettings,
     middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     registration: Option<super::query_catalog::QueryRegistration>,
+    metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
+    reset_configuration: bool,
+    runtime_compatibility: bool,
+    output_persistent: bool,
+    legacy_hash: Option<u64>,
+    checkpoint_view: Arc<RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
+    publication_identity: Arc<RwLock<Option<uuid::Uuid>>>,
 }
 
 impl ContinuousQueryTransformer {
@@ -329,6 +358,16 @@ impl ContinuousQueryTransformer {
         execution: QueryExecutionSettings,
         middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     ) -> anyhow::Result<Self> {
+        Self::construct(definition, provider, options, execution, middleware, false).await
+    }
+    async fn construct(
+        definition: ContinuousQueryDefinition,
+        provider: Arc<dyn ComputationIndexProvider>,
+        options: QueryOptions,
+        execution: QueryExecutionSettings,
+        middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
+        defer_build: bool,
+    ) -> anyhow::Result<Self> {
         execution.validate(middleware.as_deref())?;
         if !execution.middleware.is_empty() && middleware.is_none() {
             anyhow::bail!("query middleware requires a registered middleware resource");
@@ -360,9 +399,42 @@ impl ContinuousQueryTransformer {
             execution,
             middleware,
             registration: None,
+            metrics: None,
+            reset_configuration: false,
+            runtime_compatibility: false,
+            output_persistent: false,
+            legacy_hash: None,
+            checkpoint_view: Arc::new(RwLock::new(None)),
+            publication_identity: Arc::new(RwLock::new(Some(uuid::Uuid::new_v4()))),
         };
-        instance.build().await?;
+        if !defer_build {
+            instance.build().await?;
+        }
         Ok(instance)
+    }
+
+    fn result_metadata(
+        &self,
+        source_id: &str,
+        results: &[drasi_core::evaluation::context::QueryPartEvaluationContext],
+    ) -> HashMap<String, serde_json::Value> {
+        if !self.runtime_compatibility {
+            return HashMap::new();
+        }
+        let count = results
+            .iter()
+            .filter(|result| {
+                !matches!(
+                    result,
+                    drasi_core::evaluation::context::QueryPartEvaluationContext::Noop
+                )
+            })
+            .count();
+        HashMap::from([
+            ("source_id".into(), serde_json::json!(source_id)),
+            ("processed_by".into(), serde_json::json!("drasi-core")),
+            ("result_count".into(), serde_json::json!(count)),
+        ])
     }
 
     pub fn results(&self) -> QueryResults {
@@ -378,12 +450,15 @@ impl ContinuousQueryTransformer {
         use std::hash::Hasher;
         let mut hasher = fnv::FnvHasher::default();
         hasher.write(&self.definition.configuration_bytes(&self.execution)?);
+        self.metrics = catalog.configured_metrics(&self.definition.id)?;
+        self.legacy_hash = catalog.configured_hash(&self.definition.id)?;
         self.registration = Some(catalog.register(
             self.definition.id.clone(),
             self.results.clone(),
             self.source_progress.clone(),
             hasher.finish(),
-            self.provider.is_volatile(),
+            self.publication_identity.clone(),
+            self.checkpoint_view.clone(),
         )?);
         Ok(self)
     }
@@ -450,15 +525,28 @@ impl ContinuousQueryTransformer {
     }
 
     async fn build(&mut self) -> anyhow::Result<()> {
-        let resources = self
+        let mut resources = self
             .provider
             .create_indexes(&self.definition.graph_id, self.definition.id.as_str())
             .await?;
+        if self.runtime_compatibility {
+            resources = resources.with_fallback_checkpoint(Arc::new(drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore::new()));
+        }
+        self.output_persistent = !self.provider.is_volatile()
+            && resources.outbox_writer().is_some()
+            && resources.live_results_writer().is_some();
+        if self.output_persistent {
+            *self
+                .publication_identity
+                .write()
+                .map_err(|_| anyhow::anyhow!("query output identity poisoned"))? = None;
+        }
         if !self.provider.is_volatile() && self.options.publication == QueryPublicationMode::Atomic
         {
             resources.atomic_result_transaction()?;
         }
-        if !self.provider.is_volatile()
+        if !self.runtime_compatibility
+            && !self.provider.is_volatile()
             && (resources.checkpoint_store().is_none()
                 || resources.outbox_writer().is_none()
                 || resources.live_results_writer().is_none())
@@ -472,6 +560,11 @@ impl ContinuousQueryTransformer {
             QueryBuilder::new(&self.definition.query, parser).with_function_registry(functions),
             self.middleware.clone(),
         )?;
+        *self
+            .checkpoint_view
+            .write()
+            .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))? =
+            resources.checkpoint_store().cloned();
         self.query = Some(ComputationQuery::try_build(builder, resources).await?);
         Ok(())
     }
@@ -487,6 +580,19 @@ impl ContinuousQueryTransformer {
         let Some(checkpoint) = query.resources().checkpoint_store() else {
             return Ok(());
         };
+        if self.runtime_compatibility && checkpoint.is_persistent() {
+            if let Some(expected) = self.legacy_hash {
+                match checkpoint.read_config_hash().await {
+                    Ok(Some(actual)) if actual == expected => {}
+                    Ok(_) => return Err(QueryRecoveryError::ConfigurationChanged.into()),
+                    Err(error) => {
+                        log::warn!("Query {} cannot read its configuration hash; rebootstrap is required: {error}", self.definition.id);
+                        return Err(anyhow::Error::new(QueryRecoveryError::ConfigurationChanged)
+                            .context(error.to_string()));
+                    }
+                }
+            }
+        }
         if let Some(marker) = checkpoint.read_checkpoint(BOOTSTRAP).await? {
             if marker.sequence > 1 || marker.source_position.is_some() {
                 return Err(
@@ -523,6 +629,19 @@ impl ContinuousQueryTransformer {
                         .await
                 })
                 .await?;
+        }
+        if self.runtime_compatibility && !self.output_persistent {
+            *self
+                .watermarks
+                .lock()
+                .map_err(|_| anyhow::anyhow!("watermarks poisoned"))? = checkpoint
+                .read_all_checkpoints()
+                .await?
+                .into_iter()
+                .filter(|(key, _)| key.starts_with(INPUT_PREFIX))
+                .map(|(key, checkpoint)| (key, checkpoint.sequence))
+                .collect();
+            return Ok(());
         }
         let sequence = checkpoint
             .read_result_sequence(self.definition.id.as_str())
@@ -725,6 +844,10 @@ impl ContinuousQueryTransformer {
                     .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
                     .apply(output.clone())?;
                 self.results.notify.notify_waiters();
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_seq_advance();
+                }
+                self.sync_metrics()?;
                 Ok(vec![OutputEnvelope {
                     port: PortId::try_new("out")?,
                     envelope: output,
@@ -732,6 +855,25 @@ impl ContinuousQueryTransformer {
             }
             None => Ok(Vec::new()),
         }
+    }
+    fn sync_metrics(&self) -> anyhow::Result<()> {
+        if let Some(metrics) = &self.metrics {
+            let state = self
+                .results
+                .state
+                .read()
+                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+            metrics.update_outbox(
+                state.outbox.len(),
+                state
+                    .outbox
+                    .front()
+                    .map_or(0, |output| output.system().sequence()),
+                state.sequence,
+            );
+            metrics.record_live_results_count(state.rows.len());
+        }
+        Ok(())
     }
 
     async fn process(&self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -767,7 +909,13 @@ impl ContinuousQueryTransformer {
         let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
         self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);
-        let mut profiling = progress.profiling.clone().unwrap_or_default();
+        let mut profiling = progress.profiling.clone().unwrap_or_else(|| {
+            if self.runtime_compatibility {
+                ProfilingMetadata::new()
+            } else {
+                ProfilingMetadata::default()
+            }
+        });
         profiling.query_receive_ns = Some(timestamp_ns());
         profiling.query_core_call_ns = Some(timestamp_ns());
         let hook = |results: Arc<[drasi_core::evaluation::context::QueryPartEvaluationContext]>| {
@@ -801,7 +949,7 @@ impl ContinuousQueryTransformer {
                         query_id: self.definition.id.to_string(),
                         source_id: Some(progress.source_id.clone()),
                         timestamp: Utc::now(),
-                        metadata: HashMap::new(),
+                        metadata: self.result_metadata(&progress.source_id, &results),
                         profiling: Some(profiling),
                     },
                 )
@@ -826,12 +974,18 @@ impl ContinuousQueryTransformer {
                         )
                         .await?;
                     if let Some(output) = &output {
-                        if self.options.publication == QueryPublicationMode::Atomic {
-                            self.stage_output(output).await?;
-                        } else {
-                            checkpoint
-                                .stage_checkpoint(PENDING_OUTPUT, output.system().sequence(), None)
-                                .await?;
+                        if self.output_persistent {
+                            if self.options.publication == QueryPublicationMode::Atomic {
+                                self.stage_output(output).await?;
+                            } else {
+                                checkpoint
+                                    .stage_checkpoint(
+                                        PENDING_OUTPUT,
+                                        output.system().sequence(),
+                                        None,
+                                    )
+                                    .await?;
+                            }
                         }
                     }
                 }
@@ -858,9 +1012,7 @@ impl ContinuousQueryTransformer {
         let output = prepared
             .into_inner()
             .map_err(|_| anyhow::anyhow!("prepared output poisoned"))?;
-        if self.options.publication == QueryPublicationMode::NonAtomic
-            && !self.provider.is_volatile()
-        {
+        if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
             self.finish_non_atomic(output.as_ref()).await?;
         }
         self.watermarks
@@ -874,6 +1026,15 @@ impl ContinuousQueryTransformer {
             );
         }
         self.publish(output)
+    }
+}
+
+impl Drop for ContinuousQueryTransformer {
+    fn drop(&mut self) {
+        *self.checkpoint_view.write().unwrap_or_else(|error| {
+            log::error!("Releasing a poisoned query checkpoint view: {error}");
+            error.into_inner()
+        }) = None;
     }
 }
 
@@ -911,6 +1072,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
             .ready = true;
         self.results.notify.notify_waiters();
+        self.sync_metrics()?;
         Ok(())
     }
 
@@ -943,6 +1105,10 @@ impl ComputationComponent for ContinuousQueryTransformer {
 #[async_trait]
 impl Transformer for ContinuousQueryTransformer {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+        let _timer = TransactionTimer {
+            metrics: self.metrics.clone(),
+            started: std::time::Instant::now(),
+        };
         let mut guard = ProcessingGuard {
             failure: self.failure.clone(),
             complete: false,
@@ -954,12 +1120,19 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
-        self.query
-            .as_ref()
-            .map(|query| Arc::new(FutureWakeup(query.future_queue())) as Arc<dyn WakeupSource>)
+        self.query.as_ref().map(|query| {
+            Arc::new(FutureWakeup {
+                queue: query.future_queue(),
+                keep_alive: self.runtime_compatibility,
+            }) as Arc<dyn WakeupSource>
+        })
     }
 
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        let _timer = TransactionTimer {
+            metrics: self.metrics.clone(),
+            started: std::time::Instant::now(),
+        };
         if self.failure.load(Ordering::Acquire) {
             anyhow::bail!("query processing is fenced pending recovery");
         }
@@ -1010,9 +1183,13 @@ impl Transformer for ContinuousQueryTransformer {
                     QueryOutputMetadata {
                         query_id: owner.definition.id.to_string(),
                         source_id: Some(due.source_id.to_string()),
-                        timestamp,
-                        metadata: HashMap::new(),
-                        profiling: None,
+                        timestamp: if owner.runtime_compatibility {
+                            Utc::now()
+                        } else {
+                            timestamp
+                        },
+                        metadata: owner.result_metadata(&due.source_id, &due.results),
+                        profiling: owner.runtime_compatibility.then(ProfilingMetadata::new),
                     },
                 )
                 .map_err(IndexError::other)?;
@@ -1028,7 +1205,7 @@ impl Transformer for ContinuousQueryTransformer {
                     )
                     .map_err(IndexError::other)?;
                 }
-                if !owner.provider.is_volatile() {
+                if owner.output_persistent {
                     if let Some(output) = &output {
                         if owner.options.publication == QueryPublicationMode::Atomic {
                             owner.stage_output(output).await?;
@@ -1065,9 +1242,7 @@ impl Transformer for ContinuousQueryTransformer {
         let output = prepared
             .into_inner()
             .map_err(|_| anyhow::anyhow!("prepared future output poisoned"))?;
-        if self.options.publication == QueryPublicationMode::NonAtomic
-            && !self.provider.is_volatile()
-        {
+        if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
             self.finish_non_atomic(output.as_ref()).await?;
         }
         let result = self.publish(output);
@@ -1092,6 +1267,9 @@ impl Default for ContinuousQueryFactory {
             ("recovery", ConfigurationType::String, false),
             ("publication", ConfigurationType::String, false),
             ("execution", ConfigurationType::Object, false),
+            ("defer_build", ConfigurationType::Boolean, false),
+            ("reset_configuration", ConfigurationType::Boolean, false),
+            ("runtime_compatibility", ConfigurationType::Boolean, false),
         ]
         .into_iter()
         .map(|(name, value_type, required)| {
@@ -1380,15 +1558,27 @@ impl ComponentFactory for ContinuousQueryFactory {
         } else {
             None
         };
-        let mut query = ContinuousQueryTransformer::new_configured(
+        let mut query = ContinuousQueryTransformer::construct(
             definition,
             provider.0.clone(),
             options(config).map_err(ComponentCreationError::terminal)?,
             execution,
             middleware,
+            config
+                .get("defer_build")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         )
         .await
         .map_err(ComponentCreationError::retryable)?;
+        query.reset_configuration = config
+            .get("reset_configuration")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        query.runtime_compatibility = config
+            .get("runtime_compatibility")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         if context.specification.dependencies.contains_key("bootstrap") {
             if let Some(bootstrap) = context
                 .resources::<QueryBootstrapResource>("bootstrap")

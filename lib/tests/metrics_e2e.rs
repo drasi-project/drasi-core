@@ -18,6 +18,7 @@
 //! normal operation using DrasiLib's public API.
 
 mod mock_source;
+mod runtime_support;
 
 use anyhow::Result;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
@@ -302,7 +303,7 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("metrics-test")
             .with_source(mock_source)
             .with_query(query)
@@ -374,7 +375,7 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("reaction-metrics-test")
             .with_source(mock_source)
             .with_query(query)
@@ -448,7 +449,7 @@ async fn lifecycle_metrics_count_startup_rejections() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("lifecycle-metrics-test")
             .with_source(mock_source)
             .with_query(query)
@@ -488,7 +489,7 @@ async fn query_output_metrics_error_for_nonexistent() -> Result<()> {
         .build();
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("no-metrics-test")
             .with_source(mock_source)
             .with_query(query)
@@ -516,7 +517,7 @@ async fn reaction_metrics_error_for_nonexistent() -> Result<()> {
         .build();
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("reaction-not-found-test")
             .with_source(mock_source)
             .with_query(query)
@@ -554,7 +555,7 @@ async fn lifecycle_metrics_reject_snapshot_skip_gap() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("snapshot-skip-gap-test")
             .with_source(mock_source)
             .with_query(query)
@@ -602,7 +603,7 @@ async fn lifecycle_metrics_reject_no_snapshot_auto_reset() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("no-snapshot-auto-reset-test")
             .with_source(mock_source)
             .with_query(query)

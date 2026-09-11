@@ -19,6 +19,7 @@
 //! from the query outbox.
 
 mod mock_source;
+mod runtime_support;
 
 use anyhow::Result;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
@@ -332,7 +333,7 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("catchup-test")
             .with_source(mock_source)
             .with_query(query)
@@ -408,7 +409,7 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("clean-restart-test")
             .with_source(mock_source)
             .with_query(query)
@@ -469,7 +470,7 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("skip-gap-test")
             .with_source(mock_source)
             .with_query(query)
@@ -544,7 +545,7 @@ async fn test_reaction_outbox_gap_auto_reset() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("autoreset-test")
             .with_source(mock_source)
             .with_query(query)
@@ -612,7 +613,7 @@ async fn test_reaction_live_delivery_after_restart() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("live-after-restart-test")
             .with_source(mock_source)
             .with_query(query)
@@ -684,12 +685,12 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("runtime-gap-test")
             .with_source(mock_source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_state_store_provider(state_store)
+            .with_state_store_provider(state_store.clone())
             .build()
             .await?,
     );
@@ -706,6 +707,10 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     for i in 0..20 {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
+
+    // Recovery may legitimately skip everything already published. Establish
+    // that the gap has been handled before sending the post-recovery event.
+    runtime_support::wait_for_gap_recovery(&core, state_store.as_ref(), "rec", "q1", 21).await?;
 
     // Verify that live delivery still works after the gap.
     // With AutoSkipGap, the forwarder skips the gap and resumes.
@@ -747,7 +752,7 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
     );
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("strict-gap-test")
             .with_source(mock_source)
             .with_query(query)

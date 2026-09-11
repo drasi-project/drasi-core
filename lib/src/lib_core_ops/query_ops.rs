@@ -46,6 +46,16 @@ impl DrasiLib {
     /// ```
     pub async fn add_query(&self, query: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            let id = query.id.clone();
+            return runtime
+                .add_query(query, self.is_running().await)
+                .await
+                .map_err(|error| {
+                    DrasiError::operation_failed("query", id, "add", error.to_string())
+                });
+        }
 
         let query_id = query.id.clone();
         self.add_query_with_options(query, true)
@@ -69,6 +79,15 @@ impl DrasiLib {
     /// ```
     pub async fn remove_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.remove_component(id, "query", true).await,
+                "query",
+                id,
+                "remove",
+            );
+        }
 
         // Step 1: Validate no dependents
         {
@@ -136,6 +155,15 @@ impl DrasiLib {
             .ok_or_else(|| DrasiError::component_not_found("query", id))?;
 
         // Query will subscribe directly to sources when started
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.start_component(id, "query").await,
+                "query",
+                id,
+                "start",
+            );
+        }
         map_component_error(
             self.query_manager.start_query(id.to_string()).await,
             "query",
@@ -156,6 +184,15 @@ impl DrasiLib {
     /// ```
     pub async fn stop_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.stop_component(id, "query").await,
+                "query",
+                id,
+                "stop",
+            );
+        }
 
         // Stop the query (it unsubscribes from sources automatically)
         map_component_error(
@@ -180,6 +217,15 @@ impl DrasiLib {
     /// references non-existent sources, or if provisioning fails.
     pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.update_query(id, config).await,
+                "query",
+                id,
+                "update",
+            );
+        }
 
         // Delegate to QueryManager which uses the Reconfiguring transition,
         // preserving the graph node, edges, and event history.

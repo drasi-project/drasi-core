@@ -171,6 +171,58 @@ fn domain_cannot_be_attached_to_an_unrelated_actual_session() {
 }
 
 #[tokio::test]
+async fn fallback_checkpoint_is_independent_and_never_replaces_a_provider_store() {
+    use crate::{
+        in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
+        interface::CheckpointStore,
+    };
+    let fallback: Arc<dyn CheckpointStore> = Arc::new(InMemoryCheckpointStore::new());
+    let resources = InMemoryComputationProvider
+        .create_indexes("graph", "query")
+        .await
+        .unwrap()
+        .with_fallback_checkpoint(fallback.clone());
+    assert!(Arc::ptr_eq(
+        resources.checkpoint_store().unwrap(),
+        &fallback
+    ));
+    assert!(matches!(
+        resources.atomic_result_transaction(),
+        Err(ComputationQueryError::AtomicOutputUnsupported)
+    ));
+
+    let configured: Arc<dyn CheckpointStore> = Arc::new(InMemoryCheckpointStore::new());
+    configured
+        .stage_checkpoint("source", 7, None)
+        .await
+        .unwrap();
+    let resources = ComputationIndexes::try_new(
+        memory_indexes(Arc::new(NoOpSessionControl)),
+        None,
+        Some(ComputationResource::independent(configured.clone())),
+        None,
+        None,
+    )
+    .unwrap()
+    .with_fallback_checkpoint(fallback);
+    assert!(Arc::ptr_eq(
+        resources.checkpoint_store().unwrap(),
+        &configured
+    ));
+    assert_eq!(
+        resources
+            .checkpoint_store()
+            .unwrap()
+            .read_checkpoint("source")
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        7
+    );
+}
+
+#[tokio::test]
 async fn dropping_an_evaluation_fences_the_constructed_query_until_replacement() {
     let session = Arc::new(RecordingSession::default());
     let resources =

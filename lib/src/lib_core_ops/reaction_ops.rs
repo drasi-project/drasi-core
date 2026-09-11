@@ -61,6 +61,16 @@ impl DrasiLib {
         extra_metadata: HashMap<String, String>,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            let id = reaction.id().to_owned();
+            return runtime
+                .add_reaction(Box::new(reaction), extra_metadata, self.is_running().await)
+                .await
+                .map_err(|error| {
+                    DrasiError::operation_failed("reaction", id, "add", error.to_string())
+                });
+        }
 
         // Capture auto_start and id before transferring ownership
         let should_auto_start = reaction.auto_start();
@@ -127,6 +137,15 @@ impl DrasiLib {
     /// ```
     pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.remove_component(id, "reaction", cleanup).await,
+                "reaction",
+                id,
+                "remove",
+            );
+        }
 
         // Step 1: Validate no dependents
         {
@@ -204,6 +223,15 @@ impl DrasiLib {
         new_reaction: impl crate::reactions::Reaction + 'static,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.update_reaction(id, Box::new(new_reaction)).await,
+                "reaction",
+                id,
+                "update",
+            );
+        }
 
         // Validate the new reaction has the same ID
         if new_reaction.id() != id {
@@ -242,6 +270,15 @@ impl DrasiLib {
     /// ```
     pub async fn start_reaction(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.start_component(id, "reaction").await,
+                "reaction",
+                id,
+                "start",
+            );
+        }
 
         // Start the reaction (QueryProvider was injected when reaction was added)
         map_component_error(
@@ -264,6 +301,15 @@ impl DrasiLib {
     /// ```
     pub async fn stop_reaction(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.stop_component(id, "reaction").await,
+                "reaction",
+                id,
+                "stop",
+            );
+        }
 
         // Stop the reaction (subscriptions managed by reaction itself)
         map_component_error(

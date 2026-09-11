@@ -212,90 +212,39 @@ mod tests {
     }
 
     async fn create_test_env() -> (
-        Arc<crate::queries::QueryManager>,
-        Arc<crate::sources::SourceManager>,
+        Arc<crate::test_helpers::managers::QueryManager>,
+        Arc<crate::test_helpers::managers::SourceManager>,
         Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
     ) {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let source_manager = Arc::new(crate::sources::SourceManager::new(
-            "test-instance",
-            log_registry.clone(),
-            graph.clone(),
-            update_tx.clone(),
-        ));
-
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
             std::collections::HashMap::new(),
         ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
-        let query_manager = Arc::new(crate::queries::QueryManager::new(
-            "test-instance",
-            source_manager.clone(),
-            index_factory,
-            middleware_registry,
-            log_registry,
-            graph.clone(),
-            update_tx,
-            None,
-        ));
-
-        (query_manager, source_manager, graph)
+        let core =
+            crate::test_helpers::managers::core(index_factory, middleware_registry, None).await;
+        (
+            Arc::new(crate::test_helpers::managers::QueryManager(core.clone())),
+            Arc::new(crate::test_helpers::managers::SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     async fn add_source(
-        source_manager: &crate::sources::SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        source_manager: &crate::test_helpers::managers::SourceManager,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-        let auto_start = source.auto_start();
-        {
-            let mut g = graph.write().await;
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), auto_start.to_string());
-            g.register_source(&source_id, metadata)?;
-        }
-        source_manager.provision_source(source).await
+        source_manager.add(source).await
     }
 
     async fn add_query(
-        manager: &crate::queries::QueryManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        manager: &crate::test_helpers::managers::QueryManager,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
-        {
-            let mut g = graph.write().await;
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            for sid in &source_ids {
-                if !g.contains(sid) {
-                    g.register_source(sid, std::collections::HashMap::new())?;
-                }
-            }
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            g.register_query(&config.id, metadata, &source_ids)?;
-        }
-        manager.provision_query(config).await
+        manager.declare(config).await
     }
 
     // ========================================================================
@@ -555,10 +504,7 @@ mod tests {
         // However, the checkpoint SHOULD still be stored in the checkpoint store.
         // Verify by reading it directly.
         let query_instance = query_manager.get_query_instance("e2e-query").await.unwrap();
-        let cp_store = query_instance
-            .as_any()
-            .downcast_ref::<crate::queries::DrasiQuery>()
-            .unwrap()
+        let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await;
         if let Some(store) = cp_store {
@@ -871,10 +817,7 @@ mod tests {
             .get_query_instance("dedup-query")
             .await
             .unwrap();
-        let drasi_query = query_instance
-            .as_any()
-            .downcast_ref::<DrasiQuery>()
-            .unwrap();
+        let drasi_query = crate::test_helpers::checkpoints::query(&query_instance);
         let result_index = drasi_query.get_checkpoint_store().await.unwrap();
         let all_checkpoints = result_index.read_all_checkpoints().await.unwrap();
         let max_seq = all_checkpoints
@@ -1193,10 +1136,7 @@ mod tests {
             .get_query_instance("multi-query")
             .await
             .unwrap();
-        let cp_store = query_instance
-            .as_any()
-            .downcast_ref::<crate::queries::DrasiQuery>()
-            .unwrap()
+        let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await;
         if let Some(store) = cp_store {
@@ -1469,33 +1409,10 @@ mod tests {
 
     /// Create test env with a persistent mock backend.
     async fn create_test_env_with_persistent_backend() -> (
-        Arc<crate::queries::QueryManager>,
-        Arc<crate::sources::SourceManager>,
+        Arc<crate::test_helpers::managers::QueryManager>,
+        Arc<crate::test_helpers::managers::SourceManager>,
         Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
     ) {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let source_manager = Arc::new(crate::sources::SourceManager::new(
-            "test-instance",
-            log_registry.clone(),
-            graph.clone(),
-            update_tx.clone(),
-        ));
-
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
             std::collections::HashMap::from([(
@@ -1506,18 +1423,13 @@ mod tests {
         ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
-        let query_manager = Arc::new(crate::queries::QueryManager::new(
-            "test-instance",
-            source_manager.clone(),
-            index_factory,
-            middleware_registry,
-            log_registry,
-            graph.clone(),
-            update_tx,
-            None,
-        ));
-
-        (query_manager, source_manager, graph)
+        let core =
+            crate::test_helpers::managers::core(index_factory, middleware_registry, None).await;
+        (
+            Arc::new(crate::test_helpers::managers::QueryManager(core.clone())),
+            Arc::new(crate::test_helpers::managers::SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Create a query config that uses a persistent storage backend.
@@ -1631,10 +1543,7 @@ mod tests {
             .get_query_instance("hash-query")
             .await
             .unwrap();
-        let cp_store = query_instance
-            .as_any()
-            .downcast_ref::<DrasiQuery>()
-            .unwrap()
+        let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await
             .expect("Should have checkpoint store");
@@ -1688,10 +1597,7 @@ mod tests {
             .get_query_instance("hash-query")
             .await
             .unwrap();
-        let cp_store = query_instance
-            .as_any()
-            .downcast_ref::<DrasiQuery>()
-            .unwrap()
+        let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await
             .expect("Should have checkpoint store");
@@ -1787,10 +1693,7 @@ mod tests {
             .get_query_instance("mismatch-query")
             .await
             .unwrap();
-        let cp_store = query_instance
-            .as_any()
-            .downcast_ref::<DrasiQuery>()
-            .unwrap()
+        let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await
             .expect("Should have checkpoint store");
@@ -1879,10 +1782,7 @@ mod tests {
             .get_query_instance("mismatch-query")
             .await
             .unwrap();
-        let cp_store = query_instance
-            .as_any()
-            .downcast_ref::<DrasiQuery>()
-            .unwrap()
+        let cp_store = crate::test_helpers::checkpoints::query(&query_instance)
             .get_checkpoint_store()
             .await
             .expect("Should have checkpoint store");
@@ -1989,10 +1889,7 @@ mod tests {
             .get_query_instance("recov-query")
             .await
             .unwrap();
-        let drasi_query = query_instance
-            .as_any()
-            .downcast_ref::<DrasiQuery>()
-            .unwrap();
+        let drasi_query = crate::test_helpers::checkpoints::query(&query_instance);
         let checkpoint_store = drasi_query.get_checkpoint_store().await.unwrap();
         let cp_before = checkpoint_store
             .read_checkpoint("recov-source")
@@ -2202,7 +2099,7 @@ mod tests {
 
         async fn get_store(&self, query_id: &str) -> Arc<FailableCheckpointStore> {
             let mut map = self.stores.write().await;
-            map.entry(query_id.to_string())
+            map.entry(crate::test_helpers::checkpoints::storage_id(query_id))
                 .or_insert_with(|| Arc::new(FailableCheckpointStore::new()))
                 .clone()
         }
@@ -2246,33 +2143,10 @@ mod tests {
     async fn create_test_env_with_failable_backend(
         plugin: Arc<FailablePlugin>,
     ) -> (
-        Arc<crate::queries::QueryManager>,
-        Arc<crate::sources::SourceManager>,
+        Arc<crate::test_helpers::managers::QueryManager>,
+        Arc<crate::test_helpers::managers::SourceManager>,
         Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
     ) {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let source_manager = Arc::new(crate::sources::SourceManager::new(
-            "test-instance",
-            log_registry.clone(),
-            graph.clone(),
-            update_tx.clone(),
-        ));
-
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
             std::collections::HashMap::from([(
@@ -2282,18 +2156,13 @@ mod tests {
         ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
-        let query_manager = Arc::new(crate::queries::QueryManager::new(
-            "test-instance",
-            source_manager.clone(),
-            index_factory,
-            middleware_registry,
-            log_registry,
-            graph.clone(),
-            update_tx,
-            None,
-        ));
-
-        (query_manager, source_manager, graph)
+        let core =
+            crate::test_helpers::managers::core(index_factory, middleware_registry, None).await;
+        (
+            Arc::new(crate::test_helpers::managers::QueryManager(core.clone())),
+            Arc::new(crate::test_helpers::managers::SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Test: when read_config_hash() fails, the query should still start
@@ -2804,76 +2673,31 @@ mod orchestration_tests {
     }
 
     async fn add_source(
-        source_manager: &crate::sources::SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        source_manager: &crate::test_helpers::managers::SourceManager,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
         let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-        let auto_start = source.auto_start();
-        {
-            let mut g = graph.write().await;
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), auto_start.to_string());
-            g.register_source(&source_id, metadata)?;
-        }
-        source_manager.provision_source(source).await?;
+        source_manager.add(source).await?;
         source_manager.start_source(source_id).await
     }
 
     async fn add_query(
-        manager: &crate::queries::QueryManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        manager: &crate::test_helpers::managers::QueryManager,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
-        {
-            let mut g = graph.write().await;
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            for sid in &source_ids {
-                if !g.contains(sid) {
-                    g.register_source(sid, std::collections::HashMap::new())?;
-                }
-            }
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            g.register_query(&config.id, metadata, &source_ids)?;
-        }
-        manager.provision_query(config).await
+        manager.declare(config).await
     }
 
     async fn create_test_env(
         plugin: Option<Arc<dyn crate::indexes::IndexBackendPlugin>>,
         default_recovery_policy: Option<RecoveryPolicy>,
     ) -> (
-        Arc<crate::queries::QueryManager>,
-        Arc<crate::sources::SourceManager>,
+        Arc<crate::test_helpers::managers::QueryManager>,
+        Arc<crate::test_helpers::managers::SourceManager>,
         Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
     ) {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let source_manager = Arc::new(crate::sources::SourceManager::new(
-            "test-instance",
-            log_registry.clone(),
-            graph.clone(),
-            update_tx.clone(),
-        ));
-
         let providers: std::collections::HashMap<
             String,
             Arc<dyn crate::indexes::IndexBackendPlugin>,
@@ -2883,18 +2707,17 @@ mod orchestration_tests {
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], providers));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
-        let query_manager = Arc::new(crate::queries::QueryManager::new(
-            "test-instance",
-            source_manager.clone(),
+        let core = crate::test_helpers::managers::core(
             index_factory,
             middleware_registry,
-            log_registry,
-            graph.clone(),
-            update_tx,
             default_recovery_policy,
-        ));
-
-        (query_manager, source_manager, graph)
+        )
+        .await;
+        (
+            Arc::new(crate::test_helpers::managers::QueryManager(core.clone())),
+            Arc::new(crate::test_helpers::managers::SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     // ========================================================================

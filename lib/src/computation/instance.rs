@@ -176,13 +176,13 @@ enum DriverState {
     Finished(Option<Arc<str>>),
 }
 
-struct GraphSlot(Mutex<Option<ComputationGraph>>);
-struct GraphLease {
+pub(super) struct GraphSlot(pub(super) Mutex<Option<ComputationGraph>>);
+pub(super) struct GraphLease {
     slot: Arc<GraphSlot>,
-    graph: Option<ComputationGraph>,
+    pub(super) graph: Option<ComputationGraph>,
 }
 impl GraphSlot {
-    fn take(self: &Arc<Self>) -> anyhow::Result<GraphLease> {
+    pub(super) fn take(self: &Arc<Self>) -> anyhow::Result<GraphLease> {
         let graph = self
             .0
             .lock()
@@ -579,6 +579,13 @@ pub(crate) async fn reject_graph(
     dispose_rejected(vec![(graph, options)], None, error).await
 }
 
+pub(crate) async fn cleanup_failed_instance(
+    core: crate::DrasiLib,
+    error: DrasiError,
+) -> DrasiError {
+    dispose_rejected(Vec::new(), Some(core), error).await
+}
+
 impl ComputationRegistry {
     pub(crate) fn is_empty(&self) -> Result<bool> {
         Ok(self.entries()?.is_empty())
@@ -694,12 +701,16 @@ impl ComputationRegistry {
         Ok(())
     }
     pub(crate) async fn stop_all(&self) -> anyhow::Result<()> {
+        self.stop_all_except(None).await
+    }
+    pub(crate) async fn stop_all_except(&self, excluded: Option<&str>) -> anyhow::Result<()> {
         let mut failures = Vec::new();
         let mut pending: FuturesUnordered<_> = self
             .list()
             .await?
             .into_iter()
             .filter(|handle| !*handle.entry.cancel.borrow())
+            .filter(|handle| Some(handle.id()) != excluded)
             .map(|handle| async move {
                 let result = handle.stop().await;
                 (handle, result)

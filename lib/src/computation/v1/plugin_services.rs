@@ -33,7 +33,7 @@ pub struct LegacyWalResource(pub Arc<dyn WalProvider>);
 pub struct LegacySecretStoreResource(pub Arc<dyn SecretStoreProvider>);
 pub struct LegacyBootstrapResource(pub Arc<dyn crate::bootstrap::BootstrapProvider>);
 
-pub(super) struct PluginObservations {
+pub(crate) struct PluginObservations {
     id: String,
     updates: tokio::sync::Mutex<
         Option<tokio::sync::mpsc::Receiver<crate::component_graph::ComponentUpdate>>,
@@ -41,19 +41,19 @@ pub(super) struct PluginObservations {
     status: tokio::sync::watch::Sender<(crate::ComponentStatus, Option<String>)>,
 }
 impl PluginObservations {
-    pub(super) fn new(id: &str) -> Self {
+    pub(crate) fn new(id: &str) -> Self {
         Self {
             id: id.to_owned(),
             updates: tokio::sync::Mutex::new(None),
             status: tokio::sync::watch::channel((crate::ComponentStatus::Stopped, None)).0,
         }
     }
-    pub(super) async fn channel(&self) -> crate::component_graph::ComponentUpdateSender {
+    pub(crate) async fn channel(&self) -> crate::component_graph::ComponentUpdateSender {
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         *self.updates.lock().await = Some(receiver);
         sender
     }
-    pub(super) async fn reset(&self) {
+    pub(crate) async fn reset(&self) {
         self.status
             .send_replace((crate::ComponentStatus::Stopped, None));
         if let Some(receiver) = self.updates.lock().await.as_mut() {
@@ -62,10 +62,10 @@ impl PluginObservations {
             }
         }
     }
-    pub(super) async fn close(&self) {
+    pub(crate) async fn close(&self) {
         *self.updates.lock().await = None;
     }
-    pub(super) async fn read(&self) -> anyhow::Result<()> {
+    pub(crate) async fn read(&self) -> anyhow::Result<()> {
         let mut updates = self.updates.lock().await;
         if updates.is_none() {
             drop(updates);
@@ -95,7 +95,7 @@ impl PluginObservations {
         }
         Ok(())
     }
-    pub(super) async fn failure(&self) -> anyhow::Result<()> {
+    pub(crate) async fn failure(&self) -> anyhow::Result<()> {
         let mut status = self.status.subscribe();
         let status = status
             .wait_for(|(status, _)| *status == crate::ComponentStatus::Error)
@@ -106,7 +106,7 @@ impl PluginObservations {
             status.1.as_deref().unwrap_or("unspecified failure")
         );
     }
-    pub(super) async fn drive<T>(
+    pub(crate) async fn drive<T>(
         &self,
         future: impl std::future::Future<Output = anyhow::Result<T>>,
         cleanup: bool,

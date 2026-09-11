@@ -18,6 +18,7 @@
 //! to the `Error` state instead of silently becoming `Running`.
 
 mod mock_source;
+mod runtime_support;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -76,7 +77,7 @@ async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
         .build();
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("bootstrap-failure-test")
             .with_source(mock_source)
             .with_query(query)
@@ -123,7 +124,7 @@ async fn query_enters_error_state_when_multiple_bootstraps_fail() -> Result<()> 
         .build();
 
     let core = Arc::new(
-        DrasiLib::builder()
+        runtime_support::builder()
             .with_id("bootstrap-multi-failure-test")
             .with_source(source_a)
             .with_source(source_b)

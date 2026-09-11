@@ -57,13 +57,13 @@ pub trait ReactionPluginConstructor: Send + Sync {
 }
 
 #[derive(Clone)]
-struct OutputView {
+pub(super) struct OutputView {
     snapshot: QuerySnapshot,
     retained: Vec<ChangeEnvelope>,
     config_hash: u64,
     incarnation: Option<uuid::Uuid>,
 }
-fn output_view(query: &CatalogQuery) -> anyhow::Result<OutputView> {
+pub(super) fn output_view(query: &CatalogQuery) -> anyhow::Result<OutputView> {
     let state = query
         .results
         .state
@@ -77,10 +77,16 @@ fn output_view(query: &CatalogQuery) -> anyhow::Result<OutputView> {
         },
         retained: state.outbox.iter().cloned().collect(),
         config_hash: query.config_hash,
-        incarnation: query.incarnation,
+        incarnation: *query
+            .incarnation
+            .read()
+            .map_err(|_| anyhow::anyhow!("query output identity poisoned"))?,
     })
 }
-fn snapshot_response(query_id: &str, view: &OutputView) -> anyhow::Result<SnapshotResponse> {
+pub(super) fn snapshot_response(
+    query_id: &str,
+    view: &OutputView,
+) -> anyhow::Result<SnapshotResponse> {
     if view.snapshot.rows.is_empty() {
         return Ok(SnapshotResponse::new(
             im::HashMap::new(),
@@ -116,7 +122,7 @@ fn snapshot_response(query_id: &str, view: &OutputView) -> anyhow::Result<Snapsh
         view.config_hash,
     ))
 }
-fn outbox_response(
+pub(super) fn outbox_response(
     view: &OutputView,
     after: u64,
 ) -> std::result::Result<OutboxResponse, FetchError> {
@@ -279,6 +285,13 @@ pub struct ReactionPluginHost {
     claimed: AtomicBool,
     life: tokio::sync::Mutex<ReactionLife>,
     observations: PluginObservations,
+    deferred_validation: bool,
+    runtime_metrics: Option<RuntimeReactionMetrics>,
+}
+
+pub(crate) struct RuntimeReactionMetrics {
+    pub queries: BTreeMap<String, Arc<crate::metrics::ReactionMetrics>>,
+    pub lifecycle: Arc<crate::metrics::LifecycleMetrics>,
 }
 
 impl ReactionPluginHost {
@@ -288,7 +301,15 @@ impl ReactionPluginHost {
         catalog: QueryResultsCatalog,
         options: ReactionPluginOptions,
     ) -> anyhow::Result<Arc<Self>> {
-        Self::new(reaction.into(), services, catalog, options, true, None)
+        Self::new(
+            reaction.into(),
+            services,
+            catalog,
+            options,
+            true,
+            None,
+            false,
+        )
     }
     pub fn borrowed(
         reaction: Arc<dyn Reaction>,
@@ -301,6 +322,7 @@ impl ReactionPluginHost {
             ReactionPluginOptions::default(),
             false,
             None,
+            false,
         )
     }
     pub async fn recreatable(
@@ -317,7 +339,19 @@ impl ReactionPluginHost {
             options,
             true,
             Some(constructor),
+            false,
         )
+    }
+    pub(crate) fn for_runtime(
+        reaction: Arc<dyn Reaction>,
+        services: LegacyPluginServices,
+        catalog: QueryResultsCatalog,
+        options: ReactionPluginOptions,
+        metrics: RuntimeReactionMetrics,
+    ) -> anyhow::Result<Arc<Self>> {
+        let mut host = Self::new(reaction, services, catalog, options, true, None, true)?;
+        Arc::get_mut(&mut host).expect("new host").runtime_metrics = Some(metrics);
+        Ok(host)
     }
     fn new(
         reaction: Arc<dyn Reaction>,
@@ -326,11 +360,13 @@ impl ReactionPluginHost {
         options: ReactionPluginOptions,
         owned: bool,
         constructor: Option<Arc<dyn ReactionPluginConstructor>>,
+        deferred_validation: bool,
     ) -> anyhow::Result<Arc<Self>> {
         if options.bootstrap_timeout_secs == 0 {
             anyhow::bail!("reaction bootstrap timeout must be nonzero");
         }
         if owned
+            && !deferred_validation
             && reaction.is_durable()
             && services
                 .state_store
@@ -343,6 +379,7 @@ impl ReactionPluginHost {
             .recovery
             .unwrap_or_else(|| reaction.default_recovery_policy());
         if owned
+            && !deferred_validation
             && policy == ReactionRecoveryPolicy::AutoReset
             && !reaction.needs_snapshot_on_fresh_start()
         {
@@ -369,6 +406,8 @@ impl ReactionPluginHost {
             owned,
             claimed: AtomicBool::new(false),
             life: tokio::sync::Mutex::new(ReactionLife::default()),
+            deferred_validation,
+            runtime_metrics: None,
         }))
     }
     pub fn id(&self) -> &str {
@@ -451,6 +490,11 @@ impl ReactionPluginHost {
         checkpoint: Option<ReactionCheckpoint>,
         reset: bool,
     ) -> anyhow::Result<()> {
+        if let Some(metrics) = &self.runtime_metrics {
+            if let Some(query) = metrics.queries.get(query) {
+                query.record_fetch_snapshot();
+            }
+        }
         self.write_metadata(query, view, true).await?;
         let staged = Arc::new(Mutex::new(None));
         let context = BootstrapContext::from_backend(
@@ -481,7 +525,13 @@ impl ReactionPluginHost {
             )
             .await?;
         }
-        self.write_metadata(query, view, false).await
+        self.write_metadata(query, view, false).await?;
+        if reset {
+            if let Some(metrics) = &self.runtime_metrics {
+                metrics.lifecycle.record_auto_reset_completion();
+            }
+        }
+        Ok(())
     }
     async fn start(&self) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
@@ -494,6 +544,51 @@ impl ReactionPluginHost {
         if !self.owned {
             life.running = true;
             return Ok(());
+        }
+        if self.deferred_validation {
+            let reaction = self.reaction()?;
+            let policy = self
+                .options
+                .recovery
+                .unwrap_or_else(|| reaction.default_recovery_policy());
+            if reaction.is_durable()
+                && self
+                    .services
+                    .state_store
+                    .as_ref()
+                    .map_or(true, |store| !store.is_durable())
+            {
+                if let Some(metrics) = &self.runtime_metrics {
+                    metrics.lifecycle.record_startup_rejection(
+                        if self.services.state_store.is_some() {
+                            crate::metrics::StartupRejectionReason::DurableOnVolatile
+                        } else {
+                            crate::metrics::StartupRejectionReason::DurableNoStore
+                        },
+                    );
+                }
+                anyhow::bail!("durable reaction requires a durable state store");
+            }
+            if reaction.needs_snapshot_on_fresh_start()
+                && policy == ReactionRecoveryPolicy::AutoSkipGap
+            {
+                if let Some(metrics) = &self.runtime_metrics {
+                    metrics.lifecycle.record_startup_rejection(
+                        crate::metrics::StartupRejectionReason::SnapshotSkipGap,
+                    );
+                }
+                anyhow::bail!("snapshot recovery is incompatible with AutoSkipGap");
+            }
+            if !reaction.needs_snapshot_on_fresh_start()
+                && policy == ReactionRecoveryPolicy::AutoReset
+            {
+                if let Some(metrics) = &self.runtime_metrics {
+                    metrics.lifecycle.record_startup_rejection(
+                        crate::metrics::StartupRejectionReason::NoSnapshotAutoReset,
+                    );
+                }
+                anyhow::bail!("needs_snapshot_on_fresh_start=false is incompatible with AutoReset (snapshot/bootstrap support is required)");
+            }
         }
         if life.replace_on_start {
             let reaction = self
@@ -521,6 +616,213 @@ impl ReactionPluginHost {
             life.initialization_complete = false;
             life.replace_on_start = false;
         }
+        let reaction = self.initialize_locked(&mut life).await?;
+        self.observations.reset().await;
+        if !self.deferred_validation {
+            for query in &self.query_ids {
+                self.catalog
+                    .ready(
+                        query,
+                        Duration::from_secs(self.options.bootstrap_timeout_secs),
+                    )
+                    .await?;
+            }
+        }
+        life.needs_stop = true;
+        self.observations.drive(reaction.start(), false).await?;
+        life.accepted.clear();
+        for query_id in &self.query_ids {
+            let checkpoint = if let Some(store) = &self.services.state_store {
+                crate::reactions::checkpoint::read_checkpoint(store.as_ref(), &self.id, query_id)
+                    .await?
+            } else {
+                None
+            };
+            if self.deferred_validation
+                && checkpoint.is_none()
+                && !reaction.needs_snapshot_on_fresh_start()
+            {
+                if let Some(query) = self
+                    .catalog
+                    .get(&ComponentId::try_new(query_id.as_str())?)?
+                {
+                    if query.status.as_ref().is_some_and(|status| {
+                        !matches!(
+                            *status.borrow(),
+                            ComponentStatus::Starting | ComponentStatus::Running
+                        )
+                    }) {
+                        let view = output_view(&query)?;
+                        if let Some(metrics) = self
+                            .runtime_metrics
+                            .as_ref()
+                            .and_then(|metrics| metrics.queries.get(query_id))
+                        {
+                            metrics.record_fetch_outbox();
+                        }
+                        if let Some(store) = &self.services.state_store {
+                            crate::reactions::checkpoint::write_checkpoint(
+                                store.as_ref(),
+                                &self.id,
+                                query_id,
+                                &ReactionCheckpoint {
+                                    sequence: 0,
+                                    config_hash: view.config_hash,
+                                },
+                            )
+                            .await?;
+                        }
+                        life.accepted
+                            .insert(query_id.clone(), (view.snapshot.generation, 0));
+                        self.write_metadata(query_id, &view, false).await?;
+                        continue;
+                    }
+                }
+            }
+            let query = self
+                .catalog
+                .ready(
+                    query_id,
+                    Duration::from_secs(self.options.bootstrap_timeout_secs),
+                )
+                .await?;
+            let view = output_view(&query)?;
+            let metadata = self.read_metadata(query_id).await?;
+            if checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.config_hash != view.config_hash)
+            {
+                if let Some(metrics) = &self.runtime_metrics {
+                    metrics.lifecycle.record_hash_mismatch();
+                }
+            }
+            let changed = metadata.as_ref().is_some_and(|metadata| {
+                metadata.bootstrap_pending
+                    || metadata.config_hash != view.config_hash
+                    || metadata.reset_generation != view.snapshot.generation
+                    || metadata.incarnation != view.incarnation
+            }) || checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.sequence > view.snapshot.as_of_sequence)
+                || metadata.is_none()
+                    && checkpoint.as_ref().is_some_and(|checkpoint| {
+                        checkpoint.config_hash != view.config_hash
+                            || !self.deferred_validation && view.incarnation.is_some()
+                    });
+            let policy = self
+                .options
+                .recovery
+                .unwrap_or_else(|| reaction.default_recovery_policy());
+            let needs_snapshot = checkpoint.is_none() && reaction.needs_snapshot_on_fresh_start();
+            let after = checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.sequence)
+                .unwrap_or(0);
+            let replay = outbox_response(&view, after);
+            if !needs_snapshot {
+                if let Some(metrics) = self
+                    .runtime_metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.queries.get(query_id))
+                {
+                    metrics.record_fetch_outbox();
+                    if matches!(&replay, Err(FetchError::OutboxGap(_))) {
+                        metrics.record_gap_detection();
+                    }
+                }
+            }
+            if needs_snapshot
+                || changed && policy == ReactionRecoveryPolicy::AutoReset
+                || replay.is_err() && policy == ReactionRecoveryPolicy::AutoReset
+            {
+                if !reaction.needs_snapshot_on_fresh_start() {
+                    anyhow::bail!("reaction cannot reset from a snapshot");
+                }
+                let reset = changed || checkpoint.is_some();
+                self.bootstrap(reaction.as_ref(), query_id, &view, checkpoint, reset)
+                    .await?;
+                life.accepted.insert(
+                    query_id.clone(),
+                    (view.snapshot.generation, view.snapshot.as_of_sequence),
+                );
+                continue;
+            }
+            if changed && policy != ReactionRecoveryPolicy::AutoReset {
+                if self.deferred_validation {
+                    anyhow::bail!("{policy:?} recovery policy cannot recover a checkpoint from a different query/reset generation");
+                }
+                anyhow::bail!("reaction checkpoint belongs to a different query/reset generation");
+            }
+            let entries = match replay {
+                Ok(replay) => replay.results,
+                Err(FetchError::OutboxGap(_))
+                    if policy == ReactionRecoveryPolicy::AutoSkipGap
+                        || checkpoint.is_none() && !reaction.needs_snapshot_on_fresh_start() =>
+                {
+                    log::warn!("Reaction {} starts at available retained history for query {query_id}; missing history is not claimed handled", self.id);
+                    view.retained
+                        .iter()
+                        .map(|event| QueryChangeCodec::to_legacy_result(event).map(Arc::new))
+                        .collect::<std::result::Result<Vec<_>, _>>()?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut accepted = after;
+            for result in entries {
+                self.observations
+                    .drive(
+                        reaction.enqueue_query_result(result.as_ref().clone()),
+                        false,
+                    )
+                    .await?;
+                accepted = result.sequence;
+            }
+            // This is delivery dedup within this run, never a handled checkpoint.
+            life.accepted
+                .insert(query_id.clone(), (view.snapshot.generation, accepted));
+            if self.deferred_validation {
+                if let Some(store) = &self.services.state_store {
+                    crate::reactions::checkpoint::write_checkpoint(
+                        store.as_ref(),
+                        &self.id,
+                        query_id,
+                        &ReactionCheckpoint {
+                            sequence: accepted,
+                            config_hash: view.config_hash,
+                        },
+                    )
+                    .await?;
+                }
+            }
+            self.write_metadata(query_id, &view, false).await?;
+        }
+        life.running = true;
+        Ok(())
+    }
+    async fn stop(&self) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        if self.owned && life.needs_stop {
+            self.observations
+                .drive(self.reaction()?.stop(), true)
+                .await?;
+            life.needs_stop = false;
+            life.replace_on_start = self.constructor.is_some();
+        }
+        life.running = false;
+        Ok(())
+    }
+    pub(crate) async fn initialize_component(&self) -> anyhow::Result<()> {
+        if !self.owned {
+            anyhow::bail!("borrowed reactions cannot be initialized");
+        }
+        let mut life = self.life.lock().await;
+        self.initialize_locked(&mut life).await?;
+        Ok(())
+    }
+    async fn initialize_locked(
+        &self,
+        life: &mut ReactionLife,
+    ) -> anyhow::Result<Arc<dyn Reaction>> {
         let reaction = self.reaction()?;
         if life.initialized && !life.initialization_complete {
             anyhow::bail!("reaction initialization was interrupted; reconstruct it");
@@ -551,118 +853,7 @@ impl ReactionPluginHost {
                 .await?;
             life.initialization_complete = true;
         }
-        self.observations.reset().await;
-        for query in &self.query_ids {
-            self.catalog
-                .ready(
-                    query,
-                    Duration::from_secs(self.options.bootstrap_timeout_secs),
-                )
-                .await?;
-        }
-        life.needs_stop = true;
-        self.observations.drive(reaction.start(), false).await?;
-        life.accepted.clear();
-        for query_id in &self.query_ids {
-            let query = self
-                .catalog
-                .ready(
-                    query_id,
-                    Duration::from_secs(self.options.bootstrap_timeout_secs),
-                )
-                .await?;
-            let view = output_view(&query)?;
-            let checkpoint = if let Some(store) = &self.services.state_store {
-                crate::reactions::checkpoint::read_checkpoint(store.as_ref(), &self.id, query_id)
-                    .await?
-            } else {
-                None
-            };
-            let metadata = self.read_metadata(query_id).await?;
-            let changed = metadata.as_ref().is_some_and(|metadata| {
-                metadata.bootstrap_pending
-                    || metadata.config_hash != view.config_hash
-                    || metadata.reset_generation != view.snapshot.generation
-                    || metadata.incarnation != view.incarnation
-            }) || checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.sequence > view.snapshot.as_of_sequence)
-                || metadata.is_none()
-                    && checkpoint.as_ref().is_some_and(|checkpoint| {
-                        checkpoint.config_hash != view.config_hash || view.incarnation.is_some()
-                    });
-            let policy = self
-                .options
-                .recovery
-                .unwrap_or_else(|| reaction.default_recovery_policy());
-            let needs_snapshot = checkpoint.is_none() && reaction.needs_snapshot_on_fresh_start();
-            let after = checkpoint
-                .as_ref()
-                .map(|checkpoint| checkpoint.sequence)
-                .unwrap_or(0);
-            let replay = outbox_response(&view, after);
-            if needs_snapshot
-                || changed && policy == ReactionRecoveryPolicy::AutoReset
-                || replay.is_err() && policy == ReactionRecoveryPolicy::AutoReset
-            {
-                if !reaction.needs_snapshot_on_fresh_start() {
-                    anyhow::bail!("reaction cannot reset from a snapshot");
-                }
-                let reset = changed || checkpoint.is_some();
-                self.bootstrap(reaction.as_ref(), query_id, &view, checkpoint, reset)
-                    .await?;
-                life.accepted.insert(
-                    query_id.clone(),
-                    (view.snapshot.generation, view.snapshot.as_of_sequence),
-                );
-                continue;
-            }
-            if changed && policy != ReactionRecoveryPolicy::AutoReset {
-                anyhow::bail!("reaction checkpoint belongs to a different query/reset generation");
-            }
-            let entries = match replay {
-                Ok(replay) => replay.results,
-                Err(FetchError::OutboxGap(_))
-                    if policy == ReactionRecoveryPolicy::AutoSkipGap
-                        || checkpoint.is_none() && !reaction.needs_snapshot_on_fresh_start() =>
-                {
-                    log::warn!("Reaction {} starts at available retained history for query {query_id}; missing history is not claimed handled", self.id);
-                    view.retained
-                        .iter()
-                        .map(|event| QueryChangeCodec::to_legacy_result(event).map(Arc::new))
-                        .collect::<std::result::Result<Vec<_>, _>>()?
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let mut accepted = after;
-            for result in entries {
-                self.observations
-                    .drive(
-                        reaction.enqueue_query_result(result.as_ref().clone()),
-                        false,
-                    )
-                    .await?;
-                accepted = result.sequence;
-            }
-            // This is delivery dedup within this run, never a handled checkpoint.
-            life.accepted
-                .insert(query_id.clone(), (view.snapshot.generation, accepted));
-            self.write_metadata(query_id, &view, false).await?;
-        }
-        life.running = true;
-        Ok(())
-    }
-    async fn stop(&self) -> anyhow::Result<()> {
-        let mut life = self.life.lock().await;
-        if self.owned && life.needs_stop {
-            self.observations
-                .drive(self.reaction()?.stop(), true)
-                .await?;
-            life.needs_stop = false;
-            life.replace_on_start = self.constructor.is_some();
-        }
-        life.running = false;
-        Ok(())
+        Ok(reaction)
     }
     async fn accept(&self, envelope: &ChangeEnvelope) -> anyhow::Result<()> {
         if QueryChangeCodec::is_snapshot(envelope) {
@@ -684,6 +875,13 @@ impl ReactionPluginHost {
                 anyhow::bail!("obsolete query reset generation");
             }
             if generation == *previous_generation && result.sequence <= *sequence {
+                if let Some(metrics) = self
+                    .runtime_metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.queries.get(&result.query_id))
+                {
+                    metrics.record_dedup_skip();
+                }
                 return Ok(());
             }
             if generation != *previous_generation {
@@ -693,6 +891,16 @@ impl ReactionPluginHost {
         self.observations
             .drive(self.reaction()?.enqueue_query_result(result.clone()), false)
             .await?;
+        if let Some(metrics) = self
+            .runtime_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.queries.get(&result.query_id))
+        {
+            metrics.record_checkpoint(
+                result.sequence,
+                self.catalog.current_sequence(&result.query_id)?,
+            );
+        }
         life.accepted
             .insert(result.query_id, (generation, result.sequence));
         Ok(())
@@ -703,6 +911,78 @@ impl ReactionPluginHost {
         }
         self.shutdown().await?;
         self.reaction()?.deprovision().await
+    }
+    pub(crate) async fn start_component(&self) -> anyhow::Result<()> {
+        self.start().await
+    }
+    pub(crate) async fn stop_component(&self) -> anyhow::Result<()> {
+        self.stop().await
+    }
+    pub(crate) async fn run_observations(&self) -> anyhow::Result<()> {
+        self.observations.drive(std::future::pending(), false).await
+    }
+    pub(crate) async fn handle_envelope(&self, envelope: &ChangeEnvelope) -> anyhow::Result<()> {
+        self.accept(envelope).await
+    }
+    pub(crate) async fn recover_gap(&self, query: &str) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        let reaction = self.reaction()?;
+        let policy = self
+            .options
+            .recovery
+            .unwrap_or_else(|| reaction.default_recovery_policy());
+        if let Some(metrics) = self
+            .runtime_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.queries.get(query))
+        {
+            metrics.record_gap_detection();
+            metrics.record_recovery_trigger(match policy {
+                ReactionRecoveryPolicy::Strict => crate::metrics::RecoveryPolicyKind::Strict,
+                ReactionRecoveryPolicy::AutoReset => crate::metrics::RecoveryPolicyKind::AutoReset,
+                ReactionRecoveryPolicy::AutoSkipGap => {
+                    crate::metrics::RecoveryPolicyKind::AutoSkipGap
+                }
+            });
+        }
+        if policy == ReactionRecoveryPolicy::Strict {
+            anyhow::bail!("Strict recovery policy cannot recover a live query output gap");
+        }
+        let entry = self
+            .catalog
+            .ready(
+                query,
+                Duration::from_secs(self.options.bootstrap_timeout_secs),
+            )
+            .await?;
+        let view = output_view(&entry)?;
+        let checkpoint = life
+            .accepted
+            .get(query)
+            .map(|(_, sequence)| ReactionCheckpoint {
+                sequence: *sequence,
+                config_hash: view.config_hash,
+            });
+        if policy == ReactionRecoveryPolicy::AutoReset {
+            self.bootstrap(reaction.as_ref(), query, &view, checkpoint, true)
+                .await?;
+        } else if let Some(store) = &self.services.state_store {
+            crate::reactions::checkpoint::write_checkpoint(
+                store.as_ref(),
+                &self.id,
+                query,
+                &ReactionCheckpoint {
+                    sequence: view.snapshot.as_of_sequence,
+                    config_hash: view.config_hash,
+                },
+            )
+            .await?;
+        }
+        life.accepted.insert(
+            query.to_owned(),
+            (view.snapshot.generation, view.snapshot.as_of_sequence),
+        );
+        self.write_metadata(query, &view, false).await
     }
 }
 #[async_trait]

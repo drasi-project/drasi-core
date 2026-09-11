@@ -414,7 +414,7 @@ mod contract_tests {
 #[cfg(test)]
 mod manager_tests {
     use super::*;
-    use crate::sources::SourceManager;
+    use crate::test_helpers::managers::SourceManager;
     use crate::test_helpers::wait_for_component_status;
 
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -432,32 +432,11 @@ mod manager_tests {
         Arc<SourceManager>,
         Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
     ) {
-        // Use the global shared log registry since tracing subscriber is global
-        let log_registry = crate::managers::get_or_init_global_registry();
-
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        // Spawn a mini graph update loop for tests (consumes mpsc updates and applies to graph)
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
-        }
-
-        let manager = Arc::new(SourceManager::new(
-            "test-instance",
-            log_registry,
-            graph.clone(),
-            update_tx,
-        ));
-        (manager, graph)
+        let core = crate::test_helpers::managers::empty_core().await;
+        (
+            Arc::new(SourceManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
@@ -471,33 +450,20 @@ mod manager_tests {
     /// Helper: register a source in the graph, then provision it in the manager.
     async fn add_source(
         manager: &SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
-        let source_type = source.type_name().to_string();
-        let auto_start = source.auto_start();
-        {
-            let mut g = graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), source_type);
-            metadata.insert("autoStart".to_string(), auto_start.to_string());
-            g.register_source(&source_id, metadata)?;
-        }
-        manager.provision_source(source).await
+        manager.add(source).await
     }
 
     /// Helper: teardown a source in the manager, then deregister from the graph.
     async fn delete_source(
         manager: &SourceManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
-        manager.teardown_source(id.to_string(), cleanup).await?;
-        let mut g = graph.write().await;
-        g.deregister(id)?;
-        Ok(())
+        manager.delete(id, cleanup).await
     }
 
     #[tokio::test]

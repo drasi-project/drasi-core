@@ -126,6 +126,7 @@ pub enum ResourceRole {
     SourceSubscription,
     QueryCatalog,
     LegacyReaction,
+    Component,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -277,6 +278,9 @@ impl ConstructedComponent {
     }
     pub fn sink(sink: Box<dyn EnvelopeSink>) -> Self {
         Self(Component::Sink(sink))
+    }
+    pub fn service(service: Box<dyn crate::computation::v1::ComputationService>) -> Self {
+        Self(Component::Service(service))
     }
 }
 

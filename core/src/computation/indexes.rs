@@ -107,6 +107,14 @@ impl ComputationIndexes {
     pub fn checkpoint_store(&self) -> Option<&Arc<dyn CheckpointStore>> {
         self.checkpoint.as_ref().map(ComputationResource::resource)
     }
+    /// Supply an independent fallback only when the provider has no checkpoint
+    /// store. This cannot upgrade an incomplete bundle to an atomic transaction.
+    pub fn with_fallback_checkpoint(mut self, store: Arc<dyn CheckpointStore>) -> Self {
+        if self.checkpoint.is_none() {
+            self.checkpoint = Some(ComputationResource::independent(store));
+        }
+        self
+    }
 
     pub fn outbox_writer(&self) -> Option<&Arc<dyn OutboxWriter>> {
         self.outbox.as_ref().map(ComputationResource::resource)

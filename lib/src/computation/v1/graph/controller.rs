@@ -138,6 +138,7 @@ pub(super) enum Command {
     Start {
         revision: GraphRevision,
         selection: GraphSelection,
+        force: bool,
         reply: oneshot::Sender<GraphResult<StartReport>>,
     },
     Stop {
@@ -224,11 +225,29 @@ impl GraphControl {
         revision: GraphRevision,
         selection: GraphSelection,
     ) -> GraphResult<StartReport> {
+        self.request_start(revision, selection, false).await
+    }
+
+    pub(crate) async fn start_requested(
+        &self,
+        revision: GraphRevision,
+        selection: GraphSelection,
+    ) -> GraphResult<StartReport> {
+        self.request_start(revision, selection, true).await
+    }
+
+    async fn request_start(
+        &self,
+        revision: GraphRevision,
+        selection: GraphSelection,
+        force: bool,
+    ) -> GraphResult<StartReport> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Start {
                 revision,
                 selection,
+                force,
                 reply,
             })
             .await
@@ -468,10 +487,16 @@ fn binding_dependencies(graph: &ComputationGraph, id: &ComponentId) -> Vec<Compo
     let mut missing = BTreeSet::new();
     for port in node.descriptor.ports() {
         let endpoint = super::Endpoint::new(id.clone(), port.id().clone());
-        if !graph.snapshot.edges.iter().any(|edge| {
+        let bound = graph.snapshot.edges.iter().any(|edge| {
             (edge.definition.from == endpoint || edge.definition.to == endpoint)
                 && state.relationships[&edge.definition].binding == BindingState::Bound
-        }) {
+        });
+        let optional_input =
+            port.direction() == super::super::PortDirection::Input
+                && graph.snapshot.unbound_relationships.iter().any(|edge| {
+                    edge.definition.to == endpoint && !edge.policy.required_for_binding
+                });
+        if !bound && !optional_input {
             missing.insert(id.clone());
         }
     }
@@ -485,6 +510,19 @@ fn binding_dependencies(graph: &ComputationGraph, id: &ComponentId) -> Vec<Compo
             if &edge.definition.to.component == id {
                 missing.insert(edge.definition.from.component.clone());
             }
+        }
+    }
+    for edge in graph
+        .snapshot
+        .unbound_relationships
+        .iter()
+        .filter(|edge| edge.policy.required_for_binding)
+    {
+        if &edge.definition.from.component == id {
+            missing.insert(edge.definition.to.component.clone());
+        }
+        if &edge.definition.to.component == id {
+            missing.insert(edge.definition.from.component.clone());
         }
     }
     missing.into_iter().collect()
@@ -853,6 +891,7 @@ struct Starting {
     pending: BTreeSet<usize>,
     outcomes: BTreeMap<ComponentId, StartOutcome>,
     reply: Option<oneshot::Sender<GraphResult<StartReport>>>,
+    force: bool,
 }
 
 struct Stopping {
@@ -904,6 +943,7 @@ impl Operations {
                 ComponentRole::Source => "source",
                 ComponentRole::Transformer | ComponentRole::Query => "query",
                 ComponentRole::Sink => "reaction",
+                ComponentRole::Service => "query",
             },
             generation = generation.0);
         update(graph, |state| {
@@ -994,12 +1034,14 @@ impl Operations {
         graph: &ComputationGraph,
         selected: BTreeSet<usize>,
         reply: Option<oneshot::Sender<GraphResult<StartReport>>>,
+        force: bool,
     ) {
         self.starting = Some(Starting {
             revision: graph.snapshot.revision,
             pending: selected,
             outcomes: BTreeMap::new(),
             reply,
+            force,
         });
     }
 
@@ -1017,7 +1059,7 @@ impl Operations {
             let current = &observed.components[id];
             let outcome = if current.realization != RealizationState::Created {
                 Some(StartOutcome::NotCreated)
-            } else if !graph.snapshot.lifecycle_policies[id].auto_start {
+            } else if !group.force && !graph.snapshot.lifecycle_policies[id].auto_start {
                 Some(StartOutcome::NotRequested)
             } else if !binding_dependencies(graph, id).is_empty() {
                 Some(StartOutcome::Blocked {
@@ -1437,7 +1479,7 @@ pub(super) async fn run(
     let mut controls = deploy(graph, cancel).await?;
     let mut operations = Operations::default();
     if auto_start {
-        operations.begin_start(graph, select(graph, &GraphSelection::All)?, None);
+        operations.begin_start(graph, select(graph, &GraphSelection::All)?, None, false);
     } else {
         graph.state.send_replace(GraphState::Ready);
     }
@@ -1482,14 +1524,14 @@ pub(super) async fn run(
                     let _ = reply.send(result);
                     if cancelled { return Err(GraphError::Cancelled); }
                 }
-                Some(Command::Start { revision, selection, reply }) => {
+                Some(Command::Start { revision, selection, force, reply }) => {
                     let valid = check_revision(graph, revision).and_then(|_| {
                         if operations.starting.is_some() || operations.stopping.is_some() {
                             Err(GraphError::OperationInProgress)
                         } else { select(graph, &selection) }
                     });
                     match valid {
-                        Ok(selected) => operations.begin_start(graph, selected, Some(reply)),
+                        Ok(selected) => operations.begin_start(graph, selected, Some(reply), force),
                         Err(error) => { let _ = reply.send(Err(error)); }
                     }
                 }

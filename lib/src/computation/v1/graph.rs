@@ -146,6 +146,7 @@ fn validate_role(
         ComponentRole::Source => inputs == 0 && outputs > 0,
         ComponentRole::Transformer | ComponentRole::Query => inputs > 0 && outputs > 0,
         ComponentRole::Sink => inputs > 0 && outputs == 0,
+        ComponentRole::Service => inputs == 0 && outputs == 0,
     };
     if !valid || (role == ComponentRole::Sink) != completion.is_some() {
         return Err(topology(format!(
@@ -269,6 +270,7 @@ pub enum ComponentRole {
     Transformer,
     Query,
     Sink,
+    Service,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -333,6 +335,7 @@ enum Component {
     Transformer(Box<dyn Transformer>),
     Query(Box<dyn Transformer>),
     Sink(Box<dyn EnvelopeSink>),
+    Service(Box<dyn super::ComputationService>),
     Deferred {
         specification: Arc<ComponentSpecification>,
         factory: Arc<dyn ComponentFactory>,
@@ -346,6 +349,7 @@ impl Component {
             Self::Transformer(component) => component.descriptor(),
             Self::Query(component) => component.descriptor(),
             Self::Sink(component) => component.descriptor(),
+            Self::Service(component) => component.descriptor(),
             Self::Deferred { specification, .. } => &specification.descriptor,
         }
     }
@@ -356,6 +360,7 @@ impl Component {
             Self::Transformer(_) => ComponentRole::Transformer,
             Self::Query(_) => ComponentRole::Query,
             Self::Sink(_) => ComponentRole::Sink,
+            Self::Service(_) => ComponentRole::Service,
             Self::Deferred { specification, .. } => specification.role,
         }
     }
@@ -374,6 +379,7 @@ impl Component {
             Self::Transformer(component) => component.start().await,
             Self::Query(component) => component.start().await,
             Self::Sink(component) => component.start().await,
+            Self::Service(component) => component.start().await,
             Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
         }
     }
@@ -384,6 +390,7 @@ impl Component {
             Self::Transformer(component) => component.stop().await,
             Self::Query(component) => component.stop().await,
             Self::Sink(component) => component.stop().await,
+            Self::Service(component) => component.stop().await,
             Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
         }
     }
@@ -395,6 +402,7 @@ impl Component {
                 component.reconfigure(context).await
             }
             Self::Sink(component) => component.reconfigure(context).await,
+            Self::Service(component) => component.reconfigure(context).await,
             Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
         }
     }
@@ -483,6 +491,15 @@ impl ComputationGraphBuilder {
 
     pub fn sink(mut self, sink: Box<dyn EnvelopeSink>) -> Self {
         self.components.push(Component::Sink(sink));
+        self
+    }
+
+    pub fn service(mut self, service: Box<dyn super::ComputationService>) -> Self {
+        self.components.push(Component::Service(service));
+        self
+    }
+    pub(crate) fn unbound(mut self, relationship: DesiredRelationship) -> Self {
+        self.unbound_relationships.push(relationship);
         self
     }
 
@@ -1302,7 +1319,20 @@ async fn run_node(
     outputs: &[Outgoing],
     quiesce: &mut watch::Receiver<bool>,
 ) -> GraphResult<()> {
-    if inputs.is_empty() && !matches!(component, Component::Source(_)) {
+    if let Component::Service(service) = component {
+        return tokio::select! {
+            biased;
+            _ = cancelled(quiesce) => Ok(()),
+            result = service.run() => result.map_err(|error| component_error(node, "run service", error)),
+        };
+    }
+    let wakeup = match &*component {
+        Component::Transformer(transformer) | Component::Query(transformer) => {
+            transformer.wakeup_source()
+        }
+        _ => None,
+    };
+    if inputs.is_empty() && !matches!(component, Component::Source(_)) && wakeup.is_none() {
         cancelled(quiesce).await;
         return Ok(());
     }
@@ -1312,12 +1342,6 @@ async fn run_node(
         .map(receive)
         .collect();
     let mut ready: Vec<&mut Incoming> = Vec::new();
-    let wakeup = match &*component {
-        Component::Transformer(transformer) | Component::Query(transformer) => {
-            transformer.wakeup_source()
-        }
-        _ => None,
-    };
     'processing: loop {
         if *quiesce.borrow() {
             return Ok(());
@@ -1460,7 +1484,7 @@ async fn run_node(
                             .map_err(|source| component_error(node, "handle", source))?;
                         Vec::new()
                     }
-                    Component::Source(_) => unreachable!(),
+                    Component::Source(_) | Component::Service(_) => unreachable!(),
                     Component::Deferred { .. } => {
                         return Err(topology("cannot process an unconstructed component"))
                     }

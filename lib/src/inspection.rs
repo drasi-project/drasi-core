@@ -51,6 +51,8 @@ pub struct InspectionAPI {
     reaction_manager: Arc<ReactionManager>,
     state_guard: StateGuard,
     config: Arc<RuntimeConfig>,
+    #[cfg(feature = "computation")]
+    computation: Option<Arc<crate::computation::compatibility::Runtime>>,
 }
 
 impl InspectionAPI {
@@ -67,7 +69,16 @@ impl InspectionAPI {
             reaction_manager,
             state_guard,
             config,
+            #[cfg(feature = "computation")]
+            computation: None,
         }
+    }
+    #[cfg(feature = "computation")]
+    pub(crate) fn set_computation(
+        &mut self,
+        runtime: Arc<crate::computation::compatibility::Runtime>,
+    ) {
+        self.computation = Some(runtime);
     }
 
     // ============================================================================
@@ -154,6 +165,10 @@ impl InspectionAPI {
     /// Get the merged graph schema across all registered sources and queries.
     pub async fn get_graph_schema(&self) -> crate::error::Result<crate::schema::GraphSchema> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation {
+            return Ok(runtime.graph_schema().await?);
+        }
 
         let mut schema = crate::schema::GraphSchema::default();
 
@@ -816,6 +831,15 @@ impl InspectionAPI {
         std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>,
     > {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation {
+            return runtime
+                .reaction_metrics(reaction_id)
+                .await
+                .map_err(|error| {
+                    classify_component_error(error, "reaction", reaction_id, "get_metrics")
+                });
+        }
         self.reaction_manager
             .get_reaction_metrics(reaction_id)
             .await
@@ -830,6 +854,10 @@ impl InspectionAPI {
         &self,
     ) -> crate::error::Result<crate::metrics::LifecycleMetricsSnapshot> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation {
+            return Ok(runtime.lifecycle_metrics.snapshot());
+        }
         Ok(self.reaction_manager.lifecycle_metrics().snapshot())
     }
 }

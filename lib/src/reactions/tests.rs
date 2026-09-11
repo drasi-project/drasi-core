@@ -16,6 +16,7 @@
 pub(crate) mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::test_helpers::managers::ReactionManager;
     use crate::test_helpers::wait_for_component_status;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -143,35 +144,16 @@ pub(crate) mod manager_tests {
         Arc<ReactionManager>,
         Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
     ) {
-        // Use the global shared log registry for test isolation with tracing
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(tokio::sync::RwLock::new(graph));
-
-        // Spawn a mini graph update loop for tests
-        {
-            let graph_clone = graph.clone();
-            tokio::spawn(async move {
-                let mut rx = update_rx;
-                while let Some(update) = rx.recv().await {
-                    let mut g = graph_clone.write().await;
-                    g.apply_update(update);
-                }
-            });
+        let core = crate::test_helpers::managers::empty_core().await;
+        if core.execution_mode() == crate::ExecutionMode::ComponentGraph {
+            core.reaction_manager
+                .inject_query_provider(Arc::new(MockQueryProvider))
+                .await;
         }
-
-        let manager = Arc::new(ReactionManager::new(
-            "test-instance",
-            log_registry,
-            graph.clone(),
-            update_tx,
-        ));
-        // Inject mock QueryProvider so add_reaction() can construct ReactionRuntimeContext
-        manager
-            .inject_query_provider(Arc::new(MockQueryProvider))
-            .await;
-        (manager, graph)
+        (
+            Arc::new(ReactionManager(core.clone())),
+            core.component_graph(),
+        )
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
@@ -186,38 +168,20 @@ pub(crate) mod manager_tests {
     /// Registers placeholder query nodes for any referenced queries not already in the graph.
     async fn add_reaction(
         manager: &ReactionManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         reaction: impl crate::reactions::Reaction + 'static,
     ) -> anyhow::Result<()> {
-        let reaction_id = reaction.id().to_string();
-        let reaction_type = reaction.type_name().to_string();
-        let query_ids = reaction.query_ids();
-        {
-            let mut g = graph.write().await;
-            // Ensure referenced queries exist as placeholder nodes
-            for qid in &query_ids {
-                if !g.contains(qid) {
-                    g.register_query(qid, HashMap::new(), &[])?;
-                }
-            }
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), reaction_type);
-            g.register_reaction(&reaction_id, metadata, &query_ids)?;
-        }
-        manager.provision_reaction(reaction).await
+        manager.add(reaction).await
     }
 
     /// Helper: teardown a reaction in the manager, then deregister from the graph.
     async fn delete_reaction(
         manager: &ReactionManager,
-        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
-        manager.teardown_reaction(id.to_string(), cleanup).await?;
-        let mut g = graph.write().await;
-        g.deregister(id)?;
-        Ok(())
+        manager.delete(id, cleanup).await
     }
 
     #[tokio::test]

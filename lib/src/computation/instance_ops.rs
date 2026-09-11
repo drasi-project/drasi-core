@@ -24,6 +24,11 @@ impl DrasiLib {
         id: &str,
     ) -> Result<std::sync::Arc<super::v1::SourcePluginHost>> {
         self.state_guard.require_initialized()?;
+        if let Some(runtime) = &self.computation_runtime {
+            return Ok(super::v1::SourcePluginHost::borrowed(
+                runtime.source(id).await?,
+            ));
+        }
         let source = self
             .source_manager
             .get_source_instance(id)
@@ -64,6 +69,30 @@ impl DrasiLib {
         .map_err(|error| DrasiError::invalid_config(error.to_string()))
     }
     pub(crate) async fn start_parallel_components(&self) -> anyhow::Result<()> {
+        if let Some(runtime) = &self.computation_runtime {
+            let mut failures = Vec::new();
+            if let Err(error) = runtime.start_kind("source").await {
+                failures.push(format!("native sources: {error:#}"));
+            }
+            // A failed start can leave independent components running. Keep the
+            // ordinary stop path available for that partially active instance.
+            *self.running.write().await = true;
+            runtime.start_kind("query").await?;
+            if let Err(error) = self.computation_registry.start_auto().await {
+                failures.push(format!("additional native graphs: {error:#}"));
+            }
+            runtime.subscriptions_complete().await?;
+            if let Err(error) = runtime.start_kind("reaction").await {
+                failures.push(format!("native reactions: {error:#}"));
+            }
+            if !failures.is_empty() {
+                anyhow::bail!(
+                    "native startup completed with failures: {}",
+                    failures.join("; ")
+                );
+            }
+            return Ok(());
+        }
         if self.computation_registry.is_empty()? {
             return self.lifecycle.start_components().await;
         }

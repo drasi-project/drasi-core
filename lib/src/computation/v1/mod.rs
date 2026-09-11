@@ -156,7 +156,7 @@ mod graph_codec;
 mod legacy_index;
 mod legacy_reaction;
 pub use legacy_index::*;
-mod plugin_services;
+pub(crate) mod plugin_services;
 pub use plugin_services::*;
 mod plugin_source;
 pub use plugin_source::*;

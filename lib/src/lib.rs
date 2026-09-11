@@ -137,6 +137,8 @@ mod lifecycle_events_tests;
 /// # }
 /// ```
 pub use lib_core::DrasiLib;
+mod execution;
+pub use execution::ExecutionMode;
 
 /// Error types for drasi-lib
 pub use error::{DrasiError, Result};

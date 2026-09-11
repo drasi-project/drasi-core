@@ -396,6 +396,7 @@ pub struct LegacySourceSubscription {
     progress: Option<Arc<QuerySourceProgress>>,
     phase: watch::Sender<SubscriptionPhase>,
     state: Mutex<SubscriptionState>,
+    runtime_compatibility: bool,
 }
 
 impl LegacySourceSubscription {
@@ -438,6 +439,7 @@ impl LegacySourceSubscription {
                 requested_position: false,
                 generation: 0,
             }),
+            runtime_compatibility: false,
         }))
     }
     pub fn host(&self) -> &Arc<SourcePluginHost> {
@@ -445,6 +447,37 @@ impl LegacySourceSubscription {
     }
     pub fn stream(&self) -> &StreamId {
         &self.stream
+    }
+    pub(crate) fn prepare_start(&self) {
+        self.phase.send_replace(SubscriptionPhase::Waiting);
+    }
+    pub(crate) fn for_runtime(
+        host: Arc<SourcePluginHost>,
+        options: SourceSubscriptionOptions,
+        stream: StreamId,
+        progress: Option<Arc<QuerySourceProgress>>,
+        query_id: &str,
+    ) -> anyhow::Result<Arc<Self>> {
+        super::data::validate_identifier("subscriber", query_id)?;
+        let mut subscription = Self::new(host, options, stream, progress)?;
+        let instance = Arc::get_mut(&mut subscription).expect("new subscription");
+        instance.id = query_id.to_owned();
+        instance.runtime_compatibility = true;
+        Ok(subscription)
+    }
+    pub(crate) async fn wait_subscribed(&self) -> anyhow::Result<()> {
+        let mut phase = self.phase.subscribe();
+        loop {
+            match phase.borrow_and_update().clone() {
+                SubscriptionPhase::Ready => return Ok(()),
+                SubscriptionPhase::Failed(error) => anyhow::bail!("{error}"),
+                SubscriptionPhase::Closed => {
+                    anyhow::bail!("source subscription closed before binding")
+                }
+                _ => {}
+            }
+            phase.changed().await?;
+        }
     }
     fn checkpoint(
         &self,
@@ -462,7 +495,7 @@ impl LegacySourceSubscription {
     fn confirm_position(&self) -> anyhow::Result<()> {
         if let Some(progress) = &self.progress {
             let view = progress.snapshot();
-            if view.persistent {
+            if view.persistent || self.runtime_compatibility {
                 if let Some(checkpoint) = self.checkpoint(&view) {
                     if let Some(handle) = &self
                         .state
@@ -594,8 +627,14 @@ impl LegacySourceSubscription {
                         .state
                         .lock()
                         .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?;
-                    if response.position_handle.is_some() && !state.requested_position {
+                    if response.position_handle.is_some()
+                        && !state.requested_position
+                        && !self.runtime_compatibility
+                    {
                         anyhow::bail!("source supplied unrequested position ownership");
+                    }
+                    if response.position_handle.is_some() {
+                        state.requested_position = true;
                     }
                     state.bootstrap = response.bootstrap_receiver;
                     state.result = response.bootstrap_result_receiver;

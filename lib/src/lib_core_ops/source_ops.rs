@@ -61,6 +61,16 @@ impl DrasiLib {
         extra_metadata: HashMap<String, String>,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            let id = source.id().to_owned();
+            return runtime
+                .add_source(Box::new(source), extra_metadata, self.is_running().await)
+                .await
+                .map_err(|error| {
+                    DrasiError::operation_failed("source", id, "add", error.to_string())
+                });
+        }
 
         // Capture auto_start and id before transferring ownership
         let should_auto_start = source.auto_start();
@@ -124,6 +134,15 @@ impl DrasiLib {
     /// ```
     pub async fn remove_source(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.remove_component(id, "source", cleanup).await,
+                "source",
+                id,
+                "remove",
+            );
+        }
 
         // Step 1: Validate no dependents
         {
@@ -201,6 +220,15 @@ impl DrasiLib {
         new_source: impl crate::sources::Source + 'static,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.update_source(id, Box::new(new_source)).await,
+                "source",
+                id,
+                "update",
+            );
+        }
 
         // Validate the new source has the same ID
         if new_source.id() != id {
@@ -236,6 +264,15 @@ impl DrasiLib {
     /// ```
     pub async fn start_source(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.start_component(id, "source").await,
+                "source",
+                id,
+                "start",
+            );
+        }
 
         map_component_error(
             self.source_manager.start_source(id.to_string()).await,
@@ -257,6 +294,15 @@ impl DrasiLib {
     /// ```
     pub async fn stop_source(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return map_component_error(
+                runtime.stop_component(id, "source").await,
+                "source",
+                id,
+                "stop",
+            );
+        }
 
         map_component_error(
             self.source_manager.stop_source(id.to_string()).await,
