@@ -44,6 +44,72 @@ The **default-off** `computation` feature exposes additive, versioned contracts 
 drasi-lib = { version = "0.9", features = ["computation"] }
 ```
 
+### Using the ordinary API with ComputationGraph
+
+Choose the runtime explicitly when constructing the instance:
+
+```rust,ignore
+use drasi_lib::{DrasiLib, ExecutionMode, Query};
+
+let drasi = DrasiLib::builder()
+    .with_execution_mode(ExecutionMode::ComputationGraph)
+    .with_source(source)
+    .with_query(
+        Query::cypher("orders")
+            .query("MATCH (o:Order) RETURN o.name AS name")
+            .from_source("order-source")
+            .build(),
+    )
+    .with_reaction(reaction)
+    .build()
+    .await?;
+
+drasi.start().await?;
+let rows = drasi.get_query_results("orders").await?;
+drasi.shutdown().await?;
+```
+
+`source` and `reaction` are ordinary, fresh plugin instances. The normal
+add/update/remove/start/stop, query results, configuration, schema, event and metric
+APIs address the selected runtime. Native source and reaction services own the
+plugins; native query services own actual `ContinuousQueryTransformer` graphs.
+The old managers are not used to evaluate queries. A ComponentGraph-shaped
+inspection projection preserves the ordinary public topology and event API;
+the native controller owns lifecycle decisions.
+
+`ExecutionMode::ComponentGraph` remains the default, even with the Cargo feature
+enabled. This is a construction-time choice, not a command to move a running
+pipeline or import its persistent state. Native indexes use separate storage
+namespaces. Additional explicitly registered computation graphs remain available
+in either mode.
+
+The [ordinary-API example](examples/computation_runtime.rs) uses an
+ApplicationSource, a query and an ApplicationReaction without constructing adapters
+by hand:
+
+```bash
+cargo run -p drasi-lib --features computation --example computation_runtime
+```
+
+The ordinary-API profile also accepts legacy index providers with checkpoints but
+without outbox/live-result writers. Their source/index progress can be persistent,
+but query output remains **volatile**, not durable or atomic. It must not be used
+as a promise that a reaction can recover output lost across reconstruction.
+
+Creation and activation are separate. A failed creation remains visible and can
+be removed with awaited cleanup; a rejected replacement does not silently swap
+the old runtime object. Cancelling the caller does not roll back a mutation the
+native controller already committed. Start failures can be retried, and a
+component's stop request can interrupt its pending activation.
+
+Source/query replacement refreshes the affected downstream bindings. A
+reaction-only update leaves upstream sources and queries running. Reactions still
+follow their configured recovery policy when a query is reconstructed: a strict
+checkpoint cannot be reused against an unrelated query incarnation, and a plugin
+that cannot bootstrap cannot claim to have reset itself. A partially failed
+instance start can leave independent components running; inspect their statuses
+and use `stop()` or `shutdown()` to finish their cleanup.
+
 ### Hosting both graphs in one DrasiLib instance
 
 `DrasiLib` can now own **both** its existing ComponentGraph pipeline and explicitly
@@ -195,6 +261,50 @@ logs. Native transformers use the Query log category and native sinks use Reacti
 
 This milestone does not add Server YAML/REST routing, a dynamic-plugin loader,
 automatic legacy persistence migration, or a second legacy manager hierarchy.
+
+### Running the original behaviour scenarios on both runtimes
+
+The original application scenarios use the same source events and expected
+assertions. Unit-test builders and shared manager fixtures select the runtime
+with `DRASI_TEST_EXECUTION`; integration tests use an explicit fixture builder.
+Production code never reads this environment variable.
+
+```bash
+# Original and new library tests with the default runtime.
+DRASI_TEST_EXECUTION=component cargo test -p drasi-lib --lib --tests --no-fail-fast
+
+# Same original scenarios, native query execution.
+DRASI_TEST_EXECUTION=computation cargo test -p drasi-lib --features computation \
+    --lib --tests --no-fail-fast
+
+# Feature-off, feature-on legacy, and feature-on native, with corpus accounting.
+bash lib/tests/run-runtime-parity.sh
+```
+
+The runner records complete logs and exit codes under `target/runtime-parity`,
+checks that every original case is still discovered, and does not skip or turn
+known failures into successes. `RUSTUP_TOOLCHAIN=1.95.0` can select the CI toolchain.
+The unchanged shared test
+`reactions::common::base::tests::test_run_standard_loop_dedup_and_checkpoint`
+has a known intermittent legacy ordering failure. The runner returns nonzero if
+it recurs, while still attempting the other profiles.
+The [per-case inventory](tests/runtime_parity/original-cases.tsv) is pinned to
+`01813156`: 260 application/runtime cases, one shared legacy/native codec scenario,
+470 unchanged shared helper/plugin cases, 174 concrete legacy-structure units,
+and three A1 legacy-boundary characterizations. The
+[classification rules](tests/runtime_parity/classification.tsv) explain each
+disposition.
+
+The structural cases deliberately still exercise their named implementation:
+for example, QueryBase's task fields, ComponentGraph's internal transitions and
+the old priority heap. They are **not** counted as native runtime substitution.
+The three A1 cases additionally pin legacy private persistence bytes, commit order
+and a known lost-output boundary; native failure handling does not reproduce that
+defect. Shared real-runtime tests cover bootstrap, joins, checkpoints, recovery,
+CRUD, lifecycle, snapshots/outbox and metrics. Native-route assertions inspect
+the actual native query type and its constructed, running query component.
+Additional full-result cases cover fanout and scheduled-future metadata without
+sorting results or dropping result identity, metadata or profiling.
 
 ### Native graph contracts
 

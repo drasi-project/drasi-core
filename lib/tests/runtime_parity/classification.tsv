@@ -1,0 +1,81 @@
+# Longest matching prefix wins. Corpus pinned at 01813156842035ac6c9539c8996536f94cab8676.
+# prefix	classification	reason
+lib::bootstrap::component_graph::tests::	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
+lib::bootstrap::tests::	shared	Unchanged bootstrap configuration values and serialization.
+lib::builder::tests::	shared	Unchanged configuration-builder values; no component execution.
+lib::builder::tests::test_drasi_lib_builder_empty	runtime	Selected ordinary builder constructs the instance.
+lib::builder::tests::test_drasi_lib_builder_with_id	runtime	Selected ordinary builder constructs the instance.
+lib::builder::tests::test_drasi_lib_builder_with_query_no_source	runtime	Selected ordinary builder constructs an unbound query.
+lib::builder::tests::test_builder_creates_initialized_server	runtime	Selected ordinary builder initializes the instance.
+lib::builder::tests::test_builder_with_query	runtime	Selected ordinary builder constructs a source and query.
+lib::builder::tests::test_builder_with_query_adds_to_list	shared	Builder configuration collection only.
+lib::builder::tests::test_builder_default_id_when_none_set	runtime	Selected ordinary builder constructs the default instance.
+lib::builder::tests::test_builder_with_storage_backend_builds_ok	runtime	Selected ordinary builder resolves index configuration.
+lib::builder::tests::test_builder_query_named_unknown_backend_errors	runtime	Selected ordinary builder rejects invalid index configuration.
+lib::builder::tests::test_builder_query_named_memory_backend_ok	runtime	Selected ordinary builder resolves index configuration.
+lib::builder::tests::test_builder_query_declared_plugin_without_provider_errors	runtime	Selected ordinary builder rejects a missing provider.
+lib::builder::tests::test_builder_inline_plugin_backend_errors	runtime	Selected ordinary builder rejects unsupported inline plugin binding.
+lib::builder::tests::test_builder_provider_shadows_memory_backend_errors	runtime	Selected ordinary builder rejects conflicting provider ownership.
+lib::builder::tests::test_with_default_index_provider_sets_default_backend	runtime	Selected ordinary builder constructs a query with an injected provider.
+lib::channels::	shared	Unchanged plugin channels and event values used by both sets of adapters.
+lib::component_graph::tests::	legacy-structure	Concrete ComponentGraph data structure and local status handles; retained as projection/legacy units, not native-controller evidence.
+lib::component_ops::tests::	shared	Unchanged public structured error conversion.
+lib::config::	shared	Unchanged configuration values, schemas and serialization.
+lib::context::tests::	shared	Unchanged plugin runtime contexts.
+lib::error::tests::	shared	Unchanged structured public errors.
+lib::identity::	shared	Unchanged identity provider and context contracts.
+lib::indexes::	shared	Unchanged index configuration/factory used by the native provider adapter as well as the legacy runtime.
+lib::inspection::tests::	runtime	Original inspection assertions use the selected DrasiLib builder and real registered components.
+lib::lib_core::tests::	runtime	Original ordinary instance/snapshot assertions use the selected DrasiLib builder.
+lib::lib_core::tests::test_builder_returns_drasi_lib_builder	shared	Builder configuration only.
+lib::lib_core_ops::	runtime	Original public CRUD, lifecycle, schema and topology scenarios use the selected DrasiLib builder.
+lib::lifecycle::tests::	runtime	Original instance startup/shutdown scenarios use the selected DrasiLib builder.
+lib::lifecycle_events_tests::tests::	runtime	Original event and dependency assertions use the selected DrasiLib builder.
+lib::managers::component_log::tests::	shared	Unchanged scoped log store used by both runtimes.
+lib::managers::event_history::tests::	shared	Unchanged inspection event history.
+lib::managers::lifecycle_helpers::tests::	legacy-structure	Direct helper/ComponentGraph mutations are implementation units; native lifecycle is exercised through ordinary APIs and controller tests.
+lib::managers::tracing_layer::tests::	shared	Unchanged tracing conversion and component-type parsing.
+lib::metrics::	shared	Unchanged atomic metric values; runtime metric increments are separately exercised in metrics_e2e.
+lib::profiling::tests::	shared	Unchanged profiling values and timestamp helpers.
+lib::queries::base::tests::	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
+lib::queries::checkpoint_tests::	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
+lib::queries::checkpoint_tests::tests::test_sequence_assignment_monotonic	shared	Direct unchanged source plugin sequence assignment.
+lib::queries::checkpoint_tests::tests::test_source_position_preserved_through_dispatch	shared	Direct unchanged source plugin dispatch and cursor.
+lib::queries::checkpoint_tests::tests::test_source_position_size_validation	shared	Direct unchanged source plugin position validation.
+lib::queries::checkpoint_tests::tests::test_in_memory_checkpoint_various_sizes	shared	Direct unchanged core in-memory checkpoint store.
+lib::queries::checkpoint_tests::tests::test_checkpoint_and_sequence_consistency	shared	Direct unchanged core in-memory checkpoint store.
+lib::queries::config_hash::tests::	shared	Unchanged public configuration hash used by the compatibility profile.
+lib::queries::e2e_checkpoint_tests::	runtime	Original durable-store reconstruction scenarios use the selected DrasiLib builder.
+lib::queries::joins_test::	runtime	Original multi-source join inputs and assertions use shared native/legacy manager fixtures.
+lib::queries::label_extractor::tests::	shared	Unchanged parser-based label extraction used by both runtimes.
+lib::queries::manager::pipeline_characterization_tests::	legacy-boundary	A1 explicitly pins old private commit order, MessagePack payloads and lost-output defect; not relabelled as native parity or reproduced in the native engine.
+lib::queries::manager::tests::	codec	The same original temporal-value assertions execute the selected native result codec or legacy conversion.
+lib::queries::output_state::tests::	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
+lib::queries::output_state::tests::test_snapshot_stream_from_bare_values_uses_zero_signature	shared	Unchanged public SnapshotStream constructor.
+lib::queries::output_state::tests::test_snapshot_stream_preserves_row_signatures	shared	Unchanged public SnapshotStream keyed projection.
+lib::queries::output_state::tests::snapshot_stream_yields_all_values	shared	Unchanged public SnapshotStream values.
+lib::queries::priority_queue::tests::	legacy-structure	Concrete old source-event heap; native merge/pipes preserve producer FIFO instead of exposing that heap implementation.
+lib::queries::sequence_dedup::tests::	legacy-structure	Concrete old sequence-dedup helper; real restart/replay behaviour runs on both query implementations.
+lib::queries::subscription_builder::tests::	shared	Unchanged source label/cardinality/join subscription planner used by both runtimes.
+lib::queries::tests::manager_tests::	runtime	Original query CRUD, subscriptions and lifecycle assertions use shared manager fixtures.
+lib::queries::tests::manager_tests::test_query_auto_start_defaults_to_true	shared	Query configuration value only.
+lib::queries::tests::output_state_integration_tests::	runtime	Original snapshot/outbox/bootstrap/no-op assertions run on both real query implementations.
+lib::queries::tests::query_core_tests::	shared	Query configuration string assertions only; these do not execute either query engine.
+lib::reactions::checkpoint::tests::	shared	Unchanged reaction checkpoint format.
+lib::reactions::common::	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
+lib::reactions::manager::tests::	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
+lib::reactions::tests::manager_tests::	runtime	Original reaction CRUD/lifecycle assertions use shared manager fixtures.
+lib::recovery::tests::	shared	Unchanged recovery policies and serialization.
+lib::schema::tests::	shared	Unchanged public source/schema merge values.
+lib::secret_store::tests::	shared	Unchanged secret reference/context resolution.
+lib::sources::base::tests::	shared	Unchanged source plugin base used by native source adapters.
+lib::sources::component_graph_source::tests::	shared	Unchanged topology-source plugin reading the public inspection projection.
+lib::sources::future_queue_source::tests::	legacy-structure	Concrete old future-source task/dispatcher fields; actual temporal query results have a shared native/legacy scenario.
+lib::sources::tests::contract_tests::	shared	Unchanged plugin source contract defaults.
+lib::sources::tests::manager_tests::	runtime	Original source CRUD/lifecycle assertions use shared manager fixtures.
+lib::state_guard::tests::	shared	Unchanged instance public API state guard.
+lib::state_store::tests::	shared	Unchanged state-store provider interface and memory implementation.
+lib::test_helpers::tests::	shared	Test event-waiting helpers only.
+bootstrap_failure_e2e::	runtime	Original bootstrap failure inputs/status assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e::	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+metrics_e2e::	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.

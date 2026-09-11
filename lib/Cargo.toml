@@ -74,6 +74,10 @@ required-features = ["computation"]
 name = "computation_instance"
 required-features = ["computation"]
 
+[[example]]
+name = "computation_runtime"
+required-features = ["computation"]
+
 [dependencies]
 drasi-core.workspace = true
 drasi-functions-cypher.workspace = true
