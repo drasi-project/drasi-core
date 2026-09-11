@@ -12,14 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use drasi_core::{interface::SessionControl, query::QueryBuilder};
+use drasi_core::query::QueryBuilder;
 
 pub mod index;
 pub mod mock_source;
-pub mod query_output_transactions;
 pub mod recovery_test_helpers;
 pub mod redis_helpers;
 pub mod sequence_counter;
@@ -30,13 +27,6 @@ pub mod use_cases;
 mod in_memory;
 
 #[async_trait]
-pub trait QueryTestConfig: Sync {
-    async fn config_query_with_session(
-        &self,
-        builder: QueryBuilder,
-    ) -> (QueryBuilder, Arc<dyn SessionControl>);
-
-    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
-        self.config_query_with_session(builder).await.0
-    }
+pub trait QueryTestConfig {
+    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder;
 }

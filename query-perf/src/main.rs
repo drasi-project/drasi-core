@@ -107,7 +107,7 @@ async fn main() {
             };
             let client = redis::Client::open(url.as_str()).unwrap();
             let con = client.get_multiplexed_async_connection().await.unwrap();
-            let session_state = Arc::new(GarnetSessionState::new_for_query(con.clone(), &query_id));
+            let session_state = Arc::new(GarnetSessionState::new(con.clone()));
             (Some(con), Some(session_state))
         } else {
             (None, None)

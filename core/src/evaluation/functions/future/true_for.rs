@@ -66,10 +66,6 @@ impl ScalarFunction for TrueFor {
 
         let result_owner = ResultOwner::Function(expression.position_in_query);
 
-        if context.is_empty_group() {
-            return Ok(VariableValue::Null);
-        }
-
         let anchor_element = match context.get_anchor_element() {
             Some(anchor) => anchor,
             None => return Ok(VariableValue::Null),

@@ -93,9 +93,8 @@ impl ElementIndex for RocksDbElementIndex {
     ) -> Result<Option<Arc<Element>>, IndexError> {
         let element_key = hash_element_ref(element_ref);
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let task = task::spawn_blocking(move || {
-            session.with_txn(|txn| {
+            context.session_state.with_txn(|txn| {
                 let stored = get_element_internal(context.clone(), &element_key, txn)?;
                 match stored {
                     Some(stored) => {
@@ -122,9 +121,9 @@ impl ElementIndex for RocksDbElementIndex {
         let stored: StoredElement = element.into();
         let slot_affinity = slot_affinity.clone();
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let task = task::spawn_blocking(move || {
-            session
+            context
+                .session_state
                 .with_txn(|txn| set_element_internal(context.clone(), txn, stored, &slot_affinity))
         });
 
@@ -138,9 +137,10 @@ impl ElementIndex for RocksDbElementIndex {
     async fn delete_element(&self, element_ref: &ElementReference) -> Result<(), IndexError> {
         let element_key = hash_element_ref(element_ref);
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let task = task::spawn_blocking(move || {
-            session.with_txn(|txn| delete_element_internal(context.clone(), txn, &element_key))
+            context
+                .session_state
+                .with_txn(|txn| delete_element_internal(context.clone(), txn, &element_key))
         });
 
         match task.await {
@@ -157,11 +157,10 @@ impl ElementIndex for RocksDbElementIndex {
     ) -> Result<Option<Arc<Element>>, IndexError> {
         let element_key = hash_element_ref(element_ref);
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let task = task::spawn_blocking(move || {
             let slot_cf = context.db.cf_handle(SLOT_CF).expect("Slot CF not found");
 
-            session.with_txn(|txn| {
+            context.session_state.with_txn(|txn| {
                 let prev_slots = match txn.get_cf(&slot_cf, element_key) {
                     Ok(Some(prev_slots)) => BitSet::from_bytes(&prev_slots),
                     Ok(None) => return Ok(None),
@@ -196,7 +195,6 @@ impl ElementIndex for RocksDbElementIndex {
         inbound_ref: &ElementReference,
     ) -> Result<ElementStream, IndexError> {
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let element_key = hash_element_ref(inbound_ref);
 
         let task = task::spawn_blocking(move || {
@@ -206,7 +204,7 @@ impl ElementIndex for RocksDbElementIndex {
                 .expect("Inbound CF not found");
             let prefix = encode_inout_prefix(&element_key, slot);
 
-            session.with_txn(|txn| {
+            context.session_state.with_txn(|txn| {
                 let mut results: Vec<Result<Arc<Element>, IndexError>> = Vec::new();
                 for item in txn.prefix_iterator_cf(&inbound_cf, prefix) {
                     match item {
@@ -252,7 +250,6 @@ impl ElementIndex for RocksDbElementIndex {
         outbound_ref: &ElementReference,
     ) -> Result<ElementStream, IndexError> {
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let element_key = hash_element_ref(outbound_ref);
 
         let task = task::spawn_blocking(move || {
@@ -262,7 +259,7 @@ impl ElementIndex for RocksDbElementIndex {
                 .expect("Outbound CF not found");
             let prefix = encode_inout_prefix(&element_key, slot);
 
-            session.with_txn(|txn| {
+            context.session_state.with_txn(|txn| {
                 let mut results: Vec<Result<Arc<Element>, IndexError>> = Vec::new();
                 for item in txn.prefix_iterator_cf(&outbound_cf, prefix) {
                     match item {
@@ -303,95 +300,66 @@ impl ElementIndex for RocksDbElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
 
         let task = task::spawn_blocking(move || {
-            session.clear_ranges_or(
-                &[
-                    (ELEMENTS_CF, &[]),
-                    (SLOT_CF, &[]),
-                    (INBOUND_CF, &[]),
-                    (OUTBOUND_CF, &[]),
-                    (PARTIAL_CF, &[]),
-                ],
-                &[],
-                |_| {
-                    let options = &context.options;
-                    let block_cache = options.memory_budget().block_cache();
-                    if let Err(err) = context.db.drop_cf(ELEMENTS_CF) {
-                        return Err(IndexError::other(err));
-                    }
-                    if let Err(err) = context.db.drop_cf(SLOT_CF) {
-                        return Err(IndexError::other(err));
-                    }
-                    if let Err(err) = context.db.drop_cf(INBOUND_CF) {
-                        return Err(IndexError::other(err));
-                    }
-                    if let Err(err) = context.db.drop_cf(OUTBOUND_CF) {
-                        return Err(IndexError::other(err));
-                    }
-                    if let Err(err) = context.db.drop_cf(PARTIAL_CF) {
-                        return Err(IndexError::other(err));
-                    }
+            let options = &context.options;
+            let block_cache = options.memory_budget().block_cache();
+            if let Err(err) = context.db.drop_cf(ELEMENTS_CF) {
+                return Err(IndexError::other(err));
+            }
+            if let Err(err) = context.db.drop_cf(SLOT_CF) {
+                return Err(IndexError::other(err));
+            }
+            if let Err(err) = context.db.drop_cf(INBOUND_CF) {
+                return Err(IndexError::other(err));
+            }
+            if let Err(err) = context.db.drop_cf(OUTBOUND_CF) {
+                return Err(IndexError::other(err));
+            }
+            if let Err(err) = context.db.drop_cf(PARTIAL_CF) {
+                return Err(IndexError::other(err));
+            }
 
-                    if let Err(err) = context.db.create_cf(
-                        ELEMENTS_CF,
-                        &crate::sizing::sized(
-                            ELEMENTS_CF,
-                            get_elements_cf_options(block_cache),
-                            options,
-                        ),
-                    ) {
-                        return Err(IndexError::other(err));
-                    }
+            if let Err(err) = context.db.create_cf(
+                ELEMENTS_CF,
+                &crate::sizing::sized(ELEMENTS_CF, get_elements_cf_options(block_cache), options),
+            ) {
+                return Err(IndexError::other(err));
+            }
 
-                    if let Err(err) = context.db.create_cf(
-                        SLOT_CF,
-                        &crate::sizing::sized(
-                            SLOT_CF,
-                            get_elements_cf_options(block_cache),
-                            options,
-                        ),
-                    ) {
-                        return Err(IndexError::other(err));
-                    }
+            if let Err(err) = context.db.create_cf(
+                SLOT_CF,
+                &crate::sizing::sized(SLOT_CF, get_elements_cf_options(block_cache), options),
+            ) {
+                return Err(IndexError::other(err));
+            }
 
-                    if let Err(err) = context.db.create_cf(
-                        INBOUND_CF,
-                        &crate::sizing::sized(
-                            INBOUND_CF,
-                            get_inout_index_cf_options(block_cache),
-                            options,
-                        ),
-                    ) {
-                        return Err(IndexError::other(err));
-                    }
+            if let Err(err) = context.db.create_cf(
+                INBOUND_CF,
+                &crate::sizing::sized(INBOUND_CF, get_inout_index_cf_options(block_cache), options),
+            ) {
+                return Err(IndexError::other(err));
+            }
 
-                    if let Err(err) = context.db.create_cf(
-                        OUTBOUND_CF,
-                        &crate::sizing::sized(
-                            OUTBOUND_CF,
-                            get_inout_index_cf_options(block_cache),
-                            options,
-                        ),
-                    ) {
-                        return Err(IndexError::other(err));
-                    }
+            if let Err(err) = context.db.create_cf(
+                OUTBOUND_CF,
+                &crate::sizing::sized(
+                    OUTBOUND_CF,
+                    get_inout_index_cf_options(block_cache),
+                    options,
+                ),
+            ) {
+                return Err(IndexError::other(err));
+            }
 
-                    if let Err(err) = context.db.create_cf(
-                        PARTIAL_CF,
-                        &crate::sizing::sized(
-                            PARTIAL_CF,
-                            get_partial_cf_options(block_cache),
-                            options,
-                        ),
-                    ) {
-                        return Err(IndexError::other(err));
-                    }
+            if let Err(err) = context.db.create_cf(
+                PARTIAL_CF,
+                &crate::sizing::sized(PARTIAL_CF, get_partial_cf_options(block_cache), options),
+            ) {
+                return Err(IndexError::other(err));
+            }
 
-                    Ok(())
-                },
-            )
+            Ok(())
         });
 
         match task.await {
@@ -590,20 +558,10 @@ fn set_element_internal(
 
     let new_slots = slots_to_bitset(slot_affinity);
 
-    let previous_relation_nodes = if prev_slots.is_some() {
-        match get_element_internal(context.clone(), &key_hash, txn)? {
-            Some(StoredElement::Relation(r)) => Some((r.in_node, r.out_node)),
-            _ => None,
-        }
-    } else {
-        None
-    };
     let relation_nodes = match &element {
         StoredElement::Relation(r) => Some((r.in_node.clone(), r.out_node.clone())),
         _ => None,
     };
-    let adjacency_changed =
-        prev_slots.as_ref() != Some(&new_slots) || previous_relation_nodes != relation_nodes;
 
     let (element, encoded_element) = {
         let mut buf = BytesMut::new();
@@ -636,18 +594,37 @@ fn set_element_internal(
         Err(e) => return Err(IndexError::other(e)),
     };
 
-    if adjacency_changed {
-        if let (Some(prev_slots), Some((in_node, out_node))) = (prev_slots, previous_relation_nodes)
-        {
-            for slot in prev_slots.iter() {
-                txn.delete_cf(&inbound_cf, encode_inout_key(&in_node, slot, &key_hash))
-                    .map_err(IndexError::other)?;
-                txn.delete_cf(&outbound_cf, encode_inout_key(&out_node, slot, &key_hash))
-                    .map_err(IndexError::other)?;
+    if let Some((in_node, out_node)) = relation_nodes {
+        let mut slots_changed = true;
+
+        if let Some(prev_slots) = prev_slots {
+            if prev_slots == new_slots {
+                slots_changed = false;
+            }
+
+            if slots_changed {
+                for slot in prev_slots.into_iter() {
+                    let inbound_key = encode_inout_key(&in_node, slot, &key_hash);
+                    let outbound_key = encode_inout_key(&out_node, slot, &key_hash);
+
+                    if let Err(err) = txn.delete_cf(&inbound_cf, inbound_key) {
+                        log::error!(
+                            "Failed to delete inbound index {inbound_key:?} for element {key_hash:?}: {err:?}"
+                        );
+                        return Err(IndexError::other(err));
+                    }
+
+                    if let Err(err) = txn.delete_cf(&outbound_cf, outbound_key) {
+                        log::error!(
+                            "Failed to delete outbound index {outbound_key:?} for element {key_hash:?}: {err:?}"
+                        );
+                        return Err(IndexError::other(err));
+                    }
+                }
             }
         }
 
-        if let Some((in_node, out_node)) = relation_nodes {
+        if slots_changed {
             for slot in slot_affinity {
                 let inbound_key = encode_inout_key(&in_node, *slot, &key_hash);
                 let outbound_key = encode_inout_key(&out_node, *slot, &key_hash);

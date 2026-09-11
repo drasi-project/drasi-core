@@ -44,7 +44,6 @@ impl ElementArchiveIndex for RocksDbElementIndex {
             return Err(IndexError::ArchiveNotEnabled);
         }
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let element_key = super::hash_element_ref(element_ref);
         let mut key = element_key.to_vec();
         key.extend_from_slice(&time.to_be_bytes());
@@ -54,7 +53,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                 Some(cf) => cf,
                 None => return Err(IndexError::ArchiveNotEnabled),
             };
-            session.with_txn(|txn| {
+            context.session_state.with_txn(|txn| {
                 let mut iter = txn
                     .iterator_cf(
                         &archive_cf,
@@ -100,7 +99,6 @@ impl ElementArchiveIndex for RocksDbElementIndex {
             return Err(IndexError::ArchiveNotEnabled);
         }
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
         let element_key = super::hash_element_ref(element_ref);
 
         let from = range.from;
@@ -108,7 +106,6 @@ impl ElementArchiveIndex for RocksDbElementIndex {
             TimestampBound::Included(from) => from,
             TimestampBound::StartFromPrevious(from) => {
                 let context = context.clone();
-                let session = session.clone();
                 let task = task::spawn_blocking(move || {
                     let archive_cf = match context.db.cf_handle(ARCHIVE_CF) {
                         Some(cf) => cf,
@@ -116,7 +113,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                     };
                     let mut start_key = element_key.clone().to_vec();
                     start_key.extend_from_slice(&from.to_be_bytes());
-                    session.with_txn(|txn| {
+                    context.session_state.with_txn(|txn| {
                         let mut iter = txn
                             .iterator_cf(
                                 &archive_cf,
@@ -160,7 +157,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                 Some(cf) => cf,
                 None => return Err(IndexError::ArchiveNotEnabled),
             };
-            session.with_txn(|txn| {
+            context.session_state.with_txn(|txn| {
                 let mut results: Vec<Result<Arc<Element>, IndexError>> = Vec::new();
                 for item in txn.iterator_cf(
                     &archive_cf,
@@ -214,41 +211,31 @@ impl ElementArchiveIndex for RocksDbElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let context = self.context.clone();
-        let session = context.session_state.operation()?;
 
         let task = task::spawn_blocking(move || {
-            let exists = session.with_txn_or_db(
-                |_| Ok(context.db.cf_handle(ARCHIVE_CF).is_some()),
-                |db| Ok(db.cf_handle(ARCHIVE_CF).is_some()),
-            )?;
-            if !exists {
-                return Ok(());
-            }
-            session.clear_ranges_or(&[(ARCHIVE_CF, &[])], &[], |_| {
-                let options = &context.options;
-                let block_cache = options.memory_budget().block_cache();
-                match context.db.drop_cf(ARCHIVE_CF) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        let msg = err.to_string();
-                        if msg.contains("Invalid column family") {
-                            // Column family doesn't exist — nothing to clear
-                            return Ok(());
-                        }
-                        return Err(IndexError::other(err));
+            let options = &context.options;
+            let block_cache = options.memory_budget().block_cache();
+            match context.db.drop_cf(ARCHIVE_CF) {
+                Ok(()) => {}
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("Invalid column family") {
+                        // Column family doesn't exist — nothing to clear
+                        return Ok(());
                     }
-                }
-                if let Err(err) = context.db.create_cf(
-                    ARCHIVE_CF,
-                    &crate::sizing::sized(ARCHIVE_CF, get_archive_cf_options(block_cache), options),
-                ) {
                     return Err(IndexError::other(err));
                 }
-                Ok(())
-            })
+            }
+            if let Err(err) = context.db.create_cf(
+                ARCHIVE_CF,
+                &crate::sizing::sized(ARCHIVE_CF, get_archive_cf_options(block_cache), options),
+            ) {
+                return Err(IndexError::other(err));
+            }
+            Ok(())
         });
 
-        task.await.map_err(IndexError::other)?
+        task.await.expect("Failed to clear archive")
     }
 }
 

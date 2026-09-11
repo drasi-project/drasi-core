@@ -90,10 +90,6 @@ impl ScalarFunction for TrueUntil {
 
         let group_signature = context.get_input_grouping_hash();
 
-        if context.is_empty_group() {
-            return Ok(VariableValue::Null);
-        }
-
         if !*condition {
             if let SideEffects::Apply = context.get_side_effects() {
                 match self

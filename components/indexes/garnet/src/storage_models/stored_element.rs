@@ -18,7 +18,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference};
 
 use super::StoredValueMap;
 
-#[derive(Clone, prost::Message, Hash, PartialEq, Eq)]
+#[derive(Clone, prost::Message, Hash)]
 pub struct StoredElementReference {
     #[prost(string, tag = "1")]
     pub source_id: String,

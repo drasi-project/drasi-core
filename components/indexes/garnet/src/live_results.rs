@@ -23,39 +23,20 @@ use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
-use std::sync::Arc;
-
-use crate::GarnetSessionState;
 
 /// Garnet/Redis-backed live results writer.
 ///
 /// Stores serialized row data in a Redis hash keyed by row signature.
-/// Mutations and clears join the active root; reads expose only committed rows.
 pub struct GarnetLiveResultsWriter {
     query_id: String,
     connection: MultiplexedConnection,
-    session_state: Arc<GarnetSessionState>,
 }
 
 impl GarnetLiveResultsWriter {
     pub fn new(query_id: &str, connection: MultiplexedConnection) -> Self {
-        let state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            query_id,
-        ));
-        Self::new_with_session(query_id, connection, state)
-    }
-
-    pub fn new_with_session(
-        query_id: &str,
-        connection: MultiplexedConnection,
-        session_state: Arc<GarnetSessionState>,
-    ) -> Self {
-        session_state.register_query(query_id);
         Self {
             query_id: query_id.to_string(),
             connection,
-            session_state,
         }
     }
 
@@ -76,22 +57,8 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         let mut con = self.connection.clone();
         let live_key = self.live_key();
 
-        {
-            let mut session = self.session_state.lock()?;
-            if let Some(buffer) = session.as_mut() {
-                for mutation in mutations {
-                    let field = mutation.row_signature.to_string();
-                    match mutation.data {
-                        Some(data) => buffer.hash_set(live_key.clone(), &field, data.to_vec()),
-                        None => buffer.hash_del(live_key.clone(), &field),
-                    }
-                }
-                return Ok(());
-            }
-        }
-        self.session_state.ensure_recovered().await?;
+        // Use a pipeline for atomic batch operations
         let mut pipe = redis::pipe();
-        pipe.atomic();
         for m in mutations {
             let field = m.row_signature.to_string();
             match m.data {
@@ -112,7 +79,6 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
     }
 
     async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-        self.session_state.ensure_recovered().await?;
         let _ = query_id;
         let mut con = self.connection.clone();
         let live_key = self.live_key();
@@ -134,17 +100,22 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
             entries.push((sig, value));
         }
 
-        self.session_state.ensure_recovered().await?;
         Ok(entries)
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
         let _ = query_id;
-        self.session_state.clear(&[self.live_key()], &[]).await
+        let mut con = self.connection.clone();
+        let live_key = self.live_key();
+
+        con.del::<&str, ()>(&live_key)
+            .await
+            .map_err(IndexError::other)?;
+
+        Ok(())
     }
 
     async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
-        self.session_state.ensure_recovered().await?;
         let _ = query_id;
         let mut con = self.connection.clone();
         let live_key = self.live_key();
@@ -154,7 +125,6 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
             .await
             .map_err(IndexError::other)?;
 
-        self.session_state.ensure_recovered().await?;
         Ok(count)
     }
 }

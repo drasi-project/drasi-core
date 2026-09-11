@@ -36,6 +36,7 @@ use crate::{
         StoredElement, StoredElementContainer, StoredElementMetadata, StoredElementReference,
         StoredRelation, StoredValue, StoredValueMap,
     },
+    ClearByPattern,
 };
 
 use redis::{aio::MultiplexedConnection, AsyncCommands, ToRedisArgs};
@@ -67,7 +68,6 @@ impl GarnetElementIndex {
         archive_enabled: bool,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
-        session_state.register_query(query_id);
         GarnetElementIndex {
             key_formatter: Arc::new(KeyFormatter::new(Arc::from(query_id))),
             query_id: Arc::from(query_id),
@@ -547,20 +547,6 @@ impl GarnetElementIndex {
 
         let new_slots = slots_to_bitset(slot_affinity);
         let slots_bytes = new_slots.clone().into_bit_vec().to_bytes();
-        let previous_relation_nodes = if prev_slots.is_some() {
-            match self.get_element_internal(&element_key).await? {
-                Some(StoredElement::Relation(r)) => Some((r.in_node, r.out_node)),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        let relation_nodes = match &element {
-            StoredElement::Relation(r) => Some((r.in_node.clone(), r.out_node.clone())),
-            _ => None,
-        };
-        let adjacency_changed =
-            prev_slots.as_ref() != Some(&new_slots) || previous_relation_nodes != relation_nodes;
 
         {
             let mut guard = self.session_state.lock()?;
@@ -591,25 +577,37 @@ impl GarnetElementIndex {
                     .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?,
             );
 
-            if adjacency_changed {
-                if let (Some(prev_slots), Some((in_node, out_node))) =
-                    (prev_slots, previous_relation_nodes)
-                {
-                    for slot in prev_slots.iter() {
-                        let inbound_key = self.key_formatter.get_stored_inbound_key(&in_node, slot);
-                        let outbound_key =
-                            self.key_formatter.get_stored_outbound_key(&out_node, slot);
-                        buffer.set_remove(inbound_key, element_ref_string.as_bytes().to_vec());
-                        buffer.set_remove(outbound_key, element_ref_string.as_bytes().to_vec());
+            if let StoredElement::Relation(rel) = &element {
+                let mut slots_changed = true;
+
+                if let Some(ref prev_slots) = prev_slots {
+                    if *prev_slots == new_slots {
+                        slots_changed = false;
+                    }
+
+                    if slots_changed {
+                        for slot in prev_slots.into_iter() {
+                            let inbound_key = self
+                                .key_formatter
+                                .get_stored_inbound_key(&rel.in_node, slot);
+                            let outbound_key = self
+                                .key_formatter
+                                .get_stored_outbound_key(&rel.out_node, slot);
+
+                            buffer.set_remove(inbound_key, element_ref_string.as_bytes().to_vec());
+                            buffer.set_remove(outbound_key, element_ref_string.as_bytes().to_vec());
+                        }
                     }
                 }
 
-                if let Some((in_node, out_node)) = relation_nodes {
+                if slots_changed {
                     for slot in slot_affinity {
-                        let inbound_key =
-                            self.key_formatter.get_stored_inbound_key(&in_node, *slot);
-                        let outbound_key =
-                            self.key_formatter.get_stored_outbound_key(&out_node, *slot);
+                        let inbound_key = self
+                            .key_formatter
+                            .get_stored_inbound_key(&rel.in_node, *slot);
+                        let outbound_key = self
+                            .key_formatter
+                            .get_stored_outbound_key(&rel.out_node, *slot);
 
                         buffer.set_add(inbound_key, element_ref_string.as_bytes().to_vec());
                         buffer.set_add(outbound_key, element_ref_string.as_bytes().to_vec());
@@ -911,8 +909,8 @@ impl ElementIndex for GarnetElementIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        self.session_state
-            .clear(&[], &[format!("ei:{{{}}}:", self.query_id)])
+        self.connection
+            .clear(format!("ei:{{{}}}:*", self.query_id))
             .await
     }
 

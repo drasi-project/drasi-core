@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use drasi_core::interface::SessionError;
-
 use chrono::DateTime;
-use drasi_core::interface::{FutureQueue, IndexError};
+use drasi_core::interface::FutureQueue;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
 use crate::channels::{
@@ -53,7 +51,6 @@ pub struct FutureQueueSource {
     query_id: String,
     /// Dispatcher for sending events to subscribers
     dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
-    error: watch::Sender<Option<String>>,
 }
 
 impl FutureQueueSource {
@@ -65,12 +62,7 @@ impl FutureQueueSource {
             task_handle: Arc::new(RwLock::new(None)),
             query_id,
             dispatcher: Arc::new(RwLock::new(None)),
-            error: watch::channel(None).0,
         }
-    }
-
-    pub(crate) fn subscribe_errors(&self) -> watch::Receiver<Option<String>> {
-        self.error.subscribe()
     }
 
     /// Subscribe to future queue signals.
@@ -100,7 +92,6 @@ impl FutureQueueSource {
         }
 
         info!("Starting FutureQueueSource for query '{}'", self.query_id);
-        self.error.send_replace(None);
         *status = FutureQueueSourceStatus::Running;
         drop(status);
 
@@ -108,7 +99,6 @@ impl FutureQueueSource {
         let status_clone = self.status.clone();
         let query_id = self.query_id.clone();
         let dispatcher_clone = self.dispatcher.clone();
-        let error_sender = self.error.clone();
 
         let span = tracing::info_span!(
             "future_queue_polling",
@@ -137,16 +127,12 @@ impl FutureQueueSource {
                             sleep(Duration::from_millis(100)).await;
                             continue;
                         }
-                        Err(error) if matches!(error.session_error(), Some(SessionError::SessionBusy | SessionError::StaleCacheGeneration)) => {
-                            sleep(Duration::from_millis(10)).await;
-                            continue;
-                        }
                         Err(e) => {
                             error!(
                                 "FutureQueueSource failed to peek due time for query '{query_id}': {e}"
                             );
-                            error_sender.send_replace(Some(e.to_string()));
-                            break;
+                            sleep(Duration::from_secs(1)).await;
+                            continue;
                         }
                     };
 
@@ -254,10 +240,8 @@ mod tests {
     use drasi_core::interface::{FutureElementRef, IndexError, PushType};
     use drasi_core::models::{ElementReference, ElementTimestamp};
 
-    #[derive(Default)]
-    struct MockFutureQueue {
-        errors: std::sync::Mutex<std::collections::VecDeque<IndexError>>,
-    }
+    /// A minimal mock FutureQueue that always returns None from peek_due_time
+    struct MockFutureQueue;
 
     #[async_trait::async_trait]
     impl FutureQueue for MockFutureQueue {
@@ -286,10 +270,7 @@ mod tests {
         }
 
         async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
-            match self.errors.lock().unwrap().pop_front() {
-                Some(error) => Err(error),
-                None => Ok(None),
-            }
+            Ok(None)
         }
 
         async fn clear(&self) -> Result<(), IndexError> {
@@ -298,7 +279,7 @@ mod tests {
     }
 
     fn make_source(query_id: &str) -> FutureQueueSource {
-        let fq = Arc::new(MockFutureQueue::default());
+        let fq = Arc::new(MockFutureQueue);
         FutureQueueSource::new(fq, query_id.to_string())
     }
 
@@ -311,37 +292,6 @@ mod tests {
     #[test]
     fn source_id_constant_has_expected_value() {
         assert_eq!(FUTURE_QUEUE_SOURCE_ID, "__future_queue__");
-    }
-
-    #[tokio::test]
-    async fn contention_retries_but_fenced_polling_reports_failure() {
-        let queue = Arc::new(MockFutureQueue {
-            errors: std::sync::Mutex::new(std::collections::VecDeque::from([
-                IndexError::other(SessionError::SessionBusy),
-                IndexError::other(SessionError::StaleCacheGeneration),
-                IndexError::other(SessionError::SessionFenced),
-            ])),
-        });
-        let source = FutureQueueSource::new(queue.clone(), "fenced".into());
-        let mut errors = source.subscribe_errors();
-        let _receiver = source.subscribe().await.unwrap();
-        source.start().await.unwrap();
-        let reported = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                errors.changed().await.unwrap();
-                if let Some(error) = errors.borrow_and_update().clone() {
-                    break error;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            reported,
-            IndexError::other(SessionError::SessionFenced).to_string()
-        );
-        assert!(queue.errors.lock().unwrap().is_empty());
-        source.stop().await;
     }
 
     #[tokio::test]

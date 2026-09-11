@@ -75,7 +75,7 @@ impl FutureQueue for RocksDbFutureQueue {
         due_time: ElementTimestamp,
     ) -> Result<bool, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.operation()?;
+        let session_state = self.session_state.clone();
 
         let stored_element_ref: StoredElementReference = element_ref.into();
 
@@ -159,7 +159,7 @@ impl FutureQueue for RocksDbFutureQueue {
         group_signature: u64,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.operation()?;
+        let session_state = self.session_state.clone();
 
         let task = task::spawn_blocking(move || {
             let index_cf = db
@@ -182,7 +182,7 @@ impl FutureQueue for RocksDbFutureQueue {
 
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.operation()?;
+        let session_state = self.session_state.clone();
 
         let task = task::spawn_blocking(move || {
             let index_cf = db
@@ -245,27 +245,15 @@ impl FutureQueue for RocksDbFutureQueue {
 
     async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
         let db = self.db.clone();
-        let session = self.session_state.operation()?;
 
         let task = task::spawn_blocking(move || {
             let queue_cf = db
                 .cf_handle(QUEUE_CF)
                 .expect("fqueue Column family not found");
 
-            session.with_txn_or_db(
-                |txn| {
-                    parse_peek_head(
-                        txn.iterator_cf(&queue_cf, rocksdb::IteratorMode::Start)
-                            .next(),
-                    )
-                },
-                |db| {
-                    parse_peek_head(
-                        db.iterator_cf(&queue_cf, rocksdb::IteratorMode::Start)
-                            .next(),
-                    )
-                },
-            )
+            let read_opts = ReadOptions::default();
+            let mut iter = db.iterator_cf_opt(&queue_cf, read_opts, rocksdb::IteratorMode::Start);
+            parse_peek_head(iter.next())
         });
 
         match task.await {
@@ -277,33 +265,30 @@ impl FutureQueue for RocksDbFutureQueue {
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
         let options = self.options.clone();
-        let session = self.session_state.operation()?;
         let task = task::spawn_blocking(move || {
-            session.clear_ranges_or(&[(QUEUE_CF, &[]), (INDEX_CF, &[])], &[], |_| {
-                let block_cache = options.memory_budget().block_cache();
-                if let Err(err) = db.drop_cf(QUEUE_CF) {
-                    return Err(IndexError::other(err));
-                }
+            let block_cache = options.memory_budget().block_cache();
+            if let Err(err) = db.drop_cf(QUEUE_CF) {
+                return Err(IndexError::other(err));
+            }
 
-                if let Err(err) = db.create_cf(
-                    QUEUE_CF,
-                    &crate::sizing::sized(QUEUE_CF, get_fqueue_cf_options(block_cache), &options),
-                ) {
-                    return Err(IndexError::other(err));
-                }
+            if let Err(err) = db.create_cf(
+                QUEUE_CF,
+                &crate::sizing::sized(QUEUE_CF, get_fqueue_cf_options(block_cache), &options),
+            ) {
+                return Err(IndexError::other(err));
+            }
 
-                if let Err(err) = db.drop_cf(INDEX_CF) {
-                    return Err(IndexError::other(err));
-                }
+            if let Err(err) = db.drop_cf(INDEX_CF) {
+                return Err(IndexError::other(err));
+            }
 
-                if let Err(err) = db.create_cf(
-                    INDEX_CF,
-                    &crate::sizing::sized(INDEX_CF, get_findex_cf_options(block_cache), &options),
-                ) {
-                    return Err(IndexError::other(err));
-                }
-                Ok(())
-            })
+            if let Err(err) = db.create_cf(
+                INDEX_CF,
+                &crate::sizing::sized(INDEX_CF, get_findex_cf_options(block_cache), &options),
+            ) {
+                return Err(IndexError::other(err));
+            }
+            Ok(())
         });
 
         match task.await {

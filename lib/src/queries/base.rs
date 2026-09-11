@@ -217,21 +217,13 @@ impl QueryBase {
     /// Handle common stop functionality.
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping query '{}'", self.config.id);
-        self.stop_processing().await;
-        self.set_status(
-            ComponentStatus::Stopped,
-            Some(format!("Query '{}' stopped", self.config.id)),
-        )
-        .await;
-        info!("Query '{}' stopped", self.config.id);
-        Ok(())
-    }
 
-    pub(super) async fn stop_processing(&self) {
+        // Send shutdown signal if we have one
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
 
+        // Wait for task to complete
         if let Some(mut handle) = self.task_handle.write().await.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
@@ -246,17 +238,17 @@ impl QueryBase {
                         self.config.id
                     );
                     handle.abort();
-                    if let Err(error) = handle.await {
-                        if !error.is_cancelled() {
-                            error!(
-                                "Query '{}' task failed during shutdown: {error}",
-                                self.config.id
-                            );
-                        }
-                    }
                 }
             }
         }
+
+        self.set_status(
+            ComponentStatus::Stopped,
+            Some(format!("Query '{}' stopped", self.config.id)),
+        )
+        .await;
+        info!("Query '{}' stopped", self.config.id);
+        Ok(())
     }
 
     /// Set the task handle

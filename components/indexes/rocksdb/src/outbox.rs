@@ -17,7 +17,8 @@
 //! Uses a dedicated `outbox` column family with keys formatted as:
 //! `{query_id}:{sequence_u64_be}` (8-byte big-endian suffix for ordered iteration).
 //!
-//! Appends inside an active root are committed with its graph and checkpoint.
+//! Writes are standalone (not part of the session transaction) since outbox
+//! persistence happens after the index transaction commits.
 
 use std::sync::Arc;
 
@@ -71,20 +72,11 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// for efficient range reads and trimming.
 pub struct RocksDbOutboxWriter {
     db: Arc<IndexDb>,
-    session_state: Arc<crate::RocksDbSessionState>,
 }
 
 impl RocksDbOutboxWriter {
     pub fn new(db: Arc<IndexDb>) -> Self {
-        let session_state = Arc::new(crate::RocksDbSessionState::new(db.clone()));
-        Self::new_with_session(db, session_state)
-    }
-
-    pub fn new_with_session(
-        db: Arc<IndexDb>,
-        session_state: Arc<crate::RocksDbSessionState>,
-    ) -> Self {
-        Self { db, session_state }
+        Self { db }
     }
 }
 
@@ -92,16 +84,12 @@ impl RocksDbOutboxWriter {
 impl OutboxWriter for RocksDbOutboxWriter {
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let db = self.db.clone();
-        let session = self.session_state.operation()?;
         let key = make_key(query_id, sequence);
         let data = data.to_vec();
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            session.with_txn_or_db(
-                |txn| txn.put_cf(&cf, &key, &data).map_err(IndexError::other),
-                |db| db.put_cf(&cf, &key, &data).map_err(IndexError::other),
-            )
+            db.put_cf(&cf, &key, &data).map_err(IndexError::other)
         })
         .await
         .map_err(IndexError::other)?
@@ -179,55 +167,68 @@ impl OutboxWriter for RocksDbOutboxWriter {
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        let session = self.session_state.operation()?;
+        let db = self.db.clone();
         let prefix = make_prefix(query_id);
 
-        task::spawn_blocking(move || session.clear_ranges(&[(OUTBOX_CF, &prefix)], &[]))
-            .await
-            .map_err(IndexError::other)?
+        task::spawn_blocking(move || {
+            let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
+            let iter = db.iterator_cf(
+                &cf,
+                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+
+            for item in iter {
+                match item {
+                    Ok((key, _)) => {
+                        if !key.starts_with(&prefix) {
+                            break;
+                        }
+                        db.delete_cf(&cf, &key).map_err(IndexError::other)?;
+                    }
+                    Err(e) => return Err(IndexError::other(e)),
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(IndexError::other)?
     }
 
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let db = self.db.clone();
-        let session = self.session_state.operation()?;
         let prefix = make_prefix(query_id);
 
         task::spawn_blocking(move || {
-            session.with_txn_or_db(
-                |_| Err(IndexError::NotSupported),
-                |_| {
-                    let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
+            let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
 
-                    // First, count total entries
-                    let iter = db.iterator_cf(
-                        &cf,
-                        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-                    );
-                    let mut keys: Vec<Vec<u8>> = Vec::new();
-                    for item in iter {
-                        match item {
-                            Ok((key, _)) => {
-                                if !key.starts_with(&prefix) {
-                                    break;
-                                }
-                                keys.push(key.to_vec());
-                            }
-                            Err(e) => return Err(IndexError::other(e)),
+            // First, count total entries
+            let iter = db.iterator_cf(
+                &cf,
+                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            for item in iter {
+                match item {
+                    Ok((key, _)) => {
+                        if !key.starts_with(&prefix) {
+                            break;
                         }
+                        keys.push(key.to_vec());
                     }
+                    Err(e) => return Err(IndexError::other(e)),
+                }
+            }
 
-                    let total = keys.len();
-                    if total <= capacity {
-                        return Ok(0);
-                    }
+            let total = keys.len();
+            if total <= capacity {
+                return Ok(0);
+            }
 
-                    let to_remove = total - capacity;
-                    for key in keys.iter().take(to_remove) {
-                        db.delete_cf(&cf, key).map_err(IndexError::other)?;
-                    }
-                    Ok(to_remove)
-                },
-            )
+            let to_remove = total - capacity;
+            for key in keys.iter().take(to_remove) {
+                db.delete_cf(&cf, key).map_err(IndexError::other)?;
+            }
+            Ok(to_remove)
         })
         .await
         .map_err(IndexError::other)?

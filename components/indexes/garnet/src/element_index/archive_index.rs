@@ -25,6 +25,7 @@ use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 use crate::{
     session_state::BufferReadResult,
     storage_models::{StoredElement, StoredElementContainer, StoredElementMetadata},
+    ClearByPattern,
 };
 
 use super::GarnetElementIndex;
@@ -239,8 +240,8 @@ impl ElementArchiveIndex for GarnetElementIndex {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        self.session_state
-            .clear(&[], &[format!("archive:{{{}}}:", self.query_id)])
+        self.connection
+            .clear(format!("archive:{{{}}}:*", self.query_id))
             .await
     }
 }

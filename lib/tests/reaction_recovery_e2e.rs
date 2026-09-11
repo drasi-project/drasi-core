@@ -30,7 +30,7 @@ use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 // ============================================================================
@@ -147,7 +147,6 @@ struct RecordingReaction {
     recovery_policy: ReactionRecoveryPolicy,
     durable: bool,
     snapshot_on_fresh: bool,
-    enqueue_gate: Arc<Mutex<()>>,
 }
 
 /// Receiver side of the recording reaction.
@@ -197,16 +196,9 @@ fn recording_reaction(
             recovery_policy: policy,
             durable,
             snapshot_on_fresh,
-            enqueue_gate: Arc::new(Mutex::new(())),
         },
         RecordingReceiver { rx },
     )
-}
-
-impl RecordingReaction {
-    fn enqueue_gate(&self) -> Arc<Mutex<()>> {
-        self.enqueue_gate.clone()
-    }
 }
 
 impl std::fmt::Debug for RecordingReaction {
@@ -268,7 +260,6 @@ impl Reaction for RecordingReaction {
     }
 
     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-        let _gate = self.enqueue_gate.lock().await;
         let _ = self.tx.send(result);
         Ok(())
     }
@@ -754,7 +745,6 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
         true,
         false,
     );
-    let enqueue_gate = reaction.enqueue_gate();
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -776,12 +766,13 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
     let initial = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(initial.len(), 1);
 
-    let hold = enqueue_gate.lock().await;
+    // Flood to cause broadcast lag — Strict policy should stop the forwarder.
     for i in 0..20 {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    drop(hold);
+
+    // Wait deterministically for the reaction to transition to Error state
+    // (the supervisor fires this after the forwarder breaks on Strict gap).
     let error_event = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match event_rx.recv().await {
@@ -799,7 +790,7 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
     .expect("Timed out waiting for reaction to reach Error status");
     assert_eq!(error_event.status, ComponentStatus::Error);
 
-    receiver.drain_available();
+    // After strict gap failure, new events should NOT be delivered.
     insert_person(&handle, "p-after", "After", 99).await?;
     let after = receiver
         .wait_for_count(1, Duration::from_millis(1000))

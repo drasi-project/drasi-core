@@ -19,7 +19,10 @@ use std::sync::Arc;
 
 // Import drasi-core components
 use crate::config::QueryLanguage;
-use drasi_query_ast::api::{QueryConfiguration, QueryParser};
+use drasi_query_ast::{
+    api::{QueryConfiguration, QueryParser},
+    ast::{MatchClause, QueryPart},
+};
 use drasi_query_cypher::CypherParser;
 use drasi_query_gql::GQLParser;
 
@@ -59,26 +62,10 @@ impl LabelExtractor {
 
         let mut node_labels = HashSet::new();
         let mut relation_labels = HashSet::new();
-        let mut all_node_labels = false;
-        let mut all_relation_labels = false;
 
+        // Process each query part
         for query_part in &parsed_query.parts {
-            for clause in &query_part.match_clauses {
-                all_node_labels |= clause.start.labels.is_empty();
-                node_labels.extend(clause.start.labels.iter().map(ToString::to_string));
-                for (relation, node) in &clause.path {
-                    all_node_labels |= node.labels.is_empty()
-                        || relation.variable_length.as_ref().is_some_and(|length| {
-                            length
-                                .max_hops
-                                .or(length.min_hops)
-                                .map_or(true, |max| max > 1)
-                        });
-                    all_relation_labels |= relation.labels.is_empty();
-                    relation_labels.extend(relation.labels.iter().map(ToString::to_string));
-                    node_labels.extend(node.labels.iter().map(ToString::to_string));
-                }
-            }
+            Self::extract_from_query_part(query_part, &mut node_labels, &mut relation_labels);
         }
 
         debug!("Extracted node labels: {node_labels:?}");
@@ -87,19 +74,50 @@ impl LabelExtractor {
         Ok(QueryLabels {
             node_labels: node_labels.into_iter().collect(),
             relation_labels: relation_labels.into_iter().collect(),
-            all_node_labels,
-            all_relation_labels,
         })
+    }
+
+    fn extract_from_query_part(
+        query_part: &QueryPart,
+        node_labels: &mut HashSet<String>,
+        relation_labels: &mut HashSet<String>,
+    ) {
+        // Process all match clauses
+        for match_clause in &query_part.match_clauses {
+            Self::extract_from_match_clause(match_clause, node_labels, relation_labels);
+        }
+    }
+
+    fn extract_from_match_clause(
+        match_clause: &MatchClause,
+        node_labels: &mut HashSet<String>,
+        relation_labels: &mut HashSet<String>,
+    ) {
+        // Extract labels from the start node
+        for label in &match_clause.start.labels {
+            node_labels.insert(label.to_string());
+        }
+
+        // Extract labels from the path (relations and nodes)
+        for (relation_match, node_match) in &match_clause.path {
+            // Extract relation labels
+            for label in &relation_match.labels {
+                relation_labels.insert(label.to_string());
+            }
+
+            // Extract node labels
+            for label in &node_match.labels {
+                node_labels.insert(label.to_string());
+            }
+        }
     }
 }
 
 /// The set of node and relation labels extracted from a parsed query.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct QueryLabels {
     pub node_labels: Vec<String>,
     pub relation_labels: Vec<String>,
-    pub all_node_labels: bool,
-    pub all_relation_labels: bool,
 }
 
 #[cfg(test)]
@@ -114,40 +132,6 @@ mod tests {
         assert_eq!(labels.node_labels.len(), 1);
         assert!(labels.node_labels.contains(&"Person".to_string()));
         assert_eq!(labels.relation_labels.len(), 0);
-        assert!(!labels.all_node_labels);
-        assert!(!labels.all_relation_labels);
-    }
-
-    #[test]
-    fn repetition_broadens_nodes_only_when_intermediate_nodes_are_possible() {
-        for language in [QueryLanguage::Cypher, QueryLanguage::GQL] {
-            for (repetition, all_nodes) in [
-                ("*0", false),
-                ("*1", false),
-                ("*0..1", false),
-                ("*2", true),
-                ("*0..2", true),
-                ("*..2", true),
-            ] {
-                let text = format!("MATCH (a:Start)-[:R{repetition}]->(b:End) RETURN b");
-                let labels = LabelExtractor::extract_labels(&text, &language).unwrap();
-                assert_eq!(labels.all_node_labels, all_nodes, "{text}");
-                assert!(!labels.all_relation_labels, "{text}");
-                assert!(labels.node_labels.contains(&"Start".into()));
-                assert!(labels.node_labels.contains(&"End".into()));
-            }
-        }
-    }
-
-    #[test]
-    fn unlabeled_elements_require_unrestricted_labels() {
-        let labels = LabelExtractor::extract_labels(
-            "MATCH (a)-[r]->(b:End) RETURN b",
-            &QueryLanguage::Cypher,
-        )
-        .unwrap();
-        assert!(labels.all_node_labels);
-        assert!(labels.all_relation_labels);
     }
 
     #[test]

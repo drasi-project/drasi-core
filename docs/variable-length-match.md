@@ -67,36 +67,6 @@ The matcher also handles changes to relationship endpoints, types, and propertie
 Existing projection, aggregation, and future-reprocessing functions receive
 the resulting match changes.
 
-## DrasiLib source selection
-
-When a repetition can cross an intermediate node, DrasiLib requests all available
-node labels rather than only the endpoint labels. Exact zero-hop and at-most-one-hop
-segments do not require this expansion for intermediate nodes.
-
-Labels assigned to another configured source subscription remain excluded.
-Unassigned labels can come from any subscribed source. An unrestricted selection
-admits an unlabeled node or a node with at least one eligible label.
-Physical relationship labels retain their source allocations.
-
-Bootstrap requests can fetch a superset. DrasiLib applies each subscription's exact
-selection after source middleware, using the source event's envelope rather than
-the element reference's namespace. The same selection applies to bootstrap, replay,
-and live events. An excluded insert or update becomes a deletion of that reference,
-so relabeling cannot leave an earlier admitted version indexed. Label-less deletions
-pass through. Excluded events still advance their source's sequence and position
-checkpoint.
-
-An empty bootstrap label list requests all available labels of that element kind.
-It does not mean no elements. `LabelSelection::Labels` with an empty set represents
-that case inside DrasiLib. Supported fixed-length queries with source middleware
-request raw bootstrap inputs broadly because middleware can change labels and
-element kinds. Bounded patterns still reject configured source middleware.
-
-Core source-change methods accept `SourceInput` for a per-query normalizer.
-Existing calls that pass `SourceChange` retain their call syntax through its
-`From<SourceChange>` conversion. Normalizers are pure, synchronous, run after middleware,
-and do not apply to scheduled future processing.
-
 ## Index layout
 
 The matcher reuses one relationship candidate slot for a segment at every depth.
@@ -140,78 +110,6 @@ Ordinary source changes prepare both snapshots before writing to indexes.
 partial result. A preparation failure leaves the query available for a retry.
 Execution errors use the existing `EvaluationError::IndexError` variant and are
 available through `EvaluationError::execution_error()`.
-
-After mutation starts, recovery depends on the outer transaction's outcome.
-This includes a future that has been popped but whose evaluation or hook fails.
-
-| Root outcome | Meaning |
-| --- | --- |
-| `Active` | The transaction accepts explicit nested calls |
-| `Committing` | Commit is in progress. A cancelled await does not imply rollback |
-| `Committed` | A matching `CommitReceipt` releases provisional results |
-| `RolledBack` | All participating writes were restored. The query permits retry |
-| `RequiresRebuild` | Writes could not be restored. The query rejects further processing |
-| `Indeterminate` | The durable outcome is unknown. The query rejects further processing |
-
-`RollbackSupport::Complete` covers the graph, accumulators, future queue, and
-other stores that participate in the transaction. The default memory controller
-does not undo writes. A dirty abort therefore requires reconstruction.
-`ContinuousQuery::check_health()` reports `QueryExecutionError::QueryRequiresRebuild`
-for an unrecoverable or indeterminate outcome.
-
-## Transaction API
-
-Ordinary source and future processing methods own their transactions. An unrelated
-call cannot join an active transaction implicitly. It receives
-`SessionError::SessionBusy` through `IndexError::Other`.
-`IndexError::session_error()` exposes the typed session error.
-
-Explicit nested methods accept a mutable `SessionGuard` from the same controller
-as the query. Each call returns a `Provisional<T>` without waiting for the outer
-commit.
-
-```rust
-let mut outer = SessionGuard::begin(session_control.clone()).await?;
-let first = query.process_source_change_in(&mut outer, first_change).await?;
-let second = query.process_source_change_in(&mut outer, second_change).await?;
-let receipt = outer.commit_with_receipt().await?;
-let first_results = first.into_committed(&receipt)?;
-let second_results = second.into_committed(&receipt)?;
-```
-
-`process_source_change_in_with_hook` and `process_due_futures_in_with_hook`
-expose tentative results for writes that must precede the outer commit.
-These results are not ready for publication. The corresponding root-owning
-methods are `process_source_change_with_result_hook` and
-`process_due_futures_with_hook`.
-
-`SessionGuard::rollback()` consumes the guard and returns the resulting
-`RootOutcome`. Dropping an active guard also aborts it. Neither operation makes
-nontransactional writes reversible. On Tokio, an owned finalizer establishes the
-outcome even if the caller stops awaiting the commit. Other executors poll the
-commit inline. Cancelling an inline commit leaves the root indeterminate.
-A retained `RootHandle` exposes that outcome and can recover the receipt through
-`commit_receipt()` after a confirmed commit.
-
-The existing `SessionControl::begin`, `commit`, and `rollback` methods remain
-available with their original signatures. `SessionGuard::commit()` still returns
-`Result<(), IndexError>`. Nested calls use the additive `commit_with_receipt()`
-method. `NoOpSessionControl` remains a unit struct.
-
-## Cache lifetime
-
-`CachedElementIndex`, `CachedResultIndex`, and `ShadowedFutureQueue` can share the
-query's `Arc<dyn SessionControl>` through `new_with_session`.
-Mutable cache entries belong to a transaction generation. Nested calls can reuse
-them within a root, but an outcome change invalidates them. Delayed fills and
-streams cannot populate a newer generation with older data.
-
-This policy sacrifices cache reuse between source events to make rollback safe.
-It avoids retaining tentative aggregate counts or adjacency data after an abort.
-Cross-transaction promotion of mutable entries is not implemented.
-The original `new` constructors retain their signatures but act as read-through
-wrappers without retaining mutable cache entries. Without a shared controller,
-they cannot detect rollback safely.
 
 ## Unsupported combinations
 

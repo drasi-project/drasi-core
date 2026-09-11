@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    cmp::Reverse,
-    collections::{HashMap, HashSet},
-};
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use priority_queue::PriorityQueue;
@@ -26,30 +23,32 @@ use crate::{
     models::{ElementReference, ElementTimestamp},
 };
 
-#[derive(Default)]
 struct FutureQueueState {
-    queue: PriorityQueue<(usize, FutureElementRef), Reverse<u64>>,
-    groups: HashMap<(usize, u64), HashSet<FutureElementRef>>,
+    // [(position_in_query, fut_element_ref)] -> due_time
+    queue: PriorityQueue<(usize, FutureElementRef), i64>,
+
+    // (position_in_query, group_signature) -> (due_time, (original_time, element_ref))
+    map: HashMap<(usize, u64), BTreeMap<ElementTimestamp, (ElementTimestamp, ElementReference)>>,
 }
 
-impl FutureQueueState {
-    fn remove_group(&mut self, position: usize, group: u64) {
-        if let Some(entries) = self.groups.remove(&(position, group)) {
-            for entry in entries {
-                self.queue.remove(&(position, entry));
-            }
-        }
-    }
-}
-
-#[derive(Default)]
 pub struct InMemoryFutureQueue {
     data: RwLock<FutureQueueState>,
 }
 
+impl Default for InMemoryFutureQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryFutureQueue {
     pub fn new() -> Self {
-        Self::default()
+        InMemoryFutureQueue {
+            data: RwLock::new(FutureQueueState {
+                queue: PriorityQueue::new(),
+                map: HashMap::new(),
+            }),
+        }
     }
 }
 
@@ -65,22 +64,51 @@ impl FutureQueue for InMemoryFutureQueue {
         due_time: ElementTimestamp,
     ) -> Result<bool, IndexError> {
         let mut data = self.data.write().await;
-        let group = (position_in_query, group_signature);
-        match push_type {
-            PushType::IfNotExists if data.groups.contains_key(&group) => return Ok(false),
-            PushType::Overwrite => data.remove_group(position_in_query, group_signature),
-            PushType::Always | PushType::IfNotExists => {}
-        }
-        let entry = FutureElementRef {
-            element_ref: element_ref.clone(),
-            original_time,
-            due_time,
-            group_signature,
+
+        let should_push = match push_type {
+            PushType::Always => true,
+            PushType::IfNotExists => {
+                match data.map.get_mut(&(position_in_query, group_signature)) {
+                    Some(map) => map.is_empty(),
+                    None => true,
+                }
+            }
+            PushType::Overwrite => {
+                if let Some(map) = data.map.remove(&(position_in_query, group_signature)) {
+                    for (due_time, (original_time, element_ref)) in map {
+                        data.queue.remove(&(
+                            position_in_query,
+                            FutureElementRef {
+                                element_ref: element_ref.clone(),
+                                original_time,
+                                due_time,
+                                group_signature,
+                            },
+                        ));
+                    }
+                };
+
+                true
+            }
         };
-        data.groups.entry(group).or_default().insert(entry.clone());
-        data.queue
-            .push((position_in_query, entry), Reverse(due_time));
-        Ok(true)
+
+        if should_push {
+            let fut_element_ref = FutureElementRef {
+                element_ref: element_ref.clone(),
+                original_time,
+                due_time,
+                group_signature,
+            };
+            data.queue
+                .push((position_in_query, fut_element_ref), -(due_time as i64));
+
+            data.map
+                .entry((position_in_query, group_signature))
+                .or_default()
+                .insert(due_time, (original_time, element_ref.clone()));
+        }
+
+        Ok(should_push)
     }
 
     async fn remove(
@@ -89,41 +117,52 @@ impl FutureQueue for InMemoryFutureQueue {
         group_signature: u64,
     ) -> Result<(), IndexError> {
         let mut data = self.data.write().await;
-        data.remove_group(position_in_query, group_signature);
+        if let Some(map) = data.map.remove(&(position_in_query, group_signature)) {
+            for (due_time, (original_time, element_ref)) in map {
+                data.queue.remove(&(
+                    position_in_query,
+                    FutureElementRef {
+                        element_ref: element_ref.clone(),
+                        original_time,
+                        due_time,
+                        group_signature,
+                    },
+                ));
+            }
+        };
         Ok(())
     }
 
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
         let mut data = self.data.write().await;
-        let Some(((position, entry), _)) = data.queue.pop() else {
-            return Ok(None);
-        };
-        let group = (position, entry.group_signature);
-        let entries = data
-            .groups
-            .get_mut(&group)
-            .ok_or(IndexError::CorruptedData)?;
-        if !entries.remove(&entry) {
-            return Err(IndexError::CorruptedData);
+        match data.queue.pop() {
+            Some((key, due_time)) => {
+                let due_time = -due_time as u64;
+                let map_key = (key.0, key.1.group_signature);
+                if let Some(map) = data.map.get_mut(&map_key) {
+                    map.remove(&due_time);
+                    if map.is_empty() {
+                        data.map.remove(&map_key);
+                    }
+                }
+                Ok(Some(key.1))
+            }
+            None => Ok(None),
         }
-        if entries.is_empty() {
-            data.groups.remove(&group);
-        }
-        Ok(Some(entry))
     }
 
-    async fn peek_due_time(&self) -> Result<Option<u64>, IndexError> {
-        Ok(self
-            .data
-            .read()
-            .await
-            .queue
-            .peek()
-            .map(|(_, Reverse(deadline))| *deadline))
+    async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
+        let data = self.data.read().await;
+        match data.queue.peek() {
+            Some((_, due_time)) => Ok(Some((due_time * -1) as u64)),
+            None => Ok(None),
+        }
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        *self.data.write().await = FutureQueueState::default();
+        let mut data = self.data.write().await;
+        data.queue.clear();
+        data.map.clear();
         Ok(())
     }
 }

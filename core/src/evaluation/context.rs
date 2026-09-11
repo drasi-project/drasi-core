@@ -122,7 +122,6 @@ pub struct ExpressionEvaluationContext<'a> {
     solution_signature: Option<SolutionSignature>,
     anchor_element: Option<Arc<Element>>,
     future_group_signature: Option<u64>,
-    empty_group: bool,
 }
 
 impl<'a> ExpressionEvaluationContext<'a> {
@@ -139,7 +138,6 @@ impl<'a> ExpressionEvaluationContext<'a> {
             solution_signature: None,
             anchor_element: None,
             future_group_signature: None,
-            empty_group: false,
         }
     }
 
@@ -157,7 +155,6 @@ impl<'a> ExpressionEvaluationContext<'a> {
             solution_signature: None,
             anchor_element: None,
             future_group_signature: None,
-            empty_group: false,
         }
     }
 
@@ -179,7 +176,6 @@ impl<'a> ExpressionEvaluationContext<'a> {
                 _ => None,
             },
             future_group_signature: change_context.future_group_signature,
-            empty_group: false,
         }
     }
 
@@ -200,7 +196,6 @@ impl<'a> ExpressionEvaluationContext<'a> {
                 _ => None,
             },
             future_group_signature: change_context.future_group_signature,
-            empty_group: false,
         }
     }
 
@@ -259,14 +254,6 @@ impl<'a> ExpressionEvaluationContext<'a> {
     pub fn is_this_future_wake(&self, input_signature: u64) -> bool {
         self.future_group_signature
             .is_none_or(|wake| wake == input_signature)
-    }
-
-    pub fn set_empty_group(&mut self, empty_group: bool) {
-        self.empty_group = empty_group;
-    }
-
-    pub fn is_empty_group(&self) -> bool {
-        self.empty_group
     }
 }
 

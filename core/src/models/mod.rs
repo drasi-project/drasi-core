@@ -22,7 +22,6 @@ use thiserror::Error;
 mod element;
 mod element_value;
 mod source_change;
-mod source_input;
 mod timestamp_range;
 
 pub use element::{
@@ -32,7 +31,6 @@ pub use element::{
 pub use element_value::ElementPropertyMap;
 pub use element_value::ElementValue;
 pub use source_change::SourceChange;
-pub use source_input::{SourceChangeNormalizer, SourceInput};
 pub use timestamp_range::{TimestampBound, TimestampRange};
 
 #[derive(Debug, Error)]

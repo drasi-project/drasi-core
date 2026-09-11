@@ -23,7 +23,7 @@ use drasi_core::{
     index_cache::{
         cached_element_index::CachedElementIndex, cached_result_index::CachedResultIndex,
     },
-    interface::{ElementIndex, SessionControl},
+    interface::ElementIndex,
     query::QueryBuilder,
 };
 use shared_tests::QueryTestConfig;
@@ -81,10 +81,7 @@ impl GarnetQueryConfig {
     ) {
         let client = redis::Client::open(self.url.as_str()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            query_id,
-        ));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
         (
             GarnetFutureQueue::new(query_id, connection, session_state),
@@ -100,20 +97,14 @@ impl GarnetQueryConfig {
 #[allow(clippy::unwrap_used)]
 #[async_trait]
 impl QueryTestConfig for GarnetQueryConfig {
-    async fn config_query_with_session(
-        &self,
-        builder: QueryBuilder,
-    ) -> (QueryBuilder, Arc<dyn SessionControl>) {
+    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in Garnet indexes");
         let query_id = format!("test-{}", Uuid::new_v4());
 
         let client = redis::Client::open(self.url.as_str()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
 
         let element_index =
@@ -126,31 +117,24 @@ impl QueryTestConfig for GarnetQueryConfig {
 
         *self.element_index.lock().unwrap() = Some(element_index.clone());
 
-        let builder = if self.use_cache {
-            let element_index = Arc::new(
-                CachedElementIndex::new_with_session(element_index, 3, session_control.clone())
-                    .unwrap(),
-            );
-            let ari =
-                CachedResultIndex::new_with_session(Arc::new(ari), 3, session_control.clone())
-                    .unwrap();
+        if self.use_cache {
+            let element_index = Arc::new(CachedElementIndex::new(element_index, 3).unwrap());
+            let ari = CachedResultIndex::new(Arc::new(ari), 3).unwrap();
 
             builder
                 .with_element_index(element_index)
+                .with_archive_index(archive_index)
                 .with_result_index(Arc::new(ari))
+                .with_future_queue(Arc::new(fq))
+                .with_session_control(session_control)
         } else {
             builder
                 .with_element_index(element_index)
-                .with_result_index(Arc::new(ari))
-        };
-
-        (
-            builder
                 .with_archive_index(archive_index)
+                .with_result_index(Arc::new(ari))
                 .with_future_queue(Arc::new(fq))
-                .with_session_control(session_control.clone()),
-            session_control,
-        )
+                .with_session_control(session_control)
+        }
     }
 }
 
@@ -389,33 +373,6 @@ mod index {
         fqi.clear().await.unwrap();
         shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
     }
-
-    #[tokio::test]
-    async fn future_queue_pop_due_respects_deadline() {
-        let test_config = GarnetQueryConfig::new(false).await;
-        let (fqi, sc) = test_config
-            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
-            .await;
-        shared_tests::index::future_queue::pop_due_respects_deadline(&fqi, &sc).await;
-    }
-
-    #[tokio::test]
-    async fn future_queue_equal_deadlines_preserve_tickets() {
-        let test_config = GarnetQueryConfig::new(false).await;
-        let (fqi, sc) = test_config
-            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
-            .await;
-        shared_tests::index::future_queue::equal_deadlines_preserve_tickets(&fqi, &sc).await;
-    }
-
-    #[tokio::test]
-    async fn future_queue_remove_preserves_other_occurrences() {
-        let test_config = GarnetQueryConfig::new(false).await;
-        let (fqi, sc) = test_config
-            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
-            .await;
-        shared_tests::index::future_queue::remove_preserves_other_occurrences(&fqi, &sc).await;
-    }
 }
 
 mod before {
@@ -490,12 +447,11 @@ mod collect_aggregation {
 mod session {
     use std::sync::Arc;
 
-    use drasi_core::interface::PushType;
     use drasi_core::{
         evaluation::functions::aggregation::ValueAccumulator,
         interface::{
             AccumulatorIndex, CheckpointStore, ElementIndex, FutureQueue, LazySortedSetStore,
-            ResultKey, ResultOwner, RootOutcome, SessionControl, SessionGuard,
+            PushType, ResultKey, ResultOwner, SessionControl,
         },
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
     };
@@ -507,12 +463,6 @@ mod session {
     use ordered_float::OrderedFloat;
     use uuid::Uuid;
 
-    fn assert_rolled_back(root: SessionGuard) {
-        let handle = root.root();
-        drop(root);
-        assert_eq!(handle.outcome(), RootOutcome::RolledBack);
-    }
-
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn session_rollback_discards_writes() {
@@ -521,11 +471,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let element_index =
             GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
         let result_index =
@@ -549,8 +496,7 @@ mod session {
         let result_owner = ResultOwner::Function(0);
 
         // Begin session, write to all three indexes, then rollback
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         element_index.set_element(&node, &vec![]).await.unwrap();
         result_index
@@ -566,10 +512,10 @@ mod session {
             .await
             .unwrap();
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
 
         // Verify nothing persisted — reads require a session
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_none(), "element should not persist after rollback");
@@ -580,7 +526,7 @@ mod session {
             "accumulator should not persist after rollback"
         );
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
 
         // peek_due_time runs outside the session by design
         let due = future_queue.peek_due_time().await.unwrap();
@@ -595,11 +541,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let element_index =
             GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
         let result_index =
@@ -623,8 +566,7 @@ mod session {
         let result_owner = ResultOwner::Function(0);
 
         // Begin session, write to all three indexes, then commit
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         element_index.set_element(&node, &vec![]).await.unwrap();
         result_index
@@ -640,10 +582,10 @@ mod session {
             .await
             .unwrap();
 
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify data persisted — reads require a session
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
@@ -655,7 +597,7 @@ mod session {
             other => panic!("expected Count, got {other:?}"),
         }
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
 
         // peek_due_time runs outside the session by design
         let due = future_queue.peek_due_time().await.unwrap();
@@ -670,11 +612,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let element_index =
             GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
         let result_index =
@@ -695,8 +634,7 @@ mod session {
         let result_key = ResultKey::InputHash(1);
         let result_owner = ResultOwner::Function(0);
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         element_index.set_element(&node, &vec![]).await.unwrap();
         result_index
@@ -722,10 +660,10 @@ mod session {
             other => panic!("expected Count, got {other:?}"),
         }
 
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify still readable after commit — reads require a session
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
@@ -733,7 +671,7 @@ mod session {
         let acc = result_index.get(&result_key, &result_owner).await.unwrap();
         assert!(acc.is_some(), "accumulator should persist after commit");
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -744,11 +682,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let element_index =
             GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
         let result_index =
@@ -771,8 +706,7 @@ mod session {
             properties: ElementPropertyMap::new(),
         };
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         element_index.set_element(&node_v1, &vec![]).await.unwrap();
         result_index
             .set(
@@ -782,7 +716,7 @@ mod session {
             )
             .await
             .unwrap();
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
 
         // Second session: write v2, then commit
         let node_v2 = Element::Node {
@@ -794,8 +728,7 @@ mod session {
             properties: ElementPropertyMap::new(),
         };
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         element_index.set_element(&node_v2, &vec![]).await.unwrap();
         result_index
             .set(
@@ -805,10 +738,10 @@ mod session {
             )
             .await
             .unwrap();
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify v2 persisted (not v1) — reads require a session
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
@@ -828,7 +761,7 @@ mod session {
             other => panic!("expected Count, got {other:?}"),
         }
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -839,18 +772,14 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let result_index =
             GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
 
         result_index.clear().await.unwrap();
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         // Two increments to the same key within one session
         result_index
@@ -872,10 +801,10 @@ mod session {
             "buffer should show accumulated count within session"
         );
 
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // After commit: Redis should show 2 — reads require a session
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         let count = result_index
             .get_value_count(1, OrderedFloat(5.0))
@@ -883,7 +812,7 @@ mod session {
             .unwrap();
         assert_eq!(count, 2, "committed count should be 2");
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -894,11 +823,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let element_index =
             GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
 
@@ -915,10 +841,9 @@ mod session {
             },
             properties: ElementPropertyMap::new(),
         };
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         element_index.set_element(&node_v1, &vec![]).await.unwrap();
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Within a session: delete then reinsert with different effective_from
         let node_v2 = Element::Node {
@@ -930,14 +855,13 @@ mod session {
             properties: ElementPropertyMap::new(),
         };
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         element_index.delete_element(&element_ref).await.unwrap();
         element_index.set_element(&node_v2, &vec![]).await.unwrap();
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify v2 persisted — reads require a session
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should exist after delete+reinsert");
@@ -951,7 +875,7 @@ mod session {
             _ => panic!("expected Node"),
         }
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -962,16 +886,13 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
 
         result_index.clear().await.unwrap();
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         // Query a value count for a key that has never been written
         let count = result_index
@@ -980,7 +901,7 @@ mod session {
             .unwrap();
         assert_eq!(count, 0, "missing key should return 0, not error");
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -991,17 +912,13 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
 
         result_index.clear().await.unwrap();
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         // Increment two different values in the same sorted set
         result_index
@@ -1039,7 +956,7 @@ mod session {
             .unwrap();
         assert!(next.is_none(), "nothing after 20.0");
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1050,17 +967,13 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
 
         future_queue.clear().await.unwrap();
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         let ref_a = ElementReference::new("src", "a");
         let ref_b = ElementReference::new("src", "b");
@@ -1093,7 +1006,7 @@ mod session {
         let empty = future_queue.pop().await.unwrap();
         assert!(empty.is_none(), "queue should be empty after 3 pops");
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1104,11 +1017,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
 
         future_queue.clear().await.unwrap();
@@ -1116,24 +1026,22 @@ mod session {
         let element_ref = ElementReference::new("src", "node1");
 
         // Push in a session, then rollback
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         future_queue
             .push(PushType::Always, 1, 1, &element_ref, 100, 200)
             .await
             .unwrap();
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
 
         // peek_due_time runs outside session
         let due = future_queue.peek_due_time().await.unwrap();
         assert!(due.is_none(), "nothing should persist after rollback");
 
         // pop within a new session should also return None
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         let popped = future_queue.pop().await.unwrap();
         assert!(popped.is_none(), "pop should return None after rollback");
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1144,17 +1052,13 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
 
         future_queue.clear().await.unwrap();
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         let element_ref = ElementReference::new("src", "node1");
 
@@ -1172,17 +1076,16 @@ mod session {
             "pop should return None after remove in same session"
         );
 
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify nothing persisted
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         let popped = future_queue.pop().await.unwrap();
         assert!(
             popped.is_none(),
             "pop should return None after commit of remove"
         );
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1193,11 +1096,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let checkpoint_store = drasi_index_garnet::GarnetCheckpointStore::new(
             &query_id,
             connection,
@@ -1207,29 +1107,27 @@ mod session {
         checkpoint_store.clear_checkpoints().await.unwrap();
 
         // Commit sequence 5
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         checkpoint_store
             .stage_checkpoint("change-1", 5, None)
             .await
             .unwrap();
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify it persisted
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
         let cp = checkpoint_store.read_checkpoint("change-1").await.unwrap();
         assert_eq!(cp.as_ref().unwrap().sequence, 5);
 
         // Stage sequence 10 then rollback
-        root.mark_dirty().unwrap();
         checkpoint_store
             .stage_checkpoint("change-2", 10, None)
             .await
             .unwrap();
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
 
         // Verify rollback preserved the old value (change-2 should not exist)
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
         let cp = checkpoint_store.read_checkpoint("change-2").await.unwrap();
         assert!(
             cp.is_none(),
@@ -1244,18 +1142,17 @@ mod session {
         );
 
         // Now commit sequence 10
-        root.mark_dirty().unwrap();
         checkpoint_store
             .stage_checkpoint("change-2", 10, None)
             .await
             .unwrap();
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify it persisted
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
         let cp = checkpoint_store.read_checkpoint("change-2").await.unwrap();
         assert_eq!(cp.as_ref().unwrap().sequence, 10);
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1266,11 +1163,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let element_index =
             GarnetElementIndex::new(&query_id, connection, true, session_state.clone());
 
@@ -1308,8 +1202,7 @@ mod session {
             properties: ElementPropertyMap::new(),
         };
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         element_index.set_element(&node_a, &vec![0]).await.unwrap();
         element_index.set_element(&node_b, &vec![0]).await.unwrap();
@@ -1337,9 +1230,9 @@ mod session {
         assert_eq!(outbound.len(), 1, "should have 1 outbound relation");
 
         // Rollback — edges should disappear
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         let inbound_stream = element_index
             .get_slot_elements_by_inbound(0, &node_a_ref)
@@ -1358,7 +1251,7 @@ mod session {
             "outbound should be empty after rollback"
         );
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1371,11 +1264,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let element_index =
             GarnetElementIndex::new(&query_id, connection, true, session_state.clone());
 
@@ -1392,10 +1282,9 @@ mod session {
             },
             properties: ElementPropertyMap::new(),
         };
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         element_index.set_element(&node_v1, &vec![]).await.unwrap();
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Commit v2 with effective_from: 2000
         let node_v2 = Element::Node {
@@ -1406,13 +1295,12 @@ mod session {
             },
             properties: ElementPropertyMap::new(),
         };
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         element_index.set_element(&node_v2, &vec![]).await.unwrap();
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Query at different timestamps
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
         // At t=500: before any version exists
         let result = element_index
@@ -1447,49 +1335,44 @@ mod session {
             _ => panic!("expected Node"),
         }
 
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn session_explicit_child_abort_rolls_back_root() {
+    async fn session_double_begin_nests() {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
 
-        let query_id = format!("test-{}", Uuid::new_v4());
-        let session_state = Arc::new(GarnetSessionState::new_for_query(connection, &query_id));
-        let session_control: Arc<dyn SessionControl> =
-            Arc::new(GarnetSessionControl::new(session_state));
+        let session_state = Arc::new(GarnetSessionState::new(connection));
+        let session_control = GarnetSessionControl::new(session_state);
 
-        let mut root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
 
-        let child = root
-            .child(&session_control)
-            .expect("explicit child should succeed");
-        drop(child);
+        // Second begin nests — returns Ok, depth is now 2
+        session_control
+            .begin()
+            .await
+            .expect("nested begin should succeed");
 
-        assert_rolled_back(root);
+        // Rollback at any depth aborts the entire session
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn session_commit_after_child_abort_errors() {
+    async fn session_commit_without_begin_errors() {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
 
-        let query_id = format!("test-{}", Uuid::new_v4());
-        let session_state = Arc::new(GarnetSessionState::new_for_query(connection, &query_id));
-        let session_control: Arc<dyn SessionControl> =
-            Arc::new(GarnetSessionControl::new(session_state));
+        let session_state = Arc::new(GarnetSessionState::new(connection));
+        let session_control = GarnetSessionControl::new(session_state);
 
-        let mut root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        let handle = root.root();
-        drop(root.child(&session_control).unwrap());
-        let result = root.commit().await;
-        assert!(result.is_err(), "commit after abort should return error");
-        assert_eq!(handle.outcome(), RootOutcome::RolledBack);
+        // Commit without begin should error
+        let result = session_control.commit().await;
+        assert!(result.is_err(), "commit without begin should return error");
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1500,11 +1383,8 @@ mod session {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
 
         result_index.clear().await.unwrap();
@@ -1512,8 +1392,7 @@ mod session {
         let result_key = ResultKey::InputHash(1);
         let result_owner = ResultOwner::Function(0);
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
 
         // Set, delete, then re-set within the same session
         result_index
@@ -1545,17 +1424,17 @@ mod session {
             other => panic!("expected Count(77), got {other:?}"),
         }
 
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Verify persisted value after commit
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
+        session_control.begin().await.unwrap();
         let acc = result_index.get(&result_key, &result_owner).await.unwrap();
         assert!(acc.is_some(), "should persist after commit");
         match acc.unwrap() {
             ValueAccumulator::Count { value } => assert_eq!(value, 77),
             other => panic!("expected Count(77), got {other:?}"),
         }
-        assert_rolled_back(root);
+        session_control.rollback().unwrap();
     }
 }
 
@@ -1608,7 +1487,7 @@ mod source_update_upsert {
 
 mod checkpoint_tests {
     use super::*;
-    use drasi_core::interface::{AccumulatorIndex, CheckpointStore, SessionGuard};
+    use drasi_core::interface::{AccumulatorIndex, CheckpointStore, SessionControl};
     use drasi_index_garnet::checkpoint::GarnetCheckpointStore;
 
     #[allow(clippy::unwrap_used)]
@@ -1619,17 +1498,13 @@ mod checkpoint_tests {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let subject = GarnetCheckpointStore::new(&query_id, connection, session_state);
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         shared_tests::sequence_counter::sequence_counter(&subject).await;
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1640,17 +1515,13 @@ mod checkpoint_tests {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let subject = GarnetCheckpointStore::new(&query_id, connection, session_state);
 
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         shared_tests::sequence_counter::checkpoint_round_trip(&subject).await;
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1661,17 +1532,13 @@ mod checkpoint_tests {
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            &query_id,
-        ));
-        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
         let subject = GarnetResultIndex::new(&query_id, connection, session_state);
 
         subject.clear().await.unwrap();
-        let root = SessionGuard::begin(session_control.clone()).await.unwrap();
-        root.mark_dirty().unwrap();
+        session_control.begin().await.unwrap();
         shared_tests::sequence_counter::result_sequence_counter(&subject).await;
-        root.commit().await.unwrap();
+        session_control.commit().await.unwrap();
     }
 }

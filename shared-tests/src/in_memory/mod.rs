@@ -17,9 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use drasi_core::{
-    in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{NoOpSessionControl, SessionControl},
-    query::QueryBuilder,
+    in_memory_index::in_memory_element_index::InMemoryElementIndex, query::QueryBuilder,
 };
 
 use crate::QueryTestConfig;
@@ -36,23 +34,15 @@ impl InMemoryQueryConfig {
 
 #[async_trait]
 impl QueryTestConfig for InMemoryQueryConfig {
-    async fn config_query_with_session(
-        &self,
-        builder: QueryBuilder,
-    ) -> (QueryBuilder, Arc<dyn SessionControl>) {
+    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder {
         log::info!("using in memory indexes");
         let mut element_index = InMemoryElementIndex::new();
         element_index.enable_archive();
         let element_index = Arc::new(element_index);
-        let session_control = Arc::new(NoOpSessionControl);
 
-        (
-            builder
-                .with_element_index(element_index.clone())
-                .with_archive_index(element_index)
-                .with_session_control(session_control.clone()),
-            session_control,
-        )
+        builder
+            .with_element_index(element_index.clone())
+            .with_archive_index(element_index.clone())
     }
 }
 
@@ -364,8 +354,7 @@ mod index {
     #[tokio::test]
     async fn future_queue_push_always() {
         let fqi = InMemoryFutureQueue::new();
-        let sc: Arc<dyn drasi_core::interface::SessionControl> =
-            Arc::new(NoOpSessionControl);
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
         index::future_queue::push_always(&fqi, &sc).await;
     }
@@ -373,8 +362,7 @@ mod index {
     #[tokio::test]
     async fn future_queue_push_not_exists() {
         let fqi = InMemoryFutureQueue::new();
-        let sc: Arc<dyn drasi_core::interface::SessionControl> =
-            Arc::new(NoOpSessionControl);
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
         index::future_queue::push_not_exists(&fqi, &sc).await;
     }
@@ -382,42 +370,16 @@ mod index {
     #[tokio::test]
     async fn future_queue_clear_removes_all() {
         let fqi = InMemoryFutureQueue::new();
-        let sc: Arc<dyn drasi_core::interface::SessionControl> =
-            Arc::new(NoOpSessionControl);
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
     #[tokio::test]
     async fn future_queue_push_overwrite() {
         let fqi = InMemoryFutureQueue::new();
-        let sc: Arc<dyn drasi_core::interface::SessionControl> =
-            Arc::new(NoOpSessionControl);
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
         index::future_queue::push_overwrite(&fqi, &sc).await;
-    }
-
-    #[tokio::test]
-    async fn future_queue_pop_due_respects_deadline() {
-        let fqi = InMemoryFutureQueue::new();
-        let sc: Arc<dyn drasi_core::interface::SessionControl> =
-            Arc::new(NoOpSessionControl);
-        index::future_queue::pop_due_respects_deadline(&fqi, &sc).await;
-    }
-
-    #[tokio::test]
-    async fn future_queue_equal_deadlines_preserve_tickets() {
-        let fqi = InMemoryFutureQueue::new();
-        let sc: Arc<dyn drasi_core::interface::SessionControl> =
-            Arc::new(NoOpSessionControl);
-        index::future_queue::equal_deadlines_preserve_tickets(&fqi, &sc).await;
-    }
-
-    #[tokio::test]
-    async fn future_queue_remove_preserves_other_occurrences() {
-        let fqi = InMemoryFutureQueue::new();
-        let sc: Arc<dyn drasi_core::interface::SessionControl> =
-            Arc::new(NoOpSessionControl);
-        index::future_queue::remove_preserves_other_occurrences(&fqi, &sc).await;
     }
 }
 

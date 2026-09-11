@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::evaluation::QueryExecutionError;
-
-use crate::interface::SessionError;
-
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -40,11 +36,11 @@ use crate::{
         QueryPartEvaluator,
     },
     interface::{
-        ElementIndex, FutureQueue, FutureQueueConsumer, IndexError, MiddlewareError, Provisional,
-        QueryClock, RootOutcome, SessionControl, SessionGuard,
+        ElementIndex, FutureQueue, FutureQueueConsumer, IndexError, MiddlewareError, QueryClock,
+        SessionControl, SessionGuard,
     },
     middleware::SourceMiddlewarePipelineCollection,
-    models::{Element, SourceChange, SourceInput},
+    models::{Element, SourceChange},
     path_solver::{
         match_path::{MatchPath, SlotElementSpec},
         solution::{MatchPathSolution, SolutionSignature},
@@ -141,38 +137,19 @@ impl ContinuousQuery {
         }
     }
 
-    /// Check whether the last root permits processing or needs recovery.
-    pub fn check_health(&self) -> Result<(), EvaluationError> {
-        if let Some(root) =
-            crate::interface::session_tracker(&self.session_control)?.current_root()?
-        {
-            match root.outcome() {
-                RootOutcome::RequiresRebuild | RootOutcome::Indeterminate => {
-                    return Err(EvaluationError::from(
-                        QueryExecutionError::QueryRequiresRebuild,
-                    ));
-                }
-                RootOutcome::Committing => {
-                    return Err(IndexError::other(SessionError::SessionBusy).into())
-                }
-                RootOutcome::Active | RootOutcome::Committed | RootOutcome::RolledBack => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Apply one source change and return its result changes.
-    ///
-    /// Variable-length MATCH prepares both snapshots before writing. Resource
-    /// failures during pure preparation can be retried. A complete transactional
-    /// rollback permits retry; dirty nontransactional or uncertain roots require recovery.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change(
         &self,
         change: SourceChange,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
-        self.process_source_change_with_hook(change, || async { Ok(()) })
-            .await
+        let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
+
+        let changes = self.execute_source_middleware(change).await?;
+        let result = self.process_changes_inner(changes).await?;
+
+        guard.commit().await?;
+        Ok(result)
     }
 
     /// Process a source change with a pre-commit hook that runs inside the session.
@@ -191,80 +168,14 @@ impl ContinuousQuery {
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = Result<(), IndexError>> + Send,
     {
-        self.process_source_change_with_result_hook(change, |_| pre_commit_hook())
-            .await
-    }
-
-    /// Process a source change with a hook that can serialize tentative results
-    /// into the transactional outbox. Publish only the returned committed results.
-    pub async fn process_source_change_with_result_hook<F, Fut>(
-        &self,
-        change: impl Into<SourceInput> + Send,
-        pre_commit_hook: F,
-    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError>
-    where
-        F: FnOnce(&[QueryPartEvaluationContext]) -> Fut + Send,
-        Fut: Future<Output = Result<(), IndexError>> + Send,
-    {
         let _lock = self.change_lock.lock().await;
-        self.check_health()?;
-        let mut root = SessionGuard::begin(self.session_control.clone()).await?;
-        let child = root.child(&self.session_control)?;
-        let result = self
-            .process_source_input_with_hook(change.into(), pre_commit_hook)
-            .await?;
-        let provisional = child.complete(result)?;
-        let receipt = root.commit_with_receipt().await?;
-        Ok(provisional.into_committed(&receipt)?)
-    }
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
-    /// Stage a change in an explicit parent root without committing that root.
-    pub async fn process_source_change_in(
-        &self,
-        parent: &mut SessionGuard,
-        change: impl Into<SourceInput> + Send,
-    ) -> Result<Provisional<Vec<QueryPartEvaluationContext>>, EvaluationError> {
-        self.process_source_change_in_with_hook(parent, change, |_| async { Ok(()) })
-            .await
-    }
-
-    /// Stage a source change and checkpoint/outbox writes in the same parent root.
-    ///
-    /// The hook sees tentative results only for staging. Do not publish them.
-    /// It must produce an owned future, for example by serializing results before
-    /// entering its async block. Results become publishable with the root's receipt.
-    pub async fn process_source_change_in_with_hook<F, Fut>(
-        &self,
-        parent: &mut SessionGuard,
-        change: impl Into<SourceInput> + Send,
-        pre_commit_hook: F,
-    ) -> Result<Provisional<Vec<QueryPartEvaluationContext>>, EvaluationError>
-    where
-        F: FnOnce(&[QueryPartEvaluationContext]) -> Fut + Send,
-        Fut: Future<Output = Result<(), IndexError>> + Send,
-    {
-        let _lock = self.change_lock.lock().await;
-        self.check_health()?;
-        let child = parent.child(&self.session_control)?;
-        let result = self
-            .process_source_input_with_hook(change.into(), pre_commit_hook)
-            .await?;
-        Ok(child.complete(result)?)
-    }
-
-    async fn process_source_input_with_hook<F, Fut>(
-        &self,
-        input: SourceInput,
-        pre_commit_hook: F,
-    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError>
-    where
-        F: FnOnce(&[QueryPartEvaluationContext]) -> Fut + Send,
-        Fut: Future<Output = Result<(), IndexError>> + Send,
-    {
-        let changes = self.prepare_source_input(input).await?;
+        let changes = self.execute_source_middleware(change).await?;
         let result = self.process_changes_inner(changes).await?;
-        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
-        pre_commit_hook(&result).await?;
+
+        pre_commit_hook().await?;
+        guard.commit().await?;
         Ok(result)
     }
 
@@ -273,72 +184,27 @@ impl ContinuousQuery {
     /// Returns `Ok(None)` when the queue is empty (stale peek).
     /// Returns `Ok(Some(DueFutureResult))` with results and the original source_id.
     ///
-    /// Pop is atomic with downstream writes when the session supports rollback.
-    /// Dirty nontransactional and indeterminate roots require recovery; a complete
-    /// rollback restores the popped item along with the downstream writes.
+    /// Pop happens inside the session → atomic with all downstream index writes.
+    /// If a crash occurs before commit, the pop rolls back and the item stays in the queue.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
-        self.process_due_futures_with_hook(|_| async { Ok(()) })
-            .await
-    }
-
-    /// Pop and evaluate a future, staging hook writes before the root commit.
-    pub async fn process_due_futures_with_hook<F, Fut>(
-        &self,
-        pre_commit_hook: F,
-    ) -> Result<Option<DueFutureResult>, EvaluationError>
-    where
-        F: FnOnce(&Option<DueFutureResult>) -> Fut + Send,
-        Fut: Future<Output = Result<(), IndexError>> + Send,
-    {
         let _lock = self.change_lock.lock().await;
-        self.check_health()?;
-        let mut root = SessionGuard::begin(self.session_control.clone()).await?;
-        let child = root.child(&self.session_control)?;
-        let result = self.process_due_futures_inner().await?;
-        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
-        pre_commit_hook(&result).await?;
-        let provisional = child.complete(result)?;
-        let receipt = root.commit_with_receipt().await?;
-        Ok(provisional.into_committed(&receipt)?)
-    }
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
-    pub async fn process_due_futures_in(
-        &self,
-        parent: &mut SessionGuard,
-    ) -> Result<Provisional<Option<DueFutureResult>>, EvaluationError> {
-        self.process_due_futures_in_with_hook(parent, |_| async { Ok(()) })
-            .await
-    }
-
-    /// Stage a future pop, evaluation, and hook in an explicit parent root.
-    pub async fn process_due_futures_in_with_hook<F, Fut>(
-        &self,
-        parent: &mut SessionGuard,
-        pre_commit_hook: F,
-    ) -> Result<Provisional<Option<DueFutureResult>>, EvaluationError>
-    where
-        F: FnOnce(&Option<DueFutureResult>) -> Fut + Send,
-        Fut: Future<Output = Result<(), IndexError>> + Send,
-    {
-        let _lock = self.change_lock.lock().await;
-        self.check_health()?;
-        let child = parent.child(&self.session_control)?;
-        let result = self.process_due_futures_inner().await?;
-        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
-        pre_commit_hook(&result).await?;
-        Ok(child.complete(result)?)
-    }
-
-    async fn process_due_futures_inner(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
-        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
-        let Some(entry) = self.future_queue.pop().await? else {
-            return Ok(None);
+        let future_ref = match self.future_queue.pop().await {
+            Ok(Some(fr)) => fr,
+            Ok(None) => {
+                guard.commit().await?;
+                return Ok(None);
+            }
+            Err(e) => return Err(EvaluationError::from(e)),
         };
-        let source_id = entry.element_ref.source_id.clone();
-        let results = self
-            .process_changes_inner(vec![SourceChange::Future { future_ref: entry }])
-            .await?;
+
+        let source_id = future_ref.element_ref.source_id.clone();
+        let change = SourceChange::Future { future_ref };
+        let changes = self.execute_source_middleware(change).await?;
+        let results = self.process_changes_inner(changes).await?;
+        guard.commit().await?;
         Ok(Some(DueFutureResult { results, source_id }))
     }
 
@@ -377,7 +243,6 @@ impl ContinuousQuery {
             for change in solution_changes.changes {
                 let solution_signature = change.signature;
                 let part_context = change.context;
-                crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
                 let change_results = match self
                     .project_solution(
                         part_context,
@@ -459,22 +324,16 @@ impl ContinuousQuery {
                 .await?;
                 match prepared.write {
                     super::variable_length::IndexWrite::Set(element, slots) => {
-                        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
                         self.element_index.set_element(&element, &slots).await?;
                     }
                     super::variable_length::IndexWrite::Delete(reference) => {
-                        crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
                         self.element_index.delete_element(&reference).await?;
                     }
                     super::variable_length::IndexWrite::None => {}
                 }
                 return Ok(prepared.solutions);
             }
-            Matcher::Fixed(fixed) => {
-                // Fixed-pattern expressions can call stateful functions before graph writes.
-                crate::interface::session_tracker(&self.session_control)?.mark_dirty()?;
-                fixed
-            }
+            Matcher::Fixed(fixed) => fixed,
         };
         let mut result = SolutionChangesResult::new();
         let mut before_change_solutions = HashMap::new();
@@ -842,28 +701,30 @@ impl ContinuousQuery {
     }
 
     #[tracing::instrument(skip_all, err, level = "debug")]
-    async fn prepare_source_input(
+    async fn execute_source_middleware(
         &self,
-        input: SourceInput,
+        change: SourceChange,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
-        let source_id = input.change.get_reference().source_id.clone();
-        let changes = match self.source_pipelines.get(source_id) {
-            Some(pipeline) => {
-                let index = Arc::new(crate::middleware::TrackedElementIndex {
-                    inner: self.element_index.clone(),
-                    tracker: crate::interface::session_tracker(&self.session_control)?,
-                });
-                pipeline.process(input.change, index).await?
-            }
-            None => vec![input.change],
+        let source_id = change.get_reference().source_id.clone();
+        let mut source_changes = vec![change];
+
+        let pipeline = match self.source_pipelines.get(source_id) {
+            Some(pipeline) => pipeline,
+            None => return Ok(source_changes),
         };
-        match input.normalizer {
-            Some(normalizer) => Ok(changes
-                .into_iter()
-                .map(|change| normalizer.normalize(change))
-                .collect()),
-            None => Ok(changes),
+
+        let mut new_source_changes = Vec::new();
+        for source_change in source_changes {
+            new_source_changes.append(
+                &mut pipeline
+                    .process(source_change, self.element_index.clone())
+                    .await?,
+            );
         }
+
+        source_changes = new_source_changes;
+
+        Ok(source_changes)
     }
 
     pub async fn set_future_consumer(&self, consumer: Arc<dyn FutureQueueConsumer>) {
@@ -895,15 +756,6 @@ impl ContinuousQuery {
                             Ok(None) => {
                                 tokio::time::sleep(idle_interval).await;
                                 continue;
-                            }
-                            Err(error) if error.session_error() == Some(SessionError::SessionBusy) => {
-                                tokio::time::sleep(idle_interval).await;
-                                continue;
-                            }
-                            Err(error) if error.session_error() == Some(SessionError::SessionFenced) => {
-                                log::error!("Future queue requires recovery: {error}");
-                                consumer.on_error(Box::new(error)).await;
-                                break;
                             }
                             Err(e) => {
                                 log::error!("Future queue consumer error: {e:?}");

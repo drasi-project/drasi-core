@@ -54,10 +54,6 @@ pub use result_index::ResultSequenceCounter;
 pub use session_control::NoOpSessionControl;
 pub use session_control::SessionControl;
 pub use session_control::SessionGuard;
-pub use session_control::{
-    session_tracker, CacheGeneration, ChildSession, CommitReceipt, Provisional, RollbackSupport,
-    RootHandle, RootId, RootOutcome, SessionError, SessionTracker,
-};
 pub use source_middleware::MiddlewareError;
 pub use source_middleware::MiddlewareSetupError;
 pub use source_middleware::SourceMiddleware;
@@ -122,13 +118,6 @@ impl Error for IndexError {
 }
 
 impl IndexError {
-    pub fn session_error(&self) -> Option<SessionError> {
-        match self {
-            Self::Other(error) => error.downcast_ref::<SessionError>().copied(),
-            _ => None,
-        }
-    }
-
     pub fn other<E: std::error::Error + Send + Sync + 'static>(e: E) -> Self {
         IndexError::Other(Box::new(e))
     }

@@ -27,8 +27,6 @@
 //! `stage_checkpoint` writes into the active `GarnetSessionState` write buffer
 //! so it commits atomically with index updates.
 
-use drasi_core::interface::SessionError;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -55,7 +53,6 @@ impl GarnetCheckpointStore {
         connection: MultiplexedConnection,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
-        session_state.register_query(query_id);
         Self {
             query_id: Arc::from(query_id),
             connection,
@@ -82,50 +79,6 @@ impl GarnetCheckpointStore {
     fn result_sequence_key(&self) -> String {
         format!("ss:{{{}}}:result_seq", self.query_id)
     }
-
-    async fn write_u64(&self, key: String, value: u64) -> Result<(), IndexError> {
-        {
-            let mut inner = self.session_state.lock()?;
-            if let Some(buffer) = inner.as_mut() {
-                buffer.string_set(key, value.to_string().into_bytes());
-                return Ok(());
-            }
-        }
-        self.session_state.ensure_recovered().await?;
-        self.connection
-            .clone()
-            .set::<_, _, ()>(key, value.to_string())
-            .await
-            .map_err(IndexError::other)
-    }
-
-    async fn read_u64(&self, key: String) -> Result<Option<u64>, IndexError> {
-        let staged = {
-            let inner = self.session_state.lock()?;
-            inner.as_ref().map(|buffer| buffer.string_get(&key))
-        };
-        match staged {
-            Some(BufferReadResult::Found(bytes)) => {
-                let value = String::from_utf8(bytes)
-                    .map_err(IndexError::other)?
-                    .parse()
-                    .map_err(IndexError::other)?;
-                Ok(Some(value))
-            }
-            Some(BufferReadResult::KeyDeleted) => Ok(None),
-            Some(BufferReadResult::NotInBuffer) | None => {
-                self.session_state.ensure_recovered().await?;
-                let value = self
-                    .connection
-                    .clone()
-                    .get::<_, Option<u64>>(key)
-                    .await
-                    .map_err(IndexError::other)?;
-                self.session_state.ensure_recovered().await?;
-                Ok(value)
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -142,24 +95,12 @@ impl CheckpointStore for GarnetCheckpointStore {
     ) -> Result<(), IndexError> {
         let sources_key = self.sources_key();
 
-        let staged_sources = {
-            let inner = self.session_state.lock()?;
-            inner
-                .as_ref()
-                .ok_or(IndexError::other(SessionError::InvalidSession))?
-                .string_get(&sources_key)
-        };
-        let redis_list: Option<String> = match staged_sources {
-            BufferReadResult::Found(bytes) => {
-                Some(String::from_utf8(bytes).map_err(IndexError::other)?)
-            }
-            BufferReadResult::KeyDeleted => None,
-            BufferReadResult::NotInBuffer => self
-                .connection
-                .clone()
-                .get::<_, Option<String>>(&sources_key)
+        // Pre-fetch sources list from Redis in case buffer doesn't have it
+        let redis_list: Option<String> = {
+            let mut con = self.connection.clone();
+            con.get::<&str, Option<String>>(&sources_key)
                 .await
-                .map_err(IndexError::other)?,
+                .map_err(IndexError::other)?
         };
 
         let mut guard = self.session_state.lock()?;
@@ -304,20 +245,50 @@ impl CheckpointStore for GarnetCheckpointStore {
     }
 
     async fn clear_checkpoints(&self) -> Result<(), IndexError> {
-        self.session_state
-            .clear(
-                &[self.sources_key(), self.config_hash_key()],
-                &[self.seq_key(""), self.pos_key("")],
-            )
+        // Read all sources to know which keys to delete
+        let all = self.read_all_checkpoints().await?;
+        let mut con = self.connection.clone();
+
+        for source_id in all.keys() {
+            let seq_key = self.seq_key(source_id);
+            let pos_key = self.pos_key(source_id);
+            con.del::<&str, ()>(&seq_key)
+                .await
+                .map_err(IndexError::other)?;
+            con.del::<&str, ()>(&pos_key)
+                .await
+                .map_err(IndexError::other)?;
+        }
+
+        let sources_key = self.sources_key();
+        con.del::<&str, ()>(&sources_key)
             .await
+            .map_err(IndexError::other)?;
+
+        let config_hash_key = self.config_hash_key();
+        con.del::<&str, ()>(&config_hash_key)
+            .await
+            .map_err(IndexError::other)?;
+
+        Ok(())
     }
 
     async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
-        self.write_u64(self.config_hash_key(), hash).await
+        let key = self.config_hash_key();
+        let mut con = self.connection.clone();
+        con.set::<&str, String, ()>(&key, hash.to_string())
+            .await
+            .map_err(IndexError::other)?;
+        Ok(())
     }
 
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
-        self.read_u64(self.config_hash_key()).await
+        let key = self.config_hash_key();
+        let mut con = self.connection.clone();
+        match con.get::<String, Option<u64>>(key).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(IndexError::other(e)),
+        }
     }
 
     async fn write_result_sequence(
@@ -325,10 +296,20 @@ impl CheckpointStore for GarnetCheckpointStore {
         _query_id: &str,
         sequence: u64,
     ) -> Result<(), IndexError> {
-        self.write_u64(self.result_sequence_key(), sequence).await
+        let key = self.result_sequence_key();
+        let mut con = self.connection.clone();
+        con.set::<&str, String, ()>(&key, sequence.to_string())
+            .await
+            .map_err(IndexError::other)?;
+        Ok(())
     }
 
     async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
-        self.read_u64(self.result_sequence_key()).await
+        let key = self.result_sequence_key();
+        let mut con = self.connection.clone();
+        match con.get::<String, Option<u64>>(key).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(IndexError::other(e)),
+        }
     }
 }

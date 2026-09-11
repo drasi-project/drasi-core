@@ -22,7 +22,6 @@ use drasi_core::{
         functions::FunctionRegistry,
         variable_value::VariableValue,
     },
-    interface::{RollbackSupport, RootOutcome, SessionGuard},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -630,76 +629,6 @@ pub async fn rejected_patterns(config: &(impl QueryTestConfig + Send)) {
     }
 }
 
-pub async fn nested_rollback_and_retry(config: &(impl QueryTestConfig + Send)) {
-    for pattern in ["[:R]", "[:R*1..2]"] {
-        let registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
-        let parser = Arc::new(CypherParser::new(registry.clone()));
-        let text = format!("MATCH (a:Start)-{pattern}->(b:End) RETURN count(b) AS paths");
-        let (builder, control) = config
-            .config_query_with_session(
-                QueryBuilder::new(&text, parser).with_function_registry(registry),
-            )
-            .await;
-        let query = builder.try_build().await.unwrap();
-        let mut root = SessionGuard::begin(control.clone()).await.unwrap();
-        let mut seeded = Vec::new();
-        for change in [node("a", "Start"), node("b", "End"), node("c", "End")] {
-            seeded.push(
-                query
-                    .process_source_change_in(&mut root, change)
-                    .await
-                    .unwrap(),
-            );
-        }
-        let committed = root.commit_with_receipt().await.unwrap();
-        let mut count = 0;
-        for result in seeded {
-            record_count(&mut count, result.into_committed(&committed).unwrap());
-        }
-        assert_eq!(count, 0);
-
-        let mut root = SessionGuard::begin(control.clone()).await.unwrap();
-        let first = query
-            .process_source_change_in(&mut root, relationship("first", "a", "b"))
-            .await
-            .unwrap();
-        let second = query
-            .process_source_change_in(&mut root, relationship("second", "a", "c"))
-            .await
-            .unwrap();
-        let outcome = root.root();
-        drop(root);
-        assert!(first.into_committed(&committed).is_err());
-        assert!(second.into_committed(&committed).is_err());
-
-        match control.rollback_support() {
-            RollbackSupport::None => {
-                assert_eq!(outcome.outcome(), RootOutcome::RequiresRebuild);
-                assert!(query.check_health().is_err());
-                assert!(query
-                    .process_source_change(relationship("first", "a", "b"))
-                    .await
-                    .is_err());
-            }
-            RollbackSupport::Complete => {
-                assert_eq!(outcome.outcome(), RootOutcome::RolledBack);
-                query.check_health().unwrap();
-                for (change, expected) in [
-                    (relationship("first", "a", "b"), 1),
-                    (relationship("second", "a", "c"), 2),
-                    (delete("first"), 1),
-                ] {
-                    record_count(
-                        &mut count,
-                        query.process_source_change(change).await.unwrap(),
-                    );
-                    assert_eq!(count, expected, "rollback retry for {pattern}");
-                }
-            }
-        }
-    }
-}
-
 pub async fn literal_object_lists(config: &(impl QueryTestConfig + Send)) {
     for repetition in ["", "*1"] {
         let query = build_query(
@@ -949,61 +878,6 @@ pub async fn shared_anchor_futures_count_each_path_once(config: &(impl QueryTest
         );
         assert_eq!(count, 1, "{pattern}");
         assert!(query.process_due_futures().await.unwrap().is_none());
-    }
-}
-
-pub async fn empty_groups_do_not_contribute_to_later_aggregates(
-    config: &(impl QueryTestConfig + Send),
-) {
-    for repetition in ["", "*1..2"] {
-        let query = build_query(
-            config,
-            &format!(
-                "MATCH (a:Start)-[:R{repetition}]->(b:End)
-                 WITH a, count(b) AS n
-                 RETURN count(CASE WHEN drasi.trueLater(true, 10) THEN a ELSE NULL END) AS paths"
-            ),
-        )
-        .await;
-        let mut count = 0;
-        for change in [
-            node("a", "Start"),
-            node("x", "Start"),
-            node("b", "End"),
-            relationship("ab", "a", "b"),
-            relationship("xb", "x", "b"),
-        ] {
-            record_count(
-                &mut count,
-                query.process_source_change(change).await.unwrap(),
-            );
-        }
-        while let Some(due) = query.process_due_futures().await.unwrap() {
-            record_count(&mut count, due.results);
-        }
-        assert_eq!(count, 2);
-        record_count(
-            &mut count,
-            query
-                .process_source_change(SourceChange::Delete {
-                    metadata: metadata("xb", "", 20),
-                })
-                .await
-                .unwrap(),
-        );
-        assert_eq!(count, 1, "an empty group must not count as another input");
-        record_count(
-            &mut count,
-            query
-                .process_source_change(relationship("xb", "x", "b"))
-                .await
-                .unwrap(),
-        );
-        assert_eq!(count, 1, "a recreated group waits for its own timer");
-        while let Some(due) = query.process_due_futures().await.unwrap() {
-            record_count(&mut count, due.results);
-        }
-        assert_eq!(count, 2);
     }
 }
 
@@ -1359,11 +1233,6 @@ macro_rules! variable_length_match_tests {
                 $crate::use_cases::variable_length_match::aggregated_multiplicity(&config).await;
             }
             #[tokio::test]
-            async fn nested_rollback_and_retry() {
-                let config = $config;
-                $crate::use_cases::variable_length_match::nested_rollback_and_retry(&config).await;
-            }
-            #[tokio::test]
             async fn rejected_patterns() {
                 let config = $config;
                 $crate::use_cases::variable_length_match::rejected_patterns(&config).await;
@@ -1395,14 +1264,6 @@ macro_rules! variable_length_match_tests {
             async fn shared_anchor_futures_count_each_path_once() {
                 let config = $config;
                 $crate::use_cases::variable_length_match::shared_anchor_futures_count_each_path_once(
-                    &config,
-                )
-                .await;
-            }
-            #[tokio::test]
-            async fn empty_groups_do_not_contribute_to_later_aggregates() {
-                let config = $config;
-                $crate::use_cases::variable_length_match::empty_groups_do_not_contribute_to_later_aggregates(
                     &config,
                 )
                 .await;

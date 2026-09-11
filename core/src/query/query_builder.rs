@@ -214,14 +214,12 @@ impl QueryBuilder {
             None => Arc::new(InMemoryFutureQueue::new()),
         };
 
+        let future_queue = Arc::new(ShadowedFutureQueue::new(future_queue));
+
         let session_control = match self.session_control.take() {
             Some(sc) => sc,
             None => Arc::new(NoOpSessionControl),
         };
-        let future_queue = Arc::new(ShadowedFutureQueue::new_with_session(
-            future_queue,
-            session_control.clone(),
-        ));
 
         let expr_evaluator = match self.expr_evaluator.take() {
             Some(evaluator) => evaluator,

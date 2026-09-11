@@ -84,10 +84,6 @@ impl ScalarFunction for FutureElement {
 
         let group_signature = context.get_input_grouping_hash();
 
-        if context.is_empty_group() {
-            return Ok(VariableValue::Null);
-        }
-
         if due_time <= context.get_realtime() {
             if !context.is_this_future_wake(group_signature) {
                 return Ok(VariableValue::Awaiting);

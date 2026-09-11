@@ -331,46 +331,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_request_includes_all_changes() {
-        let node_labels = HashSet::new();
-        let relation_labels = HashSet::new();
-
-        let node_event = drasi_core::models::Element::Node {
-            metadata: drasi_core::models::ElementMetadata {
-                reference: drasi_core::models::ElementReference::new("s1", "n1"),
-                labels: Arc::from(vec![Arc::from(ROAD_EVENT_LABEL)]),
-                effective_from: 0,
-            },
-            properties: drasi_core::models::ElementPropertyMap::new(),
-        };
-        let relation_event = drasi_core::models::Element::Relation {
-            metadata: drasi_core::models::ElementMetadata {
-                reference: drasi_core::models::ElementReference::new("s1", "r1"),
-                labels: Arc::from(vec![Arc::from(AFFECTS_ROAD_LABEL)]),
-                effective_from: 0,
-            },
-            properties: drasi_core::models::ElementPropertyMap::new(),
-            in_node: drasi_core::models::ElementReference::new("s1", "n1"),
-            out_node: drasi_core::models::ElementReference::new("s1", "n2"),
-        };
-
-        assert!(should_send_change(
-            &drasi_core::models::SourceChange::Insert {
-                element: node_event
-            },
-            &node_labels,
-            &relation_labels
-        ));
-        assert!(should_send_change(
-            &drasi_core::models::SourceChange::Insert {
-                element: relation_event
-            },
-            &node_labels,
-            &relation_labels
-        ));
-    }
-
-    #[test]
     fn label_constants_are_non_empty() {
         assert!(!ROAD_EVENT_LABEL.is_empty());
         assert!(!ROAD_LABEL.is_empty());

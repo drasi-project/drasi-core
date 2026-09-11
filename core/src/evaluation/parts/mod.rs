@@ -431,13 +431,12 @@ impl QueryPartEvaluator {
                         grouping: _,
                         aggregates: _,
                     } => {
-                        let mut snapshot_context = ExpressionEvaluationContext::from_before_change(
+                        let snapshot_context = ExpressionEvaluationContext::from_before_change(
                             &after,
                             SideEffects::Snapshot,
                             change_context,
                             part,
                         );
-                        snapshot_context.set_empty_group(default_after);
                         let mut grouping_keys = Vec::new();
                         Some(
                             self.project(
@@ -513,7 +512,6 @@ impl QueryPartEvaluator {
 
                 let mut after_context =
                     ExpressionEvaluationContext::from_after_change(&after, change_context, part);
-                after_context.set_empty_group(default_after);
 
                 if !should_apply {
                     after_context.set_side_effects(SideEffects::Snapshot);

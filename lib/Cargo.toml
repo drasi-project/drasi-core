@@ -113,7 +113,6 @@ serial_test = "3.0"
 pretty_assertions = "1.4"
 test-case = "3.3"
 drasi-index-rocksdb = { path = "../components/indexes/rocksdb" }
-drasi-bootstrap-scriptfile = { path = "../components/bootstrappers/scriptfile" }
 
 # Additional testing dependencies
 rstest = "0.18"

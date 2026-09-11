@@ -25,6 +25,7 @@ use redis::{aio::MultiplexedConnection, AsyncCommands, ToRedisArgs};
 use crate::{
     session_state::{BufferReadResult, GarnetSessionState},
     storage_models::{StoredFutureElementRef, StoredFutureElementRefWithContext},
+    ClearByPattern,
 };
 
 /// Redis key structure (hash-tagged for cluster compatibility):
@@ -44,7 +45,6 @@ impl GarnetFutureQueue {
         connection: MultiplexedConnection,
         session_state: Arc<GarnetSessionState>,
     ) -> Self {
-        session_state.register_query(query_id);
         Self {
             query_id: Arc::from(query_id),
             connection,
@@ -368,49 +368,34 @@ impl FutureQueue for GarnetFutureQueue {
         Ok(head.map(|h| (&h).into()))
     }
 
+    /// peek_due_time runs outside the session. No buffer awareness needed.
     async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
         let mut con = self.connection.clone();
-        let queue_key = self.get_queue_key();
-        let result: Vec<(StoredFutureElementRefWithContext, f64)> =
-            match con.zrangebyscore_withscores(&queue_key, 0, "+inf").await {
-                Ok(v) => v,
-                Err(e) => return Err(IndexError::other(e)),
-            };
+        let result: Vec<(StoredFutureElementRefWithContext, f64)> = match con
+            .zrangebyscore_limit_withscores(self.get_queue_key(), 0, "+inf", 0, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return Err(IndexError::other(e)),
+        };
 
-        let guard = self.session_state.lock()?;
-        let deltas = guard
-            .as_ref()
-            .map(|buffer| buffer.zset_get_deltas(&queue_key));
-        let mut due_times = Vec::new();
-        match deltas {
-            Some(BufferReadResult::KeyDeleted) => return Ok(None),
-            Some(BufferReadResult::Found(deltas)) => {
-                if !deltas.full_replace {
-                    for (member, score) in result {
-                        let encoded =
-                            member.to_redis_args().into_iter().next().ok_or_else(|| {
-                                IndexError::other(std::io::Error::other("empty redis args"))
-                            })?;
-                        if !deltas.removed.contains(&encoded) {
-                            due_times.push(*deltas.added.get(&encoded).unwrap_or(&score) as u64);
-                        }
-                    }
-                }
-                due_times.extend(deltas.added.values().map(|score| *score as u64));
-            }
-            Some(BufferReadResult::NotInBuffer) | None => {
-                due_times.extend(result.into_iter().map(|(_, score)| score as u64));
-            }
+        if result.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(result[0].1 as u64))
         }
-        Ok(due_times.into_iter().min())
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
-        self.session_state
-            .clear(
-                &[self.get_queue_key()],
-                &[format!("fqi:{{{}}}:", self.query_id)],
-            )
+        // Delete the main queue sorted set key (not matched by the :* pattern below)
+        let mut con = self.connection.clone();
+        let _: () = con
+            .del(self.get_queue_key())
+            .await
+            .map_err(IndexError::other)?;
+        // Delete secondary index keys
+        self.connection
+            .clear(format!("fqi:{{{}}}:*", self.query_id))
             .await
     }
 }

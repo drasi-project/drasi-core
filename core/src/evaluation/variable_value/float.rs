@@ -62,10 +62,6 @@ impl Hash for Float {
 }
 
 impl Float {
-    pub(crate) fn to_bits(&self) -> u64 {
-        self.value.to_bits()
-    }
-
     #[inline]
     pub fn is_f64(&self) -> bool {
         self.value.is_finite()

@@ -24,9 +24,9 @@ use drasi_query_cypher::CypherParser;
 use serde_json::json;
 
 use crate::{
-    evaluation::{functions::FunctionRegistry, EvaluationError},
+    evaluation::functions::FunctionRegistry,
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{ElementIndex, IndexError, QueryBuilderError},
+    interface::{ElementIndex, QueryBuilderError},
     middleware::MiddlewareTypeRegistry,
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -171,92 +171,6 @@ async fn variable_length_limits_fail_before_writes_and_allow_retry() {
         .process_source_change(SourceChange::Insert { element: node("c") })
         .await
         .is_ok());
-}
-
-#[tokio::test]
-async fn variable_length_projection_failure_requires_reconstruction() {
-    let query = QueryBuilder::new("MATCH (a)-[:R*1]->(b) RETURN 1 / 0 AS value", parser())
-        .build()
-        .await;
-    for element in [node("a"), node("b")] {
-        query
-            .process_source_change(SourceChange::Insert { element })
-            .await
-            .unwrap();
-    }
-    assert!(matches!(
-        query
-            .process_source_change(SourceChange::Insert {
-                element: edge("r", "a", "b")
-            })
-            .await,
-        Err(EvaluationError::DivideByZero)
-    ));
-    assert!(matches!(
-        query
-            .process_source_change(SourceChange::Insert { element: node("c") })
-            .await,
-        Err(error) if error.execution_error() == Some(&QueryExecutionError::QueryRequiresRebuild)
-    ));
-}
-
-#[tokio::test]
-async fn variable_length_hook_failure_requires_reconstruction() {
-    let query = QueryBuilder::new("MATCH (a)-[:R*1]->(b) RETURN a", parser())
-        .build()
-        .await;
-    assert!(matches!(
-        query
-            .process_source_change_with_hook(
-                SourceChange::Insert { element: node("a") },
-                || async { Err(IndexError::IOError) },
-            )
-            .await,
-        Err(EvaluationError::IndexError(IndexError::IOError))
-    ));
-    assert!(matches!(
-        query
-            .process_source_change(SourceChange::Insert { element: node("b") })
-            .await,
-        Err(error) if error.execution_error() == Some(&QueryExecutionError::QueryRequiresRebuild)
-    ));
-}
-
-#[tokio::test]
-async fn variable_length_popped_future_failure_requires_reconstruction() {
-    let query = QueryBuilder::new(
-        "MATCH (a)-[:R*1]->(b) WHERE drasi.trueLater(true, 10) RETURN a",
-        parser(),
-    )
-    .build()
-    .await;
-    for element in [node("a"), node("b"), edge("r", "a", "b")] {
-        assert!(query
-            .process_source_change(SourceChange::Insert { element })
-            .await
-            .unwrap()
-            .is_empty());
-    }
-    assert_eq!(
-        query.future_queue().peek_due_time().await.unwrap(),
-        Some(10)
-    );
-    assert!(matches!(
-        query
-            .process_due_futures_with_hook(|due| {
-                assert!(
-                    due.is_some(),
-                    "A real retained input must be popped before the failure"
-                );
-                async { Err(IndexError::IOError) }
-            })
-            .await,
-        Err(EvaluationError::IndexError(IndexError::IOError))
-    ));
-    assert!(matches!(
-        query.process_due_futures().await,
-        Err(error) if error.execution_error() == Some(&QueryExecutionError::QueryRequiresRebuild)
-    ));
 }
 
 struct LegacyParser;

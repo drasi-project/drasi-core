@@ -57,8 +57,6 @@ pub enum EvaluationError {
 pub enum QueryExecutionError {
     #[error("variable-length MATCH exceeded {resource} limit {limit}")]
     MatchResourceLimit { resource: &'static str, limit: u64 },
-    #[error("the query and its indexes require rebuilding")]
-    QueryRequiresRebuild,
     #[error("Variable-length MATCH: {0}")]
     InvalidVariableLengthMatch(String),
 }

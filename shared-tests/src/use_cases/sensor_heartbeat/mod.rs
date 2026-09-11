@@ -763,17 +763,14 @@ pub async fn percent_not_reported(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(value_rel.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(
-            result[0].data_eq(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(100.0))
-                ),
-                after: variablemap!(
-                    "percent_not_reporting" => VariableValue::from(json!(50.0))
-                ),
-                row_signature: IGNORED_ROW_SIGNATURE,
-            }),
-            "actual output: {result:?}"
-        );
+        assert!(result[0].data_eq(&QueryPartEvaluationContext::Updating {
+            before: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(100.0))
+            ),
+            after: variablemap!(
+                "percent_not_reporting" => VariableValue::from(json!(50.0))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
     }
 }

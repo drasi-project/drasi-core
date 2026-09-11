@@ -131,11 +131,7 @@ impl IndexBackendPlugin for GarnetIndexProvider {
             .await
             .map_err(IndexError::connection_failed)?;
 
-        let session_state = Arc::new(GarnetSessionState::new_for_query(
-            connection.clone(),
-            query_id,
-        ));
-        session_state.ensure_recovered().await?;
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
 
         let element_index = Arc::new(GarnetElementIndex::new(
@@ -157,18 +153,10 @@ impl IndexBackendPlugin for GarnetIndexProvider {
         let checkpoint_store = Arc::new(GarnetCheckpointStore::new(
             query_id,
             connection.clone(),
-            session_state.clone(),
-        ));
-        let outbox_writer = Arc::new(GarnetOutboxWriter::new_with_session(
-            query_id,
-            connection.clone(),
-            session_state.clone(),
-        ));
-        let live_results_writer = Arc::new(GarnetLiveResultsWriter::new_with_session(
-            query_id,
-            connection,
             session_state,
         ));
+        let outbox_writer = Arc::new(GarnetOutboxWriter::new(query_id, connection.clone()));
+        let live_results_writer = Arc::new(GarnetLiveResultsWriter::new(query_id, connection));
 
         Ok(CreatedIndexes {
             set: IndexSet {

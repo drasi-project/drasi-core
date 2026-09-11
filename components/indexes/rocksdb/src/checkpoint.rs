@@ -23,8 +23,8 @@
 //! - `config_hash` → 8-byte big-endian `u64`
 //!
 //! `stage_checkpoint` writes into the active session transaction so it commits
-//! atomically with index updates. Clears, config hashes and result sequences
-//! use the active transaction when present, including read-your-writes.
+//! atomically with index updates. All other methods (reads, config hash,
+//! clear) operate directly on the DB without requiring an active session.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,49 +68,6 @@ pub struct RocksDbCheckpointStore {
 impl RocksDbCheckpointStore {
     pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
         Self { db, session_state }
-    }
-
-    async fn write_u64(&self, key: Vec<u8>, value: u64) -> Result<(), IndexError> {
-        let db = self.db.clone();
-        let session = self.session_state.operation()?;
-        task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(STREAM_STATE_CF)
-                .ok_or(IndexError::CorruptedData)?;
-            session.with_txn_or_db(
-                |txn| {
-                    txn.put_cf(&cf, &key, value.to_be_bytes())
-                        .map_err(IndexError::other)
-                },
-                |db| {
-                    db.put_cf(&cf, &key, value.to_be_bytes())
-                        .map_err(IndexError::other)
-                },
-            )
-        })
-        .await
-        .map_err(IndexError::other)?
-    }
-
-    async fn read_u64(&self, key: Vec<u8>) -> Result<Option<u64>, IndexError> {
-        let db = self.db.clone();
-        let session = self.session_state.operation()?;
-        task::spawn_blocking(move || {
-            let cf = db
-                .cf_handle(STREAM_STATE_CF)
-                .ok_or(IndexError::CorruptedData)?;
-            let data = session.with_txn_or_db(
-                |txn| txn.get_cf(&cf, &key).map_err(IndexError::other),
-                |db| db.get_cf(&cf, &key).map_err(IndexError::other),
-            )?;
-            data.map(|value| {
-                let bytes: [u8; 8] = value.try_into().map_err(|_| IndexError::CorruptedData)?;
-                Ok(u64::from_be_bytes(bytes))
-            })
-            .transpose()
-        })
-        .await
-        .map_err(IndexError::other)?
     }
 }
 
@@ -193,7 +150,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.operation()?;
+        let session_state = self.session_state.clone();
         let source_id = source_id.to_string();
         let source_position_owned = source_position.map(|b| b.to_vec());
 
@@ -232,7 +189,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
         source_id: &str,
     ) -> Result<Option<SourceCheckpoint>, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.operation()?;
+        let session_state = self.session_state.clone();
         let source_id = source_id.to_string();
 
         let task = task::spawn_blocking(move || {
@@ -269,7 +226,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
     async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.operation()?;
+        let session_state = self.session_state.clone();
 
         let task = task::spawn_blocking(move || {
             let cf = db
@@ -301,39 +258,143 @@ impl CheckpointStore for RocksDbCheckpointStore {
     }
 
     async fn clear_checkpoints(&self) -> Result<(), IndexError> {
-        let session = self.session_state.operation()?;
-        task::spawn_blocking(move || {
-            session.clear_ranges(
-                &[
-                    (STREAM_STATE_CF, SOURCE_SEQUENCE_PREFIX.as_bytes()),
-                    (STREAM_STATE_CF, SOURCE_POSITION_PREFIX.as_bytes()),
-                ],
-                &[(STREAM_STATE_CF, CONFIG_HASH_KEY.as_bytes())],
-            )
-        })
-        .await
-        .map_err(IndexError::other)?
+        let db = self.db.clone();
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+
+            // Delete all source_sequence: keys
+            let seq_prefix = SOURCE_SEQUENCE_PREFIX.as_bytes();
+            let keys_to_delete: Vec<Vec<u8>> = db
+                .prefix_iterator_cf(&cf, seq_prefix)
+                .take_while(|item| {
+                    item.as_ref()
+                        .map(|(k, _)| k.starts_with(seq_prefix))
+                        .unwrap_or(false)
+                })
+                .filter_map(|item| item.ok().map(|(k, _)| k.to_vec()))
+                .collect();
+
+            for key in &keys_to_delete {
+                db.delete_cf(&cf, key).map_err(IndexError::other)?;
+            }
+
+            // Delete all source_position: keys
+            let pos_prefix = SOURCE_POSITION_PREFIX.as_bytes();
+            let keys_to_delete: Vec<Vec<u8>> = db
+                .prefix_iterator_cf(&cf, pos_prefix)
+                .take_while(|item| {
+                    item.as_ref()
+                        .map(|(k, _)| k.starts_with(pos_prefix))
+                        .unwrap_or(false)
+                })
+                .filter_map(|item| item.ok().map(|(k, _)| k.to_vec()))
+                .collect();
+
+            for key in &keys_to_delete {
+                db.delete_cf(&cf, key).map_err(IndexError::other)?;
+            }
+
+            // Delete config hash
+            db.delete_cf(&cf, CONFIG_HASH_KEY)
+                .map_err(IndexError::other)?;
+
+            Ok(())
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
     }
 
     async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
-        self.write_u64(CONFIG_HASH_KEY.as_bytes().to_vec(), hash)
-            .await
+        let db = self.db.clone();
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+
+            db.put_cf(&cf, CONFIG_HASH_KEY, hash.to_be_bytes())
+                .map_err(IndexError::other)?;
+            Ok(())
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
     }
 
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
-        self.read_u64(CONFIG_HASH_KEY.as_bytes().to_vec()).await
+        let db = self.db.clone();
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+
+            let data = db.get_cf(&cf, CONFIG_HASH_KEY).map_err(IndexError::other)?;
+            match data {
+                Some(v) => {
+                    let bytes: [u8; 8] = v.try_into().map_err(|_| IndexError::CorruptedData)?;
+                    Ok(Some(u64::from_be_bytes(bytes)))
+                }
+                None => Ok(None),
+            }
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
     }
 
     async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
-        self.write_u64(
-            format!("{RESULT_SEQUENCE_PREFIX}{query_id}").into_bytes(),
-            sequence,
-        )
-        .await
+        let db = self.db.clone();
+        let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+            db.put_cf(&cf, &key, sequence.to_be_bytes())
+                .map_err(IndexError::other)
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
     }
 
     async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
-        self.read_u64(format!("{RESULT_SEQUENCE_PREFIX}{query_id}").into_bytes())
-            .await
+        let db = self.db.clone();
+        let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+            let data = db.get_cf(&cf, &key).map_err(IndexError::other)?;
+            match data {
+                Some(v) => {
+                    let bytes: [u8; 8] = v
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| IndexError::CorruptedData)?;
+                    Ok(Some(u64::from_be_bytes(bytes)))
+                }
+                None => Ok(None),
+            }
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
     }
 }
