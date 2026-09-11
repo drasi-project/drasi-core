@@ -718,8 +718,11 @@ impl TemporalRuntime {
         if !part.grouped
             || part.projection.iter().any(|expression| {
                 expression.effects.iter().any(|effect| {
-                    let effect = self.effect(effect);
-                    effect.is_temporal() && effect != FunctionEffect::SlidingWindow
+                    self.registry
+                        .get_function(&effect.name)
+                        .is_some_and(|function| {
+                            function.effect().is_temporal() && !function.is_lazy_temporal()
+                        })
                 })
             })
         {
@@ -745,6 +748,12 @@ impl TemporalRuntime {
         self.registry
             .get_function(&expression.name)
             .map_or(FunctionEffect::Pure, |function| function.effect())
+    }
+
+    fn is_lazy_temporal(&self, expression: &FunctionExpression) -> bool {
+        self.registry
+            .get_function(&expression.name)
+            .is_some_and(|function| function.is_lazy_temporal())
     }
 
     async fn settle_expression(
@@ -810,7 +819,7 @@ impl TemporalRuntime {
         let windows: BTreeSet<_> = program
             .effects
             .iter()
-            .filter(|expression| self.effect(expression) == FunctionEffect::SlidingWindow)
+            .filter(|expression| self.is_lazy_temporal(expression))
             .map(|expression| FunctionSite {
                 part: part.id,
                 position_in_query: expression.position_in_query,
@@ -995,18 +1004,16 @@ impl TemporalRuntime {
                 .captured
                 .clone();
             for capture in captures.into_values() {
-                if !capture.effect.is_temporal() {
+                let function = self
+                    .registry
+                    .get_function(&capture.expression.name)
+                    .ok_or_else(|| {
+                        EvaluationError::UnknownFunction(capture.expression.name.to_string())
+                    })?;
+                if !function.effect().is_temporal() {
                     return Err(EvaluationError::CorruptData);
                 }
-                let state = match capture.effect {
-                    FunctionEffect::TrueFor => {
-                        Some(FunctionState::TrueFor(TrueForState::default()))
-                    }
-                    FunctionEffect::PreviousValue | FunctionEffect::PreviousDistinctValue => {
-                        Some(FunctionState::UninitializedHistory)
-                    }
-                    _ => None,
-                };
+                let state = function.initial_temporal_state();
                 let id = if let Some(state) = state {
                     let (aggregate, free) = expression_dependencies(
                         &Expression::FunctionExpression(capture.expression.clone()),
@@ -1027,8 +1034,13 @@ impl TemporalRuntime {
                     None
                 };
                 let cell = id.as_ref().and_then(|id| work.cells.get_mut(id));
-                let settled =
-                    settle_function(&capture, &mut row.input, cell, event.revision.is_some())?;
+                let settled = settle_function(
+                    function.as_ref(),
+                    &capture,
+                    &mut row.input,
+                    cell,
+                    event.revision.is_some(),
+                )?;
                 row.frame
                     .lock()
                     .map_err(|_| EvaluationError::CorruptData)?

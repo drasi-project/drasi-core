@@ -16,9 +16,12 @@ use std::sync::Arc;
 
 use crate::evaluation::context::SideEffects;
 use crate::evaluation::functions::ScalarFunction;
+use crate::evaluation::temporal::runtime::frame::CapturedCall;
+use crate::evaluation::temporal::runtime::functions::{settle_true_until, SettledFunction};
+use crate::evaluation::temporal::{FunctionCell, RetainedInput};
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::ExpressionEvaluationContext;
-use crate::evaluation::{FunctionError, FunctionEvaluationError};
+use crate::evaluation::{EvaluationError, FunctionError, FunctionEvaluationError};
 use crate::interface::{FutureQueue, PushType};
 use async_trait::async_trait;
 use chrono::NaiveTime;
@@ -37,7 +40,17 @@ impl TrueUntil {
 #[async_trait]
 impl ScalarFunction for TrueUntil {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::TrueUntil
+        super::super::FunctionEffect::Temporal
+    }
+
+    fn settle_temporal(
+        &self,
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        _cell: Option<&mut FunctionCell>,
+        _capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        settle_true_until(captured, input)
     }
 
     async fn call(

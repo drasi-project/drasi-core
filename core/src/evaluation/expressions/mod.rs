@@ -1659,9 +1659,8 @@ impl ExpressionEvaluator {
                         .map_err(EvaluationError::FunctionError)?
                 }
                 Function::LazyScalar(scalar) => {
-                    if let Some(temporal) = context
-                        .temporal()
-                        .filter(|_| scalar.effect() == FunctionEffect::SlidingWindow)
+                    if let Some(temporal) =
+                        context.temporal().filter(|_| scalar.effect().is_temporal())
                     {
                         if expression.args.len() != 2 {
                             return Err(EvaluationError::InvalidArgument);

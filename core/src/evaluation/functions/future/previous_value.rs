@@ -19,10 +19,13 @@ use std::sync::Weak;
 use crate::evaluation::context::SideEffects;
 use crate::evaluation::functions::aggregation::ValueAccumulator;
 use crate::evaluation::functions::ScalarFunction;
+use crate::evaluation::temporal::runtime::frame::CapturedCall;
+use crate::evaluation::temporal::runtime::functions::{settle_history, SettledFunction};
+use crate::evaluation::temporal::{FunctionCell, FunctionState, RetainedInput};
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::ExpressionEvaluationContext;
 use crate::evaluation::ExpressionEvaluator;
-use crate::evaluation::{FunctionError, FunctionEvaluationError};
+use crate::evaluation::{EvaluationError, FunctionError, FunctionEvaluationError};
 use crate::interface::ResultIndex;
 use crate::interface::ResultOwner;
 use crate::models::ElementValue;
@@ -49,7 +52,21 @@ impl PreviousValue {
 #[async_trait]
 impl ScalarFunction for PreviousValue {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::PreviousValue
+        super::super::FunctionEffect::Temporal
+    }
+
+    fn initial_temporal_state(&self) -> Option<FunctionState> {
+        Some(FunctionState::UninitializedHistory)
+    }
+
+    fn settle_temporal(
+        &self,
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        cell: Option<&mut FunctionCell>,
+        capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        settle_history(captured, input, cell, capture_history, false)
     }
 
     async fn call(

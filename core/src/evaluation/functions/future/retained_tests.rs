@@ -24,7 +24,7 @@ use crate::{
             fixtures,
             runtime::{
                 frame::CapturedCall,
-                functions::{settle_function, SettledFunction},
+                functions::{settle_true_now_or_later, SettledFunction},
             },
             ClockStamp, ContributionKey, Generation, RetainedInput,
         },
@@ -49,17 +49,14 @@ fn registry() -> FunctionRegistry {
 }
 
 const DECLARATIONS: [(&str, FunctionEffect); 8] = [
-    ("drasi.future", FunctionEffect::Future),
-    ("drasi.trueUntil", FunctionEffect::TrueUntil),
-    ("drasi.trueFor", FunctionEffect::TrueFor),
-    ("drasi.trueLater", FunctionEffect::TrueLater),
-    ("drasi.trueNowOrLater", FunctionEffect::TrueNowOrLater),
-    ("drasi.previousValue", FunctionEffect::PreviousValue),
-    (
-        "drasi.previousDistinctValue",
-        FunctionEffect::PreviousDistinctValue,
-    ),
-    ("drasi.slidingWindow", FunctionEffect::SlidingWindow),
+    ("drasi.future", FunctionEffect::Temporal),
+    ("drasi.trueUntil", FunctionEffect::Temporal),
+    ("drasi.trueFor", FunctionEffect::Temporal),
+    ("drasi.trueLater", FunctionEffect::Temporal),
+    ("drasi.trueNowOrLater", FunctionEffect::Temporal),
+    ("drasi.previousValue", FunctionEffect::Temporal),
+    ("drasi.previousDistinctValue", FunctionEffect::Temporal),
+    ("drasi.slidingWindow", FunctionEffect::Temporal),
 ];
 
 #[test]
@@ -69,11 +66,8 @@ fn temporal_declarations_have_exact_effects_and_call_kinds() {
     for (name, expected) in DECLARATIONS {
         let function = registry.get_function(name).unwrap();
         assert_eq!(function.effect(), expected, "{name}");
-        if expected == FunctionEffect::SlidingWindow {
-            assert!(
-                matches!(function.as_ref(), Function::LazyScalar(_)),
-                "{name}"
-            );
+        if name == "drasi.slidingWindow" {
+            assert!(function.is_lazy_temporal(), "{name}");
         } else {
             assert!(matches!(function.as_ref(), Function::Scalar(_)), "{name}");
         }
@@ -148,7 +142,7 @@ fn test_true_now_or_later_invalid_args_count() {
     ] {
         let (captured, mut input) = capture(arguments, 0, 0);
         assert_function_error(
-            settle_function(&captured, &mut input, None, true),
+            settle_true_now_or_later(&captured, &input),
             FunctionEvaluationError::InvalidArgumentCount,
         );
     }
@@ -161,7 +155,7 @@ fn test_true_now_or_later_condition_true() {
         0,
         0,
     );
-    let result = settle_function(&captured, &mut input, None, true).unwrap();
+    let result = settle_true_now_or_later(&captured, &input).unwrap();
     assert_eq!(result.value, VariableValue::Bool(true));
     assert!(result.tickets.is_empty());
 }
@@ -173,7 +167,7 @@ fn test_true_now_or_later_due_time_passed() {
         800,
         1000,
     );
-    let result = settle_function(&captured, &mut input, None, true).unwrap();
+    let result = settle_true_now_or_later(&captured, &input).unwrap();
     assert_eq!(result.value, VariableValue::Bool(false));
     assert!(result.tickets.is_empty());
 }
@@ -185,7 +179,7 @@ fn test_true_now_or_later_schedule_future() {
         1000,
         1200,
     );
-    let result = settle_function(&captured, &mut input, None, true).unwrap();
+    let result = settle_true_now_or_later(&captured, &input).unwrap();
     assert_eq!(result.value, VariableValue::Awaiting);
     assert_requested_ticket(&result, &captured, 1000, 1500);
     assert!(input.tickets.is_empty());
@@ -207,7 +201,7 @@ fn test_true_now_or_later_with_date() {
         1000,
         2000,
     );
-    let result = settle_function(&captured, &mut input, None, true).unwrap();
+    let result = settle_true_now_or_later(&captured, &input).unwrap();
     assert_eq!(result.value, VariableValue::Awaiting);
     assert_requested_ticket(&result, &captured, 1000, expected_timestamp);
 }
@@ -220,7 +214,7 @@ fn test_true_now_or_later_invalid_condition_type() {
         0,
     );
     assert_function_error(
-        settle_function(&captured, &mut input, None, true),
+        settle_true_now_or_later(&captured, &input),
         FunctionEvaluationError::InvalidArgument(0),
     );
 }
@@ -232,7 +226,7 @@ fn test_true_now_or_later_null_arguments() {
         vec![VariableValue::Bool(false), VariableValue::Null],
     ] {
         let (captured, mut input) = capture(arguments, 0, 0);
-        let result = settle_function(&captured, &mut input, None, true).unwrap();
+        let result = settle_true_now_or_later(&captured, &input).unwrap();
         assert_eq!(result.value, VariableValue::Null);
         assert!(result.tickets.is_empty());
     }
@@ -248,7 +242,7 @@ fn retained_input_can_schedule_without_an_anchor() {
         );
         captured.context.anchor = None;
         input.context.anchor = None;
-        let result = settle_function(&captured, &mut input, None, true).unwrap();
+        let result = settle_true_now_or_later(&captured, &input).unwrap();
         if condition {
             assert_eq!(result.value, VariableValue::Bool(true));
             assert!(result.tickets.is_empty());
@@ -292,7 +286,7 @@ fn capture(
             args: Vec::new(),
             position_in_query: 10,
         },
-        effect: FunctionEffect::TrueNowOrLater,
+        effect: FunctionEffect::Temporal,
         arguments,
         key: ContributionKey::InputHash(input.context.input_grouping_hash),
         context: input.context.clone(),

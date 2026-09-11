@@ -18,7 +18,7 @@ use chrono::NaiveTime;
 
 use crate::{
     evaluation::{
-        functions::FunctionEffect,
+        functions::Function,
         temporal::{
             FunctionCall, FunctionCell, FunctionCellId, FunctionState, Generation, HistoryCapture,
             HistoryState, PredicateState, RetainedInput, TemporalStateError,
@@ -49,39 +49,64 @@ pub struct SettledFunction {
 }
 
 pub fn settle_function(
+    function: &Function,
     captured: &CapturedCall,
     input: &mut RetainedInput,
     cell: Option<&mut FunctionCell>,
     capture_history: bool,
 ) -> Result<SettledFunction, EvaluationError> {
-    match captured.effect {
-        FunctionEffect::TrueFor => settle_true_for(captured, input, cell),
-        FunctionEffect::PreviousValue | FunctionEffect::PreviousDistinctValue => settle_history(
-            captured,
-            input,
-            cell,
-            capture_history,
-            captured.effect == FunctionEffect::PreviousDistinctValue,
-        ),
-        FunctionEffect::SlidingWindow => settle_window(captured, input),
-        FunctionEffect::Future
-        | FunctionEffect::TrueLater
-        | FunctionEffect::TrueUntil
-        | FunctionEffect::TrueNowOrLater => settle_at(captured, input, captured.effect),
-        FunctionEffect::Pure | FunctionEffect::Aggregate => Err(EvaluationError::from(
+    if !function.effect().is_temporal() {
+        return Err(EvaluationError::from(
             QueryExecutionError::UnsupportedTemporalEffect("non-temporal function settlement"),
-        )),
+        ));
     }
+    function.settle_temporal(captured, input, cell, capture_history)
 }
 
-fn settle_at(
+#[derive(Clone, Copy)]
+enum DeadlineSettle {
+    Future,
+    Later,
+    Until,
+    NowOrLater,
+}
+
+pub(crate) fn settle_future(
     captured: &CapturedCall,
     input: &RetainedInput,
-    function: FunctionEffect,
+) -> Result<SettledFunction, EvaluationError> {
+    settle_deadline(captured, input, DeadlineSettle::Future)
+}
+
+pub(crate) fn settle_true_later(
+    captured: &CapturedCall,
+    input: &RetainedInput,
+) -> Result<SettledFunction, EvaluationError> {
+    settle_deadline(captured, input, DeadlineSettle::Later)
+}
+
+pub(crate) fn settle_true_until(
+    captured: &CapturedCall,
+    input: &RetainedInput,
+) -> Result<SettledFunction, EvaluationError> {
+    settle_deadline(captured, input, DeadlineSettle::Until)
+}
+
+pub(crate) fn settle_true_now_or_later(
+    captured: &CapturedCall,
+    input: &RetainedInput,
+) -> Result<SettledFunction, EvaluationError> {
+    settle_deadline(captured, input, DeadlineSettle::NowOrLater)
+}
+
+fn settle_deadline(
+    captured: &CapturedCall,
+    input: &RetainedInput,
+    kind: DeadlineSettle,
 ) -> Result<SettledFunction, EvaluationError> {
     require_arguments(captured, 2)?;
     let value = &captured.arguments[0];
-    if function == FunctionEffect::Future {
+    if matches!(kind, DeadlineSettle::Future) {
         let VariableValue::Element(element) = value else {
             return Err(function_error(
                 captured,
@@ -110,15 +135,14 @@ fn settle_at(
             ));
         }
     };
-    if function == FunctionEffect::TrueNowOrLater && condition {
+    if matches!(kind, DeadlineSettle::NowOrLater) && condition {
         return Ok(settled(VariableValue::Bool(true)));
     }
     if captured.arguments[1] == VariableValue::Null {
         return Ok(settled(VariableValue::Null));
     }
     let due_time = deadline(captured, &captured.arguments[1])?;
-    // trueUntil keeps its existing meaning: false is immediate, true waits for the deadline.
-    if (function == FunctionEffect::TrueUntil && !condition)
+    if (matches!(kind, DeadlineSettle::Until) && !condition)
         || captured.context.clock.realtime >= due_time
     {
         return Ok(settled(VariableValue::Bool(condition)));
@@ -129,7 +153,7 @@ fn settle_at(
     })
 }
 
-fn settle_true_for(
+pub(crate) fn settle_true_for(
     captured: &CapturedCall,
     input: &RetainedInput,
     cell: Option<&mut FunctionCell>,
@@ -192,7 +216,7 @@ fn settle_true_for(
     Ok(result)
 }
 
-fn settle_history(
+pub(crate) fn settle_history(
     captured: &CapturedCall,
     input: &mut RetainedInput,
     cell: Option<&mut FunctionCell>,
@@ -270,7 +294,7 @@ fn settle_history(
     Ok(settled(previous))
 }
 
-fn settle_window(
+pub(crate) fn settle_window(
     captured: &CapturedCall,
     input: &RetainedInput,
 ) -> Result<SettledFunction, EvaluationError> {
@@ -397,34 +421,61 @@ mod tests {
     use super::*;
     use crate::{
         evaluation::{
+            functions::{future::RegisterFutureFunctions, FunctionEffect, FunctionRegistry},
             temporal::{
                 codec, fixtures, ContributionKey, Incarnation, SourceRevision, StateOwner,
                 TemporalGroupId, TemporalRecord, TrueForState,
             },
             variable_value::{duration::Duration, float::Float, zoned_datetime::ZonedDateTime},
         },
+        in_memory_index::{
+            in_memory_future_queue::InMemoryFutureQueue,
+            in_memory_result_index::InMemoryResultIndex,
+        },
         models::{Element, ElementMetadata},
     };
 
-    fn capture(
-        function: FunctionEffect,
-        arguments: Vec<VariableValue>,
-        realtime: u64,
-    ) -> CapturedCall {
+    fn functions() -> &'static FunctionRegistry {
+        use std::sync::{OnceLock, Weak};
+        static REGISTRY: OnceLock<FunctionRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            let registry = FunctionRegistry::new();
+            registry.register_future_functions(
+                Arc::new(InMemoryFutureQueue::new()),
+                Arc::new(InMemoryResultIndex::new()),
+                Weak::new(),
+            );
+            registry
+        })
+    }
+
+    fn capture(function: &str, arguments: Vec<VariableValue>, realtime: u64) -> CapturedCall {
         let mut context = fixtures::input().context;
         context.clock.realtime = realtime;
         CapturedCall {
             call: fixtures::call(),
             expression: FunctionExpression {
-                name: format!("{function:?}").into(),
+                name: function.into(),
                 args: Vec::new(),
                 position_in_query: fixtures::call().site.position_in_query,
             },
-            effect: function,
+            effect: FunctionEffect::Temporal,
             arguments,
             key: ContributionKey::InputHash(13),
             context,
         }
+    }
+
+    fn settle_named(
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        cell: Option<&mut FunctionCell>,
+        capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        let function = functions()
+            .get_function(&captured.expression.name)
+            .expect("registered test function");
+        settle_function(function.as_ref(), captured, input, cell, capture_history)
     }
 
     fn cell(state: FunctionState) -> FunctionCell {
@@ -498,11 +549,11 @@ mod tests {
         let mut input = fixtures::input();
         let mut cell = cell(FunctionState::TrueFor(TrueForState::default()));
         let mut captured = capture(
-            FunctionEffect::TrueFor,
+            "drasi.trueFor",
             vec![VariableValue::Bool(true), VariableValue::from(20)],
             110,
         );
-        let first = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
+        let first = settle_named(&captured, &mut input, Some(&mut cell), true).unwrap();
         assert_eq!(first.value, VariableValue::Awaiting);
         assert_eq!(first.tickets.len(), 1);
         assert_eq!(first.tickets[0].due_time, 130);
@@ -512,24 +563,24 @@ mod tests {
         let active = cell_bytes(&cell);
         captured.context.clock.realtime = 119;
         for _ in 0..2 {
-            let waiting = settle_function(&captured, &mut input, Some(&mut cell), false).unwrap();
+            let waiting = settle_named(&captured, &mut input, Some(&mut cell), false).unwrap();
             assert_eq!(waiting.value, VariableValue::Awaiting);
             assert_eq!(waiting.tickets[0].due_time, 130);
             assert_eq!(cell_bytes(&cell), active);
         }
         captured.context.clock.realtime = 130;
-        let matured = settle_function(&captured, &mut input, Some(&mut cell), false).unwrap();
+        let matured = settle_named(&captured, &mut input, Some(&mut cell), false).unwrap();
         assert_eq!(matured.value, VariableValue::Bool(true));
         assert!(matured.tickets.is_empty());
         assert_eq!(cell_bytes(&cell), active);
 
         captured.arguments[0] = VariableValue::Bool(false);
-        let stopped = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
+        let stopped = settle_named(&captured, &mut input, Some(&mut cell), true).unwrap();
         assert_eq!(stopped.value, VariableValue::Bool(false));
         assert!(stopped.tickets.is_empty());
         captured.arguments[0] = VariableValue::Bool(true);
         captured.context.clock.realtime = 131;
-        let restarted = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
+        let restarted = settle_named(&captured, &mut input, Some(&mut cell), true).unwrap();
         assert_eq!(restarted.tickets[0].activation, Generation(1));
         assert_eq!(restarted.tickets[0].due_time, 151);
         assert!(matches!(
@@ -554,29 +605,26 @@ mod tests {
             vec![VariableValue::Null, VariableValue::from("ignored")],
             vec![VariableValue::Bool(true), VariableValue::Null],
         ] {
-            let captured = capture(FunctionEffect::TrueFor, args, 110);
+            let captured = capture("drasi.trueFor", args, 110);
             let before = cell_bytes(&cell);
-            let result = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
+            let result = settle_named(&captured, &mut input, Some(&mut cell), true).unwrap();
             assert_eq!(result.value, VariableValue::Null);
             assert!(result.tickets.is_empty());
             assert_eq!(cell_bytes(&cell), before);
         }
         let captured = capture(
-            FunctionEffect::TrueFor,
+            "drasi.trueFor",
             vec![VariableValue::Bool(true), VariableValue::from(0)],
             110,
         );
-        let result = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
+        let result = settle_named(&captured, &mut input, Some(&mut cell), true).unwrap();
         assert_eq!(result.value, VariableValue::Bool(true));
         assert!(result.tickets.is_empty());
     }
 
     #[test]
     fn shared_history_advances_once_per_revision_without_losing_native_values() {
-        for function in [
-            FunctionEffect::PreviousValue,
-            FunctionEffect::PreviousDistinctValue,
-        ] {
+        for function in ["drasi.previousValue", "drasi.previousDistinctValue"] {
             let mut first = fixtures::input();
             first.source_revision = SourceRevision(0);
             let mut second = first.clone();
@@ -586,7 +634,7 @@ mod tests {
             let default = VariableValue::Awaiting;
             let mut captured = capture(function, vec![initial.clone(), default.clone()], 110);
             for input in [&mut first, &mut second] {
-                let result = settle_function(&captured, input, Some(&mut cell), true).unwrap();
+                let result = settle_named(&captured, input, Some(&mut cell), true).unwrap();
                 assert_native(&result.value, &default);
                 assert!(result.tickets.is_empty());
                 assert_eq!(input.history.len(), 1);
@@ -595,12 +643,12 @@ mod tests {
             first.source_revision = SourceRevision(1);
             second.source_revision = SourceRevision(1);
             captured.arguments[0] = VariableValue::from("current");
-            let result = settle_function(&captured, &mut first, Some(&mut cell), true).unwrap();
+            let result = settle_named(&captured, &mut first, Some(&mut cell), true).unwrap();
             assert_native(&result.value, &initial);
             let once = cell_bytes(&cell);
             captured.arguments[0] = VariableValue::from("another subscriber");
             for input in [&mut second, &mut first] {
-                let result = settle_function(&captured, input, Some(&mut cell), true).unwrap();
+                let result = settle_named(&captured, input, Some(&mut cell), true).unwrap();
                 assert_native(&result.value, &initial);
                 assert_native(&input.history[&captured.call].value, &initial);
                 assert_eq!(input.history.len(), 1);
@@ -617,10 +665,7 @@ mod tests {
 
     #[test]
     fn history_refresh_uses_input_capture_and_never_writes_history() {
-        for function in [
-            FunctionEffect::PreviousValue,
-            FunctionEffect::PreviousDistinctValue,
-        ] {
+        for function in ["drasi.previousValue", "drasi.previousDistinctValue"] {
             let mut input = fixtures::input();
             let saved = native_value();
             input.history.insert(
@@ -638,14 +683,14 @@ mod tests {
             let captured = capture(function, vec![VariableValue::from("must not capture")], 999);
             let before_input = input_bytes(&input);
             let before_cell = cell_bytes(&cell);
-            let result = settle_function(&captured, &mut input, Some(&mut cell), false).unwrap();
+            let result = settle_named(&captured, &mut input, Some(&mut cell), false).unwrap();
             assert_native(&result.value, &saved);
             assert_eq!(input_bytes(&input), before_input);
             assert_eq!(cell_bytes(&cell), before_cell);
 
             input.history.clear();
             let before_input = input_bytes(&input);
-            let result = settle_function(&captured, &mut input, Some(&mut cell), false).unwrap();
+            let result = settle_named(&captured, &mut input, Some(&mut cell), false).unwrap();
             assert_eq!(result.value, VariableValue::from("shared previous"));
             assert_eq!(input_bytes(&input), before_input);
             assert_eq!(cell_bytes(&cell), before_cell);
@@ -653,7 +698,7 @@ mod tests {
             cell.state = FunctionState::UninitializedHistory;
             let captured = capture(function, vec![VariableValue::Null, saved.clone()], 999);
             let before_cell = cell_bytes(&cell);
-            let result = settle_function(&captured, &mut input, Some(&mut cell), false).unwrap();
+            let result = settle_named(&captured, &mut input, Some(&mut cell), false).unwrap();
             assert_native(&result.value, &saved);
             assert_eq!(input_bytes(&input), before_input);
             assert_eq!(cell_bytes(&cell), before_cell);
@@ -673,8 +718,8 @@ mod tests {
             (5, VariableValue::from("b"), VariableValue::Null),
         ] {
             input.source_revision = SourceRevision(revision);
-            let captured = capture(FunctionEffect::PreviousDistinctValue, vec![current], 110);
-            let result = settle_function(&captured, &mut input, Some(&mut cell), true).unwrap();
+            let captured = capture("drasi.previousDistinctValue", vec![current], 110);
+            let result = settle_named(&captured, &mut input, Some(&mut cell), true).unwrap();
             assert_eq!(result.value, previous);
         }
     }
@@ -683,9 +728,9 @@ mod tests {
     fn missing_wrong_and_regressing_history_state_are_errors() {
         let mut input = fixtures::input();
         for function in [
-            FunctionEffect::TrueFor,
-            FunctionEffect::PreviousValue,
-            FunctionEffect::PreviousDistinctValue,
+            "drasi.trueFor",
+            "drasi.previousValue",
+            "drasi.previousDistinctValue",
         ] {
             let captured = capture(
                 function,
@@ -693,16 +738,16 @@ mod tests {
                 110,
             );
             assert_error(
-                settle_function(&captured, &mut input, None, true),
+                settle_named(&captured, &mut input, None, true),
                 FunctionEvaluationError::CorruptData,
             );
-            let wrong = if function == FunctionEffect::TrueFor {
+            let wrong = if function == "drasi.trueFor" {
                 FunctionState::UninitializedHistory
             } else {
                 FunctionState::TrueFor(TrueForState::default())
             };
             assert_error(
-                settle_function(&captured, &mut input, Some(&mut cell(wrong)), true),
+                settle_named(&captured, &mut input, Some(&mut cell(wrong)), true),
                 FunctionEvaluationError::CorruptData,
             );
         }
@@ -711,14 +756,10 @@ mod tests {
             current: VariableValue::Null,
             previous: VariableValue::Null,
         }));
-        let captured = capture(
-            FunctionEffect::PreviousValue,
-            vec![VariableValue::Null],
-            110,
-        );
+        let captured = capture("drasi.previousValue", vec![VariableValue::Null], 110);
         let before = cell_bytes(&cell);
         assert_error(
-            settle_function(&captured, &mut input, Some(&mut cell), true),
+            settle_named(&captured, &mut input, Some(&mut cell), true),
             FunctionEvaluationError::CorruptData,
         );
         assert_eq!(cell_bytes(&cell), before);
@@ -728,10 +769,10 @@ mod tests {
     #[test]
     fn later_values_wait_until_the_deadline_without_an_anchor() {
         for (function, condition) in [
-            (FunctionEffect::TrueLater, true),
-            (FunctionEffect::TrueLater, false),
-            (FunctionEffect::TrueUntil, true),
-            (FunctionEffect::TrueNowOrLater, false),
+            ("drasi.trueLater", true),
+            ("drasi.trueLater", false),
+            ("drasi.trueUntil", true),
+            ("drasi.trueNowOrLater", false),
         ] {
             let mut input = fixtures::input();
             let mut captured = capture(
@@ -740,7 +781,7 @@ mod tests {
                 199,
             );
             let before = input_bytes(&input);
-            let waiting = settle_function(&captured, &mut input, None, true).unwrap();
+            let waiting = settle_named(&captured, &mut input, None, true).unwrap();
             assert_eq!(waiting.value, VariableValue::Awaiting);
             assert_eq!(waiting.tickets.len(), 1);
             let ticket = &waiting.tickets[0];
@@ -753,7 +794,7 @@ mod tests {
             assert!(ticket.attribution.is_none());
             for realtime in [200, 201] {
                 captured.context.clock.realtime = realtime;
-                let ready = settle_function(&captured, &mut input, None, false).unwrap();
+                let ready = settle_named(&captured, &mut input, None, false).unwrap();
                 assert_eq!(ready.value, VariableValue::Bool(condition));
                 assert!(ready.tickets.is_empty());
             }
@@ -766,40 +807,36 @@ mod tests {
         let mut input = fixtures::input();
         for (function, condition, due, expected) in [
             (
-                FunctionEffect::TrueUntil,
+                "drasi.trueUntil",
                 false,
                 VariableValue::from(200),
                 VariableValue::Bool(false),
             ),
             (
-                FunctionEffect::TrueUntil,
+                "drasi.trueUntil",
                 false,
                 VariableValue::Null,
                 VariableValue::Null,
             ),
             (
-                FunctionEffect::TrueNowOrLater,
+                "drasi.trueNowOrLater",
                 true,
                 VariableValue::from("not a deadline"),
                 VariableValue::Bool(true),
             ),
         ] {
             let captured = capture(function, vec![VariableValue::Bool(condition), due], 110);
-            let result = settle_function(&captured, &mut input, None, true).unwrap();
+            let result = settle_named(&captured, &mut input, None, true).unwrap();
             assert_eq!(result.value, expected);
             assert!(result.tickets.is_empty());
         }
-        for function in [
-            FunctionEffect::TrueLater,
-            FunctionEffect::TrueUntil,
-            FunctionEffect::TrueNowOrLater,
-        ] {
+        for function in ["drasi.trueLater", "drasi.trueUntil", "drasi.trueNowOrLater"] {
             let captured = capture(
                 function,
                 vec![VariableValue::Null, VariableValue::from("ignored")],
                 110,
             );
-            let result = settle_function(&captured, &mut input, None, true).unwrap();
+            let result = settle_named(&captured, &mut input, None, true).unwrap();
             assert_eq!(result.value, VariableValue::Null);
             assert!(result.tickets.is_empty());
         }
@@ -810,7 +847,7 @@ mod tests {
         let mut input = fixtures::input();
         let target = element("target");
         let mut captured = capture(
-            FunctionEffect::Future,
+            "drasi.future",
             vec![
                 VariableValue::Element(target.clone()),
                 VariableValue::from(200),
@@ -818,14 +855,14 @@ mod tests {
             110,
         );
         captured.context.anchor = Some(element("anchor"));
-        let waiting = settle_function(&captured, &mut input, None, true).unwrap();
+        let waiting = settle_named(&captured, &mut input, None, true).unwrap();
         assert_eq!(waiting.value, VariableValue::Awaiting);
         assert_eq!(
             waiting.tickets[0].attribution.as_ref(),
             Some(target.get_reference())
         );
         captured.context.clock.realtime = 200;
-        let ready = settle_function(&captured, &mut input, None, false).unwrap();
+        let ready = settle_named(&captured, &mut input, None, false).unwrap();
         let VariableValue::Element(restored) = ready.value else {
             panic!("future lost its native element");
         };
@@ -853,11 +890,11 @@ mod tests {
             (VariableValue::from(u64::MAX), u64::MAX),
         ] {
             let captured = capture(
-                FunctionEffect::TrueLater,
+                "drasi.trueLater",
                 vec![VariableValue::Bool(true), deadline],
                 110,
             );
-            let result = settle_function(&captured, &mut input, None, true).unwrap();
+            let result = settle_named(&captured, &mut input, None, true).unwrap();
             assert_eq!(result.tickets[0].due_time, expected);
         }
     }
@@ -880,12 +917,12 @@ mod tests {
             )),
         ] {
             let captured = capture(
-                FunctionEffect::TrueLater,
+                "drasi.trueLater",
                 vec![VariableValue::Bool(true), deadline],
                 110,
             );
             assert_error(
-                settle_function(&captured, &mut input, None, true),
+                settle_named(&captured, &mut input, None, true),
                 FunctionEvaluationError::OverflowError,
             );
         }
@@ -895,8 +932,8 @@ mod tests {
             VariableValue::from(u64::MAX),
             VariableValue::Duration(Duration::new(chrono::Duration::nanoseconds(-1), 0, 0)),
         ] {
-            for function in [FunctionEffect::TrueFor, FunctionEffect::SlidingWindow] {
-                let args = if function == FunctionEffect::TrueFor {
+            for function in ["drasi.trueFor", "drasi.slidingWindow"] {
+                let args = if function == "drasi.trueFor" {
                     vec![VariableValue::Bool(true), duration.clone()]
                 } else {
                     vec![duration.clone()]
@@ -905,7 +942,7 @@ mod tests {
                 let mut cell = cell(FunctionState::TrueFor(TrueForState::default()));
                 let before = cell_bytes(&cell);
                 assert_error(
-                    settle_function(&captured, &mut input, Some(&mut cell), true),
+                    settle_named(&captured, &mut input, Some(&mut cell), true),
                     FunctionEvaluationError::OverflowError,
                 );
                 assert_eq!(cell_bytes(&cell), before);
@@ -927,14 +964,14 @@ mod tests {
             ),
         ] {
             let captured = capture(
-                FunctionEffect::TrueFor,
+                "drasi.trueFor",
                 vec![VariableValue::Bool(true), VariableValue::from(1)],
                 realtime,
             );
             let mut cell = cell(FunctionState::TrueFor(state));
             let before = cell_bytes(&cell);
             assert_error(
-                settle_function(&captured, &mut input, Some(&mut cell), true),
+                settle_named(&captured, &mut input, Some(&mut cell), true),
                 FunctionEvaluationError::OverflowError,
             );
             assert_eq!(cell_bytes(&cell), before);
@@ -945,7 +982,7 @@ mod tests {
     fn sliding_window_uses_source_time_and_stops_scheduling_when_expired() {
         let mut input = fixtures::input();
         let mut captured = capture(
-            FunctionEffect::SlidingWindow,
+            "drasi.slidingWindow",
             vec![VariableValue::Duration(Duration::new(
                 chrono::Duration::milliseconds(20),
                 0,
@@ -955,7 +992,7 @@ mod tests {
         );
         captured.context.clock.transaction_time = 1_000;
         let before = input_bytes(&input);
-        let pending = settle_function(&captured, &mut input, None, true).unwrap();
+        let pending = settle_named(&captured, &mut input, None, true).unwrap();
         assert_eq!(pending.value, VariableValue::Bool(false));
         assert_eq!(pending.tickets.len(), 1);
         assert_eq!(pending.tickets[0].due_time, 120);
@@ -963,14 +1000,14 @@ mod tests {
         assert!(pending.tickets[0].cell.is_none());
         for realtime in [120, 120, 121] {
             captured.context.clock.realtime = realtime;
-            let expired = settle_function(&captured, &mut input, None, false).unwrap();
+            let expired = settle_named(&captured, &mut input, None, false).unwrap();
             assert_eq!(expired.value, VariableValue::Bool(true));
             assert!(expired.tickets.is_empty());
             assert_eq!(input_bytes(&input), before);
         }
         input.source_clock.transaction_time = u64::MAX;
         assert_error(
-            settle_function(&captured, &mut input, None, true),
+            settle_named(&captured, &mut input, None, true),
             FunctionEvaluationError::OverflowError,
         );
     }
@@ -980,27 +1017,27 @@ mod tests {
         let mut input = fixtures::input();
         for (function, args, error) in [
             (
-                FunctionEffect::TrueLater,
+                "drasi.trueLater",
                 vec![],
                 FunctionEvaluationError::InvalidArgumentCount,
             ),
             (
-                FunctionEffect::TrueLater,
+                "drasi.trueLater",
                 vec![VariableValue::Awaiting, VariableValue::from(200)],
                 FunctionEvaluationError::InvalidArgument(0),
             ),
             (
-                FunctionEffect::TrueUntil,
+                "drasi.trueUntil",
                 vec![VariableValue::Bool(false), VariableValue::from("bad time")],
                 FunctionEvaluationError::InvalidArgument(1),
             ),
             (
-                FunctionEffect::Future,
+                "drasi.future",
                 vec![VariableValue::Null, VariableValue::from(200)],
                 FunctionEvaluationError::InvalidArgument(0),
             ),
             (
-                FunctionEffect::Future,
+                "drasi.future",
                 vec![
                     VariableValue::Element(element("target")),
                     VariableValue::Null,
@@ -1008,12 +1045,12 @@ mod tests {
                 FunctionEvaluationError::InvalidArgument(1),
             ),
             (
-                FunctionEffect::SlidingWindow,
+                "drasi.slidingWindow",
                 vec![VariableValue::from("bad duration")],
                 FunctionEvaluationError::InvalidArgument(0),
             ),
             (
-                FunctionEffect::SlidingWindow,
+                "drasi.slidingWindow",
                 vec![
                     VariableValue::from(10),
                     VariableValue::from("lazy expression"),
@@ -1021,18 +1058,18 @@ mod tests {
                 FunctionEvaluationError::InvalidArgumentCount,
             ),
             (
-                FunctionEffect::PreviousValue,
+                "drasi.previousValue",
                 vec![],
                 FunctionEvaluationError::InvalidArgumentCount,
             ),
         ] {
             let captured = capture(function, args, 110);
-            assert_error(settle_function(&captured, &mut input, None, true), error);
+            assert_error(settle_named(&captured, &mut input, None, true), error);
         }
-        let mut captured = capture(FunctionEffect::TrueLater, vec![], 110);
+        let mut captured = capture("drasi.awaiting", vec![], 110);
         captured.effect = FunctionEffect::Pure;
         assert!(matches!(
-            settle_function(&captured, &mut input, None, true),
+            settle_named(&captured, &mut input, None, true),
             Err(error) if matches!(error.execution_error(), Some(QueryExecutionError::UnsupportedTemporalEffect(_)))
         ));
     }

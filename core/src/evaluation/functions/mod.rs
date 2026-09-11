@@ -23,7 +23,10 @@ pub use async_trait::async_trait;
 pub use drasi_query_ast::api::QueryConfiguration;
 pub use drasi_query_ast::ast;
 
-use super::{ExpressionEvaluationContext, FunctionError};
+use super::{EvaluationError, ExpressionEvaluationContext, FunctionError, QueryExecutionError};
+use crate::evaluation::temporal::runtime::frame::CapturedCall;
+use crate::evaluation::temporal::runtime::functions::SettledFunction;
+use crate::evaluation::temporal::{FunctionCell, FunctionState, RetainedInput};
 use crate::evaluation::variable_value::VariableValue;
 use crate::interface::ResultIndex;
 
@@ -58,19 +61,12 @@ pub enum Function {
 pub enum FunctionEffect {
     Pure,
     Aggregate,
-    TrueFor,
-    TrueLater,
-    TrueUntil,
-    TrueNowOrLater,
-    Future,
-    PreviousValue,
-    PreviousDistinctValue,
-    SlidingWindow,
+    Temporal,
 }
 
 impl FunctionEffect {
     pub fn is_temporal(self) -> bool {
-        !matches!(self, Self::Pure | Self::Aggregate)
+        matches!(self, Self::Temporal)
     }
 }
 
@@ -83,12 +79,61 @@ impl Function {
             Self::ContextMutator(_) => FunctionEffect::Pure,
         }
     }
+
+    pub fn is_lazy_temporal(&self) -> bool {
+        matches!(self, Self::LazyScalar(_)) && self.effect().is_temporal()
+    }
+
+    pub fn initial_temporal_state(&self) -> Option<FunctionState> {
+        match self {
+            Self::Scalar(function) => function.initial_temporal_state(),
+            Self::LazyScalar(function) => function.initial_temporal_state(),
+            _ => None,
+        }
+    }
+
+    pub fn settle_temporal(
+        &self,
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        cell: Option<&mut FunctionCell>,
+        capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        match self {
+            Self::Scalar(function) => {
+                function.settle_temporal(captured, input, cell, capture_history)
+            }
+            Self::LazyScalar(function) => {
+                function.settle_temporal(captured, input, cell, capture_history)
+            }
+            _ => Err(EvaluationError::from(
+                QueryExecutionError::UnsupportedTemporalEffect("non-temporal function settlement"),
+            )),
+        }
+    }
 }
 
 #[async_trait]
 pub trait ScalarFunction: Send + Sync {
     fn effect(&self) -> FunctionEffect {
         FunctionEffect::Pure
+    }
+
+    fn initial_temporal_state(&self) -> Option<FunctionState> {
+        None
+    }
+
+    fn settle_temporal(
+        &self,
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        cell: Option<&mut FunctionCell>,
+        capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        let _ = (captured, input, cell, capture_history);
+        Err(EvaluationError::from(
+            QueryExecutionError::UnsupportedTemporalEffect("non-temporal function settlement"),
+        ))
     }
 
     async fn call(
@@ -103,6 +148,23 @@ pub trait ScalarFunction: Send + Sync {
 pub trait LazyScalarFunction: Send + Sync {
     fn effect(&self) -> FunctionEffect {
         FunctionEffect::Pure
+    }
+
+    fn initial_temporal_state(&self) -> Option<FunctionState> {
+        None
+    }
+
+    fn settle_temporal(
+        &self,
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        cell: Option<&mut FunctionCell>,
+        capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        let _ = (captured, input, cell, capture_history);
+        Err(EvaluationError::from(
+            QueryExecutionError::UnsupportedTemporalEffect("non-temporal function settlement"),
+        ))
     }
 
     async fn call(

@@ -18,10 +18,13 @@ use std::sync::Weak;
 use crate::evaluation::context::SideEffects;
 use crate::evaluation::functions::aggregation::ValueAccumulator;
 use crate::evaluation::functions::ScalarFunction;
+use crate::evaluation::temporal::runtime::frame::CapturedCall;
+use crate::evaluation::temporal::runtime::functions::{settle_true_for, SettledFunction};
+use crate::evaluation::temporal::{FunctionCell, FunctionState, RetainedInput, TrueForState};
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::ExpressionEvaluationContext;
 use crate::evaluation::ExpressionEvaluator;
-use crate::evaluation::{FunctionError, FunctionEvaluationError};
+use crate::evaluation::{EvaluationError, FunctionError, FunctionEvaluationError};
 use crate::interface::ResultIndex;
 use crate::interface::ResultOwner;
 use crate::interface::{FutureQueue, PushType};
@@ -52,7 +55,21 @@ impl TrueFor {
 #[async_trait]
 impl ScalarFunction for TrueFor {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::TrueFor
+        super::super::FunctionEffect::Temporal
+    }
+
+    fn initial_temporal_state(&self) -> Option<FunctionState> {
+        Some(FunctionState::TrueFor(TrueForState::default()))
+    }
+
+    fn settle_temporal(
+        &self,
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        cell: Option<&mut FunctionCell>,
+        _capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        settle_true_for(captured, input, cell)
     }
 
     async fn call(

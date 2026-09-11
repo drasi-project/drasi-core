@@ -18,10 +18,13 @@ use std::sync::Weak;
 use crate::evaluation::context::SideEffects;
 use crate::evaluation::functions::LazyScalarFunction;
 use crate::evaluation::functions::ValueAccumulator;
+use crate::evaluation::temporal::runtime::frame::CapturedCall;
+use crate::evaluation::temporal::runtime::functions::{settle_window, SettledFunction};
+use crate::evaluation::temporal::{FunctionCell, RetainedInput};
 use crate::evaluation::variable_value::VariableValue;
 use crate::evaluation::ExpressionEvaluationContext;
 use crate::evaluation::ExpressionEvaluator;
-use crate::evaluation::{FunctionError, FunctionEvaluationError};
+use crate::evaluation::{EvaluationError, FunctionError, FunctionEvaluationError};
 use crate::interface::ResultIndex;
 use crate::interface::ResultKey;
 use crate::interface::ResultOwner;
@@ -53,7 +56,17 @@ impl SlidingWindow {
 #[async_trait]
 impl LazyScalarFunction for SlidingWindow {
     fn effect(&self) -> super::super::FunctionEffect {
-        super::super::FunctionEffect::SlidingWindow
+        super::super::FunctionEffect::Temporal
+    }
+
+    fn settle_temporal(
+        &self,
+        captured: &CapturedCall,
+        input: &mut RetainedInput,
+        _cell: Option<&mut FunctionCell>,
+        _capture_history: bool,
+    ) -> Result<SettledFunction, EvaluationError> {
+        settle_window(captured, input)
     }
 
     async fn call(

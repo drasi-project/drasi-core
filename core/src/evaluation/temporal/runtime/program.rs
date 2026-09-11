@@ -141,11 +141,11 @@ fn collect_effects(
     effects: &mut Vec<FunctionExpression>,
 ) -> Result<(), EvaluationError> {
     if let Expression::FunctionExpression(function) = expression {
-        let effect = registry
+        let registered = registry
             .get_function(&function.name)
-            .ok_or_else(|| EvaluationError::UnknownFunction(function.name.to_string()))?
-            .effect();
-        if effect == FunctionEffect::SlidingWindow {
+            .ok_or_else(|| EvaluationError::UnknownFunction(function.name.to_string()))?;
+        let effect = registered.effect();
+        if registered.is_lazy_temporal() {
             if function.args.len() != 2 {
                 return Err(EvaluationError::InvalidArgument);
             }
