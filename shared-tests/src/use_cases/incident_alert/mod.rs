@@ -273,7 +273,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             &result,
             &QueryPartEvaluationContext::Aggregation {
                 default_before: false,
-                default_after: true,
+                default_after: false,
                 grouping_keys: vec![
                     "RegionName".into(),
                     "IncidentId".into(),
@@ -627,7 +627,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             &result,
             &QueryPartEvaluationContext::Aggregation {
                 default_before: false,
-                default_after: false,
+                default_after: true,
                 grouping_keys: vec![
                     "RegionName".into(),
                     "IncidentId".into(),

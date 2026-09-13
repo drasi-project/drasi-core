@@ -63,6 +63,28 @@ impl GarnetResultIndex {
 
 #[async_trait]
 impl AccumulatorIndex for GarnetResultIndex {
+    async fn is_empty(&self) -> Result<bool, IndexError> {
+        let prefix = format!("ari:{{{}}}:", self.query_id);
+        {
+            let guard = self.session_state.lock()?;
+            if guard
+                .as_ref()
+                .is_some_and(|buffer| buffer.contains_live_key_with_prefix(&prefix))
+            {
+                return Ok(false);
+            }
+        }
+
+        let pattern = format!("{prefix}*");
+        let mut con = self.connection.clone();
+        let mut keys = con
+            .scan_match::<_, String>(pattern)
+            .await
+            .map_err(IndexError::other)?;
+
+        Ok(keys.next_item().await.is_none())
+    }
+
     #[tracing::instrument(name = "ari::get", skip_all, err)]
     async fn get(
         &self,
