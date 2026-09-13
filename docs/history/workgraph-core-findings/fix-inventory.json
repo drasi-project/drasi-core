@@ -9,7 +9,11 @@
   "sourceEvidence": {
     "reportSha256": "683a7406e1edd6778f892bd3e849d2440ac8da3fa023aac79c6ac93b37eebbda",
     "findingRows": 132,
-    "narrativeAnchors": 7
+    "narrativeAnchors": 7,
+    "sanitizedReport": "source-report-sanitized.md",
+    "sanitizedReportSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
+    "perRecordEvidence": "evidence.md",
+    "perRecordEvidenceSha256": "e547deb674a5a04b7b98f82ca6c80dce531de6ea86dad79c6adc13e234e1e29f"
   },
   "fixes": [
     {
@@ -88,8 +92,10 @@
     },
     {
       "commits": ["601e2a34b5bce2ec37e26f26818df35f2d27c830"],
-      "status": "remote-prototype-branch",
-      "note": "Retained multi-source query divergence repair."
+      "issues": [897],
+      "existingPr": 810,
+      "status": "runtime-subset-covered-by-pr-810",
+      "note": "PR #810 now carries the generic retained_multi_source survival matrix for the runtime default-transition/group-migration subset. Persisted restart/backend acceptance and the separate replay/result-index state-version repair remain open."
     },
     {
       "commits": ["645af0801f268af61d44f58480e44c3e3a3544be"],
@@ -113,6 +119,12 @@
       ],
       "issues": [820],
       "status": "prototype-evidence-existing-issue"
+    },
+    {
+      "commits": ["44342b390c501032a24519c087cb4df4cd1e539f"],
+      "issues": [820, 902],
+      "status": "prototype-evidence-existing-issues",
+      "note": "One historical commit contains two distinct fixes: forward Reaction checkpoint ownership across the dynamic ABI (#820) and require loader metadata before ABI compatibility validation (#902)."
     },
     {
       "commits": [
@@ -195,7 +207,7 @@
         "d860611bd75c3790fcc75d3f03ae04c76b52fec0"
       ],
       "status": "historical-mixed-generic-and-workgraph",
-      "note": "Generic Reaction ABI/checkpoint observations map to #820/#896; router policy remains historical WorkGraph behavior."
+      "note": "Generic Reaction checkpoint ownership maps to #820; missing loader metadata maps to #902; StateStore durability maps separately to #896. Router policy remains historical WorkGraph behavior."
     },
     {
       "component": "payload-source-and-comment-leases",
@@ -262,8 +274,15 @@
     "localOnlyPortableArtifactsRequired": true,
     "portablePatchesPublished": 20,
     "patchIndex": "patches/index.json",
-    "dirtyHistoricalDeltasRequired": false,
+    "cumulativeSeriesPublished": 7,
+    "cumulativeSeriesIndex": "patches/series/index.json",
+    "remotePreimage": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+    "localOnlyCommitPreimageCoverage": "20/20",
+    "remoteArchiveApplicationVerification": "passed",
+    "dirtyHistoricalDeltaCaptured": true,
+    "dirtyHistoricalDeltaIndex": "patches/dirty/index.json",
+    "dirtyHistoricalDeltaStatus": "interrupted-unvalidated-partial",
     "archiveOnlyPatchesRequired": false,
-    "note": "Commits reachable from current remote branches or GitHub commit endpoints are linked directly. Twenty remaining local Git objects are preserved as sanitized full-index binary patches with exact parent, file, size, and checksum metadata. No database, WAL, transcript, credential, private configuration, or git bundle is included."
+    "note": "Twenty remaining local Git objects are preserved as sanitized commit patches and covered by seven cumulative series from a verified public remote base. All seven series apply to a fresh GitHub archive. The interrupted router follow-up was recovered as seven edits across four files; a prior nine-file count is not supported by the surviving direct record. No raw log, database, WAL, credential, private configuration, or git bundle is included."
   }
 }

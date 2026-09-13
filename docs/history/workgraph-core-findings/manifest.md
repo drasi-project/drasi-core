@@ -10,6 +10,10 @@
   [`ledger.json`](ledger.json)
 - Human-readable ledger:
   [`ledger.md`](ledger.md)
+- Sanitized full source report:
+  [`source-report-sanitized.md`](source-report-sanitized.md)
+- Per-record original finding evidence:
+  [`evidence.md`](evidence.md)
 - Public fix inventory:
   [`fix-inventory.json`](fix-inventory.json)
 
@@ -22,13 +26,15 @@ There are no unassigned source IDs.
 |---|---:|---|
 | Source finding rows | 132 | All mapped |
 | Source narrative anchors | 7 | All mapped |
-| New generic Core issues | 10 | #891-#900 |
+| New generic Core issues | 11 | #891-#900, #902 |
 | New preservation umbrella issues | 1 | #889 |
 | Original Core issues enriched | 20 | #774, #775, #792-#809 |
 | Additional existing issues enriched | 5 | #574, #680, #721, #722, #827 |
 | Existing PRs enriched | 19 | #735-#747 subset, #765, #810, #825-#835 stack |
 | New preservation PRs | 1 | #890, draft |
 | Local-only commit patches preserved | 20 | Indexed under `patches/index.json` |
+| Reconstructible cumulative series | 7 | All 20 local-only commits covered from public base `43e7d250` |
+| Interrupted dirty follow-ups preserved | 1 | Four-file router partial patch under `patches/dirty/` |
 | Server handoffs | 0 | No finding was established as a current `drasi-server` defect |
 
 All new issues and the preservation PR are assigned to `agentofreality`.
@@ -50,6 +56,7 @@ downgraded.
 | [#898](https://github.com/drasi-project/drasi-core/issues/898) | `coll.distinct` on unmatched OPTIONAL values | Investigation |
 | [#899](https://github.com/drasi-project/drasi-core/issues/899) | Disconnected MATCH/Cartesian behavior | Investigation |
 | [#900](https://github.com/drasi-project/drasi-core/issues/900) | HTTP 2xx JSON/GraphQL error handling | `16f67030`, `56745f88`, `ee649b9b`, historical PR #747 |
+| [#902](https://github.com/drasi-project/drasi-core/issues/902) | Loader accepts missing/null plugin metadata without ABI validation | `44342b39`; confirmed on the recorded `main` baseline |
 
 ## Existing PR reuse
 
@@ -69,6 +76,13 @@ downgraded.
   GitHub commit API. Their sanitized diffs are preserved under
   [`patches/`](patches/) with exact original commit, parent, changed-file, size,
   and SHA-256 metadata.
+- Seven cumulative series patches provide a public-base reconstruction path for
+  all 20 commits. Every series passed `git apply --check` and applied to a
+  fresh GitHub archive of `43e7d250`.
+- The interrupted router follow-up after `25bda3bb` is preserved as an exact
+  four-file partial patch. The surviving record does not substantiate a prior
+  nine-file count; it contains no post-edit status or validation. The
+  permanent-invalid-candidate poison-row blocker remains unrecovered.
 
 ## Recommended issue-specific implementation sequence
 
@@ -83,10 +97,12 @@ inseparable root cause.
    `fcce3f11` plus required `c6615b45`, and #809 from `7691d769` with the
    related replacement-update coverage.
 4. **Small generic historical extractions:** #893 from `8a52f6f3`; #896 by
-   reusing #742; #900 from the final `16f67030`/`56745f88`/`ee649b9b`
-   implementation.
-5. **Reproduce before porting:** #897 from `601e2a34` after deduplicating
-   overlap with #680/#792/#812; #891 from the generic `SourceBase` part of
+   reusing #742; #902 from the loader-only part of `44342b39`; #900 from the
+   final `16f67030`/`56745f88`/`ee649b9b` implementation.
+5. **Reproduce before porting:** #897's runtime default-transition subset is
+   now covered by PR #810; reproduce its remaining persisted restart/backend
+   scope and the distinct replay/result-index state-version repair before any
+   extraction. Test #891 from the generic `SourceBase` part of
    `645af080`; #894 from `f54e829c` after testing current `dispatch_event`
    behavior following #827/#828/#856.
 6. **Unfixed correctness issues:** #795-#799 and #805, prioritized by

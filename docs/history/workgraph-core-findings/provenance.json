@@ -6,13 +6,17 @@
       "name": "workgraph-core-issue-history.md",
       "sha256": "683a7406e1edd6778f892bd3e849d2440ac8da3fa023aac79c6ac93b37eebbda",
       "publishedRaw": false,
-      "reason": "The source report includes local/private session navigation metadata. Its sanitized findings are represented by stable IDs in ledger.json."
+      "publishedSanitizedCopy": "source-report-sanitized.md",
+      "publishedSanitizedSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
+      "reason": "The source report includes local/private session navigation metadata. A full technical copy with those fields removed is published."
     },
     {
       "name": "publication-source-index.json",
       "sha256": "f06c1945acd8baf1cc71f8391b715f407ed49f48e20457fc5030ebad14d43d0c",
       "publishedRaw": false,
-      "reason": "The local mechanical index includes private provenance strings. All 132 rows and seven anchors are represented in ledger.json."
+      "publishedSanitizedEvidence": "evidence.md",
+      "publishedSanitizedEvidenceSha256": "e547deb674a5a04b7b98f82ca6c80dce531de6ea86dad79c6adc13e234e1e29f",
+      "reason": "The local mechanical index includes private provenance strings. The complete 132 rows and seven anchors are published with original technical detail and sanitized provenance."
     }
   ],
   "publicBaselines": {
@@ -40,6 +44,30 @@
     "index": "patches/index.json",
     "format": "git diff --binary --full-index <parent> <commit>",
     "reason": "The original commit objects remained readable locally but did not resolve through a current remote branch or GitHub commit API endpoint.",
+    "cumulativeSeries": {
+      "count": 7,
+      "index": "patches/series/index.json",
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "remoteBaseUrl": "https://github.com/drasi-project/drasi-core/commit/43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "localOnlyCommitCoverage": "20/20",
+      "applicationVerification": "All seven cumulative patches passed git apply --check and applied against a fresh GitHub archive of the remote base.",
+      "sanitizedCredentialShapedFixtureOccurrences": 44
+    },
+    "interruptedRouterFollowUp": {
+      "index": "patches/dirty/index.json",
+      "base": "25bda3bb2ef6eebef60dd6babdf69138466babae",
+      "status": "interrupted-unvalidated-partial",
+      "recoveredEditOperations": 7,
+      "recoveredChangedFiles": 4,
+      "applicationVerification": "passed against a 25bda3bb tree reconstructed from the public remote base and cumulative patch",
+      "unavailable": [
+        "post-edit status snapshot",
+        "completed commit",
+        "format/build/test results",
+        "implementation for the permanent-invalid-candidate poison-row blocker"
+      ],
+      "countCorrection": "A prior nine-dirty-file description is not supported by the surviving direct record, which shows a clean pre-edit tree followed by edits to four paths."
+    },
     "excludedMetadata": [
       "commit author email headers",
       "raw session provenance",
