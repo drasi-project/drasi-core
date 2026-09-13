@@ -1180,12 +1180,13 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Middleware, launcher, router, and Project refresh",
       "summary": "The plugin loader could skip ABI compatibility checks when metadata was absent.",
-      "disposition": "issue-opened",
+      "disposition": "issue-opened-existing-pr",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/902"
+        "https://github.com/drasi-project/drasi-core/issues/902",
+        "https://github.com/drasi-project/drasi-core/pull/903"
       ],
       "evidenceUrl": "evidence.md#report-l282",
-      "rationale": "Missing or null drasi_plugin_metadata still bypasses ABI compatibility validation on the recorded main baseline. #902 tracks fail-closed metadata enforcement; historical commit 44342b39 is fix provenance."
+      "rationale": "The recorded main baseline skipped validation for missing/null metadata. #902 tracks the fail-closed contract, historical commit 44342b39 is provenance, and draft PR #903 now implements the complete loader acceptance matrix together with #774."
     },
     {
       "id": "report-L283",

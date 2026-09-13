@@ -68,7 +68,9 @@ work does not duplicate that stack.
 - Dynamic Reaction checkpoint-ownership forwarding belongs to
   [#820](https://github.com/drasi-project/drasi-core/issues/820). Missing or
   null plugin metadata bypassing ABI checks is a distinct loader defect tracked
-  by [#902](https://github.com/drasi-project/drasi-core/issues/902).
+  by [#902](https://github.com/drasi-project/drasi-core/issues/902) and
+  implemented together with #774 in draft
+  [#903](https://github.com/drasi-project/drasi-core/pull/903).
 - [#810](https://github.com/drasi-project/drasi-core/pull/810) contains the
   isolated #792 candidate but not the later persisted aggregate-replay repair
   in `7be2e1bd`.

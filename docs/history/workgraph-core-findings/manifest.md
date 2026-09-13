@@ -32,7 +32,7 @@ There are no unassigned source IDs.
 | New preservation umbrella issues | 1 | #889 |
 | Original Core issues enriched | 20 | #774, #775, #792-#809 |
 | Additional existing issues enriched | 5 | #574, #680, #721, #722, #827 |
-| Existing PRs enriched | 19 | #735-#747 subset, #765, #810, #825-#835 stack |
+| Existing PRs enriched | 20 | #735-#747 subset, #765, #810, #825-#835 stack, #903 |
 | New preservation PRs | 1 | #890, draft |
 | Local-only commit patches preserved | 20 | Indexed under `patches/index.json` |
 | Reconstructible cumulative series | 7 | All 20 local-only commits covered from public base `43e7d250` |
@@ -58,7 +58,7 @@ downgraded.
 | [#898](https://github.com/drasi-project/drasi-core/issues/898) | `coll.distinct` on unmatched OPTIONAL values | Investigation |
 | [#899](https://github.com/drasi-project/drasi-core/issues/899) | Disconnected MATCH/Cartesian behavior | Investigation |
 | [#900](https://github.com/drasi-project/drasi-core/issues/900) | HTTP 2xx JSON/GraphQL error handling | `16f67030`, `56745f88`, `ee649b9b`, historical PR #747 |
-| [#902](https://github.com/drasi-project/drasi-core/issues/902) | Loader accepts missing/null plugin metadata without ABI validation | `44342b39`; confirmed on the recorded `main` baseline |
+| [#902](https://github.com/drasi-project/drasi-core/issues/902) | Loader accepts missing/null plugin metadata without ABI validation | `44342b39`; active draft PR #903 |
 
 ## Existing PR reuse
 
@@ -71,6 +71,9 @@ downgraded.
 - Reuse the open durability stack:
   #825/#743, #826/#821 (and #775), #830/#822, #831/#824, #832/#819,
   #834/#820, and #835/#823.
+- Reuse [#903](https://github.com/drasi-project/drasi-core/pull/903) for both
+  #774 and #902. Its loader tests cover missing, null, malformed,
+  version/target-incompatible, and physically smaller legacy metadata/layouts.
 - Historical PRs #735 and #736 merged only into a prototype base.
 - Historical PRs #747 and #765 closed unmerged. Their commits are evidence, not
   upstream implementation state.
@@ -91,16 +94,17 @@ downgraded.
 Each item should be a separate draft PR unless the listed issues share one
 inseparable root cause.
 
-1. **Existing active stacks:** finish review of #810 and #825-#835 rather than
-   creating replacements.
-2. **Source lifecycle ABI:** #774 from `1bd669a3`, isolated from WorkGraph code.
+1. **Existing active stacks:** finish review of #810, #825-#835, and #903
+   rather than creating replacements.
+2. **Source lifecycle and loader ABI:** reuse #903 for #774 and #902; do not
+   create a duplicate loader implementation.
 3. **Query fixes with retained tests:** #793/#794 together from `c2b86f9c`,
    then #806 from `2f129f22`, #807 from `67311899`, #808 from
    `fcce3f11` plus required `c6615b45`, and #809 from `7691d769` with the
    related replacement-update coverage.
 4. **Small generic historical extractions:** #893 from `8a52f6f3`; #896 by
-   reusing #742; #902 from the loader-only part of `44342b39`; #900 from the
-   final `16f67030`/`56745f88`/`ee649b9b` implementation.
+   reusing #742; #900 from the final
+   `16f67030`/`56745f88`/`ee649b9b` implementation.
 5. **Reproduce before porting:** #897's runtime default-transition subset is
    now covered by PR #810; reproduce its remaining persisted restart/backend
    scope and the distinct replay/result-index state-version repair before any

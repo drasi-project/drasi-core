@@ -13,7 +13,7 @@
     "sanitizedReport": "source-report-sanitized.md",
     "sanitizedReportSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
     "perRecordEvidence": "evidence.md",
-    "perRecordEvidenceSha256": "e547deb674a5a04b7b98f82ca6c80dce531de6ea86dad79c6adc13e234e1e29f"
+    "perRecordEvidenceSha256": "7b03743cd79923e03b839af0e5cab2a097e53193b8efbc6e55d33ba54899a07e"
   },
   "fixes": [
     {
@@ -122,9 +122,16 @@
     },
     {
       "commits": ["44342b390c501032a24519c087cb4df4cd1e539f"],
-      "issues": [820, 902],
-      "status": "prototype-evidence-existing-issues",
-      "note": "One historical commit contains two distinct fixes: forward Reaction checkpoint ownership across the dynamic ABI (#820) and require loader metadata before ABI compatibility validation (#902)."
+      "issues": [820],
+      "status": "prototype-evidence-existing-issue",
+      "note": "Historical Reaction checkpoint-ownership forwarding evidence; this remains distinct from the loader fix in the same commit."
+    },
+    {
+      "commits": ["44342b390c501032a24519c087cb4df4cd1e539f"],
+      "issues": [902],
+      "existingPr": 903,
+      "status": "active-draft-implementation",
+      "note": "Draft PR #903 requires metadata before plugin initialization and covers missing, null, malformed, version/target-incompatible, and physically smaller legacy layouts while retaining optional inspection scanning."
     },
     {
       "commits": [

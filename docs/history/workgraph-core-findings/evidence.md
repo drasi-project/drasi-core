@@ -1871,7 +1871,7 @@ The historical ReactionProxy omitted checkpoint_ownership_fn, so dynamic reactio
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Middleware, launcher, router, and Project refresh
 - **Sanitized source-report line:** 282
-- **Published disposition:** `issue-opened`
+- **Published disposition:** `issue-opened-existing-pr`
 
 **Original finding detail**
 
@@ -1879,11 +1879,12 @@ The historical ReactionProxy omitted checkpoint_ownership_fn, so dynamic reactio
 
 **Disposition rationale**
 
-Missing or null drasi_plugin_metadata still bypasses ABI compatibility validation on the recorded main baseline. #902 tracks fail-closed metadata enforcement; historical commit 44342b39 is fix provenance.
+The recorded main baseline skipped validation for missing/null metadata. #902 tracks the fail-closed contract, historical commit 44342b39 is provenance, and draft PR #903 now implements the complete loader acceptance matrix together with #774.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/902
+- https://github.com/drasi-project/drasi-core/pull/903
 
 <a id="report-l283"></a>
 ## `report-L283` - A reservation key could resume a different candidate after partial effects; fresh reaction-owned replay could race its initial config-hash seed.
