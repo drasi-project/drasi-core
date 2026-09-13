@@ -616,6 +616,11 @@ impl Source for MockSource {
         self.base.initialize(context).await;
     }
 
+    async fn on_subscriptions_complete(&self) -> Result<()> {
+        log::info!("[MOCK-SUBSCRIPTIONS-COMPLETE] source={}", self.base.id);
+        Ok(())
+    }
+
     async fn set_bootstrap_provider(
         &self,
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,

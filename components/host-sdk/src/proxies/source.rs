@@ -438,6 +438,14 @@ impl Source for SourceProxy {
         }
     }
 
+    async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+        call_on_subscriptions_complete_slot(
+            self.vtable.state,
+            self.vtable.on_subscriptions_complete_fn,
+        )
+        .map_err(anyhow::Error::msg)
+    }
+
     async fn deprovision(&self) -> anyhow::Result<()> {
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let deprovision_fn = self.vtable.deprovision_fn;
@@ -593,6 +601,17 @@ impl Drop for SourceProxy {
     }
 }
 
+fn call_on_subscriptions_complete_slot(
+    state: *mut c_void,
+    complete_fn: extern "C" fn(*mut c_void) -> drasi_plugin_sdk::ffi::FfiResult,
+) -> Result<(), String> {
+    let state = drasi_plugin_sdk::ffi::SendMutPtr(state);
+    std::thread::spawn(move || (complete_fn)(state.as_ptr()))
+        .join()
+        .map_err(|_| "on_subscriptions_complete thread panicked".to_string())
+        .and_then(|result| unsafe { result.into_result() })
+}
+
 // ============================================================================
 // SourcePluginProxy — wraps SourcePluginVtable into SourcePluginDescriptor
 // ============================================================================
@@ -696,5 +715,40 @@ impl Drop for SourcePluginProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         super::drop_worker::execute_drop_fn(drop_fn, state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn successful_callback(_state: *mut c_void) -> drasi_plugin_sdk::ffi::FfiResult {
+        CALLBACK_CALLS.fetch_add(1, Ordering::SeqCst);
+        drasi_plugin_sdk::ffi::FfiResult::ok()
+    }
+
+    extern "C" fn failing_callback(_state: *mut c_void) -> drasi_plugin_sdk::ffi::FfiResult {
+        drasi_plugin_sdk::ffi::FfiResult::err("plugin callback failed".to_string())
+    }
+
+    #[test]
+    fn subscriptions_complete_slot_is_invoked_once() {
+        CALLBACK_CALLS.store(0, Ordering::SeqCst);
+
+        let result = call_on_subscriptions_complete_slot(std::ptr::null_mut(), successful_callback);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn subscriptions_complete_slot_preserves_error() {
+        let error = call_on_subscriptions_complete_slot(std::ptr::null_mut(), failing_callback)
+            .unwrap_err();
+
+        assert_eq!(error, "plugin callback failed");
     }
 }

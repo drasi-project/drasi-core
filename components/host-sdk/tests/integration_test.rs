@@ -537,6 +537,74 @@ async fn test_mock_source_start_stop_lifecycle() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_dynamic_source_receives_one_subscriptions_complete_callback() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    test_capture::clear();
+
+    let path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        test_capture::log_callback,
+        std::ptr::null_mut(),
+        test_capture::lifecycle_callback,
+    )
+    .expect("Should load mock source plugin");
+    let source_id = "subscriptions-complete-ffi-source";
+    let source = plugin.source_plugins[0]
+        .create_source(
+            source_id,
+            &serde_json::json!({
+                "dataType": { "type": "generic" },
+                "intervalMs": 60000
+            }),
+            true,
+        )
+        .await
+        .expect("Should create mock source");
+
+    let core = drasi_lib::DrasiLib::builder()
+        .with_id("subscriptions-complete-ffi-test")
+        .with_source(source)
+        .with_query(
+            drasi_lib::Query::cypher("subscriptions-complete-query-1")
+                .query("MATCH (n) RETURN n")
+                .from_source(source_id)
+                .enable_bootstrap(false)
+                .build(),
+        )
+        .with_query(
+            drasi_lib::Query::cypher("subscriptions-complete-query-2")
+                .query("MATCH (n) RETURN n")
+                .from_source(source_id)
+                .enable_bootstrap(false)
+                .build(),
+        )
+        .build()
+        .await
+        .expect("Should build DrasiLib");
+
+    core.start().await.expect("Should start DrasiLib");
+
+    let marker = format!("[MOCK-SUBSCRIPTIONS-COMPLETE] source={source_id}");
+    let callback_count = test_capture::logs()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .filter(|entry| entry.message == marker)
+        .count();
+    assert_eq!(
+        callback_count, 1,
+        "dynamic source callback must run exactly once after both queries subscribe"
+    );
+
+    core.stop().await.expect("Should stop DrasiLib");
+}
+
 // ============================================================================
 // Multiple Instance Tests
 // ============================================================================

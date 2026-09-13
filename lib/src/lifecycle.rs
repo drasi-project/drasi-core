@@ -132,7 +132,7 @@ impl LifecycleManager {
         // Notify sources that all initial subscriptions are done. Sources that
         // held back upstream feedback (e.g., Postgres flush-fence) can now
         // resume normal advancement based on the min-watermark of all handles.
-        self.source_manager.subscriptions_complete().await;
+        self.source_manager.subscriptions_complete().await?;
 
         // Start reactions last — queries are running so snapshot fetching works.
         // The reaction subscribes to the query outbox and catches up on any
@@ -244,11 +244,13 @@ impl LifecycleManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::builder::Query;
     use crate::channels::ComponentStatus;
     use crate::lib_core::DrasiLib;
     use crate::sources::tests::TestMockSource;
     use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
     use crate::test_helpers::wait_for_component_status;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     /// Helper: build a DrasiLib with the given sources (not yet started).
@@ -294,6 +296,60 @@ mod tests {
         // Non-autostart source should remain Added
         let status = core.get_source_status("manual-src").await.unwrap();
         assert_eq!(status, ComponentStatus::Added);
+    }
+
+    #[tokio::test]
+    async fn start_components_notifies_source_once_after_all_query_subscriptions() {
+        let source = TestMockSource::new("subscription-source".to_string()).unwrap();
+        let subscription_count = source.subscription_count();
+        let completion_count = source.subscriptions_complete_count();
+        let subscriptions_at_completion = source.subscriptions_at_completion();
+        let core = DrasiLib::builder()
+            .with_id("subscription-lifecycle-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("subscription-query-1")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("subscription-source")
+                    .build(),
+            )
+            .with_query(
+                Query::cypher("subscription-query-2")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("subscription-source")
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        core.start().await.unwrap();
+
+        assert_eq!(subscription_count.load(Ordering::SeqCst), 2);
+        assert_eq!(subscriptions_at_completion.load(Ordering::SeqCst), 2);
+        assert_eq!(completion_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn start_components_propagates_subscriptions_complete_error() {
+        let source = TestMockSource::new("failing-subscription-source".to_string())
+            .unwrap()
+            .with_subscriptions_complete_error("startup fence release failed");
+        let completion_count = source.subscriptions_complete_count();
+        let core = DrasiLib::builder()
+            .with_id("failing-subscription-lifecycle-test")
+            .with_source(source)
+            .build()
+            .await
+            .unwrap();
+
+        let error = core.start().await.unwrap_err();
+
+        assert_eq!(completion_count.load(Ordering::SeqCst), 1);
+        assert!(
+            error.to_string().contains("startup fence release failed"),
+            "callback error should reach DrasiLib::start(): {error:#}"
+        );
     }
 
     // ========================================================================
@@ -353,8 +409,6 @@ mod tests {
 
     #[tokio::test]
     async fn load_configuration_creates_queries_from_config() {
-        use crate::builder::Query;
-
         // Build with a source and a query that references it
         let source = TestMockSource::with_auto_start("cfg-src".to_string(), true).unwrap();
         let core = DrasiLib::builder()
