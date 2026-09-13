@@ -26,7 +26,7 @@
         "https://github.com/drasi-project/drasi-core/pull/810"
       ],
       "evidenceUrl": "evidence.md#report-l42",
-      "rationale": "The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition."
+      "rationale": "The issue remains open. Draft PR #810 is the curated current-main implementation at 929dc80f; it covers #792 and relates to only the verified runtime subset of #897."
     },
     {
       "id": "report-L43",
@@ -36,10 +36,11 @@
       "summary": "#793",
       "disposition": "existing-issue-prototype-fix",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/793"
+        "https://github.com/drasi-project/drasi-core/issues/793",
+        "https://github.com/drasi-project/drasi-core/pull/904"
       ],
       "evidenceUrl": "evidence.md#report-l43",
-      "rationale": "The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition."
+      "rationale": "The issue remains open; draft PR #904 selectively ports the generic chained-optional propagation fix above #810."
     },
     {
       "id": "report-L44",
@@ -49,10 +50,11 @@
       "summary": "#794",
       "disposition": "existing-issue-prototype-fix",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/794"
+        "https://github.com/drasi-project/drasi-core/issues/794",
+        "https://github.com/drasi-project/drasi-core/pull/904"
       ],
       "evidenceUrl": "evidence.md#report-l44",
-      "rationale": "The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition."
+      "rationale": "The issue remains open; draft PR #904 selectively ports the shared chained-optional propagation fix above #810."
     },
     {
       "id": "report-L45",
@@ -377,13 +379,14 @@
       "sourceSection": "Restart, delivery, and plugin-boundary defects",
       "sourceSubheading": "Earlier PR-only and unfiled repairs",
       "summary": "Deep left-nested AND/OR expressions exhausted a Tokio worker's stack.",
-      "disposition": "issue-opened",
+      "disposition": "issue-opened-existing-pr",
       "recordUrls": [
         "https://github.com/drasi-project/drasi-core/issues/893",
-        "https://github.com/drasi-project/drasi-core/pull/736"
+        "https://github.com/drasi-project/drasi-core/pull/736",
+        "https://github.com/drasi-project/drasi-core/pull/901"
       ],
       "evidenceUrl": "evidence.md#report-l116",
-      "rationale": "#893 tracks the generic Core stack-overflow fix, which was merged only to a historical prototype base."
+      "rationale": "#893 remains open; draft PR #901 is the clean current-main port of the generic fix. PR #736 remains historical prototype evidence."
     },
     {
       "id": "report-L117",
@@ -394,10 +397,11 @@
       "disposition": "issue-opened-existing-pr",
       "recordUrls": [
         "https://github.com/drasi-project/drasi-core/issues/896",
-        "https://github.com/drasi-project/drasi-core/pull/742"
+        "https://github.com/drasi-project/drasi-core/pull/742",
+        "https://github.com/drasi-project/drasi-core/issues/896#issuecomment-5650808975"
       ],
       "evidenceUrl": "evidence.md#report-l117",
-      "rationale": "#896 tracks the generic StateStore durability contract and ABI versioning; its historical open draft must be reused or explicitly dispositioned."
+      "rationale": "#896 remains open. PR #742 is coupled to native WorkGraph stack 741 and must remain untouched as historical evidence; the planned clean generic replacement is layered above #903's ABI 0.15 baseline."
     },
     {
       "id": "report-L118",

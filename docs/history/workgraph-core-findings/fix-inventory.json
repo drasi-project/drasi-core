@@ -13,20 +13,25 @@
     "sanitizedReport": "source-report-sanitized.md",
     "sanitizedReportSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
     "perRecordEvidence": "evidence.md",
-    "perRecordEvidenceSha256": "7b03743cd79923e03b839af0e5cab2a097e53193b8efbc6e55d33ba54899a07e"
+    "perRecordEvidenceSha256": "4fc5a96fe03069f3b6f73c48513d12c2e532057d2b4393b0e7bce273828b21bd"
   },
   "fixes": [
     {
       "issues": [792],
       "commits": ["d4ad74218754f597f50e9ef45562eb535069aed5"],
       "existingPr": 810,
+      "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
       "status": "open-draft-isolated-candidate",
-      "note": "The PR uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e."
+      "note": "The curated draft uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e, fixes #792, and relates to only the verified runtime subset of #897."
     },
     {
       "issues": [793, 794],
       "commits": ["c2b86f9c537bff047c8335e86a078f39264343e2"],
-      "status": "prototype-only"
+      "existingPr": 904,
+      "existingPrHead": "b2970b174a8cf8e8a7052d10cca5b77d0e03ded0",
+      "dependsOnPr": 810,
+      "status": "active-draft-implementation",
+      "note": "PR #904 selectively ports the shared chained-optional propagation fix above #810."
     },
     {
       "issues": [806],
@@ -77,23 +82,33 @@
     },
     {
       "commits": ["8a52f6f3b5dfc438f93d1c53a5f0aee9896d12be"],
-      "existingPr": 736,
-      "status": "merged-only-to-prototype-base",
-      "note": "Deep logical expression evaluation stack-overflow repair."
+      "issues": [893],
+      "historicalPr": 736,
+      "existingPr": 901,
+      "existingPrHead": "615dc486f31cbb9bcd37dc716390f7e83d3babfd",
+      "status": "active-draft-implementation",
+      "note": "PR #901 is the clean current-main port; PR #736 remains merged only to a historical prototype base."
     },
     {
       "commits": [
         "eb777fa7966d04d93a4dabe6b22fbab6f75c1f3e",
         "487df491"
       ],
+      "issues": [896],
       "existingPr": 742,
-      "status": "open-draft-historical-stack",
-      "note": "StateStore durability and ABI versioning."
+      "existingPrHead": "6cbb9e285ca6af7d4a54380924d4dcdd769e36f0",
+      "nativeStack": 741,
+      "stackPrs": [737, 740, 742, 744],
+      "baseBranch": "agentofreality-github-workgraph-bootstrapper",
+      "plannedBasePr": 903,
+      "status": "historical-native-stack-not-reusable",
+      "note": "Do not unstack, retarget, or rebase PR #742. Preserve it and native stack 741 unchanged; create the clean generic #896 layer above PR #903's ABI 0.15 baseline."
     },
     {
       "commits": ["601e2a34b5bce2ec37e26f26818df35f2d27c830"],
       "issues": [897],
       "existingPr": 810,
+      "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
       "status": "runtime-subset-covered-by-pr-810",
       "note": "PR #810 now carries the generic retained_multi_source survival matrix for the runtime default-transition/group-migration subset. Persisted restart/backend acceptance and the separate replay/result-index state-version repair remain open."
     },
@@ -156,6 +171,30 @@
       "commits": ["2dc5d87833960cffc7a2335215e3d93fdd09089c"],
       "remoteBranch": "agentofreality-source-owned-workgraph-allocator",
       "status": "remote-historical-workgraph-specific"
+    }
+  ],
+  "publishedFixLinks": [
+    {
+      "repository": "drasi-project/drasi-core",
+      "issues": [893],
+      "pr": 901,
+      "head": "615dc486f31cbb9bcd37dc716390f7e83d3babfd",
+      "state": "open-draft"
+    },
+    {
+      "repository": "drasi-project/drasi-core",
+      "issues": [793, 794],
+      "pr": 904,
+      "head": "b2970b174a8cf8e8a7052d10cca5b77d0e03ded0",
+      "basePr": 810,
+      "state": "open-draft"
+    },
+    {
+      "repository": "drasi-project/drasi-server",
+      "issues": [196],
+      "pr": 198,
+      "head": "de6bc20cf686a53eb0b6db3b57b21c2bfc06b096",
+      "state": "open-draft"
     }
   ],
   "existingDurabilityStack": [

@@ -73,7 +73,19 @@ work does not duplicate that stack.
   [#903](https://github.com/drasi-project/drasi-core/pull/903).
 - [#810](https://github.com/drasi-project/drasi-core/pull/810) contains the
   isolated #792 candidate but not the later persisted aggregate-replay repair
-  in `7be2e1bd`.
+  in `7be2e1bd`. Its curated draft head is `929dc80f`.
+- [#901](https://github.com/drasi-project/drasi-core/pull/901) is the clean
+  current-main fix for #893, and
+  [#904](https://github.com/drasi-project/drasi-core/pull/904) is the shared
+  #793/#794 fix stacked above #810. Both issues remain open while reviewed.
+- [#742](https://github.com/drasi-project/drasi-core/pull/742) remains
+  historical evidence inside native WorkGraph stack `741`
+  (`#737 -> #740 -> #742 -> #744`). It must not be unstacked, retargeted, or
+  rebased; the clean #896 implementation is instead based above #903's ABI
+  `0.15.0` layer.
+- The related Server publication is
+  [drasi-project/drasi-server#198](https://github.com/drasi-project/drasi-server/pull/198)
+  for [drasi-project/drasi-server#196](https://github.com/drasi-project/drasi-server/issues/196).
 - `8033ca12`, `e26ba153`, and `c3b5f540` form a deliberately parked replay
   investigation. They are not an adopted generic recovery fix.
 - `2dc5d878` is remotely preserved on

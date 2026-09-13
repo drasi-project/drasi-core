@@ -33,6 +33,7 @@ There are no unassigned source IDs.
 | Original Core issues enriched | 20 | #774, #775, #792-#809 |
 | Additional existing issues enriched | 5 | #574, #680, #721, #722, #827 |
 | Existing PRs enriched | 20 | #735-#747 subset, #765, #810, #825-#835 stack, #903 |
+| Later fix PRs recorded | 3 | #901, #904, drasi-project/drasi-server#198 |
 | New preservation PRs | 1 | #890, draft |
 | Local-only commit patches preserved | 20 | Indexed under `patches/index.json` |
 | Reconstructible cumulative series | 7 | All 20 local-only commits covered from public base `43e7d250` |
@@ -53,7 +54,7 @@ downgraded.
 | [#893](https://github.com/drasi-project/drasi-core/issues/893) | Deep logical-expression stack overflow | `8a52f6f3`, historical PR #736 |
 | [#894](https://github.com/drasi-project/drasi-core/issues/894) | Source dispatch ordering across plugin ABI | `f54e829c` |
 | [#895](https://github.com/drasi-project/drasi-core/issues/895) | Cypher continuous-query `UNION` | Historical application workaround |
-| [#896](https://github.com/drasi-project/drasi-core/issues/896) | Dynamic StateStore durability contract | `eb777fa7`, `487df491`, existing PR #742 |
+| [#896](https://github.com/drasi-project/drasi-core/issues/896) | Dynamic StateStore durability contract | `eb777fa7`, `487df491`; #742 is historical stacked evidence only |
 | [#897](https://github.com/drasi-project/drasi-core/issues/897) | Retained multi-source aggregate divergence | `601e2a34` |
 | [#898](https://github.com/drasi-project/drasi-core/issues/898) | `coll.distinct` on unmatched OPTIONAL values | Investigation |
 | [#899](https://github.com/drasi-project/drasi-core/issues/899) | Disconnected MATCH/Cartesian behavior | Investigation |
@@ -64,16 +65,25 @@ downgraded.
 
 - Reuse [#810](https://github.com/drasi-project/drasi-core/pull/810) for
   #792. Do not silently add `7be2e1bd`; characterize and extract its persisted
-  replay change separately.
-- Reuse [#742](https://github.com/drasi-project/drasi-core/pull/742) for #896
-  if it can be cleanly rebased. If it cannot, document that disposition before
-  opening a replacement.
+  replay change separately. Its curated draft head is `929dc80f`.
+- Do **not** reuse, unstack, retarget, or rebase
+  [#742](https://github.com/drasi-project/drasi-core/pull/742) for #896. It is
+  native WorkGraph stack `741` (`#737 -> #740 -> #742 -> #744`), targets
+  `agentofreality-github-workgraph-bootstrapper`, and remains historical
+  evidence at `6cbb9e28`. The clean generic #896 layer belongs above #903 at
+  `fb891f1e` and ABI `0.15.0`.
 - Reuse the open durability stack:
   #825/#743, #826/#821 (and #775), #830/#822, #831/#824, #832/#819,
   #834/#820, and #835/#823.
 - Reuse [#903](https://github.com/drasi-project/drasi-core/pull/903) for both
   #774 and #902. Its loader tests cover missing, null, malformed,
   version/target-incompatible, and physically smaller legacy metadata/layouts.
+- [#901](https://github.com/drasi-project/drasi-core/pull/901) fixes #893.
+- [#904](https://github.com/drasi-project/drasi-core/pull/904) fixes #793 and
+  #794 and intentionally targets #810.
+- [drasi-project/drasi-server#198](https://github.com/drasi-project/drasi-server/pull/198)
+  fixes
+  [drasi-project/drasi-server#196](https://github.com/drasi-project/drasi-server/issues/196).
 - Historical PRs #735 and #736 merged only into a prototype base.
 - Historical PRs #747 and #765 closed unmerged. Their commits are evidence, not
   upstream implementation state.
@@ -94,16 +104,17 @@ downgraded.
 Each item should be a separate draft PR unless the listed issues share one
 inseparable root cause.
 
-1. **Existing active stacks:** finish review of #810, #825-#835, and #903
-   rather than creating replacements.
+1. **Existing active stacks:** finish review of #810 at `929dc80f`, #825-#835,
+   #901, #903 at `fb891f1e`, and #904 rather than creating replacements.
 2. **Source lifecycle and loader ABI:** reuse #903 for #774 and #902; do not
    create a duplicate loader implementation.
-3. **Query fixes with retained tests:** #793/#794 together from `c2b86f9c`,
+3. **Query fixes with retained tests:** reuse #904 for #793/#794 together,
    then #806 from `2f129f22`, #807 from `67311899`, #808 from
    `fcce3f11` plus required `c6615b45`, and #809 from `7691d769` with the
    related replacement-update coverage.
-4. **Small generic historical extractions:** #893 from `8a52f6f3`; #896 by
-   reusing #742; #900 from the final
+4. **Small generic historical extractions:** reuse #901 for #893; implement
+   #896 as a clean generic layer above #903 while leaving #742/stack 741
+   untouched; extract #900 from the final
    `16f67030`/`56745f88`/`ee649b9b` implementation.
 5. **Reproduce before porting:** #897's runtime default-transition subset is
    now covered by PR #810; reproduce its remaining persisted restart/backend

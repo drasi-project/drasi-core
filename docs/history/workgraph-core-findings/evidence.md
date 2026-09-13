@@ -23,7 +23,9 @@ The original source report SHA-256 is
 
 **Disposition rationale**
 
-The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition.
+The issue remains open. Draft PR #810 is the curated current-main implementation
+at `929dc80fbe0d33ed6135418d0b04f304a13e81a2`; it covers #792 and relates to
+only the verified runtime subset of #897.
 
 **Public records**
 
@@ -45,11 +47,13 @@ The issue remains open; a public prototype fix exists and requires an issue-spec
 
 **Disposition rationale**
 
-The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition.
+The issue remains open; draft PR #904 selectively ports the generic
+chained-optional propagation fix above #810.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/793
+- https://github.com/drasi-project/drasi-core/pull/904
 
 <a id="report-l44"></a>
 ## `report-L44` - #794
@@ -66,11 +70,13 @@ The issue remains open; a public prototype fix exists and requires an issue-spec
 
 **Disposition rationale**
 
-The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition.
+The issue remains open; draft PR #904 selectively ports the shared
+chained-optional propagation fix above #810.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/794
+- https://github.com/drasi-project/drasi-core/pull/904
 
 <a id="report-l45"></a>
 ## `report-L45` - #806
@@ -588,7 +594,7 @@ Historical sequence-baseline work was a predecessor to the broader durable-outpu
 - **Source section:** Restart, delivery, and plugin-boundary defects
 - **Source subheading:** Earlier PR-only and unfiled repairs
 - **Sanitized source-report line:** 116
-- **Published disposition:** `issue-opened`
+- **Published disposition:** `issue-opened-existing-pr`
 
 **Original finding detail**
 
@@ -596,12 +602,14 @@ Historical sequence-baseline work was a predecessor to the broader durable-outpu
 
 **Disposition rationale**
 
-#893 tracks the generic Core stack-overflow fix, which was merged only to a historical prototype base.
+#893 remains open; draft PR #901 is the clean current-main port of the generic
+fix. PR #736 remains historical prototype evidence.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/893
 - https://github.com/drasi-project/drasi-core/pull/736
+- https://github.com/drasi-project/drasi-core/pull/901
 
 <a id="report-l117"></a>
 ## `report-L117` - Durable host state appeared non-durable to dynamic plugins.
@@ -618,12 +626,19 @@ Historical sequence-baseline work was a predecessor to the broader durable-outpu
 
 **Disposition rationale**
 
-#896 tracks the generic StateStore durability contract and ABI versioning; its historical open draft must be reused or explicitly dispositioned.
+#896 remains open. PR #742 is coupled to native WorkGraph stack `741`
+(`#737 -> #740 -> #742 -> #744`), targets
+`agentofreality-github-workgraph-bootstrapper`, and must not be unstacked,
+retargeted, or rebased under this scope. It remains historical evidence at
+`6cbb9e285ca6af7d4a54380924d4dcdd769e36f0`. The planned clean generic
+replacement is layered above PR #903 at
+`fb891f1ee3109b885a55ab8e44d0c973e02d9e69` and ABI `0.15.0`.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/896
 - https://github.com/drasi-project/drasi-core/pull/742
+- https://github.com/drasi-project/drasi-core/issues/896#issuecomment-5650808975
 
 <a id="report-l118"></a>
 ## `report-L118` - Retained multi-source queries diverged from freshly constructed queries.

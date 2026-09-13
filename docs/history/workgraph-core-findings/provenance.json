@@ -15,7 +15,7 @@
       "sha256": "f06c1945acd8baf1cc71f8391b715f407ed49f48e20457fc5030ebad14d43d0c",
       "publishedRaw": false,
       "publishedSanitizedEvidence": "evidence.md",
-      "publishedSanitizedEvidenceSha256": "7b03743cd79923e03b839af0e5cab2a097e53193b8efbc6e55d33ba54899a07e",
+      "publishedSanitizedEvidenceSha256": "4fc5a96fe03069f3b6f73c48513d12c2e532057d2b4393b0e7bce273828b21bd",
       "reason": "The local mechanical index includes private provenance strings. The complete 132 rows and seven anchors are published with original technical detail and sanitized provenance."
     }
   ],
