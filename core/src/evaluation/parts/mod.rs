@@ -347,7 +347,11 @@ impl QueryPartEvaluator {
                 ..
             } => {
                 if let Some(before) = &before {
-                    if before == &after && !change_context.is_future_reprocess && !default_before {
+                    if before == &after
+                        && !change_context.is_future_reprocess
+                        && !default_before
+                        && !default_after
+                    {
                         return Ok(vec![QueryPartEvaluationContext::Noop]);
                     }
                 };
@@ -575,20 +579,22 @@ impl QueryPartEvaluator {
                             change_context,
                         )
                         .await?),
-                    _ => {
-                        if before_filtered || !should_revert {
-                            Ok(vec![QueryPartEvaluationContext::Adding {
-                                after: next_after,
-                                row_signature: 0,
-                            }])
-                        } else {
-                            Ok(vec![QueryPartEvaluationContext::Updating {
-                                before: next_before.unwrap_or_default(),
-                                after: next_after,
-                                row_signature: 0,
-                            }])
-                        }
-                    }
+                    _ => match (!before_filtered && should_revert, should_apply) {
+                        (true, true) => Ok(vec![QueryPartEvaluationContext::Updating {
+                            before: next_before.unwrap_or_default(),
+                            after: next_after,
+                            row_signature: 0,
+                        }]),
+                        (true, false) => Ok(vec![QueryPartEvaluationContext::Removing {
+                            before: next_before.unwrap_or_default(),
+                            row_signature: 0,
+                        }]),
+                        (false, true) => Ok(vec![QueryPartEvaluationContext::Adding {
+                            after: next_after,
+                            row_signature: 0,
+                        }]),
+                        (false, false) => Ok(vec![QueryPartEvaluationContext::Noop]),
+                    },
                 }
             }
             QueryPartEvaluationContext::Noop => Ok(vec![context]),
@@ -675,7 +681,12 @@ impl QueryPartEvaluator {
 
         let mut grouping_match = true;
         for gk in &grouping_keys {
-            if before_out.get(gk.as_str()) != after_out.get(gk.as_str()) {
+            let values_match = match (before_out.get(gk.as_str()), after_out.get(gk.as_str())) {
+                (Some(before), Some(after)) => before.eq_for_groupby(after),
+                (None, None) => true,
+                _ => false,
+            };
+            if !values_match {
                 grouping_match = false;
                 break;
             }
@@ -697,7 +708,7 @@ impl QueryPartEvaluator {
                 before: snapshot,
                 after: after_out,
                 grouping_keys: grouping_keys.clone(),
-                default_before: false,
+                default_before: true,
                 default_after: false,
                 row_signature: 0,
             },
@@ -715,7 +726,7 @@ impl QueryPartEvaluator {
                 },
                 grouping_keys: grouping_keys.clone(),
                 default_before: false,
-                default_after: false,
+                default_after: true,
                 row_signature: 0,
             },
         ])
