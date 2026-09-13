@@ -37,7 +37,7 @@ use crate::{
     },
     interface::{
         ElementIndex, FutureQueue, FutureQueueConsumer, IndexError, MiddlewareError, QueryClock,
-        SessionControl, SessionGuard,
+        ResultIndex, SessionControl, SessionGuard,
     },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
@@ -66,6 +66,7 @@ pub struct ContinuousQuery {
     query: Arc<Query>,
     future_consumer_shutdown_request: Arc<Notify>,
     future_queue: Arc<dyn FutureQueue>,
+    result_index: Arc<dyn ResultIndex>,
     future_queue_task: Mutex<Option<JoinHandle<()>>>,
     change_lock: Mutex<()>,
     source_pipelines: SourceMiddlewarePipelineCollection,
@@ -82,6 +83,7 @@ impl ContinuousQuery {
         path_solver: Arc<MatchPathSolver>,
         part_evaluator: Arc<QueryPartEvaluator>,
         future_queue: Arc<dyn FutureQueue>,
+        result_index: Arc<dyn ResultIndex>,
         source_pipelines: SourceMiddlewarePipelineCollection,
         session_control: Arc<dyn SessionControl>,
     ) -> Self {
@@ -94,6 +96,7 @@ impl ContinuousQuery {
             query,
             future_consumer_shutdown_request: Arc::new(Notify::new()),
             future_queue,
+            result_index,
             future_queue_task: Mutex::new(None),
             change_lock: Mutex::new(()),
             source_pipelines,
@@ -108,6 +111,7 @@ impl ContinuousQuery {
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
+        self.ensure_result_index_state().await?;
 
         let changes = self.execute_source_middleware(change).await?;
         let result = self.process_changes_inner(changes).await?;
@@ -134,6 +138,7 @@ impl ContinuousQuery {
     {
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
+        self.ensure_result_index_state().await?;
 
         let changes = self.execute_source_middleware(change).await?;
         let result = self.process_changes_inner(changes).await?;
@@ -154,6 +159,7 @@ impl ContinuousQuery {
     pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
+        self.ensure_result_index_state().await?;
 
         let future_ref = match self.future_queue.pop().await {
             Ok(Some(fr)) => fr,
@@ -170,6 +176,10 @@ impl ContinuousQuery {
         let results = self.process_changes_inner(changes).await?;
         guard.commit().await?;
         Ok(Some(DueFutureResult { results, source_id }))
+    }
+
+    async fn ensure_result_index_state(&self) -> Result<(), IndexError> {
+        self.result_index.ensure_state_version().await
     }
 
     /// Expose the ContinuousQuery's future queue for external polling.
@@ -848,11 +858,14 @@ impl CollapsedAggregationResults {
     ) -> Vec<(QueryPartEvaluationContext, ChangeContext)> {
         self.data
             .into_iter()
-            .map(|(after_key, (v, before_key))| {
+            .filter_map(|(after_key, (v, before_key))| {
+                if is_default_aggregation_noop(&v) {
+                    return None;
+                }
                 let mut change_context = change_context.clone();
                 change_context.before_grouping_hash = before_key;
                 change_context.after_grouping_hash = after_key;
-                (v, change_context)
+                Some((v, change_context))
             })
             .collect()
     }
@@ -860,26 +873,42 @@ impl CollapsedAggregationResults {
     fn into_result_vec(self) -> Vec<QueryPartEvaluationContext> {
         self.data
             .into_iter()
-            .map(|(after_key, (ctx, _))| match ctx {
-                QueryPartEvaluationContext::Aggregation {
-                    before,
-                    after,
-                    grouping_keys,
-                    default_before,
-                    default_after,
-                    ..
-                } => QueryPartEvaluationContext::Aggregation {
-                    before,
-                    after,
-                    grouping_keys,
-                    default_before,
-                    default_after,
-                    row_signature: after_key,
-                },
-                other => other,
+            .filter_map(|(after_key, (ctx, _))| {
+                if is_default_aggregation_noop(&ctx) {
+                    return None;
+                }
+                Some(match ctx {
+                    QueryPartEvaluationContext::Aggregation {
+                        before,
+                        after,
+                        grouping_keys,
+                        default_before,
+                        default_after,
+                        ..
+                    } => QueryPartEvaluationContext::Aggregation {
+                        before,
+                        after,
+                        grouping_keys,
+                        default_before,
+                        default_after,
+                        row_signature: after_key,
+                    },
+                    other => other,
+                })
             })
             .collect()
     }
+}
+
+fn is_default_aggregation_noop(context: &QueryPartEvaluationContext) -> bool {
+    matches!(
+        context,
+        QueryPartEvaluationContext::Aggregation {
+            default_before: true,
+            default_after: true,
+            ..
+        }
+    )
 }
 
 fn extract_grouping_value_hash(grouping_keys: &Vec<String>, variables: &QueryVariables) -> u64 {
@@ -907,7 +936,7 @@ mod collapsed_aggregation_tests {
     }
 
     #[test]
-    fn collapse_preserves_first_before_and_last_after_defaults() {
+    fn collapse_discards_add_then_remove() {
         let mut collapsed = CollapsedAggregationResults::new();
         collapsed.insert(QueryPartEvaluationContext::Aggregation {
             before: Some(variables("group-a", 0)),
@@ -927,6 +956,30 @@ mod collapsed_aggregation_tests {
         });
 
         let results = collapsed.into_result_vec();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn collapse_preserves_first_add_and_last_update() {
+        let mut collapsed = CollapsedAggregationResults::new();
+        collapsed.insert(QueryPartEvaluationContext::Aggregation {
+            before: Some(variables("group-a", 0)),
+            after: variables("group-a", 1),
+            grouping_keys: vec!["group".to_string()],
+            default_before: true,
+            default_after: false,
+            row_signature: 0,
+        });
+        collapsed.insert(QueryPartEvaluationContext::Aggregation {
+            before: Some(variables("group-a", 1)),
+            after: variables("group-a", 2),
+            grouping_keys: vec!["group".to_string()],
+            default_before: false,
+            default_after: false,
+            row_signature: 0,
+        });
+
+        let results = collapsed.into_result_vec();
         assert_eq!(results.len(), 1);
         assert!(matches!(
             &results[0],
@@ -934,9 +987,9 @@ mod collapsed_aggregation_tests {
                 before: Some(before),
                 after,
                 default_before: true,
-                default_after: true,
+                default_after: false,
                 ..
-            } if before == &variables("group-a", 0) && after == &variables("group-a", 1)
+            } if before == &variables("group-a", 0) && after == &variables("group-a", 2)
         ));
     }
 }

@@ -98,6 +98,19 @@ impl WriteBuffer {
         }
     }
 
+    pub fn contains_live_key_with_prefix(&self, prefix: &str) -> bool {
+        self.keys.iter().any(|(key, state)| {
+            key.starts_with(prefix)
+                && match state {
+                    KeyState::Deleted => false,
+                    KeyState::StringValue(_) => true,
+                    KeyState::Hash { fields } => fields.values().any(Option::is_some),
+                    KeyState::Set { added, .. } => !added.is_empty(),
+                    KeyState::SortedSet { added, .. } => !added.is_empty(),
+                }
+        })
+    }
+
     // --- String operations ---
 
     pub fn string_set(&mut self, key: String, value: Vec<u8>) {

@@ -517,7 +517,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
               "my_avg" => json!(1.0)
             ],
             grouping_keys: vec!["Category".to_string()],
-            default_before: false,
+            default_before: true,
             default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
@@ -544,7 +544,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
               "my_avg" => json!(2.0)
             ],
             grouping_keys: vec!["Category".to_string()],
-            default_before: false,
+            default_before: true,
             default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
@@ -1095,7 +1095,7 @@ async fn sequential_aggregations1() {
                 "total" => json!(1)
             ],
             grouping_keys: vec![],
-            default_before: false,
+            default_before: true,
             default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
@@ -1261,7 +1261,7 @@ async fn sequential_aggregations2() {
                 "total" => json!(2)
             ],
             grouping_keys: vec![],
-            default_before: false,
+            default_before: true,
             default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
