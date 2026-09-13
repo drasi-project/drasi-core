@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-12T18:28:14-07:00",
+  "sourceInputs": [
+    {
+      "name": "workgraph-core-issue-history.md",
+      "sha256": "683a7406e1edd6778f892bd3e849d2440ac8da3fa023aac79c6ac93b37eebbda",
+      "publishedRaw": false,
+      "reason": "The source report includes local/private session navigation metadata. Its sanitized findings are represented by stable IDs in ledger.json."
+    },
+    {
+      "name": "publication-source-index.json",
+      "sha256": "f06c1945acd8baf1cc71f8391b715f407ed49f48e20457fc5030ebad14d43d0c",
+      "publishedRaw": false,
+      "reason": "The local mechanical index includes private provenance strings. All 132 rows and seven anchors are represented in ledger.json."
+    }
+  ],
+  "publicBaselines": {
+    "main": "e759606fa065bee0ef9e60017e263f0f85dd0e44",
+    "retainedBranch": "workgraph-generic-recovery",
+    "retainedTip": "fb5d2bda2cbce4284fecbce40cae2a2d74116249",
+    "workgraphRemovalCommit": "b1458cb1c25cd39457361a1be010f2fba7c6d5ff"
+  },
+  "sanitization": {
+    "excluded": [
+      "raw transcripts and private messages",
+      "local filesystem and session identifiers",
+      "credentials and operator configuration",
+      "runtime databases, WALs, and unsanitized git bundles"
+    ],
+    "retained": [
+      "stable report row and narrative IDs",
+      "generic technical summaries and dispositions",
+      "public GitHub issue, pull request, branch, and commit URLs",
+      "input checksums and exact public revision baselines"
+    ]
+  }
+}
