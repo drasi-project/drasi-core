@@ -24,9 +24,9 @@ The original source report SHA-256 is
 **Disposition rationale**
 
 The issue remains open. Draft PR #810 is the curated current-main implementation
-at `929dc80fbe0d33ed6135418d0b04f304a13e81a2`; it fixes #792 and contains
-the full historical runtime correction for #897. The matrix failed on
-`042559d9` and passed after `601e2a34`; an exact `e759606f` run remains pending.
+at `929dc80fbe0d33ed6135418d0b04f304a13e81a2`; it fixes #792 and #897 and
+contains the full known historical runtime correction. The #897 matrix failed
+on `042559d9` and passed after `601e2a34`; no direct `e759606f` run is claimed.
 
 **Public records**
 
@@ -663,20 +663,24 @@ status and later grouping-key update, while the fresh pair receives the final
 status as an insert. No state store, shutdown, reload, result-index restore, or
 persistent backend is present.
 
-PR #810 carries the generic survival matrix and relates to #897. Exact pre-fix
-evidence records the matrix failing on parent `042559d9` and passing after
-`601e2a34`. The relevant runtime files are unchanged through `e759606f`, so a
-current-main failure is strongly inferred but has not been run directly.
-`601e2a34`'s runtime correction is a subset of #810, and no distinct surviving
-#897 correction was found. The final #792 overlap disposition remains pending.
-Persistence concerns are tracked by #775/#821, #822, and #806 rather than
-added to #897 without a reproduction.
+The immutable generic fixture at PR #810 head `929dc80f` preserves the
+[anti-join queries](https://github.com/drasi-project/drasi-core/blob/929dc80fbe0d33ed6135418d0b04f304a13e81a2/core/src/query/tests/retained_multi_source_tests.rs#L36-L56),
+[event sequences](https://github.com/drasi-project/drasi-core/blob/929dc80fbe0d33ed6135418d0b04f304a13e81a2/core/src/query/tests/retained_multi_source_tests.rs#L157-L225),
+and [assertions](https://github.com/drasi-project/drasi-core/blob/929dc80fbe0d33ed6135418d0b04f304a13e81a2/core/src/query/tests/retained_multi_source_tests.rs#L239-L248).
+Historical evidence records the matrix failing on parent `042559d9` and
+passing after `601e2a34`. The relevant runtime files are byte-identical through
+`e759606f`, so a current-main failure is strongly inferred but has not been run
+directly. `601e2a34`'s runtime correction is a subset of #810, and no distinct
+surviving #897 correction was found. PR #810 now fixes #897 as well as #792.
+Persistence concerns are tracked by #775/#821, #822, and #806 rather than added
+to #897 without a reproduction.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/897
 - https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654327604
 - https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654332165
+- https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654356845
 - https://github.com/drasi-project/drasi-core/pull/810
 
 <a id="report-l119"></a>

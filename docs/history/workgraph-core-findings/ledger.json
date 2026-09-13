@@ -26,7 +26,7 @@
         "https://github.com/drasi-project/drasi-core/pull/810"
       ],
       "evidenceUrl": "evidence.md#report-l42",
-      "rationale": "The issue remains open. Draft PR #810 is the curated current-main implementation at 929dc80f; it fixes #792 and contains the full historical runtime correction for #897. The matrix failed on 042559d9 and passed after 601e2a34; an exact e759606f run remains pending."
+      "rationale": "The issue remains open. Draft PR #810 at 929dc80f fixes #792 and #897 and contains the full known historical runtime correction. The #897 matrix failed on 042559d9 and passed after 601e2a34; no direct e759606f run is claimed."
     },
     {
       "id": "report-L43",
@@ -414,10 +414,11 @@
         "https://github.com/drasi-project/drasi-core/issues/897",
         "https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654327604",
         "https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654332165",
+        "https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654356845",
         "https://github.com/drasi-project/drasi-core/pull/810"
       ],
       "evidenceUrl": "evidence.md#report-l118",
-      "rationale": "#897 tracks an in-process live-history versus fresh-final-snapshot divergence, not a persistent restart. The matrix failed on 042559d9 and passed after 601e2a34. PR #810 contains that runtime correction and relates to #897; direct e759606f execution and the final #792 overlap disposition remain pending."
+      "rationale": "#897 tracks an in-process live-history versus fresh-final-snapshot divergence, not a persistent restart. The matrix failed on 042559d9 and passed after 601e2a34. PR #810 fixes #897 and contains the full known correction; no direct e759606f run is claimed."
     },
     {
       "id": "report-L119",

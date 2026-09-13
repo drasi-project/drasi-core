@@ -13,7 +13,7 @@
     "sanitizedReport": "source-report-sanitized.md",
     "sanitizedReportSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
     "perRecordEvidence": "evidence.md",
-    "perRecordEvidenceSha256": "eedfdf171bd5db7fd3ddd414d6f95968e218521577691a923210b46d2f47d827"
+    "perRecordEvidenceSha256": "c6bc578240ac82d6a232f57ef1dee220939ab571fa727c37d786387ccd89d9f7"
   },
   "fixes": [
     {
@@ -22,7 +22,7 @@
       "existingPr": 810,
       "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
       "status": "open-draft-isolated-candidate",
-      "note": "The curated draft uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e, fixes #792, and contains the full historical runtime correction for #897. The matrix failed on 042559d9 and passed after 601e2a34; direct e759606f execution remains pending."
+      "note": "The curated draft uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e, fixes #792 and #897, and contains the full known historical runtime correction. The #897 matrix failed on 042559d9 and passed after 601e2a34; no direct e759606f run is claimed."
     },
     {
       "issues": [793, 794],
@@ -109,8 +109,8 @@
       "issues": [897],
       "existingPr": 810,
       "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
-      "status": "historical-fix-contained-in-active-related-pr",
-      "note": "PR #810 contains the full 601e2a34 runtime correction and carries the generic retained_multi_source live-history/fresh-final-snapshot matrix. The historical matrix failed on 042559d9 and passed after 601e2a34; relevant runtime files are unchanged through e759606f, but that exact revision has not been directly run. No shutdown, reload, persistent backend, or result-index restoration was tested. The final #792 overlap disposition remains pending."
+      "status": "active-draft-implementation",
+      "note": "PR #810 fixes #897 and contains the full known 601e2a34 runtime correction plus the generic retained_multi_source live-history/fresh-final-snapshot matrix. The historical matrix failed on 042559d9 and passed after 601e2a34; relevant runtime files are byte-identical through e759606f, but that exact revision was not directly run. No shutdown, reload, persistent backend, or result-index restoration was tested."
     },
     {
       "commits": ["645af0801f268af61d44f58480e44c3e3a3544be"],

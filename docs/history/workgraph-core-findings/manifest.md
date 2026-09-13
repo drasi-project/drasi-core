@@ -119,9 +119,10 @@ inseparable root cause.
 5. **Prove the retained/fresh baseline:** #897 is an in-process live-history
    versus fresh-final-snapshot defect, not a persistence restart. The historical
    matrix failed on `042559d9` and passed after `601e2a34`; PR #810 contains
-   that runtime correction. Run the test directly on exact `e759606f`, then
-   decide whether #792 fully subsumes #897. Keep persistence concerns with
-   #775/#821, #822, and #806. Test #891 from the generic `SourceBase` part of
+   that full known runtime correction and fixes #897 as well as #792. Reuse it
+   rather than extracting another fix; no direct `e759606f` run is claimed.
+   Keep persistence concerns with #775/#821, #822, and #806. Test #891 from the
+   generic `SourceBase` part of
    `645af080`; #894 from `f54e829c` after testing current `dispatch_event`
    behavior following #827/#828/#856.
 6. **Unfixed correctness issues:** #795-#799 and #805, prioritized by

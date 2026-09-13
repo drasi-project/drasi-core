@@ -80,7 +80,8 @@ work does not duplicate that stack.
   concerns remain mapped to #775/#821, #822, and #806. The historical matrix
   failed on parent `042559d9` and passed after `601e2a34`; exact `e759606f`
   execution remains pending even though the relevant runtime files are
-  unchanged.
+  byte-identical. Draft PR #810 contains the full known runtime correction and
+  now fixes #897 as well as #792.
 - [#901](https://github.com/drasi-project/drasi-core/pull/901) is the clean
   current-main fix for #893, and
   [#904](https://github.com/drasi-project/drasi-core/pull/904) is the shared
