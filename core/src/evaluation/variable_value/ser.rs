@@ -38,22 +38,38 @@ impl Serialize for VariableValue {
                 use serde::ser::SerializeMap;
                 let mut map = serializer.serialize_map(Some(m.len()))?;
                 for (k, v) in m {
-                    let _ = map.serialize_entry(k, v);
+                    map.serialize_entry(k, v)?;
                 }
                 map.end()
             }
             VariableValue::Date(v) => v.serialize(serializer),
             VariableValue::LocalTime(v) => v.serialize(serializer),
-            VariableValue::ZonedTime(_v) => todo!(),
+            VariableValue::ZonedTime(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::ZonedTime",
+            )),
             VariableValue::LocalDateTime(v) => v.serialize(serializer),
             VariableValue::ZonedDateTime(v) => v.serialize(serializer),
-            VariableValue::Duration(_v) => todo!(),
-            VariableValue::Expression(_v) => todo!(),
-            VariableValue::ListRange(_v) => todo!(),
-            VariableValue::Element(_) => todo!(),
-            VariableValue::ElementMetadata(_m) => todo!(),
-            VariableValue::ElementReference(_) => todo!(),
-            VariableValue::Awaiting => todo!(),
+            VariableValue::Duration(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::Duration",
+            )),
+            VariableValue::Expression(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::Expression",
+            )),
+            VariableValue::ListRange(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::ListRange",
+            )),
+            VariableValue::Element(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::Element",
+            )),
+            VariableValue::ElementMetadata(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::ElementMetadata",
+            )),
+            VariableValue::ElementReference(_) => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::ElementReference",
+            )),
+            VariableValue::Awaiting => Err(serde::ser::Error::custom(
+                "Cannot serialize VariableValue::Awaiting",
+            )),
         }
     }
 }
