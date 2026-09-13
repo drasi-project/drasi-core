@@ -1175,19 +1175,19 @@ mod tests {
     }
 
     #[test]
-    fn test_sdk_compatibility_rejects_pre_callback_vtable() {
-        let error = validate_sdk_compatibility("0.14.9", "0.15.0").unwrap_err();
-        assert!(error.to_string().contains("0.14 != 0.15"));
+    fn test_sdk_compatibility_rejects_pre_current_vtable() {
+        let error = validate_sdk_compatibility("0.15.9", "0.16.0").unwrap_err();
+        assert!(error.to_string().contains("0.15 != 0.16"));
     }
 
     #[test]
     fn test_sdk_compatibility_accepts_patch_difference() {
-        validate_sdk_compatibility("0.15.9", "0.15.0").unwrap();
+        validate_sdk_compatibility("0.16.9", "0.16.0").unwrap();
     }
 
     #[test]
     fn test_sdk_compatibility_rejects_malformed_version() {
-        let error = validate_sdk_compatibility("legacy", "0.15.0").unwrap_err();
+        let error = validate_sdk_compatibility("legacy", "0.16.0").unwrap_err();
         assert!(error.to_string().contains("invalid plugin SDK version"));
     }
 }

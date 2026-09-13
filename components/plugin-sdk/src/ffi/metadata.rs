@@ -54,7 +54,10 @@ use super::types::FfiStr;
 ///   lifecycle can notify dynamic sources after startup query subscriptions
 ///   have registered. The callback returns `FfiResult`, preserving source
 ///   failures across the ABI boundary (#774).
-pub const FFI_SDK_VERSION: &str = "0.15.0";
+/// - `0.16.0`: `StateStoreVtable` gained `is_durable_fn` so dynamic plugins
+///   observe the host provider's persistence capability instead of inheriting
+///   the trait's non-durable default (#896).
+pub const FFI_SDK_VERSION: &str = "0.16.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

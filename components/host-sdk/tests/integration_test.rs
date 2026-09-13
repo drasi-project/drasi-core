@@ -2006,6 +2006,82 @@ async fn test_source_with_null_identity_provider() {
     assert_eq!(source.id(), "null-ip-test");
 }
 
+#[tokio::test]
+#[serial]
+async fn test_source_state_store_durability_cross_cdylib() {
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    const MARKER_ENV: &str = "DRASI_MOCK_STATE_STORE_DURABILITY_MARKER";
+    let _env_guard = EnvGuard(MARKER_ENV);
+    let path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    let durable_source = plugin.source_plugins[0]
+        .create_source("durable-state-store-test", &serde_json::json!({}), false)
+        .await
+        .expect("Should create durable-store source");
+    let durable_marker = tempfile::NamedTempFile::new().expect("durable marker file");
+    std::env::set_var(MARKER_ENV, durable_marker.path());
+    let durable_temp = tempfile::tempdir().expect("durable temp directory");
+    let durable_store: std::sync::Arc<dyn drasi_lib::StateStoreProvider> = std::sync::Arc::new(
+        drasi_state_store_redb::RedbStateStoreProvider::new(durable_temp.path().join("state.redb"))
+            .expect("redb state store"),
+    );
+    let (durable_update_tx, _durable_update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    durable_source
+        .initialize(drasi_lib::context::SourceRuntimeContext {
+            instance_id: "durability-bridge-test".to_string(),
+            source_id: "durable-state-store-test".to_string(),
+            update_tx: durable_update_tx,
+            state_store: Some(durable_store),
+            identity_provider: None,
+            wal_provider: None,
+        })
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(durable_marker.path()).expect("read durable marker"),
+        "true"
+    );
+
+    let volatile_source = plugin.source_plugins[0]
+        .create_source("volatile-state-store-test", &serde_json::json!({}), false)
+        .await
+        .expect("Should create volatile-store source");
+    let volatile_marker = tempfile::NamedTempFile::new().expect("volatile marker file");
+    std::env::set_var(MARKER_ENV, volatile_marker.path());
+    let volatile_store: std::sync::Arc<dyn drasi_lib::StateStoreProvider> =
+        std::sync::Arc::new(drasi_lib::MemoryStateStoreProvider::new());
+    let (volatile_update_tx, _volatile_update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    volatile_source
+        .initialize(drasi_lib::context::SourceRuntimeContext {
+            instance_id: "durability-bridge-test".to_string(),
+            source_id: "volatile-state-store-test".to_string(),
+            update_tx: volatile_update_tx,
+            state_store: Some(volatile_store),
+            identity_provider: None,
+            wal_provider: None,
+        })
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(volatile_marker.path()).expect("read volatile marker"),
+        "false"
+    );
+}
+
 /// Test that a source receives a non-null identity_provider through FFI.
 #[tokio::test]
 async fn test_source_with_identity_provider_injection() {
