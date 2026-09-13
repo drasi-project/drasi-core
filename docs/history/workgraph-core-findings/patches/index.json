@@ -1,0 +1,359 @@
+{
+  "schemaVersion": 1,
+  "format": "git diff --binary --full-index <parent> <commit>",
+  "apply": "git apply --3way <patch>",
+  "entries": [
+    {
+      "commit": "23a06f98943d649ba1f418170a2781e05aa612ac",
+      "parent": "c3638c972c5747556d4680e22cc70fa39dd4fe76",
+      "subject": "Throttle terminal prune scans per interval",
+      "patch": "23a06f98943d649ba1f418170a2781e05aa612ac.patch",
+      "sha256": "deed9deff055267c40bd0e7e07520fc6015cd89f050bc15a9a119b980b7499d1",
+      "bytes": 12460,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs"
+      ]
+    },
+    {
+      "commit": "25bda3bb2ef6eebef60dd6babdf69138466babae",
+      "parent": "44342b390c501032a24519c087cb4df4cd1e539f",
+      "subject": "Fix router candidate binding and checkpoint seeding races",
+      "patch": "25bda3bb2ef6eebef60dd6babdf69138466babae.patch",
+      "sha256": "8672c5295b2fe2c99417fc34ca418cb851cad0301984fd9cef1d0de02a5d7b7b",
+      "bytes": 43201,
+      "changedFiles": [
+        "components/reactions/workgraph-router/src/candidate.rs",
+        "components/reactions/workgraph-router/src/reaction.rs",
+        "components/reactions/workgraph-router/src/state.rs",
+        "components/reactions/workgraph-router/src/tests.rs",
+        "components/reactions/workgraph-router/tests/integration_test.rs",
+        "lib/src/queries/config_hash.rs",
+        "lib/src/reactions/common/checkpoint_state.rs",
+        "lib/src/reactions/manager.rs"
+      ]
+    },
+    {
+      "commit": "266f187f98ddde712f24d40b7b9c667d088e74e0",
+      "parent": "e63c14e9c8e8cf7f9953cad3b6b543ec210b2c2d",
+      "subject": "Make rate-limit tests deterministic",
+      "patch": "266f187f98ddde712f24d40b7b9c667d088e74e0.patch",
+      "sha256": "5fb5e91843b2aa3f9aaaf723719d6114477493a0cbde4bedcfe332580a6eacaa",
+      "bytes": 5539,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/src/graphql.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs"
+      ]
+    },
+    {
+      "commit": "26d48cde88d7a49684846d46d8f3df407930804b",
+      "parent": "ff0dce92c8e9b859a825ae373449399c1a745236",
+      "subject": "Fix replay checkpoint ownership and allowlist regressions",
+      "patch": "26d48cde88d7a49684846d46d8f3df407930804b.patch",
+      "sha256": "28d53717310a488808afbfba49fca190d1fc11aa7efe19d8d9c3a4b1e1ee8fb9",
+      "bytes": 57140,
+      "changedFiles": [
+        "components/reactions/workgraph-router/README.md",
+        "components/reactions/workgraph-router/src/config.rs",
+        "components/reactions/workgraph-router/src/descriptor.rs",
+        "components/reactions/workgraph-router/src/reaction.rs",
+        "lib/README.md",
+        "lib/src/lib.rs",
+        "lib/src/reactions/manager.rs",
+        "lib/src/reactions/mod.rs",
+        "lib/src/reactions/traits.rs"
+      ]
+    },
+    {
+      "commit": "37d0fe354792036cfcc7ba18531806c1918b8f5f",
+      "parent": "e7190b1d566fb76c1e0c3035b27f8a474a097f53",
+      "subject": "Harden router fencing and state-store CAS ABI",
+      "patch": "37d0fe354792036cfcc7ba18531806c1918b8f5f.patch",
+      "sha256": "e329af57038691c830bf75dbbec65bdf93a34905fe714233a97099ae584fd64a",
+      "bytes": 99353,
+      "changedFiles": [
+        "components/ffi-primitives/src/lib.rs",
+        "components/ffi-primitives/src/types.rs",
+        "components/host-sdk/src/loader.rs",
+        "components/host-sdk/src/state_store_bridge.rs",
+        "components/plugin-sdk/src/ffi/metadata.rs",
+        "components/plugin-sdk/src/ffi/mod.rs",
+        "components/plugin-sdk/src/ffi/state_store_proxy.rs",
+        "components/plugin-sdk/src/ffi/types.rs",
+        "components/plugin-sdk/src/ffi/vtables.rs",
+        "components/reactions/workgraph-router/README.md",
+        "components/reactions/workgraph-router/src/config.rs",
+        "components/reactions/workgraph-router/src/lib.rs",
+        "components/reactions/workgraph-router/src/reaction.rs",
+        "components/reactions/workgraph-router/src/state.rs",
+        "components/reactions/workgraph-router/tests/integration_test.rs",
+        "components/state_stores/redb/src/provider.rs",
+        "lib/src/lib.rs",
+        "lib/src/state_store/mod.rs"
+      ]
+    },
+    {
+      "commit": "403be11d37b8d669c658aa4ad1f81948ae4e648f",
+      "parent": "41c2297dd0b087f08d935fc4a7b995923f406a25",
+      "subject": "Harden invalidation constraint replay",
+      "patch": "403be11d37b8d669c658aa4ad1f81948ae4e648f.patch",
+      "sha256": "8b0b0b2764d0647774a1202f58ec15f3e9959ab990b50bb93a2787a25ab501f3",
+      "bytes": 5164,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs"
+      ]
+    },
+    {
+      "commit": "41c2297dd0b087f08d935fc4a7b995923f406a25",
+      "parent": "266f187f98ddde712f24d40b7b9c667d088e74e0",
+      "subject": "fix: align project-item-refresh dogfood contract",
+      "patch": "41c2297dd0b087f08d935fc4a7b995923f406a25.patch",
+      "sha256": "69b044d7b457f43274921124afbe0ff811f81c43e8b2cf981c48d59377defd82",
+      "bytes": 22340,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/models.rs",
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs",
+        "components/reactions/github-project-item-refresh/tests/integration_test.rs"
+      ]
+    },
+    {
+      "commit": "44342b390c501032a24519c087cb4df4cd1e539f",
+      "parent": "26d48cde88d7a49684846d46d8f3df407930804b",
+      "subject": "Add reaction checkpoint ownership to reaction FFI ABI",
+      "patch": "44342b390c501032a24519c087cb4df4cd1e539f.patch",
+      "sha256": "8a9c30ecc45abb488e162da081efd7fb90abc733e0781a1594f99edc94b43426",
+      "bytes": 22447,
+      "changedFiles": [
+        "Makefile",
+        "components/host-sdk/Cargo.toml",
+        "components/host-sdk/src/loader.rs",
+        "components/host-sdk/src/proxies/reaction.rs",
+        "components/host-sdk/tests/integration_test.rs",
+        "components/plugin-sdk/src/ffi/metadata.rs",
+        "components/plugin-sdk/src/ffi/vtable_gen.rs",
+        "components/plugin-sdk/src/ffi/vtables.rs"
+      ]
+    },
+    {
+      "commit": "4a1d058eb9fcea305d4436e7947451db595d717d",
+      "parent": "23a06f98943d649ba1f418170a2781e05aa612ac",
+      "subject": "Make prune throttling cancellation-safe",
+      "patch": "4a1d058eb9fcea305d4436e7947451db595d717d.patch",
+      "sha256": "247cc6c1fa1c3640e3a6c99e31aa1504e8e6cdc233ebfefedbed3a77c3a7c778",
+      "bytes": 7703,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs"
+      ]
+    },
+    {
+      "commit": "650533bd45531d3388c7a9ba6e81c35252ae0121",
+      "parent": "6602e16e2a766ada509fe313687f72842aba56e1",
+      "subject": "Enforce status field on every retry",
+      "patch": "650533bd45531d3388c7a9ba6e81c35252ae0121.patch",
+      "sha256": "6c28c4006591bab44c2cc16b59ddbac953de9fc408eb4360844d1e111a1f1143",
+      "bytes": 4815,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs"
+      ]
+    },
+    {
+      "commit": "6602e16e2a766ada509fe313687f72842aba56e1",
+      "parent": "403be11d37b8d669c658aa4ad1f81948ae4e648f",
+      "subject": "Harden project refresh status field validation",
+      "patch": "6602e16e2a766ada509fe313687f72842aba56e1.patch",
+      "sha256": "352329b175243522ebc1eb0815fb63c1392878d1c0db665c444fc64ac08e5c11",
+      "bytes": 39360,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/config.rs",
+        "components/reactions/github-project-item-refresh/src/descriptor.rs",
+        "components/reactions/github-project-item-refresh/src/lib.rs",
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs",
+        "components/reactions/github-project-item-refresh/tests/integration_test.rs"
+      ],
+      "sanitizations": [
+        {
+          "originalPattern": "GitHub test-token prefix",
+          "replacement": "non-secret generic test token",
+          "reason": "Avoid publishing credential-shaped strings even when the historical value was a fixture."
+        }
+      ]
+    },
+    {
+      "commit": "904031763e04a8a32759bd0a0af634e75b90bddf",
+      "parent": "37d0fe354792036cfcc7ba18531806c1918b8f5f",
+      "subject": "Harden workgraph-router lease fencing and reconciliation trust",
+      "patch": "904031763e04a8a32759bd0a0af634e75b90bddf.patch",
+      "sha256": "01847bb7f560d232d3a41676f7b3b79e6d5e125ce17cb35a7b167cfd50b103d9",
+      "bytes": 105220,
+      "changedFiles": [
+        "components/reactions/workgraph-router/README.md",
+        "components/reactions/workgraph-router/src/config.rs",
+        "components/reactions/workgraph-router/src/descriptor.rs",
+        "components/reactions/workgraph-router/src/github_client.rs",
+        "components/reactions/workgraph-router/src/lib.rs",
+        "components/reactions/workgraph-router/src/reaction.rs",
+        "components/reactions/workgraph-router/src/reconciliation.rs",
+        "components/reactions/workgraph-router/src/state.rs",
+        "components/reactions/workgraph-router/tests/integration_test.rs"
+      ]
+    },
+    {
+      "commit": "924d01c33158220898a3f2bb6f86686949ad4205",
+      "parent": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "subject": "feat: add reusable source event middleware",
+      "patch": "924d01c33158220898a3f2bb6f86686949ad4205.patch",
+      "sha256": "7443559f4b6b1193659ed7ee3dc7de419a6a7f29ab5fa46bfed1730c91c18def",
+      "bytes": 96114,
+      "changedFiles": [
+        "lib/Cargo.toml",
+        "lib/README.md",
+        "lib/src/lib_core.rs",
+        "middleware/Cargo.toml",
+        "middleware/README.md",
+        "middleware/src/jq/mod.rs",
+        "middleware/src/jq/tests.rs",
+        "middleware/src/lib.rs",
+        "middleware/src/parse_json/README.md",
+        "middleware/src/parse_json/mod.rs",
+        "middleware/src/parse_json/tests.rs",
+        "middleware/src/pipeline_tests.rs",
+        "middleware/src/regex_extract/README.md",
+        "middleware/src/regex_extract/mod.rs",
+        "middleware/src/regex_extract/tests.rs"
+      ]
+    },
+    {
+      "commit": "926919b41ba2509904d911e7b6841c3143dd11d8",
+      "parent": "5532e2bca25f14706839e721835bdab1481d896e",
+      "subject": "fix(reactions): preserve completed execution state",
+      "patch": "926919b41ba2509904d911e7b6841c3143dd11d8.patch",
+      "sha256": "1a42239c298f1dd00f82c4df0dc876e40808ba00c6f1c5dd59beea5ecfffd463",
+      "bytes": 7825,
+      "changedFiles": [
+        "components/reactions/copilot-agent-task/src/reaction.rs",
+        "components/reactions/copilot-agent-task/tests/integration_test.rs"
+      ],
+      "sanitizations": [
+        {
+          "originalPattern": "GitHub test-token prefix",
+          "replacement": "non-secret generic test token",
+          "reason": "Avoid publishing credential-shaped strings even when the historical value was a fixture."
+        }
+      ]
+    },
+    {
+      "commit": "a373d4662042ec1853145f2533be741c49429c78",
+      "parent": "241557681e780b05b941ea6de1f39de6ce940977",
+      "subject": "fix(reactions): align validator reporter prompt",
+      "patch": "a373d4662042ec1853145f2533be741c49429c78.patch",
+      "sha256": "274d6cb2fc266181a7dff0d88306e1bf7333cfa6ee4ef010878559e056557b3d",
+      "bytes": 14405,
+      "changedFiles": [
+        "components/reactions/copilot-agent-task/README.md",
+        "components/reactions/copilot-agent-task/src/prompt.rs",
+        "components/reactions/copilot-agent-task/tests/integration_test.rs"
+      ]
+    },
+    {
+      "commit": "a50fff734f09cf9ae3b040d1cfeed90c3212bff3",
+      "parent": "924d01c33158220898a3f2bb6f86686949ad4205",
+      "subject": "docs: fix jq update mapping example",
+      "patch": "a50fff734f09cf9ae3b040d1cfeed90c3212bff3.patch",
+      "sha256": "41ee4fb9a84156eb103133e17180ecf9042b93cdd1fe50bc5b738240184c4e43",
+      "bytes": 517,
+      "changedFiles": [
+        "middleware/README.md"
+      ]
+    },
+    {
+      "commit": "e56e54938c367b53d813f88f06067a591bfd47bd",
+      "parent": "8a9b05a4b07141fdd4882c3cf501665463ccff15",
+      "subject": "Align refresh reaction dogfood entry",
+      "patch": "e56e54938c367b53d813f88f06067a591bfd47bd.patch",
+      "sha256": "e49c342cef50854f1900cb6b33b157963d03cae20742c8b9bc9283c628648ce9",
+      "bytes": 3252,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/tests.rs"
+      ]
+    },
+    {
+      "commit": "e63c14e9c8e8cf7f9953cad3b6b543ec210b2c2d",
+      "parent": "02248470b97d4e6355f9efcba76a55ca710d78e7",
+      "subject": "Fix GitHub refresh rate-limit retries and status field config",
+      "patch": "e63c14e9c8e8cf7f9953cad3b6b543ec210b2c2d.patch",
+      "sha256": "f0b71676ade126157dc68f736a0f4bd7511129d112e2658fdabf4243904833d9",
+      "bytes": 33715,
+      "changedFiles": [
+        "components/reactions/github-project-item-refresh/Cargo.toml",
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/config.rs",
+        "components/reactions/github-project-item-refresh/src/descriptor.rs",
+        "components/reactions/github-project-item-refresh/src/graphql.rs",
+        "components/reactions/github-project-item-refresh/src/lib.rs",
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/reaction.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs",
+        "components/reactions/github-project-item-refresh/tests/integration_test.rs"
+      ],
+      "sanitizations": [
+        {
+          "originalPattern": "GitHub test-token prefix",
+          "replacement": "non-secret generic test token",
+          "reason": "Avoid publishing credential-shaped strings even when the historical value was a fixture."
+        }
+      ]
+    },
+    {
+      "commit": "e7190b1d566fb76c1e0c3035b27f8a474a097f53",
+      "parent": "3135f08afac85a7edca337713ba2c5d464849688",
+      "subject": "Fix workgraph-router reservation fencing and GitHub V2 status updates",
+      "patch": "e7190b1d566fb76c1e0c3035b27f8a474a097f53.patch",
+      "sha256": "f67ac0d14ed274d4ea19f0bb9a61a32fb696fb7df611c959a3d61a29b6d31237",
+      "bytes": 69656,
+      "changedFiles": [
+        "components/host-sdk/src/state_store_bridge.rs",
+        "components/plugin-sdk/src/ffi/state_store_proxy.rs",
+        "components/plugin-sdk/src/ffi/vtables.rs",
+        "components/reactions/workgraph-router/README.md",
+        "components/reactions/workgraph-router/src/config.rs",
+        "components/reactions/workgraph-router/src/descriptor.rs",
+        "components/reactions/workgraph-router/src/github_client.rs",
+        "components/reactions/workgraph-router/src/lib.rs",
+        "components/reactions/workgraph-router/src/reaction.rs",
+        "components/reactions/workgraph-router/src/reconciliation.rs",
+        "components/reactions/workgraph-router/src/state.rs",
+        "components/reactions/workgraph-router/tests/integration_test.rs",
+        "components/state_stores/redb/src/provider.rs",
+        "lib/src/lib.rs",
+        "lib/src/state_store/mod.rs"
+      ]
+    },
+    {
+      "commit": "ff0dce92c8e9b859a825ae373449399c1a745236",
+      "parent": "904031763e04a8a32759bd0a0af634e75b90bddf",
+      "subject": "fix: close workgraph-router release blockers",
+      "patch": "ff0dce92c8e9b859a825ae373449399c1a745236.patch",
+      "sha256": "5c66441938f5f3ae359ac6a04850ee9e9d0c1f4487e91b856ee7d07255c74321",
+      "bytes": 44648,
+      "changedFiles": [
+        "components/reactions/workgraph-router/README.md",
+        "components/reactions/workgraph-router/src/decision.rs",
+        "components/reactions/workgraph-router/src/descriptor.rs",
+        "components/reactions/workgraph-router/src/github_client.rs",
+        "components/reactions/workgraph-router/src/reaction.rs",
+        "components/reactions/workgraph-router/src/reconciliation.rs",
+        "components/reactions/workgraph-router/src/tests.rs",
+        "components/reactions/workgraph-router/tests/integration_test.rs"
+      ]
+    }
+  ]
+}

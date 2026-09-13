@@ -87,3 +87,6 @@ work does not duplicate that stack.
   recommended issue-specific implementation sequence.
 - [`provenance.json`](provenance.json) records source checksums and sanitization
   boundaries.
+- [`patches/index.json`](patches/index.json) inventories 20 sanitized portable
+  patches for historical commits that were still available locally but no
+  longer resolved through a remote branch or GitHub commit endpoint.
