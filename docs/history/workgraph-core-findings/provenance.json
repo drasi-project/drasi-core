@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "capturedAt": "2026-09-12T18:28:14-07:00",
+  "capturedAt": "2026-09-13T09:14:59-07:00",
   "sourceInputs": [
     {
       "name": "workgraph-core-issue-history.md",
@@ -15,7 +15,7 @@
       "sha256": "f06c1945acd8baf1cc71f8391b715f407ed49f48e20457fc5030ebad14d43d0c",
       "publishedRaw": false,
       "publishedSanitizedEvidence": "evidence.md",
-      "publishedSanitizedEvidenceSha256": "c6bc578240ac82d6a232f57ef1dee220939ab571fa727c37d786387ccd89d9f7",
+      "publishedSanitizedEvidenceSha256": "fe19478cc6678e760dc90b8be0a1d5193dba35f90af0b7a149140aa3178a03d9",
       "reason": "The local mechanical index includes private provenance strings. The complete 132 rows and seven anchors are published with original technical detail and sanitized provenance."
     }
   ],

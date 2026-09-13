@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "capturedAt": "2026-09-12T18:28:14-07:00",
+  "capturedAt": "2026-09-13T09:14:59-07:00",
   "baseline": {
     "main": "e759606fa065bee0ef9e60017e263f0f85dd0e44",
     "retainedBranch": "workgraph-generic-recovery",
@@ -13,7 +13,7 @@
     "sanitizedReport": "source-report-sanitized.md",
     "sanitizedReportSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
     "perRecordEvidence": "evidence.md",
-    "perRecordEvidenceSha256": "c6bc578240ac82d6a232f57ef1dee220939ab571fa727c37d786387ccd89d9f7"
+    "perRecordEvidenceSha256": "fe19478cc6678e760dc90b8be0a1d5193dba35f90af0b7a149140aa3178a03d9"
   },
   "fixes": [
     {
@@ -95,14 +95,16 @@
         "487df491"
       ],
       "issues": [896],
-      "existingPr": 742,
-      "existingPrHead": "6cbb9e285ca6af7d4a54380924d4dcdd769e36f0",
+      "historicalPr": 742,
+      "historicalPrHead": "6cbb9e285ca6af7d4a54380924d4dcdd769e36f0",
       "nativeStack": 741,
       "stackPrs": [737, 740, 742, 744],
       "baseBranch": "agentofreality-github-workgraph-bootstrapper",
-      "plannedBasePr": 903,
-      "status": "historical-native-stack-not-reusable",
-      "note": "Do not unstack, retarget, or rebase PR #742. Preserve it and native stack 741 unchanged; create the clean generic #896 layer above PR #903's ABI 0.15 baseline."
+      "existingPr": 906,
+      "existingPrHead": "a4fcfd848ae0571228be8326113f6d5b45eab8e4",
+      "basePr": 903,
+      "status": "active-draft-implementation",
+      "note": "Do not unstack, retarget, or rebase PR #742. It remains historical evidence in native stack 741. Draft PR #906 is the clean generic implementation above PR #903 and advances the ABI from 0.15.0 to 0.16.0."
     },
     {
       "commits": ["601e2a34b5bce2ec37e26f26818df35f2d27c830"],
@@ -145,6 +147,7 @@
       "commits": ["44342b390c501032a24519c087cb4df4cd1e539f"],
       "issues": [902],
       "existingPr": 903,
+      "existingPrHead": "fb891f1ee3109b885a55ab8e44d0c973e02d9e69",
       "status": "active-draft-implementation",
       "note": "Draft PR #903 requires metadata before plugin initialization and covers missing, null, malformed, version/target-incompatible, and physically smaller legacy layouts while retaining optional inspection scanning."
     },
@@ -171,6 +174,37 @@
       "commits": ["2dc5d87833960cffc7a2335215e3d93fdd09089c"],
       "remoteBranch": "agentofreality-source-owned-workgraph-allocator",
       "status": "remote-historical-workgraph-specific"
+    },
+    {
+      "commits": ["c1910236413f8a10e974d9ecc2e82e66280fc7ae"],
+      "issues": [916],
+      "historicalPr": 739,
+      "status": "remote-prototype-not-on-main",
+      "note": "The commit contains a generic sha256(text) implementation and tests mixed with WorkGraph changes. Extract only the generic Core/function-registry changes; its newline test did not add parser escape decoding, which is tracked separately by #917."
+    },
+    {
+      "commits": ["957961c0e4a6137d3d89cbdc0fb38055024e17ea"],
+      "issues": [],
+      "existingPr": 422,
+      "mergedCommit": "9de691cd70f80b0c88a2cfc854df1dfe04224007",
+      "status": "superseded-by-merged-generic-fix",
+      "note": "PR #422 generalized raw descriptor-config preservation and merged to main; the historical WorkGraph builder helper is no longer needed."
+    },
+    {
+      "commits": [
+        "e7190b1d566fb76c1e0c3035b27f8a474a097f53",
+        "37d0fe354792036cfcc7ba18531806c1918b8f5f"
+      ],
+      "issues": [918],
+      "status": "preserved-prototype-design-evidence",
+      "note": "The patches combine a generic StateStore CAS/FFI design with removed WorkGraph router code. They are evidence for #918 and must not be applied wholesale."
+    },
+    {
+      "commits": ["1c12f76a175eb6ba569f1ea036faa47fb87b33ba"],
+      "issues": [346],
+      "existingPr": 362,
+      "status": "merged-generic-resolution",
+      "note": "The current Redb WAL rejects unsafe source IDs instead of escaping them and declares WAL files ephemeral across upgrades; the historical collision and proposed encoded-name migration did not land."
     }
   ],
   "publishedFixLinks": [
@@ -188,6 +222,15 @@
       "head": "b2970b174a8cf8e8a7052d10cca5b77d0e03ded0",
       "basePr": 810,
       "state": "open-draft"
+    },
+    {
+      "repository": "drasi-project/drasi-core",
+      "issues": [896],
+      "pr": 906,
+      "head": "a4fcfd848ae0571228be8326113f6d5b45eab8e4",
+      "basePr": 903,
+      "state": "open-draft",
+      "note": "The clean ABI 0.16.0 layer bridges StateStore durability and rejects the physically smaller 0.15.x vtable before initialization."
     },
     {
       "repository": "drasi-project/drasi-server",

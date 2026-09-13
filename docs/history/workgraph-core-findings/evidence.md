@@ -485,7 +485,7 @@ The query was rewritten, not fixed; #892 isolates the generic clause-order capab
 - **Source section:** Deferred query-language capabilities
 - **Source subheading:** Additional unfiled query/function limitations
 - **Sanitized source-report line:** 95
-- **Published disposition:** `withdrawn-or-unsupported`
+- **Published disposition:** `enhancement-opened`
 
 **Original finding detail**
 
@@ -493,11 +493,26 @@ The query was rewritten, not fixed; #892 isolates the generic clause-order capab
 
 **Disposition rationale**
 
-Generic hash/newline primitives were explicitly removed from the authorized scope; readable IDs and Source-provided digests were the application workaround.
+The application workaround did not add either generic capability. Current main
+at `e759606fa065bee0ef9e60017e263f0f85dd0e44` still registers no deterministic
+digest function in `functions-cypher`, so #916 isolates `sha256(text)`.
+Separately, the current quoted-text grammar captures raw text while excluding
+literal LF/CR and defines no escape-decoding step, so #917 isolates string
+escape semantics. These are separate implementation surfaces even though the
+historical report grouped them.
+
+Historical commit `c1910236413f8a10e974d9ecc2e82e66280fc7ae`
+implemented and tested `sha256(text)` on a prototype branch. Its newline test
+expected `\n` decoding but did not modify the parser, so it is test/design
+provenance rather than proof that newline construction worked.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/issues/916
+- https://github.com/drasi-project/drasi-core/issues/917
+- https://github.com/drasi-project/drasi-core/commit/c1910236413f8a10e974d9ecc2e82e66280fc7ae
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/functions-cypher/src/lib.rs#L45-L65
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/query-cypher/src/lib.rs#L108-L117
 
 <a id="report-l96"></a>
 ## `report-L96` - Simple root-only OPTIONAL cases were initially suspected to fail.
@@ -631,15 +646,19 @@ fix. PR #736 remains historical prototype evidence.
 (`#737 -> #740 -> #742 -> #744`), targets
 `agentofreality-github-workgraph-bootstrapper`, and must not be unstacked,
 retargeted, or rebased under this scope. It remains historical evidence at
-`6cbb9e285ca6af7d4a54380924d4dcdd769e36f0`. The planned clean generic
-replacement is layered above PR #903 at
-`fb891f1ee3109b885a55ab8e44d0c973e02d9e69` and ABI `0.15.0`.
+`6cbb9e285ca6af7d4a54380924d4dcdd769e36f0`. Draft PR #906 is the clean
+generic implementation layered above PR #903 at
+`fb891f1ee3109b885a55ab8e44d0c973e02d9e69`; its head
+`a4fcfd848ae0571228be8326113f6d5b45eab8e4` advances the ABI from `0.15.0` to
+`0.16.0` and rejects the physically smaller prior state-store vtable before
+initialization.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/896
 - https://github.com/drasi-project/drasi-core/pull/742
 - https://github.com/drasi-project/drasi-core/issues/896#issuecomment-5650808975
+- https://github.com/drasi-project/drasi-core/pull/906
 
 <a id="report-l118"></a>
 ## `report-L118` - Retained multi-source queries diverged from freshly constructed queries.
@@ -995,7 +1014,7 @@ A public prototype implementation or bounded historical observation exists, but 
 - **Source section:** Restart, delivery, and plugin-boundary defects
 - **Source subheading:** Additional Source integration and persistence repairs
 - **Sanitized source-report line:** 151
-- **Published disposition:** `historical-prototype-evidence`
+- **Published disposition:** `resolved-existing-record`
 
 **Original finding detail**
 
@@ -1003,11 +1022,21 @@ A public prototype implementation or bounded historical observation exists, but 
 
 **Disposition rationale**
 
-A public prototype implementation or bounded historical observation exists, but no separate current-main defect was established.
+Merged PR #422 generalized the historical repair. `SourceBase` now preserves
+the original raw descriptor JSON and `properties_or_serialize` returns those
+unresolved `ConfigValue` envelopes instead of reconstructing persisted
+properties from resolved values. Current tests cover SecretReference and
+environment-reference envelopes, camelCase keys, and mixed static/reference
+values. Historical WorkGraph-specific commit `957961c0` remains provenance but
+is superseded by the generic merged implementation.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/pull/422
+- https://github.com/drasi-project/drasi-core/commit/9de691cd70f80b0c88a2cfc854df1dfe04224007
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/sources/base.rs#L233-L235
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/sources/base.rs#L390-L425
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/lib_core.rs#L1991-L2177
 
 <a id="report-l152"></a>
 ## `report-L152` - On a fresh empty WAL, `head == 0` opened the startup pruning fence too soon.
@@ -1060,7 +1089,7 @@ Incomplete positionless replay is covered by existing lost-WAL and surviving-ind
 - **Source section:** Restart, delivery, and plugin-boundary defects
 - **Source subheading:** Additional Source integration and persistence repairs
 - **Sanitized source-report line:** 154
-- **Published disposition:** `historical-investigation-unconfirmed`
+- **Published disposition:** `investigation-opened`
 
 **Original finding detail**
 
@@ -1068,11 +1097,18 @@ Incomplete positionless replay is covered by existing lost-WAL and surviving-ind
 
 **Disposition rationale**
 
-The distinguishing WAL evidence had already been pruned, so loss versus late/out-of-order transport was never established.
+The distinguishing WAL evidence had already been pruned, so loss versus
+late/out-of-order transport was never established and the historical symptom
+must not be presented as a confirmed root cause. #919 now tracks a concrete
+surviving generic race in the same boundary: two concurrent subscriptions can
+associate a resume filter with the wrong dispatcher index. The issue explicitly
+retains this missing-relation symptom only as supporting investigation evidence;
+it requires a deterministic current-main race fixture rather than inferring
+causation from the old checkpoint.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/issues/919
 
 <a id="report-l181"></a>
 ## `report-L181` - Canonical task Issue admission checked transport/object shape without a corresponding creator/editor/sender provenance gate.
@@ -1760,7 +1796,7 @@ The component/protocol was historical, superseded, or removed from Core; availab
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Middleware, launcher, router, and Project refresh
 - **Sanitized source-report line:** 275
-- **Published disposition:** `historical-workgraph-or-superseded`
+- **Published disposition:** `enhancement-opened`
 
 **Original finding detail**
 
@@ -1768,11 +1804,22 @@ The component/protocol was historical, superseded, or removed from Core; availab
 
 **Disposition rationale**
 
-The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability.
+The WorkGraph router and its reservation protocol left Core, but the generic
+capability gap remains. At current main
+`e759606fa065bee0ef9e60017e263f0f85dd0e44`, `StateStoreProvider` has `get` and
+`set` but no provider-atomic conditional write. An instance-local mutex or a
+default `get`+`set` implementation cannot supply cross-process or cross-replica
+atomicity. #918 isolates the generic CAS contract, native provider semantics,
+explicit Unsupported behavior, FFI POD result, and required ABI-version gate.
+The preserved `e7190b1d` and `37d0fe35` patches are design evidence only and
+must not be applied wholesale with their WorkGraph router code.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/issues/918
+- https://github.com/drasi-project/drasi-core/blob/4a55dae914573663135bc76c5c6186fa56795e11/docs/history/workgraph-core-findings/patches/e7190b1d566fb76c1e0c3035b27f8a474a097f53.patch
+- https://github.com/drasi-project/drasi-core/blob/4a55dae914573663135bc76c5c6186fa56795e11/docs/history/workgraph-core-findings/patches/37d0fe354792036cfcc7ba18531806c1918b8f5f.patch
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/state_store/mod.rs#L120-L296
 
 <a id="report-l276"></a>
 ## `report-L276` - Extending a vtable while keeping its ABI version could read beyond an older physically smaller table.
@@ -1781,7 +1828,7 @@ The component/protocol was historical, superseded, or removed from Core; availab
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Middleware, launcher, router, and Project refresh
 - **Sanitized source-report line:** 276
-- **Published disposition:** `historical-workgraph-or-superseded`
+- **Published disposition:** `issue-opened-existing-pr`
 
 **Original finding detail**
 
@@ -1789,11 +1836,20 @@ The component/protocol was historical, superseded, or removed from Core; availab
 
 **Disposition rationale**
 
-The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability.
+This is an active generic ABI rule, not only historical router evidence. #902
+and draft PR #903 require present, valid, target-compatible plugin metadata
+before initialization or version-dependent vtable reads and establish ABI
+`0.15.0`. #896 and draft PR #906 then add the physically larger StateStore
+durability vtable at ABI `0.16.0`, rejecting a physical `0.15.x` layout before
+initialization. Nullable trailing function pointers are not treated as a safe
+substitute for layout versioning.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/issues/902
+- https://github.com/drasi-project/drasi-core/pull/903
+- https://github.com/drasi-project/drasi-core/issues/896
+- https://github.com/drasi-project/drasi-core/pull/906
 
 <a id="report-l277"></a>
 ## `report-L277` - Router used a nonexistent mutation, omitted real bearer auth, or could write against stale/closed/incorrectly correlated items.
@@ -2455,7 +2511,7 @@ The component/protocol was historical, superseded, or removed from Core; availab
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Additional intermediate Source/shared-runtime findings
 - **Sanitized source-report line:** 335
-- **Published disposition:** `historical-investigation-unconfirmed`
+- **Published disposition:** `historical-workgraph-or-superseded`
 
 **Original finding detail**
 
@@ -2463,11 +2519,20 @@ The component/protocol was historical, superseded, or removed from Core; availab
 
 **Disposition rationale**
 
-This was a coupled regression in an attempted lifecycle cleanup; the final surviving code path was not established.
+The coupled Error-to-Stopping cleanup did not survive into current main.
+Current lifecycle validation deliberately rejects `Error -> Stopping` and has
+a regression test for that rule. Shared teardown calls `runtime.stop()` only
+for Running or Starting components, so deleting a component already in Error
+does not invoke `DrasiQuery::stop()` and cannot reach the assertion. The
+assertion still correctly documents the runtime stop precondition. No current
+bug issue is warranted for the abandoned intermediate path.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/pull/349
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/component_graph/graph.rs#L1213-L1255
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/component_graph/tests.rs#L888-L905
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/managers/lifecycle_helpers.rs#L245-L285
 
 <a id="report-l336"></a>
 ## `report-L336` - A new query's bootstrap overwrote the shared reconciliation baseline without applying that snapshot to older queries.
@@ -2497,7 +2562,7 @@ The component/protocol was historical, superseded, or removed from Core; availab
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Additional intermediate Source/shared-runtime findings
 - **Sanitized source-report line:** 337
-- **Published disposition:** `historical-workgraph-or-superseded`
+- **Published disposition:** `resolved-existing-record`
 
 **Original finding detail**
 
@@ -2505,11 +2570,22 @@ The component/protocol was historical, superseded, or removed from Core; availab
 
 **Disposition rationale**
 
-The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability.
+The competing historical WorkGraph wiring is gone. Current `SourceBase` has
+one explicit rule: a state store supplied at construction takes precedence,
+and the runtime-context store is used only as a fallback. The current
+`BootstrapContext` intentionally carries source identity, sequence state, and
+optional properties but no independently selected state-store provider;
+bootstrap providers are constructed by their source plugin. Thus the exact
+source-specific-first versus bootstrap-runtime-first split no longer exists in
+the generic runtime. PR #349 is the architecture record; no current defect was
+found.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/pull/349
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/sources/base.rs#L75-L83
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/sources/base.rs#L438-L459
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/bootstrap/mod.rs#L53-L72
 
 <a id="report-l338"></a>
 ## `report-L338` - Broadcast subscriptions bypassed bootstrapping-query exclusion, allowing delta plus full-snapshot duplication.
@@ -2560,7 +2636,7 @@ The component/protocol was historical, superseded, or removed from Core; availab
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Additional intermediate Source/shared-runtime findings
 - **Sanitized source-report line:** 340
-- **Published disposition:** `historical-investigation-unconfirmed`
+- **Published disposition:** `resolved-existing-record`
 
 **Original finding detail**
 
@@ -2568,11 +2644,19 @@ The component/protocol was historical, superseded, or removed from Core; availab
 
 **Disposition rationale**
 
-The collision was introduced by an intermediate shared-WAL change later excluded; no current surviving path is asserted.
+The `_3a_` escaping scheme was an intermediate WorkGraph-line change and did
+not land in the generic provider. Merged PR #362 introduced the current
+`RedbWalProvider`, which validates each source ID before constructing
+`{source_id}.redb`: only ASCII alphanumeric characters, `_`, and `-` are
+accepted. `a:b` is rejected, so it cannot alias `a_3a_b`. Tests explicitly
+cover colon and other unsafe characters.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/issues/346
+- https://github.com/drasi-project/drasi-core/pull/362
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/components/wals/redb/src/provider.rs#L60-L106
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/components/wals/redb/src/tests.rs#L878-L926
 
 <a id="report-l341"></a>
 ## `report-L341` - The proposed switch to `srcid-<hex>.redb` could open a new empty WAL instead of the existing legacy file.
@@ -2581,7 +2665,7 @@ The collision was introduced by an intermediate shared-WAL change later excluded
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Additional intermediate Source/shared-runtime findings
 - **Sanitized source-report line:** 341
-- **Published disposition:** `historical-investigation-unconfirmed`
+- **Published disposition:** `historical-workgraph-or-superseded`
 
 **Original finding detail**
 
@@ -2589,11 +2673,19 @@ The collision was introduced by an intermediate shared-WAL change later excluded
 
 **Disposition rationale**
 
-The proposed filename fix had a legacy migration regression; broad WAL changes were later excluded.
+The proposed `srcid-<hex>` rename never landed. Merged PR #362 introduced the
+current provider directly with validated `{source_id}.redb` names and states
+that its WAL binary files are ephemeral and expected to be wiped on upgrade.
+There is therefore no current encoded-name migration path that could silently
+open a replacement file. The historical warning remains valid for any future
+filename migration: it must explicitly discover/migrate legacy paths rather
+than treating a new empty file as recovery success.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/issues/346
+- https://github.com/drasi-project/drasi-core/pull/362
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/components/wals/redb/src/provider.rs#L40-L72
 
 <a id="report-l342"></a>
 ## `report-L342` - Concurrent subscriptions could associate a resume watermark with the wrong dispatcher index by reading `len() - 1` after releasing the registration lock.
@@ -2602,7 +2694,7 @@ The proposed filename fix had a legacy migration regression; broad WAL changes w
 - **Source section:** Earlier WorkGraph component defects in the Core repository
 - **Source subheading:** Additional intermediate Source/shared-runtime findings
 - **Sanitized source-report line:** 342
-- **Published disposition:** `historical-investigation-unconfirmed`
+- **Published disposition:** `issue-opened`
 
 **Original finding detail**
 
@@ -2610,11 +2702,21 @@ The proposed filename fix had a legacy migration regression; broad WAL changes w
 
 **Disposition rationale**
 
-A registration race was identified in an intermediate architecture, but no survival trace to current main was established.
+The exact race survives on current main. `create_streaming_receiver()` appends
+the dispatcher while holding `dispatchers.write()` and then returns. The caller
+later acquires `dispatchers.read()` and infers the subscriber identity as
+`len().saturating_sub(1)` before inserting its resume position. A second
+subscription can append between those operations, causing both callers to
+associate filters with the same last index. #919 contains the two-subscriber
+barrier reproduction and requires atomic registration or stable subscriber
+identity. This race is a possible mechanism for `report-L154`, but the pruned
+historical WAL prevents claiming that causation.
 
 **Public records**
 
-- https://github.com/drasi-project/drasi-core/issues/889
+- https://github.com/drasi-project/drasi-core/issues/919
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/sources/base.rs#L770-L797
+- https://github.com/drasi-project/drasi-core/blob/e759606fa065bee0ef9e60017e263f0f85dd0e44/lib/src/sources/base.rs#L915-L946
 
 <a id="report-l343"></a>
 ## `report-L343` - A Source set `source_position` but left wrapper `sequence` to a reset process-local counter, allowing query dedupe to discard new events after restart.

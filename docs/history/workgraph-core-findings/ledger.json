@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-09-12T18:28:14-07:00",
+  "generatedAt": "2026-09-13T09:14:59-07:00",
   "umbrellaIssue": "https://github.com/drasi-project/drasi-core/issues/889",
   "preservationPullRequest": "https://github.com/drasi-project/drasi-core/pull/890",
   "source": {
@@ -309,12 +309,14 @@
       "sourceSection": "Deferred query-language capabilities",
       "sourceSubheading": "Additional unfiled query/function limitations",
       "summary": "The desired generic hash and newline-producing Cypher primitives were unavailable.",
-      "disposition": "withdrawn-or-unsupported",
+      "disposition": "enhancement-opened",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/issues/916",
+        "https://github.com/drasi-project/drasi-core/issues/917",
+        "https://github.com/drasi-project/drasi-core/commit/c1910236413f8a10e974d9ecc2e82e66280fc7ae"
       ],
       "evidenceUrl": "evidence.md#report-l95",
-      "rationale": "Generic hash/newline primitives were explicitly removed from the authorized scope; readable IDs and Source-provided digests were the application workaround."
+      "rationale": "The application workaround did not add either generic capability. #916 tracks deterministic SHA-256 and #917 separately tracks Cypher string-literal escape decoding; c1910236 is prototype evidence, not a current-main fix."
     },
     {
       "id": "report-L96",
@@ -398,10 +400,11 @@
       "recordUrls": [
         "https://github.com/drasi-project/drasi-core/issues/896",
         "https://github.com/drasi-project/drasi-core/pull/742",
-        "https://github.com/drasi-project/drasi-core/issues/896#issuecomment-5650808975"
+        "https://github.com/drasi-project/drasi-core/issues/896#issuecomment-5650808975",
+        "https://github.com/drasi-project/drasi-core/pull/906"
       ],
       "evidenceUrl": "evidence.md#report-l117",
-      "rationale": "#896 remains open. PR #742 is coupled to native WorkGraph stack 741 and must remain untouched as historical evidence; the planned clean generic replacement is layered above #903's ABI 0.15 baseline."
+      "rationale": "#896 remains open. PR #742 stays untouched in native WorkGraph stack 741 as historical evidence. Draft PR #906 is the clean generic implementation above #903, advances ABI 0.15.0 to 0.16.0, and rejects the physically smaller prior vtable before initialization."
     },
     {
       "id": "report-L118",
@@ -619,12 +622,13 @@
       "sourceSection": "Restart, delivery, and plugin-boundary defects",
       "sourceSubheading": "Additional Source integration and persistence repairs",
       "summary": "A custom Source descriptor could not preserve unresolved SecretReference configuration; persisted properties contained `[REDACTED]` instead of reloadable references.",
-      "disposition": "historical-prototype-evidence",
+      "disposition": "resolved-existing-record",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/pull/422",
+        "https://github.com/drasi-project/drasi-core/commit/9de691cd70f80b0c88a2cfc854df1dfe04224007"
       ],
       "evidenceUrl": "evidence.md#report-l151",
-      "rationale": "A public prototype implementation or bounded historical observation exists, but no separate current-main defect was established."
+      "rationale": "Merged PR #422 added generic raw-config preservation to SourceBase and round-trip tests for secret references, environment references, camelCase keys, and mixed values. Historical WorkGraph commit 957961c0 is now superseded evidence."
     },
     {
       "id": "report-L152",
@@ -660,12 +664,12 @@
       "sourceSection": "Restart, delivery, and plugin-boundary defects",
       "sourceSubheading": "Additional Source integration and persistence repairs",
       "summary": "One subscriber's index lacked a relation despite sharing the same later checkpoint as an intact subscriber.",
-      "disposition": "historical-investigation-unconfirmed",
+      "disposition": "investigation-opened",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/issues/919"
       ],
       "evidenceUrl": "evidence.md#report-l154",
-      "rationale": "The distinguishing WAL evidence had already been pruned, so loss versus late/out-of-order transport was never established."
+      "rationale": "The historical symptom remains causally unproven because its WAL was pruned. #919 tracks a surviving generic concurrent subscription/resume-filter race and explicitly treats this symptom as supporting investigation evidence, not proof of causation."
     },
     {
       "id": "report-L181",
@@ -1096,12 +1100,12 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Middleware, launcher, router, and Project refresh",
       "summary": "Router reservation relied on instance-local get/set locking, which was not an atomic cross-instance primitive. A fallback `create_if_absent` also falsely promised atomicity.",
-      "disposition": "historical-workgraph-or-superseded",
+      "disposition": "enhancement-opened",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/issues/918"
       ],
       "evidenceUrl": "evidence.md#report-l275",
-      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+      "rationale": "The WorkGraph router is out of Core, but current StateStoreProvider still cannot express a provider-atomic conditional write. #918 isolates the generic CAS contract, provider implementations, FFI result, and ABI-versioning requirements."
     },
     {
       "id": "report-L276",
@@ -1109,12 +1113,15 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Middleware, launcher, router, and Project refresh",
       "summary": "Extending a vtable while keeping its ABI version could read beyond an older physically smaller table.",
-      "disposition": "historical-workgraph-or-superseded",
+      "disposition": "issue-opened-existing-pr",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/issues/902",
+        "https://github.com/drasi-project/drasi-core/pull/903",
+        "https://github.com/drasi-project/drasi-core/issues/896",
+        "https://github.com/drasi-project/drasi-core/pull/906"
       ],
       "evidenceUrl": "evidence.md#report-l276",
-      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+      "rationale": "Draft PR #903 rejects missing/malformed/incompatible metadata before vtable reads at ABI 0.15.0. Draft PR #906 applies the same rule to the physically larger StateStore durability vtable and advances ABI to 0.16.0."
     },
     {
       "id": "report-L277",
@@ -1527,12 +1534,12 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
       "summary": "Newly stopping Error queries could hit `DrasiQuery::stop`'s debug assertion, which did not accept Error.",
-      "disposition": "historical-investigation-unconfirmed",
+      "disposition": "historical-workgraph-or-superseded",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/pull/349"
       ],
       "evidenceUrl": "evidence.md#report-l335",
-      "rationale": "This was a coupled regression in an attempted lifecycle cleanup; the final surviving code path was not established."
+      "rationale": "The attempted Error-to-Stopping cleanup did not survive. Current lifecycle validation deliberately rejects Error-to-Stopping, teardown skips runtime.stop for Error components, and a regression test locks that behavior, so the debug assertion is not reached by the current manager path."
     },
     {
       "id": "report-L336",
@@ -1553,12 +1560,12 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
       "summary": "Source and bootstrap selected different state stores because their precedence rules differed.",
-      "disposition": "historical-workgraph-or-superseded",
+      "disposition": "resolved-existing-record",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/pull/349"
       ],
       "evidenceUrl": "evidence.md#report-l337",
-      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+      "rationale": "The historical WorkGraph bootstrap wiring was removed. Current SourceBase documents one source state-store rule (explicit provider first, runtime provider as fallback), while BootstrapContext no longer carries a competing state-store provider."
     },
     {
       "id": "report-L338",
@@ -1592,12 +1599,13 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
       "summary": "Redb WAL filename escaping could map `a:b` and `a_3a_b` to the same file.",
-      "disposition": "historical-investigation-unconfirmed",
+      "disposition": "resolved-existing-record",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/issues/346",
+        "https://github.com/drasi-project/drasi-core/pull/362"
       ],
       "evidenceUrl": "evidence.md#report-l340",
-      "rationale": "The collision was introduced by an intermediate shared-WAL change later excluded; no current surviving path is asserted."
+      "rationale": "Merged PR #362's RedbWalProvider does not escape arbitrary IDs: it rejects characters outside ASCII alphanumeric, underscore, and hyphen before constructing `{source_id}.redb`. The intermediate `_3a_` collision path did not land."
     },
     {
       "id": "report-L341",
@@ -1605,12 +1613,13 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
       "summary": "The proposed switch to `srcid-<hex>.redb` could open a new empty WAL instead of the existing legacy file.",
-      "disposition": "historical-investigation-unconfirmed",
+      "disposition": "historical-workgraph-or-superseded",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/issues/346",
+        "https://github.com/drasi-project/drasi-core/pull/362"
       ],
       "evidenceUrl": "evidence.md#report-l341",
-      "rationale": "The proposed filename fix had a legacy migration regression; broad WAL changes were later excluded."
+      "rationale": "The proposed `srcid-<hex>` repair never landed. Merged PR #362 introduced the current provider directly with validated `{source_id}.redb` names and explicitly declares WAL files ephemeral across upgrades, so there is no current encoded-name migration path to fix."
     },
     {
       "id": "report-L342",
@@ -1618,12 +1627,12 @@
       "sourceSection": "Earlier WorkGraph component defects in the Core repository",
       "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
       "summary": "Concurrent subscriptions could associate a resume watermark with the wrong dispatcher index by reading `len() - 1` after releasing the registration lock.",
-      "disposition": "historical-investigation-unconfirmed",
+      "disposition": "issue-opened",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/889"
+        "https://github.com/drasi-project/drasi-core/issues/919"
       ],
       "evidenceUrl": "evidence.md#report-l342",
-      "rationale": "A registration race was identified in an intermediate architecture, but no survival trace to current main was established."
+      "rationale": "The exact race survives on current main: create_streaming_receiver appends under a lock, then subscribe_with_bootstrap_context later infers the index from a separately acquired len()-1. #919 provides a deterministic two-subscriber reproduction and acceptance criteria."
     },
     {
       "id": "report-L343",

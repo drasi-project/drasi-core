@@ -86,11 +86,35 @@ work does not duplicate that stack.
   current-main fix for #893, and
   [#904](https://github.com/drasi-project/drasi-core/pull/904) is the shared
   #793/#794 fix stacked above #810. Both issues remain open while reviewed.
+- [#916](https://github.com/drasi-project/drasi-core/issues/916) and
+  [#917](https://github.com/drasi-project/drasi-core/issues/917) split the
+  historical combined hash/newline limitation into independent generic
+  SHA-256 and string-literal escape capabilities. Prototype `c1910236`
+  implements SHA-256 but only asserts, rather than implements, newline escape
+  decoding.
+- [#918](https://github.com/drasi-project/drasi-core/issues/918) isolates the
+  still-missing provider-atomic StateStore compare-and-swap contract from the
+  removed WorkGraph router. [#919](https://github.com/drasi-project/drasi-core/issues/919)
+  tracks the current SourceBase race that infers a subscriber's resume-filter
+  index from `len() - 1` after releasing the registration lock.
 - [#742](https://github.com/drasi-project/drasi-core/pull/742) remains
   historical evidence inside native WorkGraph stack `741`
   (`#737 -> #740 -> #742 -> #744`). It must not be unstacked, retargeted, or
-  rebased; the clean #896 implementation is instead based above #903's ABI
-  `0.15.0` layer.
+  rebased; draft [#906](https://github.com/drasi-project/drasi-core/pull/906)
+  is the clean #896 implementation above #903's ABI `0.15.0` layer and advances
+  the ABI to `0.16.0`.
+- Merged [#422](https://github.com/drasi-project/drasi-core/pull/422) now
+  supplies the generic unresolved Source-config preservation originally
+  prototyped by `957961c0`.
+- The Error-query stop assertion finding does not survive the current lifecycle
+  contract: `Error -> Stopping` is rejected and teardown skips runtime stop for
+  Error components. The old Source/bootstrap state-store precedence split also
+  does not survive because current `BootstrapContext` carries no competing
+  store.
+- Merged [#362](https://github.com/drasi-project/drasi-core/pull/362) rejects
+  unsafe Redb WAL source IDs instead of escaping them. The intermediate
+  `_3a_` collision and proposed `srcid-<hex>` migration therefore never became
+  current provider behavior.
 - The related Server publication is
   [drasi-project/drasi-server#198](https://github.com/drasi-project/drasi-server/pull/198)
   for [drasi-project/drasi-server#196](https://github.com/drasi-project/drasi-server/issues/196).
