@@ -31,7 +31,7 @@ use crate::{
     query::{ContinuousQuery, QueryBuilder},
 };
 
-const AGGREGATE_QUERY: &str = "
+const GRAPH_AGGREGATE_QUERY: &str = "
 MATCH
   (scope:Scope)-[:USES_GRAPH]->
   (graph:Graph)-[:HAS_VERTEX]->
@@ -54,7 +54,7 @@ RETURN scope.id AS scope, anchor.id AS anchor,
   leaf.id AS leaf, linkCount
 ";
 
-const RAW_QUERY: &str = "
+const GRAPH_RAW_QUERY: &str = "
 MATCH
   (scope:Scope)-[:USES_GRAPH]->
   (graph:Graph)-[:HAS_VERTEX]->
@@ -75,6 +75,170 @@ RETURN scope.id AS scope, anchor.id AS anchor,
   branch.id AS branch, link.id AS link
 ";
 
+const AGGREGATE_QUERY: &str = "
+MATCH
+  (run:Run)-[:USES_PLAN]->
+  (plan:Plan)-[:HAS_DEFINITION]->
+  (parentDefinition:Definition)<-[:INSTANCE_OF]-
+  (parent:Task)-[:IN_RUN]->(run)
+MATCH
+  (parentDefinition)-[:DECLARES_CHILD]->(childDefinition:Definition)
+OPTIONAL MATCH
+  (child:Task)-[:INSTANCE_OF]->(childDefinition)
+OPTIONAL MATCH (child)-[taskFor:TASK_FOR]->(parent)
+WITH run, plan, parent, parentDefinition, childDefinition,
+  count(CASE
+    WHEN child.runId = run.id
+      AND child.definitionId = childDefinition.id
+      AND taskFor IS NOT NULL
+    THEN 1 ELSE null END) AS realizationCount
+WHERE parent.runId = run.id
+  AND parent.definitionId = parentDefinition.id
+RETURN run.id AS run, parent.id AS parent,
+  childDefinition.id AS childDefinition, realizationCount
+";
+
+const RAW_QUERY: &str = "
+MATCH
+  (run:Run)-[:USES_PLAN]->
+  (plan:Plan)-[:HAS_DEFINITION]->
+  (parentDefinition:Definition)<-[:INSTANCE_OF]-
+  (parent:Task)-[:IN_RUN]->(run)
+MATCH
+  (parentDefinition)-[declares:DECLARES_CHILD]->(childDefinition:Definition)
+OPTIONAL MATCH
+  (child:Task)-[:INSTANCE_OF]->(childDefinition)
+OPTIONAL MATCH (child)-[taskFor:TASK_FOR]->(parent)
+WHERE parent.runId = run.id
+  AND parent.definitionId = parentDefinition.id
+  AND child.runId = run.id
+  AND child.definitionId = childDefinition.id
+  AND taskFor IS NOT NULL
+RETURN run.id AS run, parent.id AS parent,
+  childDefinition.id AS childDefinition,
+  child.id AS child, declares.id AS declares, taskFor.id AS taskFor
+";
+
+const CYCLIC_OPTIONAL_QUERY: &str = "
+MATCH
+  (run:Run)<-[:IN_RUN]-(parent:Task)-[:INSTANCE_OF]->
+  (parentDefinition:Definition)
+MATCH
+  (parentDefinition)-[:DECLARES_CHILD]->(childDefinition:Definition)
+OPTIONAL MATCH
+  (childDefinition)<-[:INSTANCE_OF]-(child:Task)-[:TASK_FOR]->(parent)
+  -[:IN_RUN]->(run)<-[:IN_RUN]-(child)
+RETURN run.id AS run, parent.id AS parent,
+  childDefinition.id AS childDefinition, count(child) AS realizationCount
+";
+
+const COMMA_OPTIONAL_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH
+  (parent)-[:HAS_CHILD]->(child:Child),
+  (child)-[:HAS_DETAIL]->(detail:Detail)
+RETURN parent.id AS parent, count(child) AS childCount,
+  count(detail) AS detailCount
+";
+
+const INDEPENDENT_OPTIONAL_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (parent)-[:HAS_CHILD]->(child:Child)
+OPTIONAL MATCH (parent)-[:HAS_NOTE]->(memo:Note)
+RETURN parent.id AS parent, count(child) AS childCount,
+  count(memo) AS noteCount
+";
+
+const THREE_OPTIONAL_ENDPOINT_QUERY: &str = "
+MATCH (parent:Parent)-[:IN_RUN]->(run:Run)-[:USES]->(definition:Definition)
+OPTIONAL MATCH (child:Child)-[:INSTANCE_OF]->(definition)
+OPTIONAL MATCH (child)-[childInRun:IN_RUN]->(run)
+OPTIONAL MATCH (child)-[taskFor:TASK_FOR]->(parent)
+RETURN run.id AS run, parent.id AS parent, definition.id AS definition,
+  count(CASE
+    WHEN childInRun IS NOT NULL AND taskFor IS NOT NULL
+    THEN 1 ELSE null END) AS realizationCount
+";
+
+const GENERIC_THREE_OPTIONAL_QUERY: &str = "
+MATCH (team:Team)-[:USES_PLAN]->
+  (plan:Plan)-[:HAS_ROLE]->
+  (managerRole:Role)<-[:HAS_ROLE]-
+  (manager:Person)-[:MEMBER_OF]->(team)
+MATCH (managerRole)-[:SUPERVISES]->(reportRole:Role)
+OPTIONAL MATCH (report:Person)-[:HAS_ROLE]->(reportRole)
+OPTIONAL MATCH (report)-[reportMember:MEMBER_OF]->(team)
+OPTIONAL MATCH (report)-[reportsTo:REPORTS_TO]->(manager)
+WITH team, plan, manager, managerRole, reportRole,
+  count(CASE
+    WHEN report.teamId = team.teamId
+      AND report.roleId = reportRole.roleId
+      AND reportMember IS NOT NULL
+      AND reportsTo IS NOT NULL
+    THEN 1 ELSE null END) AS realizationCount
+WHERE manager.teamId = team.teamId
+  AND manager.roleId = managerRole.roleId
+RETURN team.teamId AS run,
+  manager.personId AS parent,
+  reportRole.roleId AS definition,
+  realizationCount
+";
+
+const REUSED_BINDINGS_OPTIONAL_QUERY: &str = "
+MATCH (a:Point)-[link:LINK]->(b:Point)
+OPTIONAL MATCH (a)<-[link]-(b)
+RETURN a.id AS a, b.id AS b
+";
+
+const TWO_REUSED_BINDINGS_OPTIONAL_QUERY: &str = "
+MATCH (a:Point)-[link:LINK]->(b:Point)
+OPTIONAL MATCH (a)<-[link]-(b)
+OPTIONAL MATCH (a)-[link]->(a)
+RETURN a.id AS a, b.id AS b
+";
+
+const DEFERRED_SEGMENT_OPTIONAL_QUERY: &str = "
+MATCH (a:Point)-[:BASE]->(b:Point)
+OPTIONAL MATCH (a)-[link:LINK]->(x:Point)<-[link]-(b)
+RETURN a.id AS a, b.id AS b, link.id AS link, x.id AS x
+";
+
+const MULTI_AFFINITY_OPTIONAL_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (parent)-[:LINK]->(left:Child)
+OPTIONAL MATCH (parent)-[:LINK]->(right:Child)
+RETURN parent.id AS parent, count(left) AS leftCount,
+  count(right) AS rightCount
+";
+
+const MULTI_AFFINITY_RAW_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (parent)-[:LINK]->(left:Child)
+OPTIONAL MATCH (parent)-[:LINK]->(right:Child)
+RETURN parent.id AS parent, left.id AS left, right.id AS right
+";
+
+const OPTIONAL_REPARENT_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (child:Child)-[:TASK_FOR]->(parent)
+RETURN parent.id AS parent, count(child) AS childCount
+";
+
+const OPTIONAL_RELATION_LABEL_MIGRATION_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (parent)-[:LEFT]->(left:Child)
+OPTIONAL MATCH (parent)-[:RIGHT]->(right:Child)
+RETURN parent.id AS parent, count(left) AS leftCount, count(right) AS rightCount
+";
+
+const FILTERED_OPTIONAL_FANOUT_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (parent)-[:LEFT]->(left:Child)
+OPTIONAL MATCH (parent)-[:RIGHT]->(right:Child)
+WHERE right.enabled = true
+RETURN parent.id AS parent, count(left) AS leftCount, count(right) AS rightCount
+";
+
 struct MaterializedQuery {
     query: ContinuousQuery,
     rows: HashMap<u64, QueryVariables>,
@@ -82,15 +246,24 @@ struct MaterializedQuery {
 
 impl MaterializedQuery {
     async fn new(query_text: &str) -> Self {
+        let element_index = Arc::new(InMemoryElementIndex::new());
+        let result_index = Arc::new(InMemoryResultIndex::new());
+        Self::with_indexes(query_text, element_index, result_index).await
+    }
+
+    async fn with_indexes(
+        query_text: &str,
+        element_index: Arc<InMemoryElementIndex>,
+        result_index: Arc<InMemoryResultIndex>,
+    ) -> Self {
         let functions = Arc::new(FunctionRegistry::new());
         functions.register_function("count", Function::Aggregating(Arc::new(Count {})));
         let parser = Arc::new(CypherParser::new(functions.clone()));
-        let element_index = Arc::new(InMemoryElementIndex::new());
         let query = QueryBuilder::new(query_text, parser)
             .with_function_registry(functions)
             .with_element_index(element_index.clone())
             .with_archive_index(element_index)
-            .with_result_index(Arc::new(InMemoryResultIndex::new()))
+            .with_result_index(result_index)
             .with_future_queue(Arc::new(InMemoryFutureQueue::new()))
             .build()
             .await;
@@ -156,6 +329,174 @@ fn relation(id: &str, label: &str, effective_from: u64, from: &str, to: &str) ->
             properties: ElementPropertyMap::from(json!({"id": id})),
         },
     }
+}
+
+fn update_relation(
+    id: &str,
+    label: &str,
+    effective_from: u64,
+    from: &str,
+    to: &str,
+) -> SourceChange {
+    let SourceChange::Insert { element } = relation(id, label, effective_from, from, to) else {
+        unreachable!()
+    };
+    SourceChange::Update { element }
+}
+
+fn update_node(
+    id: &str,
+    label: &str,
+    effective_from: u64,
+    properties: serde_json::Value,
+) -> SourceChange {
+    let SourceChange::Insert { element } = node(id, label, effective_from, properties) else {
+        unreachable!()
+    };
+    SourceChange::Update { element }
+}
+
+fn delete(id: &str, effective_from: u64) -> SourceChange {
+    SourceChange::Delete {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("test", id),
+            labels: Arc::new([]),
+            effective_from,
+        },
+    }
+}
+
+fn definition_events() -> Vec<SourceChange> {
+    vec![
+        node("plan", "Plan", 1, json!({"id": "plan"})),
+        node(
+            "root-definition",
+            "Definition",
+            2,
+            json!({"id": "root-definition"}),
+        ),
+        relation(
+            "plan-root-definition",
+            "HAS_DEFINITION",
+            3,
+            "plan",
+            "root-definition",
+        ),
+        node(
+            "child-definition-a",
+            "Definition",
+            4,
+            json!({"id": "child-definition-a"}),
+        ),
+        relation(
+            "plan-child-definition-a",
+            "HAS_DEFINITION",
+            5,
+            "plan",
+            "child-definition-a",
+        ),
+        relation(
+            "root-declares-a",
+            "DECLARES_CHILD",
+            6,
+            "root-definition",
+            "child-definition-a",
+        ),
+        node(
+            "child-definition-b",
+            "Definition",
+            7,
+            json!({"id": "child-definition-b"}),
+        ),
+        relation(
+            "plan-child-definition-b",
+            "HAS_DEFINITION",
+            8,
+            "plan",
+            "child-definition-b",
+        ),
+        relation(
+            "root-declares-b",
+            "DECLARES_CHILD",
+            9,
+            "root-definition",
+            "child-definition-b",
+        ),
+    ]
+}
+
+fn run_events(prefix: &str, start_time: u64) -> Vec<SourceChange> {
+    let run = format!("{prefix}-run");
+    let parent = format!("{prefix}-parent");
+    let child = format!("{prefix}-child");
+    vec![
+        node(&run, "Run", start_time, json!({"id": run})),
+        relation(
+            &format!("{prefix}-run-plan"),
+            "USES_PLAN",
+            start_time + 1,
+            &run,
+            "plan",
+        ),
+        node(
+            &parent,
+            "Task",
+            start_time + 2,
+            json!({
+                "id": parent,
+                "runId": run,
+                "definitionId": "root-definition"
+            }),
+        ),
+        relation(
+            &format!("{prefix}-parent-definition"),
+            "INSTANCE_OF",
+            start_time + 3,
+            &parent,
+            "root-definition",
+        ),
+        relation(
+            &format!("{prefix}-parent-run"),
+            "IN_RUN",
+            start_time + 4,
+            &parent,
+            &run,
+        ),
+        node(
+            &child,
+            "Task",
+            start_time + 5,
+            json!({
+                "id": child,
+                "runId": run,
+                "definitionId": "child-definition-a"
+            }),
+        ),
+        relation(
+            &format!("{prefix}-child-definition"),
+            "INSTANCE_OF",
+            start_time + 6,
+            &child,
+            "child-definition-a",
+        ),
+        relation(
+            &format!("{prefix}-child-run"),
+            "IN_RUN",
+            start_time + 7,
+            &child,
+            &run,
+        ),
+    ]
+}
+
+fn task_for(prefix: &str, parent_suffix: &str, effective_from: u64) -> SourceChange {
+    relation(
+        &format!("{prefix}-task-for"),
+        "TASK_FOR",
+        effective_from,
+        &format!("{prefix}-child"),
+        &format!("{prefix}-{parent_suffix}"),
+    )
 }
 
 fn graph_events() -> Vec<SourceChange> {
@@ -230,6 +571,81 @@ fn link(effective_from: u64) -> SourceChange {
     )
 }
 
+fn three_optional_group(prefix: &str, start_time: u64) -> (Vec<SourceChange>, [SourceChange; 3]) {
+    let parent = format!("{prefix}-parent");
+    let run = format!("{prefix}-run");
+    let definition = format!("{prefix}-definition");
+    let child = format!("{prefix}-child");
+    (
+        vec![
+            node(&parent, "Parent", start_time, json!({"id": parent})),
+            node(&run, "Run", start_time + 1, json!({"id": run})),
+            node(
+                &definition,
+                "Definition",
+                start_time + 2,
+                json!({"id": definition}),
+            ),
+            node(&child, "Child", start_time + 3, json!({"id": child})),
+            relation(
+                &format!("{prefix}-parent-run"),
+                "IN_RUN",
+                start_time + 4,
+                &parent,
+                &run,
+            ),
+            relation(
+                &format!("{prefix}-run-definition"),
+                "USES",
+                start_time + 5,
+                &run,
+                &definition,
+            ),
+        ],
+        [
+            relation(
+                &format!("{prefix}-child-definition"),
+                "INSTANCE_OF",
+                start_time + 6,
+                &child,
+                &definition,
+            ),
+            relation(
+                &format!("{prefix}-child-run"),
+                "IN_RUN",
+                start_time + 7,
+                &child,
+                &run,
+            ),
+            relation(
+                &format!("{prefix}-task-for"),
+                "TASK_FOR",
+                start_time + 8,
+                &child,
+                &parent,
+            ),
+        ],
+    )
+}
+
+fn three_optional_count(subject: &MaterializedQuery, definition: &str) -> i64 {
+    let row = subject
+        .rows
+        .values()
+        .find(|row| row.get("definition") == Some(&VariableValue::from(definition)))
+        .unwrap();
+    integer_value(row, "realizationCount")
+}
+
+fn three_optional_count_for_parent(subject: &MaterializedQuery, parent: &str) -> i64 {
+    let row = subject
+        .rows
+        .values()
+        .find(|row| row.get("parent") == Some(&VariableValue::from(parent)))
+        .unwrap();
+    integer_value(row, "realizationCount")
+}
+
 async fn process_all(subject: &mut MaterializedQuery, changes: Vec<SourceChange>) {
     for change in changes {
         subject.process(change).await;
@@ -259,6 +675,78 @@ fn link_count(subject: &MaterializedQuery, leaf: &str) -> i64 {
     integer_value(row, "linkCount")
 }
 
+fn only_count(subject: &MaterializedQuery, key: &str) -> i64 {
+    assert_eq!(subject.rows.len(), 1);
+    integer_value(subject.rows.values().next().unwrap(), key)
+}
+
+fn parent_child_count(subject: &MaterializedQuery, parent: &str) -> i64 {
+    let row = subject
+        .rows
+        .values()
+        .find(|row| row.get("parent") == Some(&VariableValue::from(parent)))
+        .unwrap_or_else(|| panic!("missing parent {parent} row"));
+    integer_value(row, "childCount")
+}
+
+fn assert_parent_transition(
+    changes: &[QueryPartEvaluationContext],
+    parent: &str,
+    before_count: i64,
+    after_count: i64,
+) {
+    assert!(changes.iter().any(|change| {
+        matches!(
+            change,
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                ..
+            } if before.get("parent") == Some(&VariableValue::from(parent))
+                && after.get("parent") == Some(&VariableValue::from(parent))
+                && integer_value(before, "childCount") == before_count
+                && integer_value(after, "childCount") == after_count
+        )
+    }));
+}
+
+fn assert_count_transition(
+    changes: &[QueryPartEvaluationContext],
+    field: &str,
+    before_count: i64,
+    after_count: i64,
+) {
+    assert!(changes.iter().any(|change| {
+        matches!(
+            change,
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                ..
+            } if integer_value(before, field) == before_count
+                && integer_value(after, field) == after_count
+        )
+    }));
+}
+
+fn realization_count(
+    subject: &MaterializedQuery,
+    run: &str,
+    parent: &str,
+    child_definition: &str,
+) -> i64 {
+    let row = subject
+        .rows
+        .values()
+        .find(|row| {
+            row.get("run") == Some(&VariableValue::from(run))
+                && row.get("parent") == Some(&VariableValue::from(parent))
+                && row.get("childDefinition") == Some(&VariableValue::from(child_definition))
+        })
+        .unwrap_or_else(|| panic!("missing {run}/{parent}/{child_definition} row"));
+    integer_value(row, "realizationCount")
+}
+
 async fn build_single_scope(query: &str) -> MaterializedQuery {
     let mut subject = MaterializedQuery::new(query).await;
     process_all(&mut subject, graph_events()).await;
@@ -266,10 +754,821 @@ async fn build_single_scope(query: &str) -> MaterializedQuery {
     subject
 }
 
+async fn build_independent_optional_fanout() -> MaterializedQuery {
+    let mut subject = MaterializedQuery::new(OPTIONAL_RELATION_LABEL_MIGRATION_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("parent", "Parent", 1, json!({"id": "parent"})),
+            node("left-one", "Child", 2, json!({"id": "left-one"})),
+            node("right-one", "Child", 3, json!({"id": "right-one"})),
+            node("right-two", "Child", 4, json!({"id": "right-two"})),
+            relation("left-one-rel", "LEFT", 5, "parent", "left-one"),
+            relation("right-one-rel", "RIGHT", 6, "parent", "right-one"),
+            relation("right-two-rel", "RIGHT", 7, "parent", "right-two"),
+        ],
+    )
+    .await;
+    subject
+}
+
+#[tokio::test]
+async fn later_optional_anchor_cannot_complete_an_earlier_defaulted_clause() {
+    for _ in 0..20 {
+        let events = run_events("one", 10);
+        let mut aggregate = MaterializedQuery::new(AGGREGATE_QUERY).await;
+        process_all(&mut aggregate, definition_events()).await;
+        process_all(&mut aggregate, events[..6].to_vec()).await;
+        aggregate.process(events[7].clone()).await;
+        aggregate.process(task_for("one", "parent", 18)).await;
+        aggregate.process(events[6].clone()).await;
+        assert_eq!(
+            realization_count(&aggregate, "one-run", "one-parent", "child-definition-a"),
+            1
+        );
+
+        let mut raw = MaterializedQuery::new(RAW_QUERY).await;
+        process_all(&mut raw, definition_events()).await;
+        process_all(&mut raw, events[..6].to_vec()).await;
+        raw.process(events[7].clone()).await;
+        raw.process(task_for("one", "parent", 18)).await;
+        raw.process(events[6].clone()).await;
+        assert_eq!(raw.rows.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn every_relationship_order_converges_to_one_raw_solution() {
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        for _ in 0..20 {
+            let events = run_events("one", 10);
+            let relationships = [
+                events[6].clone(),
+                events[7].clone(),
+                task_for("one", "parent", 18),
+            ];
+            let mut subject = MaterializedQuery::new(RAW_QUERY).await;
+            process_all(&mut subject, definition_events()).await;
+            process_all(&mut subject, events[..6].to_vec()).await;
+            for index in order {
+                subject.process(relationships[index].clone()).await;
+            }
+            assert_eq!(subject.rows.len(), 1, "relationship order {order:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cyclic_optional_keeps_defaults_when_local_candidates_fail_globally() {
+    let mut subject = MaterializedQuery::new(CYCLIC_OPTIONAL_QUERY).await;
+    process_all(&mut subject, definition_events()).await;
+    let events = run_events("one", 10);
+    process_all(&mut subject, events[..5].to_vec()).await;
+
+    assert_eq!(subject.rows.len(), 2);
+    assert_eq!(
+        realization_count(&subject, "one-run", "one-parent", "child-definition-a"),
+        0
+    );
+    assert_eq!(
+        realization_count(&subject, "one-run", "one-parent", "child-definition-b"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn comma_separated_optional_patterns_succeed_or_default_together() {
+    let mut subject = MaterializedQuery::new(COMMA_OPTIONAL_QUERY).await;
+    subject
+        .process(node("parent", "Parent", 1, json!({"id": "parent"})))
+        .await;
+    assert_eq!(only_count(&subject, "childCount"), 0);
+
+    subject
+        .process(node("child", "Child", 2, json!({"id": "child"})))
+        .await;
+    subject
+        .process(relation("parent-child", "HAS_CHILD", 3, "parent", "child"))
+        .await;
+    assert_eq!(only_count(&subject, "childCount"), 0);
+    assert_eq!(only_count(&subject, "detailCount"), 0);
+
+    subject
+        .process(node("detail", "Detail", 4, json!({"id": "detail"})))
+        .await;
+    subject
+        .process(relation("child-detail", "HAS_DETAIL", 5, "child", "detail"))
+        .await;
+    assert_eq!(only_count(&subject, "childCount"), 1);
+    assert_eq!(only_count(&subject, "detailCount"), 1);
+}
+
+#[tokio::test]
+async fn independent_later_optional_clause_remains_eligible() {
+    let mut subject = MaterializedQuery::new(INDEPENDENT_OPTIONAL_QUERY).await;
+    subject
+        .process(node("parent", "Parent", 1, json!({"id": "parent"})))
+        .await;
+    subject
+        .process(node("note", "Note", 2, json!({"id": "note"})))
+        .await;
+    subject
+        .process(relation("parent-note", "HAS_NOTE", 3, "parent", "note"))
+        .await;
+
+    assert_eq!(only_count(&subject, "childCount"), 0);
+    assert_eq!(only_count(&subject, "noteCount"), 1);
+}
+
+#[tokio::test]
+async fn endpoint_invalid_middle_optional_preserves_later_match_in_every_order() {
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for repeat in 0..20 {
+        for (case, order) in orders.into_iter().enumerate() {
+            let prefix = format!("isolated-{repeat}-{case}");
+            let (events, relationships) = three_optional_group(&prefix, 1);
+            let mut subject = MaterializedQuery::new(THREE_OPTIONAL_ENDPOINT_QUERY).await;
+            process_all(&mut subject, events).await;
+            assert_eq!(
+                three_optional_count(&subject, &format!("{prefix}-definition")),
+                0
+            );
+            for index in order {
+                subject.process(relationships[index].clone()).await;
+            }
+            assert_eq!(
+                three_optional_count(&subject, &format!("{prefix}-definition")),
+                1,
+                "repeat {repeat}, order {order:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn endpoint_invalid_middle_optional_converges_with_shared_history_and_churn() {
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for repeat in 0..20 {
+        let mut subject = MaterializedQuery::new(THREE_OPTIONAL_ENDPOINT_QUERY).await;
+        for (case, order) in orders.into_iter().enumerate() {
+            let prefix = format!("shared-{repeat}-{case}");
+            let time = 1 + case as u64 * 20;
+            let (events, relationships) = three_optional_group(&prefix, time);
+            process_all(&mut subject, events).await;
+            for index in order {
+                subject.process(relationships[index].clone()).await;
+            }
+            let definition = format!("{prefix}-definition");
+            assert_eq!(
+                three_optional_count(&subject, &definition),
+                1,
+                "repeat {repeat}, order {order:?}"
+            );
+
+            subject
+                .process(delete(&format!("{prefix}-task-for"), time + 10))
+                .await;
+            assert_eq!(three_optional_count(&subject, &definition), 0);
+            subject
+                .process(relation(
+                    &format!("{prefix}-task-for"),
+                    "TASK_FOR",
+                    time + 11,
+                    &format!("{prefix}-child"),
+                    &format!("{prefix}-parent"),
+                ))
+                .await;
+            assert_eq!(three_optional_count(&subject, &definition), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn generic_three_optional_order_converges_without_underflow() {
+    let mut subject = MaterializedQuery::new(GENERIC_THREE_OPTIONAL_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node(
+                "plan",
+                "Plan",
+                1,
+                json!({"planId": "plan", "version": "v1"}),
+            ),
+            node("manager-role", "Role", 2, json!({"roleId": "manager-role"})),
+            node("report-role", "Role", 3, json!({"roleId": "report-role"})),
+            relation("plan-manager-role", "HAS_ROLE", 4, "plan", "manager-role"),
+            relation(
+                "supervises-report",
+                "SUPERVISES",
+                5,
+                "manager-role",
+                "report-role",
+            ),
+            node("team", "Team", 6, json!({"teamId": "team"})),
+            relation("uses-plan", "USES_PLAN", 7, "team", "plan"),
+            node(
+                "manager",
+                "Person",
+                8,
+                json!({
+                    "personId": "manager",
+                    "teamId": "team",
+                    "roleId": "manager-role"
+                }),
+            ),
+            relation(
+                "manager-role-membership",
+                "HAS_ROLE",
+                9,
+                "manager",
+                "manager-role",
+            ),
+            relation("manager-team", "MEMBER_OF", 10, "manager", "team"),
+            node(
+                "report",
+                "Person",
+                11,
+                json!({
+                    "personId": "report",
+                    "teamId": "team",
+                    "roleId": "report-role"
+                }),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(three_optional_count(&subject, "report-role"), 0);
+
+    subject
+        .process(relation(
+            "reports-to",
+            "REPORTS_TO",
+            14,
+            "report",
+            "manager",
+        ))
+        .await;
+    subject
+        .process(relation(
+            "report-role-membership",
+            "HAS_ROLE",
+            12,
+            "report",
+            "report-role",
+        ))
+        .await;
+    subject
+        .process(relation("report-team", "MEMBER_OF", 13, "report", "team"))
+        .await;
+
+    assert_eq!(three_optional_count(&subject, "report-role"), 1);
+}
+
+#[tokio::test]
+async fn three_optional_membership_survives_restart_delete_and_reinsert() {
+    let element_index = Arc::new(InMemoryElementIndex::new());
+    let result_index = Arc::new(InMemoryResultIndex::new());
+    let (events, relationships) = three_optional_group("restart", 1);
+    let mut initial = MaterializedQuery::with_indexes(
+        THREE_OPTIONAL_ENDPOINT_QUERY,
+        element_index.clone(),
+        result_index.clone(),
+    )
+    .await;
+    process_all(&mut initial, events).await;
+    for index in [2, 0, 1] {
+        initial.process(relationships[index].clone()).await;
+    }
+    assert_eq!(three_optional_count(&initial, "restart-definition"), 1);
+    drop(initial);
+
+    let mut restarted =
+        MaterializedQuery::with_indexes(THREE_OPTIONAL_ENDPOINT_QUERY, element_index, result_index)
+            .await;
+    restarted.process(delete("restart-task-for", 20)).await;
+    assert_eq!(three_optional_count(&restarted, "restart-definition"), 0);
+    restarted
+        .process(relation(
+            "restart-task-for",
+            "TASK_FOR",
+            21,
+            "restart-child",
+            "restart-parent",
+        ))
+        .await;
+    assert_eq!(three_optional_count(&restarted, "restart-definition"), 1);
+}
+
+#[tokio::test]
+async fn three_optional_task_for_reparent_restores_and_replaces_defaults() {
+    let mut subject = MaterializedQuery::new(THREE_OPTIONAL_ENDPOINT_QUERY).await;
+    let (events, relationships) = three_optional_group("move", 1);
+    process_all(&mut subject, events).await;
+    process_all(
+        &mut subject,
+        vec![
+            node(
+                "move-other-parent",
+                "Parent",
+                10,
+                json!({"id": "move-other-parent"}),
+            ),
+            relation(
+                "move-other-parent-run",
+                "IN_RUN",
+                11,
+                "move-other-parent",
+                "move-run",
+            ),
+        ],
+    )
+    .await;
+    for index in [2, 0, 1] {
+        subject.process(relationships[index].clone()).await;
+    }
+    assert_eq!(three_optional_count_for_parent(&subject, "move-parent"), 1);
+    assert_eq!(
+        three_optional_count_for_parent(&subject, "move-other-parent"),
+        0
+    );
+
+    subject
+        .process(update_relation(
+            "move-task-for",
+            "TASK_FOR",
+            12,
+            "move-child",
+            "move-other-parent",
+        ))
+        .await;
+    assert_eq!(three_optional_count_for_parent(&subject, "move-parent"), 0);
+    assert_eq!(
+        three_optional_count_for_parent(&subject, "move-other-parent"),
+        1
+    );
+
+    subject
+        .process(update_relation(
+            "move-task-for",
+            "TASK_FOR",
+            13,
+            "move-child",
+            "move-parent",
+        ))
+        .await;
+    assert_eq!(three_optional_count_for_parent(&subject, "move-parent"), 1);
+    assert_eq!(
+        three_optional_count_for_parent(&subject, "move-other-parent"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn optional_clause_with_only_reused_bindings_can_default() {
+    let mut subject = MaterializedQuery::new(REUSED_BINDINGS_OPTIONAL_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("a", "Point", 1, json!({"id": "a"})),
+            node("b", "Point", 2, json!({"id": "b"})),
+            relation("a-b", "LINK", 3, "a", "b"),
+        ],
+    )
+    .await;
+
+    assert_eq!(subject.rows.len(), 1);
+    let row = subject.rows.values().next().unwrap();
+    assert_eq!(row.get("a"), Some(&VariableValue::from("a")));
+    assert_eq!(row.get("b"), Some(&VariableValue::from("b")));
+}
+
+#[tokio::test]
+async fn every_failed_reused_binding_clause_defaults() {
+    let mut subject = MaterializedQuery::new(TWO_REUSED_BINDINGS_OPTIONAL_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("a", "Point", 1, json!({"id": "a"})),
+            node("b", "Point", 2, json!({"id": "b"})),
+            relation("a-b", "LINK", 3, "a", "b"),
+        ],
+    )
+    .await;
+
+    assert_eq!(subject.rows.len(), 1);
+    let row = subject.rows.values().next().unwrap();
+    assert_eq!(row.get("a"), Some(&VariableValue::from("a")));
+    assert_eq!(row.get("b"), Some(&VariableValue::from("b")));
+}
+
+#[tokio::test]
+async fn completed_solution_rechecks_deferred_optional_segments() {
+    let mut subject = MaterializedQuery::new(DEFERRED_SEGMENT_OPTIONAL_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("a", "Point", 1, json!({"id": "a"})),
+            node("x", "Point", 2, json!({"id": "x"})),
+            relation("link", "LINK", 3, "a", "x"),
+            relation("base", "BASE", 4, "a", "b"),
+            node("b", "Point", 5, json!({"id": "b"})),
+        ],
+    )
+    .await;
+
+    assert_eq!(subject.rows.len(), 1);
+    let row = subject.rows.values().next().unwrap();
+    assert_eq!(row.get("a"), Some(&VariableValue::from("a")));
+    assert_eq!(row.get("b"), Some(&VariableValue::from("b")));
+    assert_eq!(row.get("link"), Some(&VariableValue::Null));
+    assert_eq!(row.get("x"), Some(&VariableValue::Null));
+}
+
+#[tokio::test]
+async fn duplicate_affinity_merges_all_affected_optional_clauses() {
+    let mut subject = MaterializedQuery::new(MULTI_AFFINITY_OPTIONAL_QUERY).await;
+    subject
+        .process(node("parent", "Parent", 1, json!({"id": "parent"})))
+        .await;
+    subject
+        .process(node("child", "Child", 2, json!({"id": "child"})))
+        .await;
+    let changes = subject
+        .process(relation("parent-child", "LINK", 3, "parent", "child"))
+        .await;
+
+    assert_eq!(only_count(&subject, "leftCount"), 1);
+    assert_eq!(only_count(&subject, "rightCount"), 1);
+    assert!(matches!(
+        changes.as_slice(),
+        [QueryPartEvaluationContext::Aggregation {
+            before: Some(before),
+            after,
+            ..
+        }] if integer_value(before, "leftCount") == 0
+            && integer_value(before, "rightCount") == 0
+            && integer_value(after, "leftCount") == 1
+            && integer_value(after, "rightCount") == 1
+    ));
+}
+
+#[tokio::test]
+async fn multi_affinity_delete_does_not_emit_a_joint_default() {
+    let mut subject = MaterializedQuery::new(MULTI_AFFINITY_RAW_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("parent", "Parent", 1, json!({"id": "parent"})),
+            node("first", "Child", 2, json!({"id": "first"})),
+            node("second", "Child", 3, json!({"id": "second"})),
+            relation("first-link", "LINK", 4, "parent", "first"),
+            relation("second-link", "LINK", 5, "parent", "second"),
+        ],
+    )
+    .await;
+    assert_eq!(subject.rows.len(), 4);
+
+    subject.process(delete("second-link", 6)).await;
+
+    assert_eq!(subject.rows.len(), 1);
+    let row = subject.rows.values().next().unwrap();
+    assert_eq!(row.get("left"), Some(&VariableValue::from("first")));
+    assert_eq!(row.get("right"), Some(&VariableValue::from("first")));
+}
+
+#[tokio::test]
+async fn relation_endpoint_update_restores_source_default_and_retracts_destination_default() {
+    let mut subject = MaterializedQuery::new(OPTIONAL_REPARENT_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("parent-a", "Parent", 1, json!({"id": "a"})),
+            node("parent-b", "Parent", 2, json!({"id": "b"})),
+            node("child", "Child", 3, json!({"id": "child"})),
+            relation("task-for", "TASK_FOR", 4, "child", "parent-a"),
+        ],
+    )
+    .await;
+    assert_eq!(parent_child_count(&subject, "a"), 1);
+    assert_eq!(parent_child_count(&subject, "b"), 0);
+
+    let away = subject
+        .process(update_relation(
+            "task-for", "TASK_FOR", 5, "child", "parent-b",
+        ))
+        .await;
+    assert_eq!(away.len(), 2);
+    assert_parent_transition(&away, "a", 1, 0);
+    assert_parent_transition(&away, "b", 0, 1);
+    assert_eq!(parent_child_count(&subject, "a"), 0);
+    assert_eq!(parent_child_count(&subject, "b"), 1);
+
+    let back = subject
+        .process(update_relation(
+            "task-for", "TASK_FOR", 6, "child", "parent-a",
+        ))
+        .await;
+    assert_eq!(back.len(), 2);
+    assert_parent_transition(&back, "a", 0, 1);
+    assert_parent_transition(&back, "b", 1, 0);
+    assert_eq!(parent_child_count(&subject, "a"), 1);
+    assert_eq!(parent_child_count(&subject, "b"), 0);
+}
+
+#[tokio::test]
+async fn endpoint_update_converges_with_delete_then_insert() {
+    async fn build() -> MaterializedQuery {
+        let mut subject = MaterializedQuery::new(OPTIONAL_REPARENT_QUERY).await;
+        process_all(
+            &mut subject,
+            vec![
+                node("parent-a", "Parent", 1, json!({"id": "a"})),
+                node("parent-b", "Parent", 2, json!({"id": "b"})),
+                node("child", "Child", 3, json!({"id": "child"})),
+                relation("task-for", "TASK_FOR", 4, "child", "parent-a"),
+            ],
+        )
+        .await;
+        subject
+    }
+
+    let mut updated = build().await;
+    updated
+        .process(update_relation(
+            "task-for", "TASK_FOR", 5, "child", "parent-b",
+        ))
+        .await;
+
+    let mut replaced = build().await;
+    replaced.process(delete("task-for", 5)).await;
+    replaced
+        .process(relation("task-for", "TASK_FOR", 6, "child", "parent-b"))
+        .await;
+
+    assert_eq!(updated.rows, replaced.rows);
+    assert_eq!(parent_child_count(&updated, "a"), 0);
+    assert_eq!(parent_child_count(&updated, "b"), 1);
+}
+
+#[tokio::test]
+async fn endpoint_update_restores_default_only_after_last_source_match() {
+    let mut subject = MaterializedQuery::new(OPTIONAL_REPARENT_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("parent-a", "Parent", 1, json!({"id": "a"})),
+            node("parent-b", "Parent", 2, json!({"id": "b"})),
+            node("child-one", "Child", 3, json!({"id": "child-one"})),
+            node("child-two", "Child", 4, json!({"id": "child-two"})),
+            relation("task-for-one", "TASK_FOR", 5, "child-one", "parent-a"),
+            relation("task-for-two", "TASK_FOR", 6, "child-two", "parent-a"),
+        ],
+    )
+    .await;
+    assert_eq!(parent_child_count(&subject, "a"), 2);
+    assert_eq!(parent_child_count(&subject, "b"), 0);
+
+    let non_last = subject
+        .process(update_relation(
+            "task-for-one",
+            "TASK_FOR",
+            7,
+            "child-one",
+            "parent-b",
+        ))
+        .await;
+    assert_parent_transition(&non_last, "a", 2, 1);
+    assert_parent_transition(&non_last, "b", 0, 1);
+    assert_eq!(parent_child_count(&subject, "a"), 1);
+    assert_eq!(parent_child_count(&subject, "b"), 1);
+
+    let last = subject
+        .process(update_relation(
+            "task-for-two",
+            "TASK_FOR",
+            8,
+            "child-two",
+            "parent-b",
+        ))
+        .await;
+    assert_parent_transition(&last, "a", 1, 0);
+    assert_parent_transition(&last, "b", 1, 2);
+    assert_eq!(parent_child_count(&subject, "a"), 0);
+    assert_eq!(parent_child_count(&subject, "b"), 2);
+}
+
+#[tokio::test]
+async fn relationship_and_node_match_updates_restore_optional_defaults() {
+    let mut subject = MaterializedQuery::new(OPTIONAL_REPARENT_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("parent", "Parent", 1, json!({"id": "parent"})),
+            node("child", "Child", 2, json!({"id": "child"})),
+            relation("task-for", "TASK_FOR", 3, "child", "parent"),
+        ],
+    )
+    .await;
+    assert_eq!(parent_child_count(&subject, "parent"), 1);
+
+    let relation_away = subject
+        .process(update_relation("task-for", "IGNORED", 4, "child", "parent"))
+        .await;
+    assert_parent_transition(&relation_away, "parent", 1, 0);
+
+    let relation_back = subject
+        .process(update_relation(
+            "task-for", "TASK_FOR", 5, "child", "parent",
+        ))
+        .await;
+    assert_parent_transition(&relation_back, "parent", 0, 1);
+
+    let node_away = subject
+        .process(update_node("child", "Ignored", 6, json!({"id": "child"})))
+        .await;
+    assert_parent_transition(&node_away, "parent", 1, 0);
+
+    let node_back = subject
+        .process(update_node("child", "Child", 7, json!({"id": "child"})))
+        .await;
+    assert_parent_transition(&node_back, "parent", 0, 1);
+    assert_eq!(parent_child_count(&subject, "parent"), 1);
+}
+
+#[tokio::test]
+async fn update_between_independent_optional_clauses_preserves_raw_fanout() {
+    let mut updated = build_independent_optional_fanout().await;
+    assert_eq!(only_count(&updated, "leftCount"), 2);
+    assert_eq!(only_count(&updated, "rightCount"), 2);
+
+    let changes = updated
+        .process(update_relation(
+            "left-one-rel",
+            "RIGHT",
+            8,
+            "parent",
+            "left-one",
+        ))
+        .await;
+    assert_eq!(changes.len(), 1);
+    assert_eq!(only_count(&updated, "leftCount"), 0);
+    assert_eq!(only_count(&updated, "rightCount"), 3);
+
+    let mut replaced = build_independent_optional_fanout().await;
+    let deleted = replaced.process(delete("left-one-rel", 8)).await;
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(only_count(&replaced, "leftCount"), 0);
+    assert_eq!(only_count(&replaced, "rightCount"), 2);
+    replaced
+        .process(relation("left-one-rel", "RIGHT", 9, "parent", "left-one"))
+        .await;
+
+    assert_eq!(updated.rows, replaced.rows);
+
+    updated.process(delete("parent", 10)).await;
+    updated
+        .process(node("parent", "Parent", 11, json!({"id": "parent"})))
+        .await;
+    assert_eq!(only_count(&updated, "leftCount"), 0);
+    assert_eq!(only_count(&updated, "rightCount"), 3);
+}
+
+#[tokio::test]
+async fn optional_match_cardinality_survives_query_restart() {
+    let element_index = Arc::new(InMemoryElementIndex::new());
+    let result_index = Arc::new(InMemoryResultIndex::new());
+    let mut subject = MaterializedQuery::with_indexes(
+        OPTIONAL_RELATION_LABEL_MIGRATION_QUERY,
+        element_index.clone(),
+        result_index.clone(),
+    )
+    .await;
+    process_all(
+        &mut subject,
+        vec![
+            node("parent", "Parent", 1, json!({"id": "parent"})),
+            node("left", "Child", 2, json!({"id": "left"})),
+            node("right-one", "Child", 3, json!({"id": "right-one"})),
+            node("right-two", "Child", 4, json!({"id": "right-two"})),
+            relation("left-rel", "LEFT", 5, "parent", "left"),
+            relation("right-one-rel", "RIGHT", 6, "parent", "right-one"),
+            relation("right-two-rel", "RIGHT", 7, "parent", "right-two"),
+        ],
+    )
+    .await;
+    assert_eq!(only_count(&subject, "leftCount"), 2);
+    drop(subject);
+
+    let mut restarted = MaterializedQuery::with_indexes(
+        OPTIONAL_RELATION_LABEL_MIGRATION_QUERY,
+        element_index,
+        result_index,
+    )
+    .await;
+    restarted
+        .process(node(
+            "right-three",
+            "Child",
+            8,
+            json!({"id": "right-three"}),
+        ))
+        .await;
+    let added = restarted
+        .process(relation(
+            "right-three-rel",
+            "RIGHT",
+            9,
+            "parent",
+            "right-three",
+        ))
+        .await;
+    assert_count_transition(&added, "rightCount", 2, 3);
+    assert_eq!(only_count(&restarted, "leftCount"), 3);
+    assert_eq!(only_count(&restarted, "rightCount"), 3);
+
+    let removed = restarted.process(delete("right-three-rel", 10)).await;
+    assert_count_transition(&removed, "rightCount", 3, 2);
+    assert_eq!(only_count(&restarted, "leftCount"), 2);
+    assert_eq!(only_count(&restarted, "rightCount"), 2);
+}
+
+#[tokio::test]
+async fn filtered_optional_fanout_tracks_raw_and_projected_cardinality() {
+    let mut subject = MaterializedQuery::new(FILTERED_OPTIONAL_FANOUT_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("parent", "Parent", 1, json!({"id": "parent"})),
+            node("left", "Child", 2, json!({"id": "left"})),
+            node(
+                "right-one",
+                "Child",
+                3,
+                json!({"id": "right-one", "enabled": true}),
+            ),
+            node(
+                "right-two",
+                "Child",
+                4,
+                json!({"id": "right-two", "enabled": false}),
+            ),
+            relation("left-rel", "LEFT", 5, "parent", "left"),
+            relation("right-one-rel", "RIGHT", 6, "parent", "right-one"),
+            relation("right-two-rel", "RIGHT", 7, "parent", "right-two"),
+        ],
+    )
+    .await;
+    assert_eq!(only_count(&subject, "leftCount"), 1);
+    assert_eq!(only_count(&subject, "rightCount"), 1);
+
+    let enabled = subject
+        .process(update_node(
+            "right-two",
+            "Child",
+            8,
+            json!({"id": "right-two", "enabled": true}),
+        ))
+        .await;
+    assert!(matches!(
+        enabled.as_slice(),
+        [QueryPartEvaluationContext::Aggregation { after, .. }]
+            if integer_value(after, "leftCount") == 2
+                && integer_value(after, "rightCount") == 2
+    ));
+    assert_eq!(only_count(&subject, "leftCount"), 2);
+    assert_eq!(only_count(&subject, "rightCount"), 2);
+
+    subject.process(delete("left-rel", 9)).await;
+    assert_eq!(only_count(&subject, "leftCount"), 0);
+    assert_eq!(only_count(&subject, "rightCount"), 2);
+}
+
 #[tokio::test]
 async fn raw_solution_cardinality_excludes_cross_paired_relationships() {
     for _ in 0..32 {
-        let mut subject = build_single_scope(RAW_QUERY).await;
+        let mut subject = build_single_scope(GRAPH_RAW_QUERY).await;
         let changes = subject.process(link(18)).await;
 
         assert_eq!(changes.len(), 1);
@@ -286,7 +1585,7 @@ async fn raw_solution_cardinality_excludes_cross_paired_relationships() {
 
 #[tokio::test]
 async fn aggregate_preserves_valid_matches_and_optional_defaults() {
-    let mut subject = build_single_scope(AGGREGATE_QUERY).await;
+    let mut subject = build_single_scope(GRAPH_AGGREGATE_QUERY).await;
     assert_eq!(subject.rows.len(), 2);
     assert_eq!(link_count(&subject, "leaf-a"), 0);
     assert_eq!(link_count(&subject, "leaf-b"), 0);
@@ -300,8 +1599,8 @@ async fn aggregate_preserves_valid_matches_and_optional_defaults() {
 
 #[tokio::test]
 async fn converging_path_results_are_independent_of_event_order() {
-    let mut interleaved = MaterializedQuery::new(AGGREGATE_QUERY).await;
-    let mut nodes_first = MaterializedQuery::new(AGGREGATE_QUERY).await;
+    let mut interleaved = MaterializedQuery::new(GRAPH_AGGREGATE_QUERY).await;
+    let mut nodes_first = MaterializedQuery::new(GRAPH_AGGREGATE_QUERY).await;
     let mut events = graph_events();
     events.extend(scope_events(10));
     events.push(link(18));

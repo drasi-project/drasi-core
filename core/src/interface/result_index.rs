@@ -25,8 +25,9 @@ use crate::evaluation::functions::aggregation::ValueAccumulator;
 
 use super::IndexError;
 
-/// Version 2 requires replay so persisted rows satisfy physical path endpoints.
-pub const RESULT_INDEX_STATE_VERSION: u64 = 2;
+/// Version 3 requires replay for clause-aware OPTIONAL lifecycle cardinality
+/// while retaining the physical endpoint guarantees introduced by version 2.
+pub const RESULT_INDEX_STATE_VERSION: u64 = 3;
 
 #[async_trait]
 pub trait ResultIndex: AccumulatorIndex + ResultSequenceCounter {
