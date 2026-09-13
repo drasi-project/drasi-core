@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-12T18:28:14-07:00",
+  "sourceInputs": [
+    {
+      "name": "workgraph-core-issue-history.md",
+      "sha256": "683a7406e1edd6778f892bd3e849d2440ac8da3fa023aac79c6ac93b37eebbda",
+      "publishedRaw": false,
+      "publishedSanitizedCopy": "source-report-sanitized.md",
+      "publishedSanitizedSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
+      "reason": "The source report includes local/private session navigation metadata. A full technical copy with those fields removed is published."
+    },
+    {
+      "name": "publication-source-index.json",
+      "sha256": "f06c1945acd8baf1cc71f8391b715f407ed49f48e20457fc5030ebad14d43d0c",
+      "publishedRaw": false,
+      "publishedSanitizedEvidence": "evidence.md",
+      "publishedSanitizedEvidenceSha256": "4fc5a96fe03069f3b6f73c48513d12c2e532057d2b4393b0e7bce273828b21bd",
+      "reason": "The local mechanical index includes private provenance strings. The complete 132 rows and seven anchors are published with original technical detail and sanitized provenance."
+    }
+  ],
+  "publicBaselines": {
+    "main": "e759606fa065bee0ef9e60017e263f0f85dd0e44",
+    "retainedBranch": "workgraph-generic-recovery",
+    "retainedTip": "fb5d2bda2cbce4284fecbce40cae2a2d74116249",
+    "workgraphRemovalCommit": "b1458cb1c25cd39457361a1be010f2fba7c6d5ff"
+  },
+  "sanitization": {
+    "excluded": [
+      "raw transcripts and private messages",
+      "local filesystem and session identifiers",
+      "credentials and operator configuration",
+      "runtime databases, WALs, and unsanitized git bundles"
+    ],
+    "retained": [
+      "stable report row and narrative IDs",
+      "generic technical summaries and dispositions",
+      "public GitHub issue, pull request, branch, and commit URLs",
+      "input checksums and exact public revision baselines"
+    ]
+  },
+  "portablePatchRecovery": {
+    "patchCount": 20,
+    "index": "patches/index.json",
+    "format": "git diff --binary --full-index <parent> <commit>",
+    "reason": "The original commit objects remained readable locally but did not resolve through a current remote branch or GitHub commit API endpoint.",
+    "cumulativeSeries": {
+      "count": 7,
+      "index": "patches/series/index.json",
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "remoteBaseUrl": "https://github.com/drasi-project/drasi-core/commit/43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "localOnlyCommitCoverage": "20/20",
+      "applicationVerification": "All seven cumulative patches passed git apply --check and applied against a fresh GitHub archive of the remote base.",
+      "sanitizedCredentialShapedFixtureOccurrences": 44
+    },
+    "interruptedRouterFollowUp": {
+      "index": "patches/dirty/index.json",
+      "base": "25bda3bb2ef6eebef60dd6babdf69138466babae",
+      "status": "interrupted-unvalidated-partial",
+      "recoveredEditOperations": 7,
+      "recoveredChangedFiles": 4,
+      "applicationVerification": "passed against a 25bda3bb tree reconstructed from the public remote base and cumulative patch",
+      "unavailable": [
+        "post-edit status snapshot",
+        "completed commit",
+        "format/build/test results",
+        "implementation for the permanent-invalid-candidate poison-row blocker"
+      ],
+      "countCorrection": "A prior nine-dirty-file description is not supported by the surviving direct record, which shows a clean pre-edit tree followed by edits to four paths."
+    },
+    "excludedMetadata": [
+      "commit author email headers",
+      "raw session provenance",
+      "local repository paths"
+    ]
+  }
+}

@@ -11,6 +11,8 @@ extend-exclude = [
     "dump.rdb",
     "components/host-sdk/src/registry/cosign.rs",
     "components/reactions/dashboard/static/",
+    # Exact historical diffs contain truncated context and must remain byte-for-byte.
+    "docs/history/workgraph-core-findings/patches/",
 ]
 
 [default.extend-words]
@@ -29,4 +31,3 @@ Unter = "Unter"
 # Method name in mysql binlog library (TableMapEvent::get_tme)
 tme = "tme"
 unparseable = "unparseable"
-

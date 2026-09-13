@@ -1,0 +1,334 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-12T18:28:14-07:00",
+  "baseline": {
+    "main": "e759606fa065bee0ef9e60017e263f0f85dd0e44",
+    "retainedBranch": "workgraph-generic-recovery",
+    "retainedTip": "fb5d2bda2cbce4284fecbce40cae2a2d74116249"
+  },
+  "sourceEvidence": {
+    "reportSha256": "683a7406e1edd6778f892bd3e849d2440ac8da3fa023aac79c6ac93b37eebbda",
+    "findingRows": 132,
+    "narrativeAnchors": 7,
+    "sanitizedReport": "source-report-sanitized.md",
+    "sanitizedReportSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
+    "perRecordEvidence": "evidence.md",
+    "perRecordEvidenceSha256": "4fc5a96fe03069f3b6f73c48513d12c2e532057d2b4393b0e7bce273828b21bd"
+  },
+  "fixes": [
+    {
+      "issues": [792],
+      "commits": ["d4ad74218754f597f50e9ef45562eb535069aed5"],
+      "existingPr": 810,
+      "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
+      "status": "open-draft-isolated-candidate",
+      "note": "The curated draft uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e, fixes #792, and relates to only the verified runtime subset of #897."
+    },
+    {
+      "issues": [793, 794],
+      "commits": ["c2b86f9c537bff047c8335e86a078f39264343e2"],
+      "existingPr": 904,
+      "existingPrHead": "b2970b174a8cf8e8a7052d10cca5b77d0e03ded0",
+      "dependsOnPr": 810,
+      "status": "active-draft-implementation",
+      "note": "PR #904 selectively ports the shared chained-optional propagation fix above #810."
+    },
+    {
+      "issues": [806],
+      "commits": ["2f129f229f487611bebbba3c9270aca315642401"],
+      "status": "prototype-only"
+    },
+    {
+      "issues": [807],
+      "commits": ["6731189964f90c9fbd08af39fa0e76883bab71b3"],
+      "status": "prototype-only"
+    },
+    {
+      "issues": [808],
+      "commits": [
+        "fcce3f11a38df8cde7355473d05fb9f90bb05baf",
+        "c6615b450b0be85694f2e77460cf892617eb946e"
+      ],
+      "status": "prototype-only-follow-up-required"
+    },
+    {
+      "issues": [809],
+      "commits": [
+        "7691d769b58393940d3e58fe0756300589d39f04",
+        "c6615b450b0be85694f2e77460cf892617eb946e"
+      ],
+      "status": "prototype-only"
+    },
+    {
+      "issues": [774],
+      "commits": ["1bd669a389924cc264ef071f5f97624b5618ef08"],
+      "status": "prototype-only",
+      "note": "f54e829c is dispatch ordering, not this callback."
+    },
+    {
+      "issues": [775, 821],
+      "commits": [
+        "54d02054698bf34bcf3b4afa32ce6bc0480f8055",
+        "e4f2af57f8c8b1b8ac8ec24b20909e05fe7cdae3"
+      ],
+      "existingPr": 826,
+      "status": "existing-upstream-stack"
+    },
+    {
+      "issues": [792],
+      "commits": ["7be2e1bd895196c1e4fbf99a23dbbcbdb4abc8e8"],
+      "status": "prototype-residual-not-in-pr-810",
+      "note": "Persisted grouping identity and bounded WAL recovery share this historical commit and need clean issue-specific extraction."
+    },
+    {
+      "commits": ["8a52f6f3b5dfc438f93d1c53a5f0aee9896d12be"],
+      "issues": [893],
+      "historicalPr": 736,
+      "existingPr": 901,
+      "existingPrHead": "615dc486f31cbb9bcd37dc716390f7e83d3babfd",
+      "status": "active-draft-implementation",
+      "note": "PR #901 is the clean current-main port; PR #736 remains merged only to a historical prototype base."
+    },
+    {
+      "commits": [
+        "eb777fa7966d04d93a4dabe6b22fbab6f75c1f3e",
+        "487df491"
+      ],
+      "issues": [896],
+      "existingPr": 742,
+      "existingPrHead": "6cbb9e285ca6af7d4a54380924d4dcdd769e36f0",
+      "nativeStack": 741,
+      "stackPrs": [737, 740, 742, 744],
+      "baseBranch": "agentofreality-github-workgraph-bootstrapper",
+      "plannedBasePr": 903,
+      "status": "historical-native-stack-not-reusable",
+      "note": "Do not unstack, retarget, or rebase PR #742. Preserve it and native stack 741 unchanged; create the clean generic #896 layer above PR #903's ABI 0.15 baseline."
+    },
+    {
+      "commits": ["601e2a34b5bce2ec37e26f26818df35f2d27c830"],
+      "issues": [897],
+      "existingPr": 810,
+      "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
+      "status": "runtime-subset-covered-by-pr-810",
+      "note": "PR #810 now carries the generic retained_multi_source survival matrix for the runtime default-transition/group-migration subset. Persisted restart/backend acceptance and the separate replay/result-index state-version repair remain open."
+    },
+    {
+      "commits": ["645af0801f268af61d44f58480e44c3e3a3544be"],
+      "status": "prototype-only",
+      "note": "Startup Source event retention."
+    },
+    {
+      "commits": ["f54e829c81d6dde581001d8c20338afa6818ddd6"],
+      "status": "prototype-only",
+      "note": "Dispatch ordering across the plugin ABI."
+    },
+    {
+      "commits": ["01dbaf200e2705d86604b819d443df9b93574635"],
+      "status": "remote-prototype-branch",
+      "note": "Changed query row-signature reconciliation."
+    },
+    {
+      "commits": [
+        "cc8d3f712b69fc730b91ce04edf4556e8d2b7899",
+        "eb224595cf297445a13a943572cc5657979dfc8f"
+      ],
+      "issues": [820],
+      "status": "prototype-evidence-existing-issue"
+    },
+    {
+      "commits": ["44342b390c501032a24519c087cb4df4cd1e539f"],
+      "issues": [820],
+      "status": "prototype-evidence-existing-issue",
+      "note": "Historical Reaction checkpoint-ownership forwarding evidence; this remains distinct from the loader fix in the same commit."
+    },
+    {
+      "commits": ["44342b390c501032a24519c087cb4df4cd1e539f"],
+      "issues": [902],
+      "existingPr": 903,
+      "status": "active-draft-implementation",
+      "note": "Draft PR #903 requires metadata before plugin initialization and covers missing, null, malformed, version/target-incompatible, and physically smaller legacy layouts while retaining optional inspection scanning."
+    },
+    {
+      "commits": [
+        "16f670304b5956a41f316a0ba670d8e0aa7eab9b",
+        "56745f88",
+        "ee649b9b"
+      ],
+      "existingPr": 747,
+      "status": "closed-unmerged-retained-prototype",
+      "note": "HTTP 2xx response JSON validation and exact-number corrections."
+    },
+    {
+      "commits": [
+        "8033ca122ad83cbca7427e7f3b3a83b50775832b",
+        "e26ba15323802e9fe958edcacf720e8845e788eb",
+        "c3b5f54078065372f9b75b4560e3abfb8db354c8"
+      ],
+      "status": "explicitly-parked",
+      "note": "The last commit documents a remaining limitation; it is not another fix."
+    },
+    {
+      "commits": ["2dc5d87833960cffc7a2335215e3d93fdd09089c"],
+      "remoteBranch": "agentofreality-source-owned-workgraph-allocator",
+      "status": "remote-historical-workgraph-specific"
+    }
+  ],
+  "publishedFixLinks": [
+    {
+      "repository": "drasi-project/drasi-core",
+      "issues": [893],
+      "pr": 901,
+      "head": "615dc486f31cbb9bcd37dc716390f7e83d3babfd",
+      "state": "open-draft"
+    },
+    {
+      "repository": "drasi-project/drasi-core",
+      "issues": [793, 794],
+      "pr": 904,
+      "head": "b2970b174a8cf8e8a7052d10cca5b77d0e03ded0",
+      "basePr": 810,
+      "state": "open-draft"
+    },
+    {
+      "repository": "drasi-project/drasi-server",
+      "issues": [196],
+      "pr": 198,
+      "head": "de6bc20cf686a53eb0b6db3b57b21c2bfc06b096",
+      "state": "open-draft"
+    }
+  ],
+  "existingDurabilityStack": [
+    {"issue": 743, "pr": 825},
+    {"issue": 821, "pr": 826},
+    {"issue": 822, "pr": 830},
+    {"issue": 824, "pr": 831},
+    {"issue": 819, "pr": 832},
+    {"issue": 820, "pr": 834},
+    {"issue": 823, "pr": 835}
+  ],
+  "historicalComponentSpine": [
+    {
+      "component": "source-event-middleware",
+      "commits": [
+        "924d01c33158220898a3f2bb6f86686949ad4205",
+        "a50fff734f09cf9ae3b040d1cfeed90c3212bff3"
+      ],
+      "status": "historical-integrated-then-superseded"
+    },
+    {
+      "component": "project-item-refresh",
+      "commits": [
+        "e63c14e9c8e8cf7f9953cad3b6b543ec210b2c2d",
+        "266f187f98ddde712f24d40b7b9c667d088e74e0",
+        "41c2297dd0b087f08d935fc4a7b995923f406a25",
+        "403be11d37b8d669c658aa4ad1f81948ae4e648f",
+        "6602e16e2a766ada509fe313687f72842aba56e1",
+        "650533bd45531d3388c7a9ba6e81c35252ae0121",
+        "23a06f98943d649ba1f418170a2781e05aa612ac",
+        "4a1d058eb9fcea305d4436e7947451db595d717d",
+        "e56e54938c367b53d813f88f06067a591bfd47bd",
+        "4a1ee90822c406cdc4aa21ab4f6ee8d5afe19de1"
+      ],
+      "status": "historical-workgraph-specific"
+    },
+    {
+      "component": "launcher",
+      "commits": [
+        "926919b41ba2509904d911e7b6841c3143dd11d8",
+        "a373d4662042ec1853145f2533be741c49429c78",
+        "5160cf53aba477322688758371349e2ac65f793d"
+      ],
+      "status": "historical-workgraph-specific"
+    },
+    {
+      "component": "router-and-reaction-checkpoint-ownership",
+      "commits": [
+        "e7190b1d566fb76c1e0c3035b27f8a474a097f53",
+        "37d0fe354792036cfcc7ba18531806c1918b8f5f",
+        "904031763e04a8a32759bd0a0af634e75b90bddf",
+        "ff0dce92c8e9b859a825ae373449399c1a745236",
+        "26d48cde88d7a49684846d46d8f3df407930804b",
+        "44342b390c501032a24519c087cb4df4cd1e539f",
+        "25bda3bb2ef6eebef60dd6babdf69138466babae",
+        "d860611bd75c3790fcc75d3f03ae04c76b52fec0"
+      ],
+      "status": "historical-mixed-generic-and-workgraph",
+      "note": "Generic Reaction checkpoint ownership maps to #820; missing loader metadata maps to #902; StateStore durability maps separately to #896. Router policy remains historical WorkGraph behavior."
+    },
+    {
+      "component": "payload-source-and-comment-leases",
+      "commits": [
+        "59bc6dd31f7106737337ff25faa0586ff92569f4",
+        "4c0d037d71a90a174137e88827cb96c558253edb",
+        "5ec967a20ef29fa40775ec35087da47fabd85edc",
+        "a575af4f7f8e1a3278b6e441c0cb53fc8149e97a",
+        "409790b08cb21f34512df91364d49df1a1bbf9bb",
+        "43f28285d67bb2bc3aecb22c23df6c042d098664",
+        "198ecb48a28655c0dc5b52e571263e3d779fc273",
+        "3064be2d26701749d105db0808ca589cc92a9313",
+        "2dc5d87833960cffc7a2335215e3d93fdd09089c"
+      ],
+      "status": "remote-historical-workgraph-specific",
+      "note": "2dc5d878 is remotely published on agentofreality-source-owned-workgraph-allocator."
+    },
+    {
+      "component": "abandoned-general-github-source",
+      "commits": [
+        "c2a8396cb0554a1eb2a330101af130a9561e1c86",
+        "7f00f3255e016edae49ad2d778b3e9bf3956b96f",
+        "393c3cbc244d7b74db3dd4ce84e714ecfc1cb080",
+        "0d1cfe6bb5103d50738b2d5f39070e0f8e0a36cb"
+      ],
+      "status": "historical-superseded"
+    },
+    {
+      "component": "durable-output-hardening",
+      "commits": [
+        "dc10c20083723414572472537a1b5368627784b1",
+        "042559d99f77dd6e071d35bf3dfe3c2453b65301"
+      ],
+      "status": "historical-generic-evidence",
+      "note": "These are predecessors/evidence for #775, #821, and #822, not replacements for the current PR stack."
+    },
+    {
+      "component": "vnext-source-and-allocation",
+      "commits": [
+        "a826c56edd369da55f6fc76069e9f95ed8305123",
+        "9fa2113c844715fb253b814bd309dbfab6da69c4",
+        "957961c0e4a6137d3d89cbdc0fb38055024e17ea"
+      ],
+      "status": "historical-workgraph-specific"
+    },
+    {
+      "component": "later-workgraph-source-corrections",
+      "commits": [
+        "e1b56a2902e3e30904a0f67dff2383968a84ed6d",
+        "16cc7d3cc016f4f5d795a94ba671e8b8d7af6570",
+        "95fa364789c31469cd8462d2ae8570a6ca35a2ed",
+        "2a6fa78e3174f499e73011b8534e47f405b7bc24",
+        "c3813ee178d6dffe4d2dff5afc5f7b6d1cd1dead",
+        "22c8a52b2a1de300566c3ee2e3f20ee71af698e7",
+        "509a3bf3bbb0888e55335981d7f984e1e11fc9be",
+        "726c2e27e36b511b9d0971f3b6d1c782fb1d5979"
+      ],
+      "status": "historical-workgraph-specific-partial-remediation"
+    }
+  ],
+  "availabilityAudit": {
+    "publicRemoteRefsVerified": true,
+    "localOnlyCommitObjectsDetected": 20,
+    "localOnlyPortableArtifactsRequired": true,
+    "portablePatchesPublished": 20,
+    "patchIndex": "patches/index.json",
+    "cumulativeSeriesPublished": 7,
+    "cumulativeSeriesIndex": "patches/series/index.json",
+    "remotePreimage": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+    "localOnlyCommitPreimageCoverage": "20/20",
+    "remoteArchiveApplicationVerification": "passed",
+    "dirtyHistoricalDeltaCaptured": true,
+    "dirtyHistoricalDeltaIndex": "patches/dirty/index.json",
+    "dirtyHistoricalDeltaStatus": "interrupted-unvalidated-partial",
+    "archiveOnlyPatchesRequired": false,
+    "note": "Twenty remaining local Git objects are preserved as sanitized commit patches and covered by seven cumulative series from a verified public remote base. All seven series apply to a fresh GitHub archive. The interrupted router follow-up was recovered as seven edits across four files; a prior nine-file count is not supported by the surviving direct record. No raw log, database, WAL, credential, private configuration, or git bundle is included."
+  }
+}

@@ -1,0 +1,1865 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-12T18:28:14-07:00",
+  "umbrellaIssue": "https://github.com/drasi-project/drasi-core/issues/889",
+  "preservationPullRequest": "https://github.com/drasi-project/drasi-core/pull/890",
+  "source": {
+    "reportSha256": "683a7406e1edd6778f892bd3e849d2440ac8da3fa023aac79c6ac93b37eebbda",
+    "findingRows": 132,
+    "narrativeAnchors": 7
+  },
+  "counts": {
+    "entries": 139,
+    "findingRows": 132,
+    "narrativeAnchors": 7
+  },
+  "entries": [
+    {
+      "id": "report-L42",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs with prototype fixes",
+      "sourceSubheading": null,
+      "summary": "#792",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/792",
+        "https://github.com/drasi-project/drasi-core/pull/810"
+      ],
+      "evidenceUrl": "evidence.md#report-l42",
+      "rationale": "The issue remains open. Draft PR #810 is the curated current-main implementation at 929dc80f; it covers #792 and relates to only the verified runtime subset of #897."
+    },
+    {
+      "id": "report-L43",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs with prototype fixes",
+      "sourceSubheading": null,
+      "summary": "#793",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/793",
+        "https://github.com/drasi-project/drasi-core/pull/904"
+      ],
+      "evidenceUrl": "evidence.md#report-l43",
+      "rationale": "The issue remains open; draft PR #904 selectively ports the generic chained-optional propagation fix above #810."
+    },
+    {
+      "id": "report-L44",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs with prototype fixes",
+      "sourceSubheading": null,
+      "summary": "#794",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/794",
+        "https://github.com/drasi-project/drasi-core/pull/904"
+      ],
+      "evidenceUrl": "evidence.md#report-l44",
+      "rationale": "The issue remains open; draft PR #904 selectively ports the shared chained-optional propagation fix above #810."
+    },
+    {
+      "id": "report-L45",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs with prototype fixes",
+      "sourceSubheading": null,
+      "summary": "#806",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/806"
+      ],
+      "evidenceUrl": "evidence.md#report-l45",
+      "rationale": "The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition."
+    },
+    {
+      "id": "report-L46",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs with prototype fixes",
+      "sourceSubheading": null,
+      "summary": "#807",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/807"
+      ],
+      "evidenceUrl": "evidence.md#report-l46",
+      "rationale": "The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition."
+    },
+    {
+      "id": "report-L47",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs with prototype fixes",
+      "sourceSubheading": null,
+      "summary": "#808",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/808"
+      ],
+      "evidenceUrl": "evidence.md#report-l47",
+      "rationale": "The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition."
+    },
+    {
+      "id": "report-L48",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs with prototype fixes",
+      "sourceSubheading": null,
+      "summary": "#809",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/809"
+      ],
+      "evidenceUrl": "evidence.md#report-l48",
+      "rationale": "The issue remains open; a public prototype fix exists and requires an issue-specific upstream disposition."
+    },
+    {
+      "id": "report-L64",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs not fixed",
+      "sourceSubheading": null,
+      "summary": "#795",
+      "disposition": "existing-issue-unfixed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/795"
+      ],
+      "evidenceUrl": "evidence.md#report-l64",
+      "rationale": "The generic defect is already tracked; only an application workaround was recovered."
+    },
+    {
+      "id": "report-L65",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs not fixed",
+      "sourceSubheading": null,
+      "summary": "#796",
+      "disposition": "existing-issue-unfixed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/796"
+      ],
+      "evidenceUrl": "evidence.md#report-l65",
+      "rationale": "The generic defect is already tracked; only an application workaround was recovered."
+    },
+    {
+      "id": "report-L66",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs not fixed",
+      "sourceSubheading": null,
+      "summary": "#797",
+      "disposition": "existing-issue-unfixed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/797"
+      ],
+      "evidenceUrl": "evidence.md#report-l66",
+      "rationale": "The generic defect is already tracked; only an application workaround was recovered."
+    },
+    {
+      "id": "report-L67",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs not fixed",
+      "sourceSubheading": null,
+      "summary": "#798",
+      "disposition": "existing-issue-unfixed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/798"
+      ],
+      "evidenceUrl": "evidence.md#report-l67",
+      "rationale": "The generic defect is already tracked; only an application workaround was recovered."
+    },
+    {
+      "id": "report-L68",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs not fixed",
+      "sourceSubheading": null,
+      "summary": "#799",
+      "disposition": "existing-issue-unfixed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/799"
+      ],
+      "evidenceUrl": "evidence.md#report-l68",
+      "rationale": "The generic defect is already tracked; only an application workaround was recovered."
+    },
+    {
+      "id": "report-L69",
+      "kind": "finding-row",
+      "sourceSection": "Query-engine bugs not fixed",
+      "sourceSubheading": null,
+      "summary": "#805",
+      "disposition": "existing-issue-unfixed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/805"
+      ],
+      "evidenceUrl": "evidence.md#report-l69",
+      "rationale": "The generic defect is already tracked; only an application workaround was recovered."
+    },
+    {
+      "id": "report-L77",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": null,
+      "summary": "#800",
+      "disposition": "existing-enhancement-deferred",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/800"
+      ],
+      "evidenceUrl": "evidence.md#report-l77",
+      "rationale": "The missing capability is already tracked and was explicitly deferred; the application workaround is not a Core implementation."
+    },
+    {
+      "id": "report-L78",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": null,
+      "summary": "#801",
+      "disposition": "existing-enhancement-deferred",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/801"
+      ],
+      "evidenceUrl": "evidence.md#report-l78",
+      "rationale": "The missing capability is already tracked and was explicitly deferred; the application workaround is not a Core implementation."
+    },
+    {
+      "id": "report-L79",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": null,
+      "summary": "#802",
+      "disposition": "existing-enhancement-deferred",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/802"
+      ],
+      "evidenceUrl": "evidence.md#report-l79",
+      "rationale": "The missing capability is already tracked and was explicitly deferred; the application workaround is not a Core implementation."
+    },
+    {
+      "id": "report-L80",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": null,
+      "summary": "#803",
+      "disposition": "existing-enhancement-deferred",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/803"
+      ],
+      "evidenceUrl": "evidence.md#report-l80",
+      "rationale": "The missing capability is already tracked and was explicitly deferred; the application workaround is not a Core implementation."
+    },
+    {
+      "id": "report-L81",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": null,
+      "summary": "#804",
+      "disposition": "existing-enhancement-deferred",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/804"
+      ],
+      "evidenceUrl": "evidence.md#report-l81",
+      "rationale": "The missing capability is already tracked and was explicitly deferred; the application workaround is not a Core implementation."
+    },
+    {
+      "id": "report-L91",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": "Additional unfiled query/function limitations",
+      "summary": "`coll.distinct` on an unmatched optional collection raised `InvalidType { expected: \"List\" }`.",
+      "disposition": "investigation-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/898"
+      ],
+      "evidenceUrl": "evidence.md#report-l91",
+      "rationale": "The historical failure lacked an isolated cause; #898 defines a current-main characterization matrix."
+    },
+    {
+      "id": "report-L92",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": "Additional unfiled query/function limitations",
+      "summary": "A disconnected task-by-worker MATCH returned no rows although each side worked independently. Other staged forms failed with `UnknownIdentifier(\"worker\")`.",
+      "disposition": "investigation-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/899"
+      ],
+      "evidenceUrl": "evidence.md#report-l92",
+      "rationale": "The disconnected-pattern behavior was worked around by changing the graph model; #899 defines the generic support/rejection contract."
+    },
+    {
+      "id": "report-L93",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": "Additional unfiled query/function limitations",
+      "summary": "Cypher UNION could not combine the frozen artifact-detail streams.",
+      "disposition": "enhancement-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/895"
+      ],
+      "evidenceUrl": "evidence.md#report-l93",
+      "rationale": "The application workaround did not add UNION support; #895 defines compatible continuous-stream semantics."
+    },
+    {
+      "id": "report-L94",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": "Additional unfiled query/function limitations",
+      "summary": "`MATCH -> WHERE -> OPTIONAL MATCH` was rejected by the supported grammar.",
+      "disposition": "enhancement-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/892"
+      ],
+      "evidenceUrl": "evidence.md#report-l94",
+      "rationale": "The query was rewritten, not fixed; #892 isolates the generic clause-order capability."
+    },
+    {
+      "id": "report-L95",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": "Additional unfiled query/function limitations",
+      "summary": "The desired generic hash and newline-producing Cypher primitives were unavailable.",
+      "disposition": "withdrawn-or-unsupported",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l95",
+      "rationale": "Generic hash/newline primitives were explicitly removed from the authorized scope; readable IDs and Source-provided digests were the application workaround."
+    },
+    {
+      "id": "report-L96",
+      "kind": "finding-row",
+      "sourceSection": "Deferred query-language capabilities",
+      "sourceSubheading": "Additional unfiled query/function limitations",
+      "summary": "Simple root-only OPTIONAL cases were initially suspected to fail.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/799",
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l96",
+      "rationale": "The root-only OPTIONAL hypothesis did not reproduce; the interrupted CASE/SUM follow-up is retained only as supporting uncertainty for the confirmed mixed-number issue."
+    },
+    {
+      "id": "report-L104",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "The two filed reliability tickets",
+      "summary": "#774",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/774"
+      ],
+      "evidenceUrl": "evidence.md#report-l104",
+      "rationale": "The callback fix is public at 1bd669a3 and is distinct from f54e829c dispatch ordering."
+    },
+    {
+      "id": "report-L105",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "The two filed reliability tickets",
+      "summary": "#775",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/775",
+        "https://github.com/drasi-project/drasi-core/issues/821",
+        "https://github.com/drasi-project/drasi-core/pull/826"
+      ],
+      "evidenceUrl": "evidence.md#report-l105",
+      "rationale": "The original report is continued by #821 and existing PR #826; no duplicate implementation record is needed."
+    },
+    {
+      "id": "report-L115",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Durable reaction sequence baseline lost across restart.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/775",
+        "https://github.com/drasi-project/drasi-core/issues/821",
+        "https://github.com/drasi-project/drasi-core/pull/735"
+      ],
+      "evidenceUrl": "evidence.md#report-l115",
+      "rationale": "Historical sequence-baseline work was a predecessor to the broader durable-output restoration issue and merged only into a prototype base."
+    },
+    {
+      "id": "report-L116",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Deep left-nested AND/OR expressions exhausted a Tokio worker's stack.",
+      "disposition": "issue-opened-existing-pr",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/893",
+        "https://github.com/drasi-project/drasi-core/pull/736",
+        "https://github.com/drasi-project/drasi-core/pull/901"
+      ],
+      "evidenceUrl": "evidence.md#report-l116",
+      "rationale": "#893 remains open; draft PR #901 is the clean current-main port of the generic fix. PR #736 remains historical prototype evidence."
+    },
+    {
+      "id": "report-L117",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Durable host state appeared non-durable to dynamic plugins.",
+      "disposition": "issue-opened-existing-pr",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/896",
+        "https://github.com/drasi-project/drasi-core/pull/742",
+        "https://github.com/drasi-project/drasi-core/issues/896#issuecomment-5650808975"
+      ],
+      "evidenceUrl": "evidence.md#report-l117",
+      "rationale": "#896 remains open. PR #742 is coupled to native WorkGraph stack 741 and must remain untouched as historical evidence; the planned clean generic replacement is layered above #903's ABI 0.15 baseline."
+    },
+    {
+      "id": "report-L118",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Retained multi-source queries diverged from freshly constructed queries.",
+      "disposition": "issue-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/897"
+      ],
+      "evidenceUrl": "evidence.md#report-l118",
+      "rationale": "#897 tracks the historical retained/fresh divergence. PR #810 now covers 601e2a34's runtime default-transition and grouping-migration subset with a generic survival test; persisted restart/backend acceptance and the separate replay/result-index state-version repair remain open."
+    },
+    {
+      "id": "report-L119",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Startup Source changes could be lost before downstream dispatch was ready.",
+      "disposition": "issue-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/891"
+      ],
+      "evidenceUrl": "evidence.md#report-l119",
+      "rationale": "#891 tracks the generic SourceBase startup readiness/loss window despite the historical WorkGraph fixture."
+    },
+    {
+      "id": "report-L120",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Dispatch order changed across the plugin boundary.",
+      "disposition": "issue-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/894"
+      ],
+      "evidenceUrl": "evidence.md#report-l120",
+      "rationale": "#894 tracks the generic dispatch-order defect, which is distinct from #774; current dispatch_event behavior must be characterized first."
+    },
+    {
+      "id": "report-L121",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Query output did not reconcile a changed result-row signature correctly.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/680",
+        "https://github.com/drasi-project/drasi-core/issues/792"
+      ],
+      "evidenceUrl": "evidence.md#report-l121",
+      "rationale": "Changed row-signature reconciliation overlaps existing stale aggregate-row/group-migration records; preserve the commit as evidence rather than create a duplicate."
+    },
+    {
+      "id": "report-L122",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "Dynamic reaction delivery could be acknowledged before the plugin callback finished, and callback failures did not propagate reliably.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/820",
+        "https://github.com/drasi-project/drasi-core/pull/834"
+      ],
+      "evidenceUrl": "evidence.md#report-l122",
+      "rationale": "Callback completion and error propagation support the existing checkpoint-after-side-effect contract."
+    },
+    {
+      "id": "report-L123",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Earlier PR-only and unfiled repairs",
+      "summary": "HTTP Reaction treated GraphQL HTTP 2xx error responses as success.",
+      "disposition": "issue-opened",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/900",
+        "https://github.com/drasi-project/drasi-core/pull/747"
+      ],
+      "evidenceUrl": "evidence.md#report-l123",
+      "rationale": "#900 tracks the generic HTTP response-validation implementation retained on a prototype branch after its historical PR closed unmerged."
+    },
+    {
+      "id": "report-L135",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "What the older durable-output hardening actually covered",
+      "summary": "Restoring the sequence alone left in-memory outbox/live state empty despite persistent payloads. A failed live-row write followed by a later successful watermark could certify an incomplete snapshot.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/775",
+        "https://github.com/drasi-project/drasi-core/issues/821",
+        "https://github.com/drasi-project/drasi-core/pull/826"
+      ],
+      "evidenceUrl": "evidence.md#report-l135",
+      "rationale": "Snapshot/outbox hydration is part of the existing durable-output restoration root cause."
+    },
+    {
+      "id": "report-L136",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "What the older durable-output hardening actually covered",
+      "summary": "Lower sequence writes could regress persisted watermarks. An initial Garnet get-then-set repair still raced and had full-`u64` representation concerns.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/775",
+        "https://github.com/drasi-project/drasi-core/issues/821",
+        "https://github.com/drasi-project/drasi-core/issues/822"
+      ],
+      "evidenceUrl": "evidence.md#report-l136",
+      "rationale": "Monotonic durable watermarks support the existing hydration and atomic-output issues."
+    },
+    {
+      "id": "report-L137",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "What the older durable-output hardening actually covered",
+      "summary": "Capacity-based outbox trimming could evict the exact history needed to repair a failed snapshot update.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/775",
+        "https://github.com/drasi-project/drasi-core/issues/821",
+        "https://github.com/drasi-project/drasi-core/issues/822"
+      ],
+      "evidenceUrl": "evidence.md#report-l137",
+      "rationale": "Repair-history retention is part of durable output hydration/atomicity, not a separate WorkGraph defect."
+    },
+    {
+      "id": "report-L138",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "What the older durable-output hardening actually covered",
+      "summary": "A fresh replay checkpoint could advance to the response's latest sequence after only part of the batch was enqueued successfully, or advance unconditionally across a gap.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/820",
+        "https://github.com/drasi-project/drasi-core/pull/834"
+      ],
+      "evidenceUrl": "evidence.md#report-l138",
+      "rationale": "Advancing only through successful enqueue/side effects is covered by the existing reaction checkpoint issue."
+    },
+    {
+      "id": "report-L139",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "What the older durable-output hardening actually covered",
+      "summary": "Source/index progress could still commit before output persistence.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/822",
+        "https://github.com/drasi-project/drasi-core/pull/830"
+      ],
+      "evidenceUrl": "evidence.md#report-l139",
+      "rationale": "Input progress committing before output is the atomic query-output issue."
+    },
+    {
+      "id": "report-L147",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "An initial projector journal retained every full-body transition and required work proportional to history; partial batches also needed recoverable checkpoint/WAL ordering.",
+      "disposition": "historical-prototype-evidence",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l147",
+      "rationale": "A public prototype implementation or bounded historical observation exists, but no separate current-main defect was established."
+    },
+    {
+      "id": "report-L148",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "Authenticated VNext Assignment/Dispatch evidence never reached the old native allocator, whose issue/comment/agent identity vocabulary did not match canonical task/assignment/executor identities.",
+      "disposition": "historical-prototype-evidence",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l148",
+      "rationale": "A public prototype implementation or bounded historical observation exists, but no separate current-main defect was established."
+    },
+    {
+      "id": "report-L149",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "Delta-only allocator directives could retain an older lease after another artifact, definition conflict, or reparenting invalidated its graph Assignment.",
+      "disposition": "historical-prototype-evidence",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l149",
+      "rationale": "A public prototype implementation or bounded historical observation exists, but no separate current-main defect was established."
+    },
+    {
+      "id": "report-L150",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "Dispatch/Close could destroy historical Lease facts required by subsequent lifecycle queries. Closed-task validation could discard accepted historical assignments.",
+      "disposition": "historical-prototype-evidence",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l150",
+      "rationale": "A public prototype implementation or bounded historical observation exists, but no separate current-main defect was established."
+    },
+    {
+      "id": "report-L151",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "A custom Source descriptor could not preserve unresolved SecretReference configuration; persisted properties contained `[REDACTED]` instead of reloadable references.",
+      "disposition": "historical-prototype-evidence",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l151",
+      "rationale": "A public prototype implementation or bounded historical observation exists, but no separate current-main defect was established."
+    },
+    {
+      "id": "report-L152",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "On a fresh empty WAL, `head == 0` opened the startup pruning fence too soon.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/774",
+        "https://github.com/drasi-project/drasi-core/issues/721"
+      ],
+      "evidenceUrl": "evidence.md#report-l152",
+      "rationale": "The startup fence complements #774; lost-WAL gap handling is already tracked by #721."
+    },
+    {
+      "id": "report-L153",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "Positionless replay from `oldest - 1` could silently accept incomplete retained history.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/721",
+        "https://github.com/drasi-project/drasi-core/issues/722"
+      ],
+      "evidenceUrl": "evidence.md#report-l153",
+      "rationale": "Incomplete positionless replay is covered by existing lost-WAL and surviving-index bootstrap issues."
+    },
+    {
+      "id": "report-L154",
+      "kind": "finding-row",
+      "sourceSection": "Restart, delivery, and plugin-boundary defects",
+      "sourceSubheading": "Additional Source integration and persistence repairs",
+      "summary": "One subscriber's index lacked a relation despite sharing the same later checkpoint as an intact subscriber.",
+      "disposition": "historical-investigation-unconfirmed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l154",
+      "rationale": "The distinguishing WAL evidence had already been pruned, so loss versus late/out-of-order transport was never established."
+    },
+    {
+      "id": "report-L181",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Canonical task Issue admission checked transport/object shape without a corresponding creator/editor/sender provenance gate.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l181",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L182",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Lifecycle deletion checked the original comment author rather than the deleting sender.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l182",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L183",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Removing a marker or changing Issue Type could bypass the old ownership path and leave stale workflow evidence.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l183",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L184",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Ordinary-to-canonical and canonical-to-ordinary reclassification could leave evidence in both graph namespaces.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l184",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L185",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "A trusted artifact rewritten into another role by an untrusted editor could leave its previously accepted evidence active.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l185",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L186",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Late edits/removals under new delivery IDs could resurrect deleted state or remove a newer incarnation.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l186",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L187",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "DeleteTask could retain task-bound lifecycle documents, allowing the old chain to return on same-source restoration.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l187",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L188",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Deleting Dispatch evidence could make an old Assignment eligible again and launch duplicate work. Deleting Result/Evaluation could strand or regress lifecycle state.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l188",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L189",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Sparse `sub_issue_removed` payloads containing only a numeric child ID did not retract canonical parent linkage.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l189",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L190",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Deleting a completed child after its parent was assigned could leave the parent authorized for downstream execution with incomplete child evidence.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l190",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L191",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "WAL append and pending-offset persistence were separate; the classic delivery marker was also written after state/WAL.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/822",
+        "https://github.com/drasi-project/drasi-core/pull/830"
+      ],
+      "evidenceUrl": "evidence.md#report-l191",
+      "rationale": "The append/progress crash window belongs to the existing atomic output/checkpoint boundary."
+    },
+    {
+      "id": "report-L192",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "`last_dispatched` advanced while constructing a batch, before a successful downstream send.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l192",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L193",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "WAL deletion and Source state clearing were separate deprovision operations.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l193",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L194",
+      "kind": "finding-row",
+      "sourceSection": "Explicitly stopped deletion-resilience work",
+      "sourceSubheading": null,
+      "summary": "Already-dispatched external work and append-only journals lacked cancellation/retirement.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l194",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L208",
+      "kind": "finding-row",
+      "sourceSection": "Later Source corrections and misleading leads",
+      "sourceSubheading": null,
+      "summary": "Generated typed tasks carrying the admission label could be misclassified as ordinary Root Issues.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l208",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L209",
+      "kind": "finding-row",
+      "sourceSection": "Later Source corrections and misleading leads",
+      "sourceSubheading": null,
+      "summary": "Stale/equal-revision Issue events could reopen or reauthorize state incorrectly.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l209",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L210",
+      "kind": "finding-row",
+      "sourceSection": "Later Source corrections and misleading leads",
+      "sourceSubheading": null,
+      "summary": "The lease validation consumer inferred the attempt instead of receiving the authoritative active-lease attempt.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l210",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L211",
+      "kind": "finding-row",
+      "sourceSection": "Later Source corrections and misleading leads",
+      "sourceSubheading": null,
+      "summary": "Lifecycle producers and the Source disagreed on exact Assignment/Evaluation marker names, and Error artifacts needed ingestion.",
+      "disposition": "moved-workgraph-out-of-core",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l211",
+      "rationale": "This behavior belonged to the WorkGraph Source/protocol removed from Core in b1458cb1; partial historical repairs and remaining limits are preserved without filing a current Core defect."
+    },
+    {
+      "id": "report-L235",
+      "kind": "finding-row",
+      "sourceSection": "Later upstream durability follow-up",
+      "sourceSubheading": null,
+      "summary": "#821",
+      "disposition": "existing-durability-follow-up",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/821",
+        "https://github.com/drasi-project/drasi-core/pull/826"
+      ],
+      "evidenceUrl": "evidence.md#report-l235",
+      "rationale": "This later issue already decomposes the durable reaction recovery work under #818."
+    },
+    {
+      "id": "report-L236",
+      "kind": "finding-row",
+      "sourceSection": "Later upstream durability follow-up",
+      "sourceSubheading": null,
+      "summary": "#822",
+      "disposition": "existing-durability-follow-up",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/822",
+        "https://github.com/drasi-project/drasi-core/pull/830"
+      ],
+      "evidenceUrl": "evidence.md#report-l236",
+      "rationale": "This later issue already decomposes the durable reaction recovery work under #818."
+    },
+    {
+      "id": "report-L237",
+      "kind": "finding-row",
+      "sourceSection": "Later upstream durability follow-up",
+      "sourceSubheading": null,
+      "summary": "#824",
+      "disposition": "existing-durability-follow-up",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/824",
+        "https://github.com/drasi-project/drasi-core/pull/831"
+      ],
+      "evidenceUrl": "evidence.md#report-l237",
+      "rationale": "This later issue already decomposes the durable reaction recovery work under #818."
+    },
+    {
+      "id": "report-L238",
+      "kind": "finding-row",
+      "sourceSection": "Later upstream durability follow-up",
+      "sourceSubheading": null,
+      "summary": "#819",
+      "disposition": "existing-durability-follow-up",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/819",
+        "https://github.com/drasi-project/drasi-core/pull/832"
+      ],
+      "evidenceUrl": "evidence.md#report-l238",
+      "rationale": "This later issue already decomposes the durable reaction recovery work under #818."
+    },
+    {
+      "id": "report-L239",
+      "kind": "finding-row",
+      "sourceSection": "Later upstream durability follow-up",
+      "sourceSubheading": null,
+      "summary": "#820",
+      "disposition": "existing-durability-follow-up",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/820",
+        "https://github.com/drasi-project/drasi-core/pull/834"
+      ],
+      "evidenceUrl": "evidence.md#report-l239",
+      "rationale": "This later issue already decomposes the durable reaction recovery work under #818."
+    },
+    {
+      "id": "report-L240",
+      "kind": "finding-row",
+      "sourceSection": "Later upstream durability follow-up",
+      "sourceSubheading": null,
+      "summary": "#823",
+      "disposition": "existing-durability-follow-up",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/823",
+        "https://github.com/drasi-project/drasi-core/pull/835"
+      ],
+      "evidenceUrl": "evidence.md#report-l240",
+      "rationale": "This later issue already decomposes the durable reaction recovery work under #818."
+    },
+    {
+      "id": "report-L267",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Source-wide middleware could drop unrelated graph elements or fail to reconcile prior derived output after an update.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l267",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L268",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Malformed JSON edits left a previously derived WorkGraph event alive because parsing failed before reconciliation.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l268",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L269",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Project refresh mishandled secondary-rate-limit 403s and assumed the field was literally named Status.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l269",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L270",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Project refresh used the wrong deterministic status-node identity and insufficient Project/field/destination authority checks; retry could bypass current-row constraints.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l270",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L271",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Refresh scanned the full Redb state on every add; cancellation could strand the pruning permit.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l271",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L272",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Launcher/refresh examples used config shapes that the actual descriptor/server could not load.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l272",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L273",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "A duplicate launcher request after allowlist narrowing could overwrite a durable Started/task identity with Failed.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l273",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L274",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Launcher wire fields, prompt key, authoritative subject/Project/content/profile binding, and token-owner verification were inconsistent or incomplete.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l274",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L275",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Router reservation relied on instance-local get/set locking, which was not an atomic cross-instance primitive. A fallback `create_if_absent` also falsely promised atomicity.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l275",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L276",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Extending a vtable while keeping its ABI version could read beyond an older physically smaller table.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l276",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L277",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Router used a nonexistent mutation, omitted real bearer auth, or could write against stale/closed/incorrectly correlated items.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l277",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L278",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Router could silently acknowledge an unresolved foreign-policy reservation, accept invalid output ownership/responsibilities, or advance a non-strict checkpoint past unresolved work.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l278",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L279",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Explicit empty router allowlists were treated as omitted and regained permissive defaults; persisted old-policy decisions could bypass current transition restrictions.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l279",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L280",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "The manager acknowledged router enqueue rather than completed side effects.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/820",
+        "https://github.com/drasi-project/drasi-core/pull/834"
+      ],
+      "evidenceUrl": "evidence.md#report-l280",
+      "rationale": "Manager acknowledgement before completed side effects is the existing checkpoint-after-side-effect root cause."
+    },
+    {
+      "id": "report-L281",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "Dynamic ReactionProxy lost that checkpoint-ownership capability because its vtable omitted the hook.",
+      "disposition": "existing-issue-prototype-fix",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/820"
+      ],
+      "evidenceUrl": "evidence.md#report-l281",
+      "rationale": "The historical ReactionProxy omitted checkpoint_ownership_fn, so dynamic reactions could silently fall back to manager-owned acknowledgement. Commit 44342b39 forwards the hook; #820 owns the generic checkpoint-after-side-effect contract."
+    },
+    {
+      "id": "report-L282",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "The plugin loader could skip ABI compatibility checks when metadata was absent.",
+      "disposition": "issue-opened-existing-pr",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/902",
+        "https://github.com/drasi-project/drasi-core/pull/903"
+      ],
+      "evidenceUrl": "evidence.md#report-l282",
+      "rationale": "The recorded main baseline skipped validation for missing/null metadata. #902 tracks the fail-closed contract, historical commit 44342b39 is provenance, and draft PR #903 now implements the complete loader acceptance matrix together with #774."
+    },
+    {
+      "id": "report-L283",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "A reservation key could resume a different candidate after partial effects; fresh reaction-owned replay could race its initial config-hash seed.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l283",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L284",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "A permanently invalid router candidate could poison the entire strict stream.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l284",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L285",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Middleware, launcher, router, and Project refresh",
+      "summary": "PR #739 review exposed unsafe partial-side-effect recovery, ambiguous recreation, assignment conflicts, and canonical byte differences.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l285",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L295",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Collapsed Assignment/Result parsing disagreed with producer bytes, final newline, summary, and validation-profile contract.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l295",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L296",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Typing/untyping an Issue did not reclassify its existing comments.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l296",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L297",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "The supported request-info task could not select `issue-info-requester`.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l297",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L298",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Labels/state had inconsistent or absent shapes for the queries.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l298",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L299",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Task Source/bootstrap handling diverged across type changes, filtered repositories, pagination, parent-repository shapes, reverse-order sub-Issue links, malformed-body repair, and database-ID tombstones.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l299",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L300",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Comment-backed Lease events could forge/cross-bind endings, corrupt shared identities, overcount active leases, resurrect ended leases on replay, or fail to restore state after an end edit/delete.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l300",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L301",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Worker configuration missed force/create/delete push cases; remote fetches blocked a shared webhook critical section.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l301",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L302",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Worker-ledger persistence preceded WAL, and bootstrap's temporary ledger did not align with live lifecycle state.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l302",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L303",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "The minimal dispatcher only suppressed pending work within one scope and lacked some row-identity/worker/repository guards.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l303",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L304",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "A trusted Assignment posted after task closure could allocate new work.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l304",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L305",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "Assignment edit/retract/recreate reused lease identity, allowing a stale Result to release a new allocation.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l305",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L306",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "TaskCancelled deauthorization depended on artifact map ordering.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l306",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L307",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Payload Source, comment-backed leases, and the early allocator",
+      "summary": "The webhook signing secret could equal the lease-validation bearer secret.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l307",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L317",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "Invalid GraphQL selections, unsupported App attribution, and incorrect Project-item locator shapes.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l317",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L318",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "Secret exposure from properties, followed by an overcorrection that stripped required configuration and broke snapshot/recreate; a masked literal authorization header.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l318",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L319",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "Fatal hydrator failure left the Source reporting Running/accepting work; stop/restart could detach or revive old tasks/listeners; timeouts were missing.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l319",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L320",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "Dedupe check/append/mark races and indefinitely growing markers.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l320",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L321",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "Missing/nested pagination and partial GraphQL errors could appear to be a complete inventory and delete real graph objects; reconciliation could race deletion or stale scope.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l321",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L322",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "Bootstrap discarded durable adjacency, making early deletion ineffective; incorrect ownership fallback deleted the wrong Project Item; archived replay could remove restored items.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l322",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L323",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "Concurrent query bootstrap could deliver an older snapshot after a newer one or deadlock on a bounded waiting queue.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l323",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L324",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "The abandoned general-purpose GitHub Source implementation",
+      "summary": "A missing/deleted/unsupported object at the FIFO head could retry forever.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l324",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L334",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Dedupe compaction rescanned and individually read all markers after every admission, producing quadratic work over a backlog.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l334",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L335",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Newly stopping Error queries could hit `DrasiQuery::stop`'s debug assertion, which did not accept Error.",
+      "disposition": "historical-investigation-unconfirmed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l335",
+      "rationale": "This was a coupled regression in an attempted lifecycle cleanup; the final surviving code path was not established."
+    },
+    {
+      "id": "report-L336",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "A new query's bootstrap overwrote the shared reconciliation baseline without applying that snapshot to older queries.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l336",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L337",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Source and bootstrap selected different state stores because their precedence rules differed.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l337",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L338",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Broadcast subscriptions bypassed bootstrapping-query exclusion, allowing delta plus full-snapshot duplication.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l338",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L339",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "A pending committed delta could be cleared after a successful dispatch with no ready subscribers.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l339",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L340",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Redb WAL filename escaping could map `a:b` and `a_3a_b` to the same file.",
+      "disposition": "historical-investigation-unconfirmed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l340",
+      "rationale": "The collision was introduced by an intermediate shared-WAL change later excluded; no current surviving path is asserted."
+    },
+    {
+      "id": "report-L341",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "The proposed switch to `srcid-<hex>.redb` could open a new empty WAL instead of the existing legacy file.",
+      "disposition": "historical-investigation-unconfirmed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l341",
+      "rationale": "The proposed filename fix had a legacy migration regression; broad WAL changes were later excluded."
+    },
+    {
+      "id": "report-L342",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Concurrent subscriptions could associate a resume watermark with the wrong dispatcher index by reading `len() - 1` after releasing the registration lock.",
+      "disposition": "historical-investigation-unconfirmed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l342",
+      "rationale": "A registration race was identified in an intermediate architecture, but no survival trace to current main was established."
+    },
+    {
+      "id": "report-L343",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "A Source set `source_position` but left wrapper `sequence` to a reset process-local counter, allowing query dedupe to discard new events after restart.",
+      "disposition": "resolved-existing-record",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/827",
+        "https://github.com/drasi-project/drasi-core/pull/833"
+      ],
+      "evidenceUrl": "evidence.md#report-l343",
+      "rationale": "The generic source sequence-reset problem was later filed and fixed upstream."
+    },
+    {
+      "id": "report-L344",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Permanent GraphQL authentication, permission, or invalid-document failures became endless transient hydration retries.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l344",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L345",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Project union queries used the same response field `state` for incompatible Issue/PR enum types.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l345",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L346",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "An object leaving scope was ignored without retracting its prior in-scope graph.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l346",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L347",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Additional intermediate Source/shared-runtime findings",
+      "summary": "Cascade deletion iterated a randomized map, while sorted assertions concealed nondeterministic output order.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l347",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L353",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Other deliberately bounded contracts",
+      "summary": "Single active allocator: no distributed CAS/leader-election or active-active allocation guarantee in the simplified design.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l353",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L354",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Other deliberately bounded contracts",
+      "summary": "Point-in-time lease validation: validation does not atomically cover a subsequent GitHub write.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l354",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L355",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Other deliberately bounded contracts",
+      "summary": "Result actor attribution: the old Result schema did not independently identify a worker; trusted reporter plus exact lease possession was the accepted boundary.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l355",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L356",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Other deliberately bounded contracts",
+      "summary": "Bootstrap/activation: no invented restoration of preexisting open Assignments; fresh-state activation and full Source-state/WAL reset requirements were explicit.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l356",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L357",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Other deliberately bounded contracts",
+      "summary": "Missed webhook reconciliation and atomic GitHub snapshots: payload-only ingress did not implement polling/catch-up, and successful pagination was not a transactional upstream snapshot.",
+      "disposition": "historical-workgraph-or-superseded",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#report-l357",
+      "rationale": "The component/protocol was historical, superseded, or removed from Core; available public fixes and unresolved limits are retained for provenance without asserting current applicability."
+    },
+    {
+      "id": "report-L358",
+      "kind": "finding-row",
+      "sourceSection": "Earlier WorkGraph component defects in the Core repository",
+      "sourceSubheading": "Other deliberately bounded contracts",
+      "summary": "Historical publication dependency: automatic standalone plugin installation was gated on loader-compatible published Core/SDK dependencies, referenced as #574; pinned local plugin builds were used instead. This is a historical packaging constraint, not a newly asserted current engine defect.",
+      "disposition": "duplicate-mapped",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/574"
+      ],
+      "evidenceUrl": "evidence.md#report-l358",
+      "rationale": "The packaging dependency was already tracked by #574 and is not a new engine defect."
+    },
+    {
+      "id": "broad-aggregate-identity",
+      "kind": "narrative-anchor",
+      "sourceSection": null,
+      "sourceSubheading": null,
+      "summary": "broad aggregate identity",
+      "disposition": "explicitly-deferred",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/384",
+        "https://github.com/drasi-project/drasi-core/issues/411",
+        "https://github.com/drasi-project/drasi-core/issues/806"
+      ],
+      "evidenceUrl": "evidence.md#broad-aggregate-identity",
+      "rationale": "Bounded nested-group lifecycle work was implemented, but no general accumulator identity/Sum redesign was authorized."
+    },
+    {
+      "id": "parked-replay-patch",
+      "kind": "narrative-anchor",
+      "sourceSection": null,
+      "sourceSubheading": null,
+      "summary": "parked replay patch",
+      "disposition": "explicitly-parked",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/818",
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#parked-replay-patch",
+      "rationale": "The reaction replay patch was explicitly parked and must not be described as adopted."
+    },
+    {
+      "id": "legacy-recovery-provenance",
+      "kind": "narrative-anchor",
+      "sourceSection": null,
+      "sourceSubheading": null,
+      "summary": "legacy recovery provenance",
+      "disposition": "explicitly-parked",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/818",
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#legacy-recovery-provenance",
+      "rationale": "Later commits bounded recovery for durable provenance and documented an unsolved legacy case; documentation was not another fix."
+    },
+    {
+      "id": "redb-shutdown-owner",
+      "kind": "narrative-anchor",
+      "sourceSection": null,
+      "sourceSubheading": null,
+      "summary": "redb shutdown owner",
+      "disposition": "historical-investigation-unconfirmed",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#redb-shutdown-owner",
+      "rationale": "The scenario switched to fresh processes before root cause was isolated; no general Redb shutdown defect is asserted."
+    },
+    {
+      "id": "excess-slot-retirement",
+      "kind": "narrative-anchor",
+      "sourceSection": null,
+      "sourceSubheading": null,
+      "summary": "excess slot retirement",
+      "disposition": "explicitly-deferred",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#excess-slot-retirement",
+      "rationale": "The discrepancy matched pre-existing behavior and was explicitly excluded from implementation."
+    },
+    {
+      "id": "withdrawn-diagnoses",
+      "kind": "narrative-anchor",
+      "sourceSection": null,
+      "sourceSubheading": null,
+      "summary": "withdrawn diagnoses",
+      "disposition": "withdrawn-or-unsupported",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#withdrawn-diagnoses",
+      "rationale": "Route ingestion, projector ownership, and inline-predicate assertions were corrected or not reproducible and must not become Core tickets."
+    },
+    {
+      "id": "derived-slot-fixture-collision",
+      "kind": "narrative-anchor",
+      "sourceSection": null,
+      "sourceSubheading": null,
+      "summary": "derived slot fixture collision",
+      "disposition": "withdrawn-or-unsupported",
+      "recordUrls": [
+        "https://github.com/drasi-project/drasi-core/issues/805",
+        "https://github.com/drasi-project/drasi-core/issues/889"
+      ],
+      "evidenceUrl": "evidence.md#derived-slot-fixture-collision",
+      "rationale": "The fixture reused node/relationship IDs; correcting it disproved that diagnosis, while the generic collision hazard remains #805."
+    }
+  ]
+}
