@@ -16,6 +16,8 @@
   [`evidence.md`](evidence.md)
 - Public fix inventory:
   [`fix-inventory.json`](fix-inventory.json)
+- Complete artifact checksums:
+  [`checksums.sha256`](checksums.sha256)
 
 The ledger covers all 132 source finding rows and all seven narrative anchors.
 There are no unassigned source IDs.

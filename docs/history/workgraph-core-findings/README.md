@@ -95,6 +95,8 @@ work does not duplicate that stack.
   recommended issue-specific implementation sequence.
 - [`provenance.json`](provenance.json) records source checksums and sanitization
   boundaries.
+- [`checksums.sha256`](checksums.sha256) records SHA-256 checksums for every
+  other published artifact in this directory tree.
 - [`patches/index.json`](patches/index.json) inventories 20 sanitized portable
   patches for historical commits that were still available locally but no
   longer resolved through a remote branch or GitHub commit endpoint.
