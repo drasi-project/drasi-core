@@ -21,6 +21,7 @@ jobs:
     uses: drasi-project/.github/.github/workflows/rust-unit-test.yaml@main
     with:
       test-command: |
+        .github/scripts/release-with-retry.test.sh
         cargo run -p xtask -- check-publish-dependency-cycles
         cargo test --workspace --exclude drasi-host-sdk
         make test-host-sdk

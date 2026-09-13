@@ -407,6 +407,7 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
             nodes: HashSet::from(["Products".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: true,
         };
         let response = source
@@ -2154,6 +2155,7 @@ async fn subscribe_direct(
         nodes: HashSet::from(["Products".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
     };
     let response = source

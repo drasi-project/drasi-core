@@ -27,6 +27,12 @@ jobs:
       # XML parser used by the optional HTTP/Azure source/bootstrap plugins, whose
       # input may come from external endpoints; accepted as a known risk pending
       # the Azure SDK upgrade.
+      # RUSTSEC-2026-0275 (medium): legacy azure_core 0.21.0 writes the
+      # `authorization` header value to logs. Pulled in transitively by
+      # drasi-reaction-azure-storage via the azure_storage_* 0.21 family; the
+      # fix (azure_core >= 0.22) requires the same major Azure SDK upgrade noted
+      # above. Accepted as a known risk pending that upgrade — the affected code
+      # path is the optional Azure storage reaction plugin.
       audit-args: >-
         --ignore RUSTSEC-2026-0098
         --ignore RUSTSEC-2026-0099
@@ -34,3 +40,4 @@ jobs:
         --ignore RUSTSEC-2026-0194
         --ignore RUSTSEC-2026-0195
         --ignore RUSTSEC-2026-0235
+        --ignore RUSTSEC-2026-0275

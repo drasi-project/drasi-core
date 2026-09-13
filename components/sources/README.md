@@ -679,8 +679,8 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
     pub resume_from: Option<Bytes>,
+    pub resume_sequence: Option<u64>,
     pub request_position_handle: bool,
-    pub last_sequence: Option<u64>,
 }
 ```
 
@@ -690,8 +690,9 @@ The settings are important:
   the query actually needs.
 - `resume_from` contains opaque source-position bytes from a prior checkpoint.
   Only the Source knows how to interpret them.
-- `last_sequence` lets `SourceBase` keep framework sequence numbers monotonic
-  after restart.
+- `resume_sequence` carries the last framework-assigned sequence the query
+  checkpointed, so `SourceBase` keeps framework sequence numbers monotonic
+  after restart (it raises its counter to `resume_sequence + 1`).
 - `request_position_handle` asks replay-capable sources for a shared
   `Arc<AtomicU64>` so the query can report its durably processed sequence.
 
@@ -1004,7 +1005,7 @@ initialize(context)
     ↓
 start()
     ↓
-subscribe(query, resume_from = Some(source_position), last_sequence = Some(seq))
+subscribe(query, resume_from = Some(source_position), resume_sequence = Some(seq))
     ↓
 source validates/rewinds/replays
     ↓
@@ -2671,8 +2672,8 @@ fn settings(query_id: &str) -> SourceSubscriptionSettings {
         nodes: HashSet::from(["Order".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
-        last_sequence: None,
     }
 }
 
@@ -2710,7 +2711,7 @@ Replay-capable sources need explicit tests for:
 - resume from an available position
 - resume from a pruned/unavailable position
 - bootstrap skipped when `resume_from` is present
-- `last_sequence` advances `SourceBase` sequence generation
+- `resume_sequence` advances `SourceBase` sequence generation
 - position handles pin upstream feedback
 - dropping/removing position handles advances the minimum confirmed position
 - source-position comparator filters duplicate replay events
@@ -2926,8 +2927,8 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
     pub resume_from: Option<Bytes>,
+    pub resume_sequence: Option<u64>,
     pub request_position_handle: bool,
-    pub last_sequence: Option<u64>,
 }
 ```
 

@@ -3011,6 +3011,7 @@ async fn test_cdylib_source_dispatches_events() {
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
@@ -3091,6 +3092,7 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.expect("Should subscribe");
@@ -3225,6 +3227,7 @@ async fn test_ffi_subscribe_position_handle() {
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
     };
     let sub = source
@@ -3258,6 +3261,7 @@ async fn test_ffi_subscribe_position_handle() {
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
     let sub2 = source
@@ -3294,6 +3298,7 @@ async fn test_ffi_resume_from_skips_bootstrap() {
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: Some(resume_bytes),
+        resume_sequence: None,
         request_position_handle: true,
     };
     let sub = source
@@ -3372,6 +3377,7 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
     };
     let sub = source
@@ -3523,6 +3529,7 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
     };
     let sub = source2

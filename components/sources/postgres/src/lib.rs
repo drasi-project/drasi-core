@@ -1801,6 +1801,7 @@ mod tests {
                 nodes: HashSet::new(),
                 relations: HashSet::new(),
                 resume_from: Some(bad_position),
+                resume_sequence: None,
                 request_position_handle: false,
             };
 

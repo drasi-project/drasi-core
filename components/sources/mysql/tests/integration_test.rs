@@ -565,6 +565,7 @@ async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
             nodes: HashSet::from(["items".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: true,
         };
         let response = source.subscribe(settings).await.unwrap();

@@ -471,6 +471,7 @@ async fn test_kafka_bootstrap_source_overlap_handover() {
         nodes: HashSet::from(["Order".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
     };
     let response = source.subscribe(settings).await.unwrap();

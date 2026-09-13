@@ -16,6 +16,7 @@ on:
     types: [labeled]
 checkout: false
 if: inputs.pr_url != '' || github.event.label.name == 'review:testing'
+timeout-minutes: 40
 permissions:
   copilot-requests: write
   contents: read
