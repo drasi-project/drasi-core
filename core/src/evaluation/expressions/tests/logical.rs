@@ -12,15 +12,108 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::evaluation::variable_value::integer::Integer;
 use crate::evaluation::variable_value::VariableValue;
 
 use crate::evaluation::context::QueryVariables;
-use crate::evaluation::functions::FunctionRegistry;
-use crate::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
+use crate::evaluation::functions::{ast, async_trait, Function, FunctionRegistry, ScalarFunction};
+use crate::evaluation::{
+    EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, FunctionError,
+    InstantQueryClock,
+};
 use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+
+struct RecordingBoolean {
+    calls: Arc<Mutex<Vec<i64>>>,
+}
+
+#[async_trait]
+impl ScalarFunction for RecordingBoolean {
+    async fn call(
+        &self,
+        _context: &ExpressionEvaluationContext,
+        _expression: &ast::FunctionExpression,
+        args: Vec<VariableValue>,
+    ) -> Result<VariableValue, FunctionError> {
+        let position = args[0]
+            .as_i64()
+            .expect("first argument should be an integer");
+        let result = args[1]
+            .as_bool()
+            .expect("second argument should be a boolean");
+        self.calls
+            .lock()
+            .expect("recording mutex should not be poisoned")
+            .push(position);
+        Ok(VariableValue::Bool(result))
+    }
+}
+
+fn evaluate_on_two_mib_worker(expression: &str) -> VariableValue {
+    let expression = expression.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let expression = drasi_query_cypher::parse_expression(&expression).unwrap();
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_stack_size(2 * 1024 * 1024)
+                .build()
+                .unwrap();
+
+            let (result, expression) = runtime.block_on(async move {
+                tokio::spawn(async move {
+                    let function_registry = Arc::new(FunctionRegistry::new());
+                    let result_index = Arc::new(InMemoryResultIndex::new());
+                    let evaluator = ExpressionEvaluator::new(function_registry, result_index);
+                    let variables = QueryVariables::new();
+                    let context = ExpressionEvaluationContext::new(
+                        &variables,
+                        Arc::new(InstantQueryClock::new(0, 0)),
+                    );
+
+                    let result = evaluator
+                        .evaluate_expression(&context, &expression)
+                        .await
+                        .unwrap();
+                    (result, expression)
+                })
+                .await
+                .unwrap()
+            });
+            drop(expression);
+            result
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn evaluates_128_term_conjunction_on_two_mib_worker() {
+    let expression = std::iter::repeat_n("true", 128)
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    assert_eq!(
+        evaluate_on_two_mib_worker(&expression),
+        VariableValue::Bool(true)
+    );
+}
+
+#[test]
+fn evaluates_128_term_disjunction_on_two_mib_worker() {
+    let expression = std::iter::repeat_n("false", 128)
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    assert_eq!(
+        evaluate_on_two_mib_worker(&expression),
+        VariableValue::Bool(false)
+    );
+}
 
 #[tokio::test]
 async fn evaluate_logical_predicate() {
@@ -266,4 +359,57 @@ async fn or_not_short_circuited() {
         result.is_err(),
         "Expected DivideByZero error (proving both operands evaluated), but got: {result:?}"
     );
+}
+
+#[tokio::test]
+async fn flattened_logical_expressions_remain_eager_and_left_to_right() {
+    let expression = drasi_query_cypher::parse_expression(
+        "record(1, false) AND record(2, true) \
+         AND (record(3, true) OR record(4, false)) AND record(5, true)",
+    )
+    .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let function_registry = Arc::new(FunctionRegistry::new());
+    function_registry.register_function(
+        "record",
+        Function::Scalar(Arc::new(RecordingBoolean {
+            calls: calls.clone(),
+        })),
+    );
+    let result_index = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry, result_index);
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expression)
+            .await
+            .unwrap(),
+        VariableValue::Bool(false)
+    );
+    assert_eq!(
+        *calls
+            .lock()
+            .expect("recording mutex should not be poisoned"),
+        vec![1, 2, 3, 4, 5]
+    );
+}
+
+#[tokio::test]
+async fn flattened_logical_errors_are_reported_left_to_right() {
+    let expression =
+        drasi_query_cypher::parse_expression("false AND (1 / 0 = 0) AND missing()").unwrap();
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let result_index = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry, result_index);
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    assert!(matches!(
+        evaluator.evaluate_expression(&context, &expression).await,
+        Err(EvaluationError::DivideByZero)
+    ));
 }
