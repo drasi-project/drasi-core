@@ -31,8 +31,9 @@
 
 use anyhow::Result;
 use log::{debug, error, info, warn};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
@@ -43,6 +44,57 @@ use crate::identity::IdentityProvider;
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "query result sequence inversion for query '{query_id}': received sequence {received} after {last_observed}"
+)]
+struct QueryResultSequenceInversion {
+    query_id: String,
+    received: u64,
+    last_observed: u64,
+}
+
+struct QuerySequenceCursor {
+    last_observed: u64,
+    missing: Vec<std::ops::Range<u64>>,
+}
+
+impl QuerySequenceCursor {
+    fn new(checkpoint: u64) -> Self {
+        Self {
+            last_observed: checkpoint,
+            missing: Vec::new(),
+        }
+    }
+
+    fn observe(&mut self, query_id: &str, sequence: u64) -> Result<()> {
+        if sequence > self.last_observed {
+            let next = self.last_observed + 1;
+            if sequence > next {
+                self.missing.push(next..sequence);
+            }
+            self.last_observed = sequence;
+        } else {
+            // Retain only gaps, not every delivered sequence: old checkpoint
+            // replays and previously observed duplicates must remain valid.
+            let index = self.missing.partition_point(|range| range.end <= sequence);
+            if self
+                .missing
+                .get(index)
+                .is_some_and(|range| range.contains(&sequence))
+            {
+                return Err(QueryResultSequenceInversion {
+                    query_id: query_id.to_string(),
+                    received: sequence,
+                    last_observed: self.last_observed,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Parameters for creating a ReactionBase instance.
 ///
@@ -121,8 +173,10 @@ pub struct ReactionBase {
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
-    /// Priority queue for timestamp-ordered result processing
+    /// Priority queue for result processing
     pub priority_queue: PriorityQueue<QueryResult>,
+    /// Per-query effective timestamps; never written into QueryResult payloads.
+    result_ordering: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// Handles to subscription forwarder tasks
     pub subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
     /// Handle to the main processing task
@@ -146,6 +200,7 @@ impl ReactionBase {
     pub fn new(params: ReactionBaseParams) -> Self {
         Self {
             priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
+            result_ordering: Arc::new(Mutex::new(HashMap::new())),
             id: params.id.clone(),
             queries: params.queries,
             auto_start: params.auto_start,
@@ -272,6 +327,7 @@ impl ReactionBase {
             context: self.context.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
+            result_ordering: self.result_ordering.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
@@ -285,10 +341,29 @@ impl ReactionBase {
     /// Returns the receiver which should be passed to the processing task.
     /// The sender is stored internally and will be triggered by `stop_common()`.
     ///
-    /// This should be called before spawning the processing task.
+    /// Call this once per start, before spawning the processing task. A previous
+    /// processing generation is stopped and its pending results are discarded.
     pub async fn create_shutdown_channel(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let mut shutdown_tx = self.shutdown_tx.write().await;
+        let previous_generation = self.processing_task.read().await.is_some()
+            || shutdown_tx.as_ref().is_some_and(|tx| tx.is_closed());
+        if previous_generation {
+            self.priority_queue.close().await;
+            if let Some(tx) = shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.processing_task.write().await.take() {
+                task.abort();
+                if let Err(e) = task.await {
+                    debug!("[{}] Previous processing task ended: {}", self.id, e);
+                }
+            }
+            self.drain_pending_results().await;
+        }
+        self.priority_queue.reopen().await;
+
         let (tx, rx) = tokio::sync::oneshot::channel();
-        *self.shutdown_tx.write().await = Some(tx);
+        *shutdown_tx = Some(tx);
         rx
     }
 
@@ -325,9 +400,22 @@ impl ReactionBase {
     /// Enqueue a query result for processing.
     ///
     /// The host calls this to forward query results to the reaction's priority queue.
-    /// Results are processed in timestamp order by the reaction's processing task.
+    /// Each query retains its incoming sequence order. Across queries, effective
+    /// timestamps are merged, with insertion order breaking ties.
     pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
-        self.priority_queue.enqueue_wait(Arc::new(result)).await;
+        // Capture the generation before waiting for the ordering lock so a
+        // sender cannot carry an old result across a stop/restart boundary.
+        let generation = self.priority_queue.generation();
+        let mut ordering = self.result_ordering.lock().await;
+        let timestamp = result.timestamp;
+        let query_id = result.query_id.clone();
+        let ordering_timestamp = ordering
+            .get(&query_id)
+            .map_or(timestamp, |last| (*last).max(timestamp));
+        self.priority_queue
+            .enqueue_wait_with_ordering_timestamp(Arc::new(result), ordering_timestamp, generation)
+            .await?;
+        ordering.insert(query_id, ordering_timestamp);
         Ok(())
     }
 
@@ -402,6 +490,9 @@ impl ReactionBase {
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping reaction: {}", self.id);
 
+        // A producer can hold result_ordering while waiting for queue capacity.
+        self.priority_queue.close().await;
+
         // Send shutdown signal to processing task (if it's using tokio::select!)
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -433,20 +524,13 @@ impl ReactionBase {
                         self.id
                     );
                     task.abort();
+                    let _ = task.await;
                 }
             }
         }
         drop(processing_task);
 
-        // Drain the priority queue
-        let drained_events = self.priority_queue.drain().await;
-        if !drained_events.is_empty() {
-            info!(
-                "[{}] Drained {} pending events from priority queue",
-                self.id,
-                drained_events.len()
-            );
-        }
+        self.drain_pending_results().await;
 
         self.set_status(
             ComponentStatus::Stopped,
@@ -456,6 +540,19 @@ impl ReactionBase {
         info!("Reaction '{}' stopped", self.id);
 
         Ok(())
+    }
+
+    async fn drain_pending_results(&self) {
+        let mut ordering = self.result_ordering.lock().await;
+        let drained_events = self.priority_queue.drain().await;
+        if !drained_events.is_empty() {
+            info!(
+                "[{}] Drained {} pending events from priority queue",
+                self.id,
+                drained_events.len()
+            );
+        }
+        ordering.clear();
     }
 
     /// Clear the reaction's state store partition.
@@ -502,6 +599,9 @@ impl ReactionBase {
     ///    (or 0 if no prior checkpoint exists for that query).
     /// 5. Breaks when `shutdown_rx` fires.
     ///
+    /// Previously unseen sequence regressions return an error rather than being
+    /// mistaken for replay duplicates. Ordered gaps remain valid.
+    ///
     /// # Arguments
     /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
     /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
@@ -521,6 +621,7 @@ impl ReactionBase {
         Fut: std::future::Future<Output = Result<()>> + Send,
     {
         let mut checkpoints = initial_checkpoints;
+        let mut sequences = HashMap::new();
 
         loop {
             let event = tokio::select! {
@@ -533,6 +634,13 @@ impl ReactionBase {
 
             let query_id = &event.query_id;
             let seq = event.sequence;
+
+            sequences
+                .entry(query_id.clone())
+                .or_insert_with(|| {
+                    QuerySequenceCursor::new(checkpoints.get(query_id).map_or(0, |cp| cp.sequence))
+                })
+                .observe(query_id, seq)?;
 
             // Dedup: skip events at or before the checkpoint.
             if let Some(cp) = checkpoints.get(query_id) {
@@ -579,6 +687,73 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    fn query_result(query_id: &str, sequence: u64, timestamp: i64) -> QueryResult {
+        QueryResult::new(
+            query_id.to_string(),
+            sequence,
+            chrono::DateTime::from_timestamp_millis(timestamp).unwrap(),
+            vec![],
+            Default::default(),
+        )
+    }
+
+    async fn store_backed_base(id: &str) -> ReactionBase {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let base = ReactionBase::new(ReactionBaseParams::new(
+            id,
+            vec!["q1".to_string(), "q2".to_string(), "q3".to_string()],
+        ));
+        base.initialize(ReactionRuntimeContext::new(
+            "test-instance",
+            id,
+            Some(Arc::new(crate::state_store::MemoryStateStoreProvider::new())),
+            graph.update_sender(),
+            None,
+        ))
+        .await;
+        base
+    }
+
+    async fn collect_queued_results(
+        base: &ReactionBase,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+        checkpoints: HashMap<String, ReactionCheckpoint>,
+    ) -> Vec<Arc<QueryResult>> {
+        let expected_dequeued = base.priority_queue.metrics().await.total_dequeued
+            + base.priority_queue.depth().await as u64;
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let processed_clone = processed.clone();
+        let base_clone = base.clone_shared();
+        let task = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(shutdown_rx, checkpoints, |event| {
+                    let processed = processed_clone.clone();
+                    async move {
+                        processed.lock().await.push(event);
+                        Ok(())
+                    }
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while base.priority_queue.metrics().await.total_dequeued < expected_dequeued
+                && !task.is_finished()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        base.stop_common().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let results = processed.lock().await.clone();
+        results
+    }
 
     #[tokio::test]
     async fn test_reaction_base_creation() {
@@ -647,6 +822,325 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_multi_query_order_preserves_query_result_bytes() {
+        let base = store_backed_base("multi-query").await;
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let results = [
+            query_result("q1", 6, 30),
+            query_result("q2", 1, 20),
+            query_result("q1", 7, 10),
+            query_result("q3", 1, 30),
+            query_result("q2", 2, 30),
+        ];
+        let wire_bytes: Vec<_> = results
+            .iter()
+            .map(|result| rmp_serde::to_vec_named(result).unwrap())
+            .collect();
+        let persisted_bytes: Vec<_> = results
+            .iter()
+            .map(|result| bincode::serialize(result).unwrap())
+            .collect();
+        let shared = base.clone_shared();
+        for (index, result) in results.into_iter().enumerate() {
+            let producer = if index % 2 == 0 { &base } else { &shared };
+            producer.enqueue_query_result(result).await.unwrap();
+        }
+
+        let processed = collect_queued_results(&base, shutdown_rx, HashMap::new()).await;
+        assert_eq!(processed.len(), 5);
+        for (result, index) in processed.iter().zip([1, 0, 2, 3, 4]) {
+            assert_eq!(
+                rmp_serde::to_vec_named(result.as_ref()).unwrap(),
+                wire_bytes[index]
+            );
+            assert_eq!(
+                bincode::serialize(result.as_ref()).unwrap(),
+                persisted_bytes[index]
+            );
+        }
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            7
+        );
+        assert_eq!(
+            base.read_checkpoint("q2").await.unwrap().unwrap().sequence,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replays_below_checkpoint_and_earlier_deliveries_are_still_skipped() {
+        let base = store_backed_base("replay").await;
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let checkpoints = HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 5,
+                config_hash: 42,
+            },
+        )]);
+        for sequence in [5, 3, 6, 7, 6, 4, 7, 8] {
+            base.enqueue_query_result(query_result("q1", sequence, 100))
+                .await
+                .unwrap();
+        }
+        let processed = collect_queued_results(&base, shutdown_rx, checkpoints).await;
+        assert_eq!(
+            processed
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>(),
+            vec![6, 7, 8]
+        );
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap(),
+            ReactionCheckpoint {
+                sequence: 8,
+                config_hash: 42,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unseen_sequence_inversion_returns_typed_error_without_skipping_ahead() {
+        let base = store_backed_base("inversion").await;
+        let shutdown_rx = base.create_shutdown_channel().await;
+        for (sequence, timestamp) in [(7, 10), (6, 20), (8, 30)] {
+            base.enqueue_query_result(query_result("q1", sequence, timestamp))
+                .await
+                .unwrap();
+        }
+        let checkpoints = HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 5,
+                config_hash: 42,
+            },
+        )]);
+        let processed = Mutex::new(Vec::new());
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            base.run_standard_loop(shutdown_rx, checkpoints, |event| {
+                let processed = &processed;
+                async move {
+                    processed.lock().await.push(event.sequence);
+                    Ok(())
+                }
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        let inversion = error
+            .downcast_ref::<QueryResultSequenceInversion>()
+            .unwrap();
+        assert_eq!(inversion.query_id, "q1");
+        assert_eq!(inversion.received, 6);
+        assert_eq!(inversion.last_observed, 7);
+        assert_eq!(*processed.lock().await, vec![7]);
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            7
+        );
+        assert_eq!(base.priority_queue.dequeue().await.sequence, 8);
+        base.stop_common().await.unwrap();
+    }
+
+    #[test]
+    fn test_sequence_cursor_accepts_gaps_replays_and_u64_max() {
+        let mut cursor = QuerySequenceCursor::new(5);
+        for sequence in [3, 5, 7, 9, 7, 3, u64::MAX, 9, u64::MAX] {
+            cursor.observe("q1", sequence).unwrap();
+        }
+        for sequence in [6, 8, u64::MAX - 1] {
+            assert!(cursor
+                .observe("q1", sequence)
+                .unwrap_err()
+                .is::<QueryResultSequenceInversion>());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_wakes_capacity_and_ordering_waiters() {
+        let base = ReactionBase::new(
+            ReactionBaseParams::new("full-queue", vec!["q1".to_string()])
+                .with_priority_queue_capacity(1),
+        );
+        let _shutdown_rx = base.create_shutdown_channel().await;
+        base.enqueue_query_result(query_result("q1", 100, 100))
+            .await
+            .unwrap();
+        let blocked = base.enqueue_query_result(query_result("q1", 101, 101));
+        tokio::pin!(blocked);
+        assert!(futures::poll!(blocked.as_mut()).is_pending());
+        let waiting = base.enqueue_query_result(query_result("q2", 1, 1));
+        tokio::pin!(waiting);
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+        let (stopped, blocked, waiting) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(base.stop_common(), blocked, waiting)
+        })
+        .await
+        .expect("stop must close the queue before acquiring the ordering lock");
+        stopped.unwrap();
+        for result in [blocked, waiting] {
+            assert!(result
+                .unwrap_err()
+                .is::<crate::channels::priority_queue::PriorityQueueClosed>());
+        }
+        assert!(base.priority_queue.is_empty().await);
+        assert!(base.result_ordering.lock().await.is_empty());
+        assert!(base
+            .enqueue_query_result(query_result("q1", 102, 102))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_restarting_a_full_failed_generation_wakes_old_senders() {
+        let base = ReactionBase::new(
+            ReactionBaseParams::new("full-restart", vec![]).with_priority_queue_capacity(1),
+        );
+        let shutdown = base.create_shutdown_channel().await;
+        let consumer = tokio::spawn(async move {
+            let _ = shutdown.await;
+        });
+        let old_consumer = consumer.abort_handle();
+        base.set_processing_task(consumer).await;
+        base.enqueue_query_result(query_result("q1", 100, 100))
+            .await
+            .unwrap();
+        let blocked = base.enqueue_query_result(query_result("q1", 101, 101));
+        tokio::pin!(blocked);
+        assert!(futures::poll!(blocked.as_mut()).is_pending());
+        let waiting = base.enqueue_query_result(query_result("q1", 102, 102));
+        tokio::pin!(waiting);
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+        let (_new_shutdown, blocked, waiting) =
+            tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::join!(base.create_shutdown_channel(), blocked, waiting)
+            })
+            .await
+            .expect("restart must close the old generation before waiting for its senders");
+        for result in [blocked, waiting] {
+            assert!(result
+                .unwrap_err()
+                .is::<crate::channels::priority_queue::PriorityQueueClosed>());
+        }
+        assert!(old_consumer.is_finished());
+        assert!(base.priority_queue.is_empty().await);
+        assert!(base.result_ordering.lock().await.is_empty());
+        base.enqueue_query_result(query_result("q1", 1, 10))
+            .await
+            .unwrap();
+        assert_eq!(base.priority_queue.dequeue().await.sequence, 1);
+        base.stop_common().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clean_restart_resets_ordering_for_fresh_lower_sequences() {
+        let base = ReactionBase::new(ReactionBaseParams::new("restart", vec![]));
+        let _first_rx = base.create_shutdown_channel().await;
+        base.enqueue_query_result(query_result("q1", 100, 100))
+            .await
+            .unwrap();
+        base.stop_common().await.unwrap();
+        let _next_rx = base.create_shutdown_channel().await;
+        base.enqueue_query_result(query_result("q2", 1, 20))
+            .await
+            .unwrap();
+        base.enqueue_query_result(query_result("q1", 1, 10))
+            .await
+            .unwrap();
+        let result = base.priority_queue.dequeue().await;
+        assert_eq!((result.query_id.as_str(), result.sequence), ("q1", 1));
+        assert_eq!(base.priority_queue.dequeue().await.query_id, "q2");
+        base.stop_common().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_failed_generation_discards_stale_results_and_ordering() {
+        let base = ReactionBase::new(ReactionBaseParams::new("failed", vec![]));
+        let first_rx = base.create_shutdown_channel().await;
+        base.enqueue_query_result(query_result("q1", 100, 100))
+            .await
+            .unwrap();
+        let task = tokio::spawn(async move {
+            drop(first_rx);
+        });
+        let aborted = task.abort_handle();
+        base.set_processing_task(task).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !aborted.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        base.set_status(ComponentStatus::Error, None).await;
+
+        let _next_rx = base.create_shutdown_channel().await;
+        assert!(base.processing_task.read().await.is_none());
+        assert!(base.priority_queue.is_empty().await);
+        assert!(base.result_ordering.lock().await.is_empty());
+        base.enqueue_query_result(query_result("q2", 1, 20))
+            .await
+            .unwrap();
+        base.enqueue_query_result(query_result("q1", 1, 10))
+            .await
+            .unwrap();
+        let result = base.priority_queue.dequeue().await;
+        assert_eq!((result.query_id.as_str(), result.sequence), ("q1", 1));
+        assert_eq!(base.priority_queue.dequeue().await.query_id, "q2");
+        base.stop_common().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_failed_start_before_task_registration_resets_ordering() {
+        let base = ReactionBase::new(ReactionBaseParams::new("failed-start", vec![]));
+        let first_rx = base.create_shutdown_channel().await;
+        base.enqueue_query_result(query_result("q1", 100, 100))
+            .await
+            .unwrap();
+        drop(first_rx);
+        let _next_rx = base.create_shutdown_channel().await;
+        assert!(base.priority_queue.is_empty().await);
+        assert!(base.result_ordering.lock().await.is_empty());
+        base.enqueue_query_result(query_result("q1", 1, 10))
+            .await
+            .unwrap();
+        assert_eq!(base.priority_queue.dequeue().await.sequence, 1);
+        base.stop_common().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_enqueue_does_not_advance_ordering() {
+        let base = ReactionBase::new(
+            ReactionBaseParams::new("cancelled", vec![]).with_priority_queue_capacity(2),
+        );
+        for sequence in [4, 5] {
+            base.enqueue_query_result(query_result("q1", sequence, 10))
+                .await
+                .unwrap();
+        }
+        let mut blocked = Box::pin(base.enqueue_query_result(query_result("q1", 6, 100)));
+        assert!(futures::poll!(blocked.as_mut()).is_pending());
+        drop(blocked);
+        for _ in 0..2 {
+            base.priority_queue.dequeue().await;
+        }
+        base.enqueue_query_result(query_result("q1", 6, 20))
+            .await
+            .unwrap();
+        base.enqueue_query_result(query_result("q2", 1, 30))
+            .await
+            .unwrap();
+        assert_eq!(base.priority_queue.dequeue().await.query_id, "q1");
+        assert_eq!(base.priority_queue.dequeue().await.query_id, "q2");
+    }
+
+    #[tokio::test]
     async fn test_event_without_initialization() {
         // Test that set_status works even without context initialization
         let params = ReactionBaseParams::new("test-reaction", vec![]);
@@ -703,9 +1197,17 @@ mod tests {
 
         // Create first channel
         let _rx1 = base.create_shutdown_channel().await;
+        base.enqueue_query_result(query_result("q1", 6, 30))
+            .await
+            .unwrap();
 
         // Create second channel (should replace the first)
         let mut rx2 = base.create_shutdown_channel().await;
+        assert_eq!(base.priority_queue.depth().await, 1);
+        assert_eq!(
+            base.result_ordering.lock().await["q1"].timestamp_millis(),
+            30
+        );
 
         // Send signal - should go to second channel
         if let Some(tx) = base.shutdown_tx.write().await.take() {
@@ -1029,94 +1531,95 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_dedup_and_checkpoint() {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        assert_standard_loop_sequence_order([0, 1, 2, 2]).await;
+    }
 
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+    #[tokio::test]
+    async fn test_run_standard_loop_all_equal_timestamps() {
+        assert_standard_loop_sequence_order([0, 0, 0, 0]).await;
+    }
 
-        let params = ReactionBaseParams::new("loop-reaction", vec!["q1".to_string()]);
-        let base = ReactionBase::new(params);
+    #[tokio::test]
+    async fn test_run_standard_loop_backwards_timestamps() {
+        assert_standard_loop_sequence_order([3, 2, 1, 0]).await;
+    }
 
-        let store: Arc<dyn StateStoreProvider> =
-            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-        let context = crate::context::ReactionRuntimeContext::new(
-            "test-instance",
-            "loop-reaction",
-            Some(store),
-            update_tx,
-            None,
-        );
-        base.initialize(context).await;
+    async fn assert_standard_loop_sequence_order(timestamp_offsets: [i64; 4]) {
+        for iteration in 0..100 {
+            let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+            let base = ReactionBase::new(ReactionBaseParams::new(
+                "loop-reaction",
+                vec!["q1".to_string()],
+            ));
+            let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+            base.initialize(ReactionRuntimeContext::new(
+                "test-instance",
+                "loop-reaction",
+                Some(store),
+                graph.update_sender(),
+                None,
+            ))
+            .await;
 
-        // Initial checkpoints: seq=5 with config_hash=42
-        let initial_checkpoints = {
-            let mut m = std::collections::HashMap::new();
-            m.insert(
+            let initial_checkpoints = std::collections::HashMap::from([(
                 "q1".to_string(),
                 ReactionCheckpoint {
                     sequence: 5,
                     config_hash: 42,
                 },
-            );
-            m
-        };
+            )]);
+            let shutdown_rx = base.create_shutdown_channel().await;
 
-        // Enqueue events: seq 3 (dup), seq 5 (dup), seq 6, seq 7
-        for seq in [3u64, 5, 6, 7] {
-            let result = crate::channels::QueryResult {
-                query_id: "q1".to_string(),
-                sequence: seq,
-                timestamp: chrono::Utc::now(),
-                results: vec![],
-                metadata: Default::default(),
-                profiling: None,
-            };
-            base.enqueue_query_result(result).await.unwrap();
-        }
-
-        // Track which sequences the handler actually processes
-        let processed = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
-        let processed_clone = processed.clone();
-        let handler_count = Arc::new(AtomicU64::new(0));
-        let handler_count_clone = handler_count.clone();
-
-        let shutdown_rx = base.create_shutdown_channel().await;
-        let base_clone = base.clone_shared();
-
-        let loop_handle = tokio::spawn(async move {
-            base_clone
-                .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
-                    let processed = processed_clone.clone();
-                    let count = handler_count_clone.clone();
-                    async move {
-                        processed.lock().await.push(event.sequence);
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
-                    }
-                })
-                .await
-                .unwrap();
-        });
-
-        // Wait for all non-dup events to be processed (seq 6 and 7)
-        for _ in 0..50 {
-            if handler_count.load(Ordering::SeqCst) >= 2 {
-                break;
+            // Queue the whole batch before starting the real checkpointing loop.
+            for (seq, offset) in [3u64, 5, 6, 7].into_iter().zip(timestamp_offsets) {
+                let result = QueryResult::new(
+                    "q1".to_string(),
+                    seq,
+                    chrono::DateTime::from_timestamp_millis(1_000 + offset).unwrap(),
+                    vec![],
+                    Default::default(),
+                );
+                base.enqueue_query_result(result).await.unwrap();
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let processed = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
+            let processed_clone = processed.clone();
+            let base_clone = base.clone_shared();
+            let loop_handle = tokio::spawn(async move {
+                base_clone
+                    .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
+                        let processed = processed_clone.clone();
+                        async move {
+                            processed.lock().await.push(event.sequence);
+                            Ok(())
+                        }
+                    })
+                    .await
+            });
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while base.priority_queue.metrics().await.total_dequeued < 4 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the loop must dequeue every event, including replay duplicates");
+            base.stop_common().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), loop_handle)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+
+            let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+            assert_eq!(cp.sequence, 7);
+            assert_eq!(cp.config_hash, 42);
+            assert_eq!(
+                *processed.lock().await,
+                vec![6, 7],
+                "lost a new result on iteration {iteration} after checkpointing seq={}",
+                cp.sequence
+            );
         }
-
-        // Signal shutdown via stop_common (the standard path)
-        let _ = base.stop_common().await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
-
-        // Verify only seq 6 and 7 were processed (3 and 5 were deduped)
-        let processed = processed.lock().await;
-        assert_eq!(*processed, vec![6, 7]);
-
-        // Checkpoint should now be at seq=7, preserving config_hash=42
-        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
-        assert_eq!(cp.sequence, 7);
-        assert_eq!(cp.config_hash, 42);
     }
 }
