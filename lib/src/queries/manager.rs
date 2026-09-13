@@ -136,6 +136,55 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn persisted_update_with_absent_grouping_keys_round_trips() {
+        use super::*;
+        use drasi_core::in_memory_index::in_memory_outbox_writer::InMemoryOutboxWriter;
+
+        let writer: Arc<dyn OutboxWriter> = Arc::new(InMemoryOutboxWriter::new());
+        let state = RwLock::new(QueryOutputState::new(10));
+        let dispatchers = RwLock::new(Vec::new());
+        let signature = 13_660_005_145_781_501_189;
+        let update = QueryPartEvaluationContext::Updating {
+            before: QueryVariables::new(),
+            after: QueryVariables::new(),
+            row_signature: signature,
+        };
+        dispatch_query_results(
+            &[update],
+            "source",
+            "query",
+            &state,
+            &dispatchers,
+            &Some(writer.clone()),
+            &None,
+            &None,
+            10,
+            crate::profiling::ProfilingMetadata::new(),
+            &Arc::new(QueryOutputMetrics::new()),
+        )
+        .await;
+
+        let entries = writer.read_from("query", 0).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 1);
+        let restored: QueryResult =
+            rmp_serde::from_slice(&entries[0].1).expect("production outbox output must round-trip");
+        assert_eq!(restored.sequence, 1);
+        assert_eq!(restored.query_id, "query");
+        assert!(restored.profiling.is_some());
+        assert_eq!(
+            restored.results,
+            vec![ResultDiff::Update {
+                data: serde_json::json!({}),
+                before: serde_json::json!({}),
+                after: serde_json::json!({}),
+                grouping_keys: None,
+                row_signature: signature,
+            }]
+        );
+    }
+
     use super::convert_variable_value_to_json;
     use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
     use drasi_core::evaluation::variable_value::{
@@ -393,7 +442,7 @@ async fn dispatch_query_results(
     let mut outbox_ok = true;
     if let Some(writer) = outbox_writer {
         // Serialize the QueryResult for the outbox using MessagePack (compact binary)
-        match rmp_serde::to_vec(arc_result.as_ref()) {
+        match rmp_serde::to_vec_named(arc_result.as_ref()) {
             Ok(data) => {
                 if let Err(e) = writer.append(query_id, arc_result.sequence, &data).await {
                     warn!(
