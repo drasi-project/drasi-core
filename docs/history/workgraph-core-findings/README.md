@@ -80,7 +80,10 @@ work does not duplicate that stack.
 
 - [`fix-inventory.json`](fix-inventory.json) records immutable public commits
   and existing PR reuse requirements.
-- `ledger.json` will contain the complete stable-ID disposition map.
-- `ledger.md` will provide the corresponding human-readable issue and ownership
-  summary.
-
+- [`ledger.json`](ledger.json) contains the complete 139-entry stable-ID
+  disposition map.
+- [`ledger.md`](ledger.md) provides the corresponding human-readable mapping.
+- [`manifest.md`](manifest.md) records publication counts, ownership, and the
+  recommended issue-specific implementation sequence.
+- [`provenance.json`](provenance.json) records source checksums and sanitization
+  boundaries.
