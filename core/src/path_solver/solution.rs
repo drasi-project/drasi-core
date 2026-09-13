@@ -39,6 +39,8 @@ pub struct MatchPathSolution {
     pub(crate) slot_cursors: VecDeque<(usize, Option<Arc<Element>>)>,
     pub(crate) solution_signature: Option<SolutionSignature>,
     pub(crate) anchor_slot: usize,
+    pub(crate) anchor_slots: HashSet<usize>,
+    pub(crate) defaulted_clauses: HashSet<usize>,
 }
 
 impl MatchPathSolution {
@@ -46,6 +48,8 @@ impl MatchPathSolution {
         let mut queued_slots = Vec::new();
         queued_slots.resize(total_slots, false);
 
+        let mut anchor_slots = HashSet::new();
+        anchor_slots.insert(anchor_slot);
         MatchPathSolution {
             solved_slots: BTreeMap::new(),
             total_slots,
@@ -53,6 +57,8 @@ impl MatchPathSolution {
             slot_cursors: VecDeque::new(),
             solution_signature: None,
             anchor_slot,
+            anchor_slots,
+            defaulted_clauses: HashSet::new(),
         }
     }
 
@@ -60,20 +66,183 @@ impl MatchPathSolution {
         self.solved_slots.insert(slot_num, value);
 
         if self.solved_slots.len() == self.total_slots {
-            let mut hasher = SpookyHasher::default();
-            for (slot_num, value) in &self.solved_slots {
-                slot_num.hash(&mut hasher);
-                match value {
-                    Some(value) => {
-                        let elem_ref = value.get_reference();
-                        elem_ref.source_id.hash(&mut hasher);
-                        elem_ref.element_id.hash(&mut hasher);
-                    }
-                    None => 0.hash(&mut hasher),
+            self.refresh_signature();
+        }
+    }
+
+    pub(crate) fn canonicalize_optional_defaults(&mut self, match_path: &MatchPath) {
+        for (clause_id, clause) in match_path.clauses.iter().enumerate() {
+            if !clause.optional
+                || clause
+                    .slots
+                    .iter()
+                    .all(|slot_num| matches!(self.solved_slots.get(slot_num), Some(Some(_))))
+            {
+                continue;
+            }
+
+            self.defaulted_clauses.insert(clause_id);
+            for slot_num in &clause.introduced_slots {
+                self.solved_slots.insert(*slot_num, None);
+            }
+        }
+        self.refresh_signature();
+    }
+
+    pub(crate) fn unresolved_optional_clause(&self, match_path: &MatchPath) -> Option<usize> {
+        match_path
+            .clauses
+            .iter()
+            .enumerate()
+            .find(|(clause_id, clause)| {
+                clause.optional
+                    && !self.defaulted_clauses.contains(clause_id)
+                    && clause
+                        .introduced_slots
+                        .iter()
+                        .any(|slot_num| !self.solved_slots.contains_key(slot_num))
+            })
+            .map(|(clause_id, _)| clause_id)
+    }
+
+    pub(crate) fn default_clause_for_continuation(
+        &mut self,
+        match_path: &MatchPath,
+        clause_id: usize,
+    ) -> bool {
+        if !match_path.clauses[clause_id].optional || !self.defaulted_clauses.insert(clause_id) {
+            return false;
+        }
+
+        for slot_num in &match_path.clauses[clause_id].introduced_slots {
+            self.solved_slots.insert(*slot_num, None);
+        }
+
+        // A later clause is blocked only when it reuses a null introduced by an
+        // earlier clause. Unrelated later cursors remain available to resume.
+        for downstream_id in clause_id + 1..match_path.clauses.len() {
+            let downstream = &match_path.clauses[downstream_id];
+            if !downstream.optional || self.defaulted_clauses.contains(&downstream_id) {
+                continue;
+            }
+            let blocked = downstream.slots.iter().any(|slot_num| {
+                match_path.slots[*slot_num].introduction_clause < downstream_id
+                    && matches!(self.solved_slots.get(slot_num), Some(None))
+            });
+            if blocked {
+                self.defaulted_clauses.insert(downstream_id);
+                for slot_num in &downstream.introduced_slots {
+                    self.solved_slots.insert(*slot_num, None);
                 }
             }
-            self.solution_signature = Some(hasher.finish());
         }
+
+        let defaulted_clauses = &self.defaulted_clauses;
+        let slots = &match_path.slots;
+        self.slot_cursors.retain(|(slot_num, _)| {
+            !defaulted_clauses.contains(&slots[*slot_num].introduction_clause)
+        });
+        self.solution_signature = None;
+        self.refresh_signature();
+        true
+    }
+
+    pub(crate) fn continuation_signature(&self) -> SolutionSignature {
+        let mut hasher = SpookyHasher::default();
+        for (slot_num, value) in &self.solved_slots {
+            slot_num.hash(&mut hasher);
+            hash_element(value, &mut hasher);
+        }
+        let mut defaulted_clauses = self.defaulted_clauses.iter().collect::<Vec<_>>();
+        defaulted_clauses.sort_unstable();
+        for clause_id in defaulted_clauses {
+            clause_id.hash(&mut hasher);
+        }
+        let mut cursors = self.slot_cursors.iter().collect::<Vec<_>>();
+        cursors.sort_by_key(|(slot_num, _)| *slot_num);
+        for (slot_num, value) in cursors {
+            slot_num.hash(&mut hasher);
+            hash_element(value, &mut hasher);
+        }
+        hasher.finish()
+    }
+
+    pub(crate) fn clause_is_real(&self, match_path: &MatchPath, clause_id: usize) -> bool {
+        !self.defaulted_clauses.contains(&clause_id)
+            && match_path.clauses[clause_id]
+                .slots
+                .iter()
+                .all(|slot_num| matches!(self.solved_slots.get(slot_num), Some(Some(_))))
+    }
+
+    pub(crate) fn defaulted_clause_count(&self) -> usize {
+        self.defaulted_clauses.len()
+    }
+
+    pub(crate) fn merge_anchor_provenance(&mut self, other: &MatchPathSolution) {
+        self.anchor_slots.extend(&other.anchor_slots);
+    }
+
+    pub(crate) fn optional_clause_memberships(
+        &self,
+        match_path: &MatchPath,
+    ) -> Vec<(usize, SolutionSignature)> {
+        match_path
+            .clauses
+            .iter()
+            .enumerate()
+            .filter(|(clause_id, clause)| {
+                clause.optional && self.clause_is_real(match_path, *clause_id)
+            })
+            .map(|(clause_id, _)| (clause_id, self.upstream_signature(match_path, clause_id)))
+            .collect()
+    }
+
+    pub(crate) fn optional_anchor_memberships(
+        &self,
+        match_path: &MatchPath,
+    ) -> Vec<(usize, SolutionSignature)> {
+        let anchor_clauses = self
+            .anchor_slots
+            .iter()
+            .map(|slot_num| match_path.slots[*slot_num].introduction_clause)
+            .filter(|clause_id| {
+                match_path.clauses[*clause_id].optional
+                    && self.clause_is_real(match_path, *clause_id)
+            })
+            .collect::<HashSet<_>>();
+
+        self.optional_clause_memberships(match_path)
+            .into_iter()
+            .filter(|(clause_id, _)| anchor_clauses.contains(clause_id))
+            .collect()
+    }
+
+    pub(crate) fn upstream_signature(&self, match_path: &MatchPath, clause_id: usize) -> u64 {
+        let mut hasher = SpookyHasher::default();
+        clause_id.hash(&mut hasher);
+        for (slot_num, value) in &self.solved_slots {
+            if match_path.slots[*slot_num].introduction_clause >= clause_id {
+                continue;
+            }
+            slot_num.hash(&mut hasher);
+            hash_element(value, &mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn refresh_signature(&mut self) {
+        if self.solved_slots.len() != self.total_slots {
+            self.solution_signature = None;
+            return;
+        }
+
+        let mut hasher = SpookyHasher::default();
+        for (slot_num, value) in &self.solved_slots {
+            slot_num.hash(&mut hasher);
+            hash_element(value, &mut hasher);
+        }
+        self.solution_signature = Some(hasher.finish());
     }
 
     pub fn enqueue_slot(&mut self, slot_num: usize, value: Option<Arc<Element>>) {
@@ -92,7 +261,14 @@ impl MatchPathSolution {
     }
 
     pub fn get_empty_optional_solution(&self, match_path: &MatchPath) -> Option<MatchPathSolution> {
-        if !match_path.slots[self.anchor_slot].optional {
+        let anchor_clauses = self
+            .anchor_slots
+            .iter()
+            .filter(|slot_num| matches!(self.solved_slots.get(slot_num), Some(Some(_))))
+            .map(|slot_num| match_path.slots[*slot_num].introduction_clause)
+            .filter(|clause_id| match_path.clauses[*clause_id].optional)
+            .collect::<HashSet<_>>();
+        if anchor_clauses.is_empty() {
             return None;
         }
 
@@ -107,7 +283,10 @@ impl MatchPathSolution {
             .map(|(slot_num, _)| *slot_num)
             .collect::<HashSet<_>>();
 
-        let opt_slots = match_path.get_optional_slots_for_default(self.anchor_slot, &empty_slots);
+        let mut opt_slots = HashSet::new();
+        for anchor_slot in &self.anchor_slots {
+            opt_slots.extend(match_path.get_optional_slots_for_default(*anchor_slot, &empty_slots));
+        }
 
         let mut result = self.clone();
         for slot_num in &opt_slots {
@@ -117,6 +296,8 @@ impl MatchPathSolution {
         for slot_num in &opt_slots {
             result.mark_slot_solved(*slot_num, None);
         }
+        result.defaulted_clauses.extend(anchor_clauses);
+        result.canonicalize_optional_defaults(match_path);
 
         Some(result)
     }
@@ -142,6 +323,7 @@ impl MatchPathSolution {
                         );
                     }
                 }
+
                 None => {
                     //log warning
                 }
@@ -149,5 +331,16 @@ impl MatchPathSolution {
             slot_num += 1;
         }
         result
+    }
+}
+
+fn hash_element(value: &Option<Arc<Element>>, hasher: &mut SpookyHasher) {
+    match value {
+        Some(value) => {
+            let elem_ref = value.get_reference();
+            elem_ref.source_id.hash(hasher);
+            elem_ref.element_id.hash(hasher);
+        }
+        None => 0.hash(hasher),
     }
 }

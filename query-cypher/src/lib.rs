@@ -361,11 +361,11 @@ peg::parser! {
         rule match_clause() -> Vec<MatchClause>
             = kw_match() __+ items:( (start:node()
                     path:( (__* e:relation() __* n:node() { (e, n) }) ** "" ) {
-                    MatchClause { start, path, optional: false }
+                    MatchClause { start, path, optional: false, clause_id: usize::MAX }
                 }) ++ (__* "," __*) ) { items }
             / kw_optional() __+ kw_match() __+ items:( (start:node()
                 path:( (__* e:relation() __* n:node() { (e, n) }) ** "" ) {
-                    MatchClause { start, path, optional: true }
+                    MatchClause { start, path, optional: true, clause_id: usize::MAX }
                 }) ++ (__* "," __*) ) { items }
 
         // e.g. 'WHERE a.name <> b.name', 'WHERE a.age > b.age AND a.age <= 42'
@@ -394,7 +394,18 @@ peg::parser! {
             / r:return_clause() { r }
 
         rule part(config: &dyn QueryConfiguration) -> QueryPart
-            = match_clauses:( __* m:(match_clause() ** (__+) )? { m.unwrap_or_else(Vec::new).into_iter().flatten().collect() } )
+            = match_clauses:( __* m:(match_clause() ** (__+) )? {
+                m.unwrap_or_else(Vec::new)
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(clause_id, clauses)| {
+                        clauses.into_iter().map(move |mut clause| {
+                            clause.clause_id = clause_id;
+                            clause
+                        })
+                    })
+                    .collect()
+              } )
                 where_clauses:( __* w:(where_clause() ** (__+) )? { w.unwrap_or_else(Vec::new) } )
                 //create_clauses:( __* c:(create_clause() ** (__+) )? { c.unwrap_or_else(Vec::new) } )
                 set_clauses:( __* s:(set_clause() ** (__+) )? { s.unwrap_or_else(Vec::new) } )
