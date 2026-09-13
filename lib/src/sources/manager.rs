@@ -400,22 +400,37 @@ impl SourceManager {
     /// Called by the lifecycle after all auto-start queries have subscribed.
     /// Sources that hold back feedback during the subscription window (e.g.,
     /// Postgres flush-fence) release those guards here.
-    pub async fn subscriptions_complete(&self) {
+    pub async fn subscriptions_complete(&self) -> Result<()> {
         let sources: Vec<Arc<dyn Source>> = {
             let g = self.graph.read().await;
             g.list_by_kind(&ComponentKind::Source)
                 .iter()
                 .filter_map(|(id, status)| {
-                    if *status == ComponentStatus::Running {
-                        g.get_runtime::<Arc<dyn Source>>(id).cloned()
-                    } else {
-                        None
-                    }
+                    let source = g.get_runtime::<Arc<dyn Source>>(id)?;
+                    // start_all() completed successfully before this call, but
+                    // graph status updates emitted by a source can still be in
+                    // flight. Include auto-start sources based on the same
+                    // predicate used to start them instead of racing that
+                    // asynchronous status update.
+                    (source.auto_start() || *status == ComponentStatus::Running)
+                        .then(|| Arc::clone(source))
                 })
                 .collect()
         };
+        let mut failures = Vec::new();
         for source in sources {
-            source.on_subscriptions_complete().await;
+            if let Err(error) = source.on_subscriptions_complete().await {
+                failures.push(format!("{}: {error}", source.id()));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "on_subscriptions_complete failed for sources: {}",
+                failures.join("; ")
+            ))
         }
     }
 

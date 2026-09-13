@@ -616,6 +616,27 @@ impl Source for MockSource {
         self.base.initialize(context).await;
     }
 
+    async fn on_subscriptions_complete(&self) -> Result<()> {
+        if let Ok(path) = std::env::var("DRASI_MOCK_SUBSCRIPTIONS_COMPLETE_MARKER") {
+            use std::io::Write;
+
+            let mut marker = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to open subscriptions-complete marker '{path}': {error}"
+                    )
+                })?;
+            writeln!(marker, "{}", self.base.id).map_err(|error| {
+                anyhow::anyhow!("failed to write subscriptions-complete marker '{path}': {error}")
+            })?;
+        }
+        log::info!("[MOCK-SUBSCRIPTIONS-COMPLETE] source={}", self.base.id);
+        Ok(())
+    }
+
     async fn set_bootstrap_provider(
         &self,
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,

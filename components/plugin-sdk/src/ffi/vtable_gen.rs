@@ -933,6 +933,23 @@ pub fn build_source_vtable<T: Source + 'static>(
         })
     }
 
+    extern "C" fn on_subscriptions_complete_fn<T: Source + 'static>(
+        state: *mut c_void,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            match dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.on_subscriptions_complete().await
+            }) {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -969,6 +986,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         set_bootstrap_provider_fn: set_bootstrap_provider_fn::<T>,
         supports_replay_fn: supports_replay_fn::<T>,
         remove_position_handle_fn: remove_position_handle_fn::<T>,
+        on_subscriptions_complete_fn: on_subscriptions_complete_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -1324,6 +1342,21 @@ pub fn build_source_vtable_from_boxed(
         })
     }
 
+    extern "C" fn on_subscriptions_complete_fn(state: *mut c_void) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let handle = (w.runtime_handle)().handle().clone();
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            match dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.on_subscriptions_complete().await
+            }) {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -1360,6 +1393,7 @@ pub fn build_source_vtable_from_boxed(
         set_bootstrap_provider_fn,
         supports_replay_fn,
         remove_position_handle_fn,
+        on_subscriptions_complete_fn,
         drop_fn,
     }
 }
@@ -3843,7 +3877,7 @@ pub fn build_secret_store_plugin_vtable<T: SecretStorePluginDescriptor + 'static
 }
 
 #[cfg(test)]
-mod snapshot_stream_tests {
+mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3866,6 +3900,183 @@ mod snapshot_stream_tests {
     extern "C" fn test_drop(ctx: *mut c_void) {
         if !ctx.is_null() {
             unsafe { drop(Box::from_raw(ctx as *mut TestIter)) };
+        }
+    }
+
+    mod source_subscriptions_complete_vtable_tests {
+        use super::*;
+        use std::any::Any;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, OnceLock};
+
+        #[derive(Clone, Copy)]
+        enum Completion {
+            Success,
+            Error,
+            Panic,
+        }
+
+        struct LifecycleSource {
+            calls: Arc<AtomicUsize>,
+            completion: Completion,
+        }
+
+        #[async_trait::async_trait]
+        impl Source for LifecycleSource {
+            fn id(&self) -> &str {
+                "lifecycle-source"
+            }
+
+            fn type_name(&self) -> &str {
+                "lifecycle"
+            }
+
+            fn properties(&self) -> HashMap<String, serde_json::Value> {
+                HashMap::new()
+            }
+
+            async fn start(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn stop(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn status(&self) -> ComponentStatus {
+                ComponentStatus::Running
+            }
+
+            async fn subscribe(
+                &self,
+                _settings: SourceSubscriptionSettings,
+            ) -> anyhow::Result<drasi_lib::channels::SubscriptionResponse> {
+                unreachable!("subscription is not used by lifecycle vtable tests")
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            async fn initialize(&self, _context: SourceRuntimeContext) {}
+
+            async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                match self.completion {
+                    Completion::Success => Ok(()),
+                    Completion::Error => Err(anyhow::anyhow!("source fence release failed")),
+                    Completion::Panic => panic!("source lifecycle callback panicked"),
+                }
+            }
+        }
+
+        fn test_runtime() -> &'static tokio::runtime::Runtime {
+            static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+            RUNTIME.get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+            })
+        }
+
+        extern "C" fn noop_executor(_future: *mut c_void) -> *mut c_void {
+            std::ptr::null_mut()
+        }
+
+        fn noop_lifecycle(_id: &str, _event: FfiLifecycleEventType, _message: &str) {}
+
+        fn invoke(vtable: SourceVtable) -> Result<(), String> {
+            let state = SendMutPtr(vtable.state);
+            let callback = vtable.on_subscriptions_complete_fn;
+            let result = std::thread::spawn(move || callback(state.as_ptr()))
+                .join()
+                .expect("FFI callback thread should not panic");
+            (vtable.drop_fn)(vtable.state);
+            unsafe { result.into_result() }
+        }
+
+        fn source(completion: Completion) -> (LifecycleSource, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                LifecycleSource {
+                    calls: Arc::clone(&calls),
+                    completion,
+                },
+                calls,
+            )
+        }
+
+        #[test]
+        fn typed_vtable_invokes_callback_once() {
+            let (source, calls) = source(Completion::Success);
+            let result = invoke(build_source_vtable(
+                source,
+                noop_executor,
+                noop_lifecycle,
+                test_runtime,
+            ));
+
+            assert_eq!(result, Ok(()));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn boxed_vtable_invokes_callback_once() {
+            let (source, calls) = source(Completion::Success);
+            let result = invoke(build_source_vtable_from_boxed(
+                Box::new(source),
+                noop_executor,
+                noop_lifecycle,
+                test_runtime,
+            ));
+
+            assert_eq!(result, Ok(()));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn typed_vtable_preserves_callback_error() {
+            let (source, _) = source(Completion::Error);
+            let error = invoke(build_source_vtable(
+                source,
+                noop_executor,
+                noop_lifecycle,
+                test_runtime,
+            ))
+            .unwrap_err();
+
+            assert_eq!(error, "source fence release failed");
+        }
+
+        #[test]
+        fn boxed_vtable_preserves_callback_error() {
+            let (source, _) = source(Completion::Error);
+            let error = invoke(build_source_vtable_from_boxed(
+                Box::new(source),
+                noop_executor,
+                noop_lifecycle,
+                test_runtime,
+            ))
+            .unwrap_err();
+
+            assert_eq!(error, "source fence release failed");
+        }
+
+        #[test]
+        fn callback_panic_becomes_ffi_error() {
+            let (source, _) = source(Completion::Panic);
+            let error = invoke(build_source_vtable(
+                source,
+                noop_executor,
+                noop_lifecycle,
+                test_runtime,
+            ))
+            .unwrap_err();
+
+            assert!(error.contains("plugin panic"));
         }
     }
 
