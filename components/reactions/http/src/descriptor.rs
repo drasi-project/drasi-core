@@ -31,7 +31,8 @@ use crate::HttpReactionBuilder;
 // ---------------------------------------------------------------------------
 
 /// DTO for a single HTTP call spec. Mirrors `HttpCallSpec` on the wire:
-/// a Handlebars `template` (body) plus `url`, `method`, and `headers`.
+/// a Handlebars `template` (body) plus `url`, `method`, `headers`, and optional
+/// response validation.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::http::HttpCallSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -52,6 +53,11 @@ pub struct HttpCallSpecDto {
     /// Additional HTTP headers. Header values support Handlebars.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+
+    /// RFC 6901 JSON pointer whose non-empty value rejects an otherwise
+    /// successful response. The pointer is literal, not a Handlebars template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_non_empty_json_pointer: Option<String>,
 }
 
 /// DTO for per-query call configuration: one [`HttpCallSpecDto`] per operation.
@@ -183,6 +189,7 @@ fn map_call_spec(dto: &HttpCallSpecDto) -> crate::config::HttpCallSpec {
             url: dto.url.clone(),
             method: dto.method.clone(),
             headers: dto.headers.clone(),
+            reject_non_empty_json_pointer: dto.reject_non_empty_json_pointer.clone(),
         },
     }
 }
@@ -216,6 +223,7 @@ fn dto_call_spec(spec: &crate::config::HttpCallSpec) -> HttpCallSpecDto {
         url: spec.extension.url.clone(),
         method: spec.extension.method.clone(),
         headers: spec.extension.headers.clone(),
+        reject_non_empty_json_pointer: spec.extension.reject_non_empty_json_pointer.clone(),
     }
 }
 
