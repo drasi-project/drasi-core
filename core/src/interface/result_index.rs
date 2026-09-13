@@ -25,8 +25,8 @@ use crate::evaluation::functions::aggregation::ValueAccumulator;
 
 use super::IndexError;
 
-/// First explicit version for persisted accumulator and aggregate lifecycle semantics.
-pub const RESULT_INDEX_STATE_VERSION: u64 = 1;
+/// Version 2 requires replay so persisted rows satisfy physical path endpoints.
+pub const RESULT_INDEX_STATE_VERSION: u64 = 2;
 
 #[async_trait]
 pub trait ResultIndex: AccumulatorIndex + ResultSequenceCounter {

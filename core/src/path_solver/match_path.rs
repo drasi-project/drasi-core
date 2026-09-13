@@ -28,6 +28,21 @@ use drasi_query_ast::ast;
 pub struct MatchPath {
     pub slots: Vec<MatchPathSlot>,
     pub(crate) optional_paths: HashSet<usize>,
+    pub(crate) segments: Vec<MatchPathSegment>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MatchPathSegment {
+    pub(crate) start_slot: usize,
+    pub(crate) relation_slot: usize,
+    pub(crate) end_slot: usize,
+    pub(crate) direction: ast::Direction,
+}
+
+impl MatchPathSegment {
+    pub(crate) fn contains_slot(&self, slot_num: usize) -> bool {
+        self.start_slot == slot_num || self.relation_slot == slot_num || self.end_slot == slot_num
+    }
 }
 
 impl MatchPath {
@@ -36,6 +51,7 @@ impl MatchPath {
 
         let mut alias_map = HashMap::new();
         let mut optional_paths = HashSet::new();
+        let mut segments = Vec::new();
 
         for (path_index, mc) in query_part.match_clauses.iter().enumerate() {
             if mc.optional {
@@ -60,6 +76,12 @@ impl MatchPath {
                 )?;
                 let node_slot_num =
                     merge_node_match(&p.1, &mut slots, &mut alias_map, path_index, mc.optional)?;
+                segments.push(MatchPathSegment {
+                    start_slot: prev_slot_num,
+                    relation_slot: rel_slot_num,
+                    end_slot: node_slot_num,
+                    direction: p.0.direction,
+                });
 
                 match p.0.direction {
                     ast::Direction::Right => {
@@ -96,6 +118,7 @@ impl MatchPath {
         Ok(MatchPath {
             slots,
             optional_paths,
+            segments,
         })
     }
 
