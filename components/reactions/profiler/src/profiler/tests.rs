@@ -16,6 +16,92 @@ use super::*;
 use drasi_lib::channels::QueryResult;
 use std::time::Duration;
 
+struct ReportLogger {
+    first_report: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
+}
+
+impl log::Log for ReportLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        let message = record.args().to_string();
+        if message.starts_with("[profiler-report-fairness] Source") {
+            if let Some(tx) = self.first_report.lock().unwrap().take() {
+                tx.send(message).unwrap();
+            }
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+#[tokio::test]
+async fn a_due_report_is_not_starved_by_queued_results() {
+    static LOGGER: ReportLogger = ReportLogger {
+        first_report: std::sync::Mutex::new(None),
+    };
+    let (report_tx, report_rx) = tokio::sync::oneshot::channel();
+    *LOGGER.first_report.lock().unwrap() = Some(report_tx);
+    log::set_logger(&LOGGER).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
+
+    let reaction = ProfilerReaction::new(
+        "profiler-report-fairness",
+        vec!["q1".to_string()],
+        ProfilerReactionConfig {
+            report_interval_secs: 1,
+            ..Default::default()
+        },
+    );
+    reaction.start().await.unwrap();
+    let held_stats = reaction.stats.write().await;
+    let mut result = QueryResult::new(
+        "q1".to_string(),
+        1,
+        chrono::Utc::now(),
+        vec![],
+        Default::default(),
+    );
+    result.profiling = Some(ProfilingMetadata::default());
+    reaction.enqueue_query_result(result.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while reaction.base.priority_queue.metrics().await.total_dequeued == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for sequence in 2..=65 {
+        result.sequence = sequence;
+        reaction.enqueue_query_result(result.clone()).await.unwrap();
+    }
+    // The consumer is gated on its first sample. Let its real timer become due
+    // with a full backlog, then verify the report runs before another dequeue.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drop(held_stats);
+    let report = tokio::time::timeout(Duration::from_secs(30), report_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while reaction.stats.read().await.count < 65 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), reaction.stop())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        report.ends_with("(n=1)"),
+        "report was delayed by backlog: {report}"
+    );
+}
+
 #[tokio::test]
 async fn stop_and_restart_reopens_the_result_queue() {
     let reaction = ProfilerReaction::new(

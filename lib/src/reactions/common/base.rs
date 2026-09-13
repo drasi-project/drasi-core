@@ -57,6 +57,9 @@ struct QueryResultSequenceInversion {
 
 struct QuerySequenceCursor {
     last_observed: u64,
+    // Retained for this loop generation to distinguish unseen inversions from
+    // old duplicates. Space is O(disjoint forward gaps), not the gap widths or
+    // contiguous event count; evicting a gap would silently accept an inversion.
     missing: Vec<std::ops::Range<u64>>,
 }
 
@@ -599,8 +602,10 @@ impl ReactionBase {
     ///    (or 0 if no prior checkpoint exists for that query).
     /// 5. Breaks when `shutdown_rx` fires.
     ///
-    /// Previously unseen sequence regressions return an error rather than being
-    /// mistaken for replay duplicates. Ordered gaps remain valid.
+    /// Previously unseen sequence regressions close the queue generation, wake
+    /// blocked producers, publish `Error`, and return the inversion error rather
+    /// than treating it as a replay duplicate. This fences ingress but does not
+    /// abort host-owned subscription tasks. Ordered gaps remain valid.
     ///
     /// # Arguments
     /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
@@ -635,12 +640,24 @@ impl ReactionBase {
             let query_id = &event.query_id;
             let seq = event.sequence;
 
-            sequences
+            if let Err(e) = sequences
                 .entry(query_id.clone())
                 .or_insert_with(|| {
                     QuerySequenceCursor::new(checkpoints.get(query_id).map_or(0, |cp| cp.sequence))
                 })
-                .observe(query_id, seq)?;
+                .observe(query_id, seq)
+            {
+                // Fence producers before reporting failure; do not join this
+                // processing task from itself through stop_common().
+                self.priority_queue.close().await;
+                error!("[{}] Stopping result processing: {e}", self.id);
+                self.set_status(
+                    ComponentStatus::Error,
+                    Some(format!("Result processing stopped: {e}")),
+                )
+                .await;
+                return Err(e);
+            }
 
             // Dedup: skip events at or before the checkpoint.
             if let Some(cp) = checkpoints.get(query_id) {
@@ -736,23 +753,37 @@ mod tests {
                 })
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        finish_queued_loop(base, expected_dequeued, task).await;
+        let results = processed.lock().await.clone();
+        results
+    }
+
+    async fn finish_queued_loop(
+        base: &ReactionBase,
+        expected_dequeued: u64,
+        mut task: tokio::task::JoinHandle<Result<()>>,
+    ) {
+        // Dequeue completion includes skipped replay inputs. Joining the actual
+        // loop also waits for the final handler and checkpoint, not just its pop.
+        let completed = tokio::time::timeout(Duration::from_secs(30), async {
             while base.priority_queue.metrics().await.total_dequeued < expected_dequeued
                 && !task.is_finished()
             {
                 tokio::task::yield_now().await;
             }
+            base.stop_common().await.unwrap();
+            (&mut task).await.unwrap().unwrap();
         })
-        .await
-        .unwrap();
-        base.stop_common().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let results = processed.lock().await.clone();
-        results
+        .await;
+        if completed.is_err() {
+            task.abort();
+            let _ = task.await;
+            panic!(
+                "queue/handler/checkpoint completion timed out: expected {expected_dequeued} \
+                 dequeued inputs, metrics={:?}",
+                base.priority_queue.metrics().await
+            );
+        }
     }
 
     #[tokio::test]
@@ -902,48 +933,178 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unseen_sequence_inversion_returns_typed_error_without_skipping_ahead() {
-        let base = store_backed_base("inversion").await;
+    async fn test_unseen_inversion_fences_running_generation_and_allows_cleanup_restart() {
+        use crate::channels::priority_queue::PriorityQueueClosed;
+        use crate::component_graph::{ComponentGraph, ComponentUpdate};
+
+        let (mut graph, mut updates) = ComponentGraph::new("test-instance");
+        graph.register_query("q1", HashMap::new(), &[]).unwrap();
+        graph
+            .register_reaction("inversion", HashMap::new(), &["q1".to_string()])
+            .unwrap();
+        let base = ReactionBase::new(
+            ReactionBaseParams::new("inversion", vec!["q1".to_string()])
+                .with_priority_queue_capacity(2),
+        );
+        base.initialize(ReactionRuntimeContext::new(
+            "test-instance",
+            "inversion",
+            Some(Arc::new(crate::state_store::MemoryStateStoreProvider::new())),
+            graph.update_sender(),
+            None,
+        ))
+        .await;
+        for status in [ComponentStatus::Starting, ComponentStatus::Running] {
+            base.set_status(status, None).await;
+            graph.apply_update(updates.recv().await.unwrap());
+        }
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+        assert_eq!(
+            graph.get_component("inversion").unwrap().status,
+            ComponentStatus::Running
+        );
+
+        base.write_checkpoint(
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 5,
+                config_hash: 42,
+            },
+        )
+        .await
+        .unwrap();
+        let checkpoints = base.read_all_checkpoints().await.unwrap();
         let shutdown_rx = base.create_shutdown_channel().await;
-        for (sequence, timestamp) in [(7, 10), (6, 20), (8, 30)] {
+        for (sequence, timestamp) in [(7, 10), (6, 20)] {
             base.enqueue_query_result(query_result("q1", sequence, timestamp))
                 .await
                 .unwrap();
         }
-        let checkpoints = HashMap::from([(
-            "q1".to_string(),
-            ReactionCheckpoint {
-                sequence: 5,
-                config_hash: 42,
-            },
-        )]);
-        let processed = Mutex::new(Vec::new());
-        let error = tokio::time::timeout(
-            Duration::from_secs(2),
-            base.run_standard_loop(shutdown_rx, checkpoints, |event| {
-                let processed = &processed;
-                async move {
-                    processed.lock().await.push(event.sequence);
-                    Ok(())
-                }
-            }),
-        )
-        .await
-        .unwrap()
-        .unwrap_err();
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let loop_base = base.clone_shared();
+        let loop_entered = entered.clone();
+        let loop_release = release.clone();
+        let loop_processed = processed.clone();
+        base.set_processing_task(tokio::spawn(async move {
+            let result = loop_base
+                .run_standard_loop(shutdown_rx, checkpoints, |event| {
+                    let entered = loop_entered.clone();
+                    let release = loop_release.clone();
+                    let processed = loop_processed.clone();
+                    async move {
+                        processed.lock().await.push(event.sequence);
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    }
+                })
+                .await;
+            result_tx.send(result).unwrap();
+        }))
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        base.enqueue_query_result(query_result("q1", 8, 30))
+            .await
+            .unwrap();
+        // Poll both producers to Pending while the handler is gated: one owns
+        // the ordering lock and waits for capacity, the other waits for that lock.
+        let blocked = base.enqueue_query_result(query_result("q1", 9, 40));
+        tokio::pin!(blocked);
+        assert!(futures::poll!(blocked.as_mut()).is_pending());
+        let waiting = base.enqueue_query_result(query_result("q1", 10, 50));
+        tokio::pin!(waiting);
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(base.priority_queue.depth().await, 2);
+        release.notify_one();
+
+        let error = tokio::time::timeout(Duration::from_secs(2), result_rx)
+            .await
+            .expect("the registered consumer must fail without trying to join itself")
+            .unwrap()
+            .unwrap_err();
         let inversion = error
             .downcast_ref::<QueryResultSequenceInversion>()
             .unwrap();
         assert_eq!(inversion.query_id, "q1");
         assert_eq!(inversion.received, 6);
         assert_eq!(inversion.last_observed, 7);
+        assert_eq!(base.get_status().await, ComponentStatus::Error);
+        let update = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ComponentUpdate::Status {
+            status, message, ..
+        } = &update;
+        assert_eq!(*status, ComponentStatus::Error);
+        assert!(message.as_ref().unwrap().contains(&error.to_string()));
+        graph.apply_update(update);
+        assert_eq!(
+            graph.get_component("inversion").unwrap().status,
+            ComponentStatus::Error
+        );
+        let (blocked, waiting) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(blocked, waiting)
+        })
+        .await
+        .expect("an inversion must fence capacity and ordering waiters");
+        for result in [blocked, waiting] {
+            assert!(result.unwrap_err().is::<PriorityQueueClosed>());
+        }
+        assert!(base
+            .enqueue_query_result(query_result("q1", 11, 60))
+            .await
+            .unwrap_err()
+            .is::<PriorityQueueClosed>());
         assert_eq!(*processed.lock().await, vec![7]);
         assert_eq!(
-            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
-            7
+            base.read_checkpoint("q1").await.unwrap().unwrap(),
+            ReactionCheckpoint {
+                sequence: 7,
+                config_hash: 42
+            }
         );
-        assert_eq!(base.priority_queue.dequeue().await.sequence, 8);
-        base.stop_common().await.unwrap();
+        assert_eq!(base.priority_queue.depth().await, 1);
+
+        tokio::time::timeout(Duration::from_secs(2), base.stop_common())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(base.processing_task.read().await.is_none());
+        assert!(base.priority_queue.is_empty().await);
+        assert!(base.result_ordering.lock().await.is_empty());
+        let shutdown_rx = base.create_shutdown_channel().await;
+        base.set_status(ComponentStatus::Starting, None).await;
+        base.set_status(ComponentStatus::Running, None).await;
+        let checkpoints = base.read_all_checkpoints().await.unwrap();
+        base.enqueue_query_result(query_result("q1", 7, 1))
+            .await
+            .unwrap();
+        base.enqueue_query_result(query_result("q1", 8, 0))
+            .await
+            .unwrap();
+        let restarted = collect_queued_results(&base, shutdown_rx, checkpoints).await;
+        assert_eq!(
+            restarted
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap(),
+            ReactionCheckpoint {
+                sequence: 8,
+                config_hash: 42
+            }
+        );
     }
 
     #[test]
@@ -958,6 +1119,36 @@ mod tests {
                 .unwrap_err()
                 .is::<QueryResultSequenceInversion>());
         }
+    }
+
+    #[test]
+    fn test_sequence_cursor_retains_one_range_per_gap_not_per_missing_sequence() {
+        let mut cursor = QuerySequenceCursor::new(0);
+        for sequence in 0..=100_000 {
+            cursor.observe("q1", sequence).unwrap();
+        }
+        assert_eq!(cursor.missing.capacity(), 0);
+
+        for sequence in (100_002..=108_192).step_by(2) {
+            cursor.observe("q1", sequence).unwrap();
+        }
+        assert_eq!(cursor.missing.len(), 4_096);
+        cursor.observe("q1", u64::MAX).unwrap();
+        assert_eq!(cursor.missing.len(), 4_097);
+        assert_eq!(cursor.missing.last().unwrap(), &(108_193..u64::MAX));
+        for sequence in [0, 100_000, 100_002, 108_192, u64::MAX] {
+            cursor.observe("q1", sequence).unwrap();
+        }
+        assert_eq!(cursor.missing.len(), 4_097);
+        for sequence in [100_001, 108_191, u64::MAX - 1] {
+            assert!(cursor.observe("q1", sequence).is_err());
+        }
+
+        let mut restarted = QuerySequenceCursor::new(u64::MAX);
+        for sequence in [0, 1, u64::MAX - 1, u64::MAX] {
+            restarted.observe("q1", sequence).unwrap();
+        }
+        assert_eq!(restarted.missing.capacity(), 0);
     }
 
     #[tokio::test]
@@ -1530,6 +1721,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_loop_completion_waits_for_the_final_handler_and_checkpoint() {
+        let base = store_backed_base("delayed-completion").await;
+        let checkpoint = ReactionCheckpoint {
+            sequence: 5,
+            config_hash: 42,
+        };
+        base.write_checkpoint("q1", &checkpoint).await.unwrap();
+        let checkpoints = HashMap::from([("q1".to_string(), checkpoint)]);
+        let shutdown_rx = base.create_shutdown_channel().await;
+        for sequence in [6, 7] {
+            base.enqueue_query_result(query_result("q1", sequence, 100))
+                .await
+                .unwrap();
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let loop_base = base.clone_shared();
+        let loop_entered = entered.clone();
+        let loop_release = release.clone();
+        let loop_processed = processed.clone();
+        let task = tokio::spawn(async move {
+            loop_base
+                .run_standard_loop(shutdown_rx, checkpoints, |event| {
+                    let entered = loop_entered.clone();
+                    let release = loop_release.clone();
+                    let processed = loop_processed.clone();
+                    async move {
+                        if event.sequence == 7 {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        processed.lock().await.push(event.sequence);
+                        Ok(())
+                    }
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(30), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(base.priority_queue.metrics().await.total_dequeued, 2);
+        let completed = finish_queued_loop(&base, 2, task);
+        tokio::pin!(completed);
+        assert!(
+            futures::poll!(completed.as_mut()).is_pending(),
+            "completion must wait for the handler, even after every input was dequeued"
+        );
+        assert_eq!(*processed.lock().await, vec![6]);
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            6
+        );
+        release.notify_one();
+        completed.await;
+        assert_eq!(*processed.lock().await, vec![6, 7]);
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap(),
+            ReactionCheckpoint {
+                sequence: 7,
+                config_hash: 42
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_standard_loop_dedup_and_checkpoint() {
         assert_standard_loop_sequence_order([0, 1, 2, 2]).await;
     }
@@ -1546,22 +1803,8 @@ mod tests {
 
     async fn assert_standard_loop_sequence_order(timestamp_offsets: [i64; 4]) {
         for iteration in 0..100 {
-            let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-            let base = ReactionBase::new(ReactionBaseParams::new(
-                "loop-reaction",
-                vec!["q1".to_string()],
-            ));
-            let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
-            base.initialize(ReactionRuntimeContext::new(
-                "test-instance",
-                "loop-reaction",
-                Some(store),
-                graph.update_sender(),
-                None,
-            ))
-            .await;
-
-            let initial_checkpoints = std::collections::HashMap::from([(
+            let base = store_backed_base("loop-reaction").await;
+            let initial_checkpoints = HashMap::from([(
                 "q1".to_string(),
                 ReactionCheckpoint {
                     sequence: 5,
@@ -1572,50 +1815,20 @@ mod tests {
 
             // Queue the whole batch before starting the real checkpointing loop.
             for (seq, offset) in [3u64, 5, 6, 7].into_iter().zip(timestamp_offsets) {
-                let result = QueryResult::new(
-                    "q1".to_string(),
-                    seq,
-                    chrono::DateTime::from_timestamp_millis(1_000 + offset).unwrap(),
-                    vec![],
-                    Default::default(),
-                );
-                base.enqueue_query_result(result).await.unwrap();
+                base.enqueue_query_result(query_result("q1", seq, 1_000 + offset))
+                    .await
+                    .unwrap();
             }
 
-            let processed = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
-            let processed_clone = processed.clone();
-            let base_clone = base.clone_shared();
-            let loop_handle = tokio::spawn(async move {
-                base_clone
-                    .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
-                        let processed = processed_clone.clone();
-                        async move {
-                            processed.lock().await.push(event.sequence);
-                            Ok(())
-                        }
-                    })
-                    .await
-            });
-
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while base.priority_queue.metrics().await.total_dequeued < 4 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("the loop must dequeue every event, including replay duplicates");
-            base.stop_common().await.unwrap();
-            tokio::time::timeout(Duration::from_secs(2), loop_handle)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-
+            let processed = collect_queued_results(&base, shutdown_rx, initial_checkpoints).await;
             let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
             assert_eq!(cp.sequence, 7);
             assert_eq!(cp.config_hash, 42);
             assert_eq!(
-                *processed.lock().await,
+                processed
+                    .iter()
+                    .map(|event| event.sequence)
+                    .collect::<Vec<_>>(),
                 vec![6, 7],
                 "lost a new result on iteration {iteration} after checkpointing seq={}",
                 cp.sequence

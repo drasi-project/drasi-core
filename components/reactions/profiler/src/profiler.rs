@@ -518,12 +518,7 @@ impl Reaction for ProfilerReaction {
                     _ = &mut shutdown_rx => {
                         break;
                     }
-                    query_result = priority_queue.dequeue() => {
-                        // Extract and store profiling data
-                        if let Some(profiling) = query_result.profiling.clone() {
-                            stats.write().await.add_sample(profiling);
-                        }
-                    }
+                    // Service a due report even when the result queue stays backlogged.
                     _ = report_timer.tick() => {
                         // Generate periodic report
                         let stats_guard = stats.read().await;
@@ -551,6 +546,12 @@ impl Reaction for ProfilerReaction {
                         info!("[{}] {}", reaction_name, Self::format_stats("Total End-to-End", &total));
 
                         info!("[{reaction_name}] ======================================");
+                    }
+                    query_result = priority_queue.dequeue() => {
+                        // Extract and store profiling data
+                        if let Some(profiling) = query_result.profiling.clone() {
+                            stats.write().await.add_sample(profiling);
+                        }
                     }
                 }
             }

@@ -21,7 +21,7 @@ pub(crate) mod manager_tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
@@ -139,6 +139,14 @@ pub(crate) mod manager_tests {
     struct QueuedReaction {
         base: Arc<ReactionBase>,
         fail_start: AtomicBool,
+        start_gate: Option<Arc<StartGate>>,
+    }
+
+    #[derive(Default)]
+    struct StartGate {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        calls: AtomicUsize,
     }
 
     #[async_trait]
@@ -162,6 +170,13 @@ pub(crate) mod manager_tests {
             self.base.initialize(context).await;
         }
         async fn start(&self) -> Result<()> {
+            if let Some(gate) = &self.start_gate {
+                let previous = gate.calls.fetch_add(1, Ordering::SeqCst);
+                gate.entered.notify_one();
+                if previous == 0 {
+                    gate.release.notified().await;
+                }
+            }
             let shutdown = self.base.create_shutdown_channel().await;
             self.base
                 .set_processing_task(tokio::spawn(async move {
@@ -401,6 +416,69 @@ pub(crate) mod manager_tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_start_invokes_the_start_hook_only_once() {
+        let (manager, graph) = create_test_manager().await;
+        let base = Arc::new(ReactionBase::new(ReactionBaseParams::new(
+            "gated-start",
+            vec![],
+        )));
+        let gate = Arc::new(StartGate::default());
+        add_reaction(
+            &manager,
+            &graph,
+            QueuedReaction {
+                base,
+                fail_start: AtomicBool::new(false),
+                start_gate: Some(gate.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let mut events = graph.read().await.subscribe();
+        let first_manager = manager.clone();
+        let first = tokio::spawn(async move {
+            first_manager
+                .start_reaction("gated-start".to_string())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            manager
+                .get_reaction_status("gated-start".to_string())
+                .await
+                .unwrap(),
+            ComponentStatus::Starting
+        );
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.start_reaction("gated-start".to_string()),
+        )
+        .await
+        .expect("a duplicate start must reject without waiting for the first hook");
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(second.unwrap_err().to_string().contains("already starting"));
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        wait_for_component_status(
+            &mut events,
+            "gated-start",
+            ComponentStatus::Running,
+            Duration::from_secs(2),
+        )
+        .await;
+        manager
+            .stop_reaction("gated-start".to_string())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_duplicate_or_illegal_start_preserves_pending_results() {
         for status in
             [ComponentStatus::Starting, ComponentStatus::Running, ComponentStatus::Stopping]
@@ -413,6 +491,7 @@ pub(crate) mod manager_tests {
                 QueuedReaction {
                     base: base.clone(),
                     fail_start: AtomicBool::new(false),
+                    start_gate: None,
                 },
             )
             .await
@@ -469,6 +548,7 @@ pub(crate) mod manager_tests {
             QueuedReaction {
                 base: base.clone(),
                 fail_start: AtomicBool::new(true),
+                start_gate: None,
             },
         )
         .await

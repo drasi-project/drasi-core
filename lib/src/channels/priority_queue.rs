@@ -583,6 +583,7 @@ mod tests {
     fn test_ordering_key_is_a_transitive_total_order() {
         let timestamp = Utc::now();
         let events: Vec<_> = (0..8)
+            .chain([u64::MAX - 1, u64::MAX])
             .map(|ordinal| {
                 PriorityQueueEvent::new(
                     create_test_event("same-payload", timestamp),
