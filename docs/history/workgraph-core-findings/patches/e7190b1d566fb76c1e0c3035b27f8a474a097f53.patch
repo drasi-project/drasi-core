@@ -1,0 +1,1706 @@
+diff --git a/components/host-sdk/src/state_store_bridge.rs b/components/host-sdk/src/state_store_bridge.rs
+index 82dcf17aafc184a849b2f047c7750c16cefbbb8e..44115f640ac8f8b0770f0239ecfc241e6200ec06 100644
+--- a/components/host-sdk/src/state_store_bridge.rs
++++ b/components/host-sdk/src/state_store_bridge.rs
+@@ -21,7 +21,7 @@
+ use std::ffi::c_void;
+ use std::sync::Arc;
+ 
+-use drasi_lib::StateStoreProvider;
++use drasi_lib::{StateStoreCreateIfAbsentResult, StateStoreProvider};
+ use drasi_plugin_sdk::ffi::{FfiGetResult, FfiResult, FfiStr, FfiStringArray, StateStoreVtable};
+ 
+ /// Wraps an FFI body in `catch_unwind` and returns `default` on panic.
+@@ -53,6 +53,7 @@ impl StateStoreVtableBuilder {
+             state,
+             get_fn: ss_get,
+             set_fn: ss_set,
++            create_if_absent_fn: ss_create_if_absent,
+             delete_fn: ss_delete,
+             contains_key_fn: ss_contains_key,
+             get_many_fn: ss_get_many,
+@@ -116,6 +117,32 @@ extern "C" fn ss_set(
+     })
+ }
+ 
++extern "C" fn ss_create_if_absent(
++    state: *mut c_void,
++    store_id: FfiStr,
++    key: FfiStr,
++    value: *const u8,
++    value_len: usize,
++) -> FfiGetResult {
++    ffi_guard(
++        FfiGetResult::err("ss_create_if_absent: panic".to_string()),
++        || {
++            let provider = provider_ref(state);
++            let store_id = unsafe { store_id.to_string() };
++            let key = unsafe { key.to_string() };
++            let value = unsafe { std::slice::from_raw_parts(value, value_len) }.to_vec();
++            match block_on(provider.create_if_absent(&store_id, &key, value)) {
++                Some(Ok(StateStoreCreateIfAbsentResult::Created)) => FfiGetResult::not_found(),
++                Some(Ok(StateStoreCreateIfAbsentResult::Existing(existing))) => {
++                    FfiGetResult::found(existing)
++                }
++                Some(Err(e)) => FfiGetResult::err(e.to_string()),
++                None => FfiGetResult::err("failed to build runtime".to_string()),
++            }
++        },
++    )
++}
++
+ extern "C" fn ss_delete(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult {
+     ffi_guard(FfiResult::err("ss_delete: panic".to_string()), || {
+         let provider = provider_ref(state);
+diff --git a/components/plugin-sdk/src/ffi/state_store_proxy.rs b/components/plugin-sdk/src/ffi/state_store_proxy.rs
+index 9cc577e38d11658dcd8d8822f288a54a92ee12de..e4fefc26da36e5bc8b014bb924ed7fa067ecf8c4 100644
+--- a/components/plugin-sdk/src/ffi/state_store_proxy.rs
++++ b/components/plugin-sdk/src/ffi/state_store_proxy.rs
+@@ -23,7 +23,7 @@ use std::collections::HashMap;
+ 
+ use super::types::FfiStr;
+ use super::vtables::StateStoreVtable;
+-use drasi_lib::{StateStoreProvider, StateStoreResult};
++use drasi_lib::{StateStoreCreateIfAbsentResult, StateStoreProvider, StateStoreResult};
+ 
+ /// Plugin-side proxy: wraps a host-provided `StateStoreVtable` into a local
+ /// `StateStoreProvider` implementation.
+@@ -64,6 +64,30 @@ impl StateStoreProvider for FfiStateStoreProxy {
+         }
+     }
+ 
++    async fn create_if_absent(
++        &self,
++        store_id: &str,
++        key: &str,
++        value: Vec<u8>,
++    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
++        unsafe {
++            let vtable = &*self.vtable;
++            (vtable.create_if_absent_fn)(
++                vtable.state,
++                FfiStr::from_str(store_id),
++                FfiStr::from_str(key),
++                value.as_ptr(),
++                value.len(),
++            )
++            .into_result()
++            .map(|value| match value {
++                Some(existing) => StateStoreCreateIfAbsentResult::Existing(existing),
++                None => StateStoreCreateIfAbsentResult::Created,
++            })
++            .map_err(drasi_lib::StateStoreError::Other)
++        }
++    }
++
+     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+         unsafe {
+             let vtable = &*self.vtable;
+diff --git a/components/plugin-sdk/src/ffi/vtables.rs b/components/plugin-sdk/src/ffi/vtables.rs
+index 5b98c3aeea028d0995db8050a5d2af91dfdcdb30..e96895f5747f89f28453ca550a34ec96492b8e6b 100644
+--- a/components/plugin-sdk/src/ffi/vtables.rs
++++ b/components/plugin-sdk/src/ffi/vtables.rs
+@@ -667,6 +667,14 @@ pub struct StateStoreVtable {
+     pub sync_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
+     // Cleanup
+     pub drop_fn: extern "C" fn(state: *mut c_void),
++    // Extension operations (appended to preserve prefix ABI layout)
++    pub create_if_absent_fn: extern "C" fn(
++        state: *mut c_void,
++        store_id: FfiStr,
++        key: FfiStr,
++        value: *const u8,
++        value_len: usize,
++    ) -> FfiGetResult,
+ }
+ 
+ unsafe impl Send for StateStoreVtable {}
+diff --git a/components/reactions/workgraph-router/README.md b/components/reactions/workgraph-router/README.md
+index 91786ab6b73118ed76f6edd8828588a419ac29bd..9a5bfc57dc897887358a1809d37035cd506d1065 100644
+--- a/components/reactions/workgraph-router/README.md
++++ b/components/reactions/workgraph-router/README.md
+@@ -2,7 +2,7 @@
+ 
+ `drasi-reaction-workgraph-router` is a deterministic Phase 2 WorkGraph router reaction.
+ 
+-It consumes **ADDED** rows from the single query `route-awaiting-workgraph-items`, revalidates row provenance + allowlists, reserves routing by `(executionId, requiredEventType)`, applies rules v1, writes trusted JSON comments, creates next routing responsibility, updates Project status, and checkpoints only after durable side effects.
++It consumes **ADDED** rows from the single query `route-awaiting-workgraph-items`, revalidates row provenance + allowlists, reserves routing by `(executionId, requiredEventType)` with durable create-if-absent fencing, applies rules v1, writes trusted JSON comments, creates next routing responsibility, updates Project status, and checkpoints only after durable side effects.
+ 
+ ## Prerequisites
+ 
+@@ -20,6 +20,7 @@ Top-level config (`camelCase`):
+ - `allowedResponsibilityTypes`, `allowedActors`
+ - `trustedRoutingAuthors`, `trustedLauncherAuthors`, `trustedAgentAuthors`, `trustedRouterAuthors`
+ - `githubGraphqlUrl`, `githubRestUrl`, `githubTokenEnv`
++- `projectStatusFieldName` (defaults to `Status`)
+ - `timeoutSecs`
+ - `strictRecovery`
+ 
+@@ -67,22 +68,20 @@ For `CompletedIssueValidation`:
+    - `type: "workgraph.routing-decision/v1"`
+ 2. Trusted pure-JSON issue comment:
+    - `type: "workgraph.routing-responsibility/v1"`
+-3. GraphQL project status update mutation
++3. GraphQL `updateProjectV2ItemFieldValue` project status mutation
+ 
+ Reconciliation on retry requires trusted, unedited comments; forged public comments do not satisfy reconciliation.
+ 
+ ## Durability and recovery
+ 
+ - Durable reservation key: `(executionId, requiredEventType)` only
+-- Policy id/version are atomically bound at reservation time within the reaction process
++- Reservation creation uses state-store `create_if_absent` (atomic where supported) and records owner fencing metadata
++- Incomplete reservations owned by another runner are fenced until a persisted failed state is available for safe resume
+ - Stored state includes reservation, decision, selected transition, side-effect progress, ambiguous/failed flags, and errors
+ - `is_durable() = true`
+ - `needs_snapshot_on_fresh_start() = false`
+ - `default_recovery_policy() = Strict`
+-
+-### Note on SDK primitive gap
+-
+-Drasi state store currently has no cross-process compare-and-swap primitive. Reservation write is implemented with an in-process async mutex + durable state store read/write. This is the smallest reusable extension available without middleware changes.
++- Retry/resume always re-checks GitHub issue/project state; status updates are allowed only from source status (`AwaitingRouting`) or when destination status is already applied
+ 
+ ## Running checks
+ 
+@@ -101,10 +100,13 @@ Covered scenarios:
+ 
+ - pass/fail routing
+ - duplicate race suppression
++- concurrent replica fencing with shared durable state
+ - policy-version conflict suppression
++- interrupted old-policy resume using persisted decision contract
+ - untrusted input rejection
+ - stale content rejection
+ - wrong status rejection
++- retry preflight protection for closed issues and competing status changes
+ - GraphQL HTTP 200 + `errors` failure behavior
+ - partial side-effect recovery via reconciliation
+ - update/delete ignored
+@@ -122,5 +124,5 @@ cargo test -p drasi-reaction-workgraph-router --test integration_test -- --ignor
+   - ensure `githubTokenEnv` points to an exported token variable
+ - `selected transition ... is not allowlisted`:
+   - update `allowedStatusTransitions` to include policy output
+-- `project item ... status is 'X' (expected 'AwaitingRouting')`:
+-  - row is stale or item was already routed
++- `project item ... status is 'X' (expected 'AwaitingRouting' or '<destination>')`:
++  - row is stale, changed by another workflow, or already routed
+diff --git a/components/reactions/workgraph-router/src/config.rs b/components/reactions/workgraph-router/src/config.rs
+index e7554df117c9b2c840ea41efff75b174e9f0f4b7..c7432c8ab4c71b48c9b53d70f51ee1ac05fbebf5 100644
+--- a/components/reactions/workgraph-router/src/config.rs
++++ b/components/reactions/workgraph-router/src/config.rs
+@@ -30,6 +30,10 @@ fn default_github_token_env() -> String {
+     "GITHUB_TOKEN".to_string()
+ }
+ 
++fn default_project_status_field_name() -> String {
++    "Status".to_string()
++}
++
+ fn default_timeout_secs() -> u64 {
+     30
+ }
+@@ -68,6 +72,8 @@ pub struct WorkgraphRouterReactionConfig {
+     pub github_rest_url: String,
+     #[serde(default = "default_github_token_env")]
+     pub github_token_env: String,
++    #[serde(default = "default_project_status_field_name")]
++    pub project_status_field_name: String,
+     #[serde(default = "default_timeout_secs")]
+     pub timeout_secs: u64,
+     #[serde(default = "default_strict_recovery")]
+@@ -99,6 +105,7 @@ impl std::fmt::Debug for WorkgraphRouterReactionConfig {
+             .field("github_graphql_url", &self.github_graphql_url)
+             .field("github_rest_url", &self.github_rest_url)
+             .field("github_token_env", &self.github_token_env)
++            .field("project_status_field_name", &self.project_status_field_name)
+             .field("timeout_secs", &self.timeout_secs)
+             .field("strict_recovery", &self.strict_recovery)
+             .finish()
+@@ -137,6 +144,7 @@ impl Default for WorkgraphRouterReactionConfig {
+             github_graphql_url: default_github_graphql_url(),
+             github_rest_url: default_github_rest_url(),
+             github_token_env: default_github_token_env(),
++            project_status_field_name: default_project_status_field_name(),
+             timeout_secs: default_timeout_secs(),
+             strict_recovery: default_strict_recovery(),
+         }
+@@ -189,6 +197,9 @@ impl WorkgraphRouterReactionConfig {
+         if self.github_token_env.trim().is_empty() {
+             anyhow::bail!("githubTokenEnv is required");
+         }
++        if self.project_status_field_name.trim().is_empty() {
++            anyhow::bail!("projectStatusFieldName is required");
++        }
+         Ok(())
+     }
+ 
+diff --git a/components/reactions/workgraph-router/src/descriptor.rs b/components/reactions/workgraph-router/src/descriptor.rs
+index 6877cf098aa75eb8489540af381242e179fce757..11930db3c8dfeed149662f29a0d3f4bcad5a56a7 100644
+--- a/components/reactions/workgraph-router/src/descriptor.rs
++++ b/components/reactions/workgraph-router/src/descriptor.rs
+@@ -73,6 +73,9 @@ pub struct WorkgraphRouterReactionConfigDto {
+     #[schema(value_type = ConfigValueString)]
+     pub github_token_env: ConfigValue<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub project_status_field_name: Option<ConfigValue<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[schema(value_type = Option<ConfigValueU64>)]
+     pub timeout_secs: Option<ConfigValue<u64>>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -154,6 +157,9 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
+             github_graphql_url: ConfigValue::Static(config.github_graphql_url.clone()),
+             github_rest_url: ConfigValue::Static(config.github_rest_url.clone()),
+             github_token_env: ConfigValue::Static(config.github_token_env.clone()),
++            project_status_field_name: Some(ConfigValue::Static(
++                config.project_status_field_name.clone(),
++            )),
+             timeout_secs: Some(ConfigValue::Static(config.timeout_secs)),
+             strict_recovery: Some(ConfigValue::Static(config.strict_recovery)),
+             priority_queue_capacity: None,
+@@ -254,6 +260,12 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
+             .with_github_rest_url(mapper.resolve_string(&dto.github_rest_url).await?)
+             .with_github_token_env(mapper.resolve_string(&dto.github_token_env).await?);
+ 
++        if let Some(project_status_field_name) = dto.project_status_field_name.as_ref() {
++            builder = builder.with_project_status_field_name(
++                mapper.resolve_string(project_status_field_name).await?,
++            );
++        }
++
+         if let Some(timeout_secs) = dto.timeout_secs.as_ref() {
+             builder = builder.with_timeout_secs(mapper.resolve_typed::<u64>(timeout_secs).await?);
+         }
+diff --git a/components/reactions/workgraph-router/src/github_client.rs b/components/reactions/workgraph-router/src/github_client.rs
+index faeceb52827aea0083e16df4bd136642f50db4df..dcba8512b9defdb183095f719c3a6d28d80dc4fa 100644
+--- a/components/reactions/workgraph-router/src/github_client.rs
++++ b/components/reactions/workgraph-router/src/github_client.rs
+@@ -12,6 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++use std::collections::HashMap;
++
+ use anyhow::Context;
+ use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
+ use serde::{Deserialize, Serialize};
+@@ -19,14 +21,35 @@ use serde_json::Value;
+ 
+ use crate::config::WorkgraphRouterReactionConfig;
+ 
+-const PRE_FLIGHT_STATUS_QUERY: &str = r#"
+-query WorkgraphRouterPreflight($projectItemId: ID!) {
+-  node(id: $projectItemId) {
++const PROJECT_STATUS_SNAPSHOT_QUERY: &str = r#"
++query WorkgraphRouterProjectStatusSnapshot($projectId: ID!, $projectItemId: ID!, $statusFieldName: String!) {
++  project: node(id: $projectId) {
++    ... on ProjectV2 {
++      id
++      fields(first: 100) {
++        nodes {
++          ... on ProjectV2SingleSelectField {
++            id
++            name
++            options {
++              id
++              name
++            }
++          }
++        }
++      }
++    }
++  }
++  item: node(id: $projectItemId) {
+     ... on ProjectV2Item {
+       id
+-      fieldValueByName(name: "Status") {
++      project {
++        id
++      }
++      fieldValueByName(name: $statusFieldName) {
+         ... on ProjectV2ItemFieldSingleSelectValue {
+           name
++          optionId
+         }
+       }
+     }
+@@ -34,11 +57,22 @@ query WorkgraphRouterPreflight($projectItemId: ID!) {
+ }
+ "#;
+ 
+-const PROJECT_STATUS_MUTATION: &str = r#"
+-mutation WorkgraphRouterUpdateStatus($projectId: ID!, $projectItemId: ID!, $statusName: String!) {
+-  workgraphRouterUpdateStatus(projectId: $projectId, projectItemId: $projectItemId, statusName: $statusName) {
+-    projectItemId
+-    statusName
++const UPDATE_PROJECT_V2_ITEM_FIELD_VALUE_MUTATION: &str = r#"
++mutation WorkgraphRouterUpdateProjectV2Status(
++  $projectId: ID!
++  $projectItemId: ID!
++  $statusFieldId: ID!
++  $statusOptionId: String!
++) {
++  updateProjectV2ItemFieldValue(input: {
++    projectId: $projectId,
++    itemId: $projectItemId,
++    fieldId: $statusFieldId,
++    value: { singleSelectOptionId: $statusOptionId }
++  }) {
++    projectV2Item {
++      id
++    }
+   }
+ }
+ "#;
+@@ -49,6 +83,7 @@ pub struct GithubClient {
+     pub rest_url: String,
+     pub graphql_url: String,
+     pub token_env: String,
++    pub project_status_field_name: String,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+@@ -83,6 +118,7 @@ impl GithubClient {
+             rest_url: config.github_rest_url.trim_end_matches('/').to_string(),
+             graphql_url: config.github_graphql_url.clone(),
+             token_env: config.github_token_env.clone(),
++            project_status_field_name: config.project_status_field_name.clone(),
+         })
+     }
+ 
+@@ -114,19 +150,16 @@ impl GithubClient {
+             .is_some_and(|state| state.eq_ignore_ascii_case("open")))
+     }
+ 
+-    pub async fn current_project_status(&self, project_item_id: &str) -> anyhow::Result<String> {
+-        let data = self
+-            .graphql(
+-                PRE_FLIGHT_STATUS_QUERY,
+-                serde_json::json!({ "projectItemId": project_item_id }),
+-            )
+-            .await?;
+-        data.pointer("/node/fieldValueByName/name")
+-            .and_then(Value::as_str)
+-            .map(ToString::to_string)
+-            .ok_or_else(|| {
+-                anyhow::anyhow!("GraphQL preflight response missing project item status")
+-            })
++    pub async fn current_project_status(
++        &self,
++        project_id: &str,
++        project_item_id: &str,
++    ) -> anyhow::Result<String> {
++        let snapshot = self
++            .project_status_snapshot(project_id, project_item_id)
++            .await
++            .context("failed to resolve project status snapshot")?;
++        Ok(snapshot.current_status)
+     }
+ 
+     pub async fn update_project_status(
+@@ -135,13 +168,31 @@ impl GithubClient {
+         project_item_id: &str,
+         status_name: &str,
+     ) -> anyhow::Result<()> {
+-        let _ = self
++        let snapshot = self
++            .project_status_snapshot(project_id, project_item_id)
++            .await
++            .context("failed to resolve project status update metadata")?;
++        let status_option_id = snapshot
++            .status_option_ids
++            .get(status_name)
++            .cloned()
++            .ok_or_else(|| {
++                anyhow::anyhow!(
++                    "project '{}' status field '{}' has no option named '{}'",
++                    project_id,
++                    self.project_status_field_name,
++                    status_name
++                )
++            })?;
++
++        let data = self
+             .graphql(
+-                PROJECT_STATUS_MUTATION,
++                UPDATE_PROJECT_V2_ITEM_FIELD_VALUE_MUTATION,
+                 serde_json::json!({
+                     "projectId": project_id,
+                     "projectItemId": project_item_id,
+-                    "statusName": status_name
++                    "statusFieldId": snapshot.status_field_id,
++                    "statusOptionId": status_option_id
+                 }),
+             )
+             .await
+@@ -150,6 +201,17 @@ impl GithubClient {
+                     "failed to update project status for projectItemId='{project_item_id}' to '{status_name}'"
+                 )
+             })?;
++        let updated_item_id = data
++            .pointer("/updateProjectV2ItemFieldValue/projectV2Item/id")
++            .and_then(Value::as_str)
++            .ok_or_else(|| {
++                anyhow::anyhow!("GraphQL update response missing updateProjectV2ItemFieldValue.projectV2Item.id")
++            })?;
++        if updated_item_id != project_item_id {
++            anyhow::bail!(
++                "GraphQL update returned mismatched project item id '{updated_item_id}' (expected '{project_item_id}')"
++            );
++        }
+         Ok(())
+     }
+ 
+@@ -281,6 +343,91 @@ impl GithubClient {
+         std::env::var(&self.token_env)
+             .with_context(|| format!("environment variable '{}' is not set", self.token_env))
+     }
++
++    async fn project_status_snapshot(
++        &self,
++        project_id: &str,
++        project_item_id: &str,
++    ) -> anyhow::Result<ProjectStatusSnapshot> {
++        let data = self
++            .graphql(
++                PROJECT_STATUS_SNAPSHOT_QUERY,
++                serde_json::json!({
++                    "projectId": project_id,
++                    "projectItemId": project_item_id,
++                    "statusFieldName": self.project_status_field_name
++                }),
++            )
++            .await?;
++
++        let item_project_id = data
++            .pointer("/item/project/id")
++            .and_then(Value::as_str)
++            .ok_or_else(|| anyhow::anyhow!("GraphQL status snapshot missing item.project.id"))?;
++        if item_project_id != project_id {
++            anyhow::bail!(
++                "project item '{project_item_id}' belongs to project '{item_project_id}' instead of expected '{project_id}'"
++            );
++        }
++
++        let current_status = data
++            .pointer("/item/fieldValueByName/name")
++            .and_then(Value::as_str)
++            .ok_or_else(|| anyhow::anyhow!("GraphQL status snapshot missing current status value"))?
++            .to_string();
++
++        let status_field_nodes = data
++            .pointer("/project/fields/nodes")
++            .and_then(Value::as_array)
++            .ok_or_else(|| anyhow::anyhow!("GraphQL status snapshot missing project fields"))?;
++        let status_field = status_field_nodes
++            .iter()
++            .find(|field| {
++                field.get("name").and_then(Value::as_str)
++                    == Some(self.project_status_field_name.as_str())
++            })
++            .ok_or_else(|| {
++                anyhow::anyhow!(
++                    "project '{}' is missing single-select field '{}'",
++                    project_id,
++                    self.project_status_field_name
++                )
++            })?;
++        let status_field_id = status_field
++            .get("id")
++            .and_then(Value::as_str)
++            .ok_or_else(|| anyhow::anyhow!("status field payload missing field id"))?
++            .to_string();
++        let status_option_ids = status_field
++            .get("options")
++            .and_then(Value::as_array)
++            .ok_or_else(|| anyhow::anyhow!("status field payload missing options"))?
++            .iter()
++            .filter_map(|option| {
++                let name = option.get("name").and_then(Value::as_str)?;
++                let id = option.get("id").and_then(Value::as_str)?;
++                Some((name.to_string(), id.to_string()))
++            })
++            .collect::<HashMap<_, _>>();
++        if status_option_ids.is_empty() {
++            anyhow::bail!(
++                "status field '{}' has no configured options",
++                self.project_status_field_name
++            );
++        }
++
++        Ok(ProjectStatusSnapshot {
++            current_status,
++            status_field_id,
++            status_option_ids,
++        })
++    }
++}
++
++struct ProjectStatusSnapshot {
++    current_status: String,
++    status_field_id: String,
++    status_option_ids: HashMap<String, String>,
+ }
+ 
+ fn parse_comment(value: Value) -> anyhow::Result<IssueComment> {
+diff --git a/components/reactions/workgraph-router/src/lib.rs b/components/reactions/workgraph-router/src/lib.rs
+index 2538bb78f75504e89e34d4dd888c84d6b829c5ba..89aeb7575166cf6e067d65657051f1b81ebbb981 100644
+--- a/components/reactions/workgraph-router/src/lib.rs
++++ b/components/reactions/workgraph-router/src/lib.rs
+@@ -164,6 +164,11 @@ impl WorkgraphRouterReactionBuilder {
+         self
+     }
+ 
++    pub fn with_project_status_field_name(mut self, value: impl Into<String>) -> Self {
++        self.config.project_status_field_name = value.into();
++        self
++    }
++
+     pub fn with_timeout_secs(mut self, value: u64) -> Self {
+         self.config.timeout_secs = value;
+         self
+diff --git a/components/reactions/workgraph-router/src/reaction.rs b/components/reactions/workgraph-router/src/reaction.rs
+index 36c23f01fedadf402290ed5288e31bc1a289a6c9..34d61542d39d8eec16e571e4445b9b8b9b5c1706 100644
+--- a/components/reactions/workgraph-router/src/reaction.rs
++++ b/components/reactions/workgraph-router/src/reaction.rs
+@@ -25,7 +25,6 @@ use drasi_lib::recovery::ReactionRecoveryPolicy;
+ use drasi_lib::state_store::StateStoreProvider;
+ use drasi_lib::Reaction;
+ use log::{error, info, warn};
+-use tokio::sync::Mutex;
+ 
+ use crate::candidate::RoutingCandidate;
+ use crate::config::{WorkgraphRouterReactionConfig, ROUTE_QUERY_ID};
+@@ -34,16 +33,22 @@ use crate::github_client::GithubClient;
+ use crate::reconciliation::reconcile_progress;
+ use crate::rules::{PolicyMode, RoutingPolicyEngine, RulesV1PolicyEngine};
+ use crate::state::{
+-    load_reservation, load_routing_state, save_reservation, save_routing_state, ReservationRecord,
+-    RoutingStateRecord, SideEffectProgress,
++    create_reservation_if_absent, load_reservation, load_routing_state, save_reservation,
++    save_routing_state, ReservationRecord, RoutingStateRecord, SideEffectProgress,
+ };
+ use crate::validation::validate_candidate;
+ use crate::WorkgraphRouterReactionBuilder;
+ 
++#[derive(Debug, thiserror::Error)]
++#[error("{message}")]
++struct ReservationFencedError {
++    message: String,
++}
++
+ pub struct WorkgraphRouterReaction {
+     pub(crate) base: ReactionBase,
+     pub(crate) config: WorkgraphRouterReactionConfig,
+-    reservation_lock: Arc<Mutex<()>>,
++    runner_instance_id: String,
+ }
+ 
+ impl WorkgraphRouterReaction {
+@@ -59,6 +64,11 @@ impl WorkgraphRouterReaction {
+         auto_start: bool,
+         recovery_policy: Option<ReactionRecoveryPolicy>,
+     ) -> Self {
++        let runner_instance_id = format!(
++            "{id}:{}:{}",
++            std::process::id(),
++            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
++        );
+         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+         if let Some(capacity) = priority_queue_capacity {
+             params = params.with_priority_queue_capacity(capacity);
+@@ -69,7 +79,7 @@ impl WorkgraphRouterReaction {
+         Self {
+             base: ReactionBase::new(params),
+             config,
+-            reservation_lock: Arc::new(Mutex::new(())),
++            runner_instance_id,
+         }
+     }
+ }
+@@ -118,7 +128,7 @@ impl Reaction for WorkgraphRouterReaction {
+         let reaction_name = self.base.id.clone();
+         let base = self.base.clone_shared();
+         let config = self.config.clone();
+-        let reservation_lock = Arc::clone(&self.reservation_lock);
++        let runner_instance_id = self.runner_instance_id.clone();
+ 
+         let handle = tokio::spawn(async move {
+             let mut checkpoint_state = CheckpointState::load(&base).await;
+@@ -127,7 +137,7 @@ impl Reaction for WorkgraphRouterReaction {
+                 base,
+                 config,
+                 github,
+-                reservation_lock,
++                &runner_instance_id,
+                 &mut checkpoint_state,
+                 shutdown_rx,
+             )
+@@ -174,7 +184,7 @@ async fn run_processing_loop(
+     base: ReactionBase,
+     config: WorkgraphRouterReactionConfig,
+     github: GithubClient,
+-    reservation_lock: Arc<Mutex<()>>,
++    runner_instance_id: &str,
+     checkpoint_state: &mut CheckpointState,
+     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+ ) {
+@@ -198,11 +208,18 @@ async fn run_processing_loop(
+             &base,
+             &config,
+             &github,
+-            Arc::clone(&reservation_lock),
++            runner_instance_id,
+             &event,
+         )
+         .await
+         {
++            if error.downcast_ref::<ReservationFencedError>().is_some() {
++                info!(
++                    "[{}] reservation fenced for query '{}' sequence {}: {}",
++                    reaction_name, event.query_id, event.sequence, error
++                );
++                continue;
++            }
+             error!(
+                 "[{}] processing failed for query '{}' sequence {}: {error:#}",
+                 reaction_name, event.query_id, event.sequence
+@@ -241,7 +258,7 @@ async fn process_query_result(
+     base: &ReactionBase,
+     config: &WorkgraphRouterReactionConfig,
+     github: &GithubClient,
+-    reservation_lock: Arc<Mutex<()>>,
++    runner_instance_id: &str,
+     result: &QueryResult,
+ ) -> anyhow::Result<()> {
+     for diff in &result.results {
+@@ -254,7 +271,7 @@ async fn process_query_result(
+                     base,
+                     config,
+                     github,
+-                    Arc::clone(&reservation_lock),
++                    runner_instance_id,
+                     &candidate,
+                 )
+                 .await?;
+@@ -276,7 +293,7 @@ async fn process_candidate(
+     base: &ReactionBase,
+     config: &WorkgraphRouterReactionConfig,
+     github: &GithubClient,
+-    reservation_lock: Arc<Mutex<()>>,
++    runner_instance_id: &str,
+     candidate: &RoutingCandidate,
+ ) -> anyhow::Result<()> {
+     validate_candidate(candidate, config).context("row validation failed")?;
+@@ -286,8 +303,14 @@ async fn process_candidate(
+         .await
+         .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
+ 
+-    let (mut reservation, mut state) =
+-        reserve_or_resume(store.clone(), &base.id, config, candidate, reservation_lock).await?;
++    let (mut reservation, mut state, owns_reservation) = reserve_or_resume(
++        store.clone(),
++        &base.id,
++        config,
++        candidate,
++        runner_instance_id,
++    )
++    .await?;
+ 
+     if reservation.completed && state.progress.is_complete() {
+         info!(
+@@ -297,29 +320,60 @@ async fn process_candidate(
+         return Ok(());
+     }
+ 
+-    if reservation.policy_id != config.policy_id
+-        || reservation.policy_version != config.policy_version
+-    {
++    if !owns_reservation && !reservation.completed && !state.failed {
++        return Err(ReservationFencedError {
++            message: format!(
++                "reservation '{}' is fenced by owner '{}' and is not complete",
++                reservation.reservation_key,
++                reservation
++                    .owner_instance_id
++                    .as_deref()
++                    .unwrap_or("unknown")
++            ),
++        }
++        .into());
++    }
++    if !owns_reservation && !reservation.completed && state.failed {
+         info!(
+-            "[{}] reservation '{}' already bound to policy {}@{}; skipping newer policy {}@{}",
++            "[{}] resuming failed reservation '{}' owned by '{}' after persisted failure",
+             reaction_name,
+             reservation.reservation_key,
+-            reservation.policy_id,
+-            reservation.policy_version,
+-            config.policy_id,
+-            config.policy_version
++            reservation
++                .owner_instance_id
++                .as_deref()
++                .unwrap_or("unknown")
+         );
+-        return Ok(());
++        reservation.owner_instance_id = Some(runner_instance_id.to_string());
++        save_reservation(store.clone(), &base.id, &reservation)
++            .await
++            .context("failed to persist reservation ownership claim during resume")?;
+     }
+ 
+-    let requires_fresh_preflight = state.decision.is_none();
+-    if requires_fresh_preflight {
+-        run_github_preflight(github, candidate).await?;
+-    }
++    let reservation_policy_mismatch = reservation.policy_id != config.policy_id
++        || reservation.policy_type != config.policy_type
++        || reservation.policy_version != config.policy_version;
+ 
+     let decision = if let Some(decision) = state.decision.clone() {
++        if reservation_policy_mismatch {
++            info!(
++                "[{}] resuming reservation '{}' with persisted decision '{}' bound to policy {}@{}",
++                reaction_name,
++                reservation.reservation_key,
++                decision.decision_id,
++                decision.policy_id,
++                decision.policy_version
++            );
++        }
+         decision
+     } else {
++        if reservation_policy_mismatch {
++            anyhow::bail!(
++                "reservation '{}' is bound to policy {}@{} but has no persisted decision to resume",
++                reservation.reservation_key,
++                reservation.policy_id,
++                reservation.policy_version
++            );
++        }
+         let mode = PolicyMode::try_from(config.policy_type.as_str())
+             .context("unable to resolve policyType for routing evaluation")?;
+         let engine: Box<dyn RoutingPolicyEngine> = match mode {
+@@ -351,6 +405,14 @@ async fn process_candidate(
+         decision
+     };
+ 
++    if let Err(error) = run_github_preflight(github, candidate, &decision).await {
++        state.mark_error(format!("github preflight failed: {error:#}"), false);
++        save_routing_state(store.clone(), &base.id, &state)
++            .await
++            .context("failed to persist preflight failure state")?;
++        return Err(error);
++    }
++
+     let mut progress =
+         reconcile_progress(github, candidate, &decision, config, state.progress.clone())
+             .await
+@@ -463,22 +525,20 @@ async fn reserve_or_resume(
+     store_id: &str,
+     config: &WorkgraphRouterReactionConfig,
+     candidate: &RoutingCandidate,
+-    reservation_lock: Arc<Mutex<()>>,
+-) -> anyhow::Result<(ReservationRecord, RoutingStateRecord)> {
+-    // Smallest reusable reservation primitive available today:
+-    // the StateStoreProvider trait has no CAS/create-if-absent operation yet,
+-    // so we serialize read+write within the reaction process. Durable state
+-    // still guarantees replay-safe dedupe on restart for a single runner.
+-    let _guard = reservation_lock.lock().await;
++    runner_instance_id: &str,
++) -> anyhow::Result<(ReservationRecord, RoutingStateRecord, bool)> {
+     let reservation_key = candidate.reservation_key();
+-    let existing = load_reservation(store.clone(), store_id, &reservation_key).await?;
+-    let reservation = if let Some(existing) = existing {
+-        existing
++    let (reservation, owns_reservation) = if let Some(existing) =
++        load_reservation(store.clone(), store_id, &reservation_key).await?
++    {
++        let owns_existing = existing.owner_instance_id.as_deref() == Some(runner_instance_id);
++        (existing, owns_existing)
+     } else {
+         let created = ReservationRecord {
+             reservation_key: reservation_key.clone(),
+             execution_id: candidate.execution_id.clone(),
+             required_event_type: candidate.required_event_type.clone(),
++            owner_instance_id: Some(runner_instance_id.to_string()),
+             policy_id: config.policy_id.clone(),
+             policy_type: config.policy_type.clone(),
+             policy_version: config.policy_version.clone(),
+@@ -486,8 +546,10 @@ async fn reserve_or_resume(
+             created_at: chrono::Utc::now().to_rfc3339(),
+             completed: false,
+         };
+-        save_reservation(store.clone(), store_id, &created).await?;
+-        created
++        match create_reservation_if_absent(store.clone(), store_id, &created).await? {
++            Some(existing) => (existing, false),
++            None => (created, true),
++        }
+     };
+ 
+     let state = if let Some(existing_state) =
+@@ -499,12 +561,13 @@ async fn reserve_or_resume(
+         save_routing_state(store, store_id, &state).await?;
+         state
+     };
+-    Ok((reservation, state))
++    Ok((reservation, state, owns_reservation))
+ }
+ 
+ async fn run_github_preflight(
+     github: &GithubClient,
+     candidate: &RoutingCandidate,
++    decision: &RoutingDecision,
+ ) -> anyhow::Result<()> {
+     if !github
+         .issue_is_open(&candidate.subject_repo, candidate.subject_issue_number)
+@@ -518,14 +581,16 @@ async fn run_github_preflight(
+         );
+     }
+     let current_status = github
+-        .current_project_status(&candidate.project_item_id)
++        .current_project_status(&candidate.project_id, &candidate.project_item_id)
+         .await
+         .context("GitHub project-status preflight failed")?;
+-    if current_status != "AwaitingRouting" {
++    if current_status != decision.from_status && current_status != decision.to_status {
+         anyhow::bail!(
+-            "project item {} status is '{}' (expected 'AwaitingRouting')",
++            "project item {} status is '{}' (expected '{}' or '{}')",
+             candidate.project_item_id,
+-            current_status
++            current_status,
++            decision.from_status,
++            decision.to_status
+         );
+     }
+     Ok(())
+diff --git a/components/reactions/workgraph-router/src/reconciliation.rs b/components/reactions/workgraph-router/src/reconciliation.rs
+index 47e3634db51eb46af1bad4890af3ba7ebf3e9bec..e08794718f7242359059e98200e30699192e2f1a 100644
+--- a/components/reactions/workgraph-router/src/reconciliation.rs
++++ b/components/reactions/workgraph-router/src/reconciliation.rs
+@@ -56,7 +56,7 @@ pub async fn reconcile_progress(
+ 
+     if !progress.project_status_updated {
+         let project_status = github
+-            .current_project_status(&candidate.project_item_id)
++            .current_project_status(&candidate.project_id, &candidate.project_item_id)
+             .await?;
+         if project_status == decision.to_status {
+             progress.project_status_updated = true;
+diff --git a/components/reactions/workgraph-router/src/state.rs b/components/reactions/workgraph-router/src/state.rs
+index 8dbe00a8a83d970ec0911aa8b0f8f8fc0f85154b..0d84b1c553f5561d93057293551a5ac6069e3caf 100644
+--- a/components/reactions/workgraph-router/src/state.rs
++++ b/components/reactions/workgraph-router/src/state.rs
+@@ -15,7 +15,7 @@
+ use std::sync::Arc;
+ 
+ use chrono::Utc;
+-use drasi_lib::state_store::StateStoreProvider;
++use drasi_lib::state_store::{StateStoreCreateIfAbsentResult, StateStoreProvider};
+ use serde::{Deserialize, Serialize};
+ 
+ use crate::candidate::RoutingCandidate;
+@@ -30,6 +30,8 @@ pub struct ReservationRecord {
+     pub reservation_key: String,
+     pub execution_id: String,
+     pub required_event_type: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub owner_instance_id: Option<String>,
+     pub policy_id: String,
+     pub policy_type: String,
+     pub policy_version: String,
+@@ -157,6 +159,26 @@ pub async fn save_reservation(
+     Ok(())
+ }
+ 
++pub async fn create_reservation_if_absent(
++    store: Arc<dyn StateStoreProvider>,
++    store_id: &str,
++    record: &ReservationRecord,
++) -> anyhow::Result<Option<ReservationRecord>> {
++    let key = reservation_store_key(&record.reservation_key);
++    let bytes = serde_json::to_vec(record)
++        .map_err(|e| anyhow::anyhow!("failed to serialize reservation record: {e}"))?;
++    let outcome = store
++        .create_if_absent(store_id, &key, bytes)
++        .await
++        .map_err(|e| anyhow::anyhow!("state-store create-if-absent reservation failed: {e}"))?;
++    match outcome {
++        StateStoreCreateIfAbsentResult::Created => Ok(None),
++        StateStoreCreateIfAbsentResult::Existing(existing_bytes) => {
++            deserialize_reservation(existing_bytes).map(Some)
++        }
++    }
++}
++
+ pub async fn load_routing_state(
+     store: Arc<dyn StateStoreProvider>,
+     store_id: &str,
+@@ -189,3 +211,8 @@ pub async fn save_routing_state(
+         .map_err(|e| anyhow::anyhow!("state-store set routing-state failed: {e}"))?;
+     Ok(())
+ }
++
++fn deserialize_reservation(bytes: Vec<u8>) -> anyhow::Result<ReservationRecord> {
++    serde_json::from_slice::<ReservationRecord>(&bytes)
++        .map_err(|e| anyhow::anyhow!("failed to deserialize reservation record: {e}"))
++}
+diff --git a/components/reactions/workgraph-router/tests/integration_test.rs b/components/reactions/workgraph-router/tests/integration_test.rs
+index 0655a84587e26f00ad0f7da6f3a5ae0737d58b12..665b7d87f8944176ed20bf15dac345ca0c32c729 100644
+--- a/components/reactions/workgraph-router/tests/integration_test.rs
++++ b/components/reactions/workgraph-router/tests/integration_test.rs
+@@ -19,7 +19,9 @@ use std::time::Duration;
+ use chrono::Utc;
+ use drasi_lib::channels::{QueryResult, ResultDiff};
+ use drasi_lib::component_graph::ComponentGraph;
+-use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
++use drasi_lib::state_store::{
++    StateStoreCreateIfAbsentResult, StateStoreProvider, StateStoreResult,
++};
+ use drasi_lib::{Reaction, ReactionRuntimeContext};
+ use drasi_reaction_workgraph_router::candidate::RoutingCandidate;
+ use drasi_reaction_workgraph_router::config::{
+@@ -27,11 +29,16 @@ use drasi_reaction_workgraph_router::config::{
+ };
+ use drasi_reaction_workgraph_router::decision::RoutingDecision;
+ use drasi_reaction_workgraph_router::rules::{RoutingPolicyEngine, RulesV1PolicyEngine};
++use drasi_reaction_workgraph_router::state::{
++    save_reservation, save_routing_state, ReservationRecord, RoutingStateRecord, SideEffectProgress,
++};
+ use drasi_reaction_workgraph_router::WorkgraphRouterReaction;
+ use serde_json::{json, Value};
+ use wiremock::matchers::{body_string_contains, method, path};
+ use wiremock::{Mock, MockServer, ResponseTemplate};
+ 
++const TEST_REACTION_ID: &str = "workgraph-router-test";
++
+ struct DurableMemoryStateStore {
+     inner: drasi_lib::MemoryStateStoreProvider,
+ }
+@@ -54,6 +61,15 @@ impl StateStoreProvider for DurableMemoryStateStore {
+         self.inner.set(store_id, key, value).await
+     }
+ 
++    async fn create_if_absent(
++        &self,
++        store_id: &str,
++        key: &str,
++        value: Vec<u8>,
++    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
++        self.inner.create_if_absent(store_id, key, value).await
++    }
++
+     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+         self.inner.delete(store_id, key).await
+     }
+@@ -144,8 +160,50 @@ fn sample_candidate() -> RoutingCandidate {
+     }
+ }
+ 
++fn status_snapshot_response(status: &str) -> Value {
++    json!({
++        "data": {
++            "project": {
++                "id": "PVT_project",
++                "fields": {
++                    "nodes": [
++                        {
++                            "id": "PVTSSF_status",
++                            "name": "Status",
++                            "options": [
++                                {"id":"PVTSSO_awaiting_routing","name":"AwaitingRouting"},
++                                {"id":"PVTSSO_awaiting_risk","name":"AwaitingIssueRiskProfiling"},
++                                {"id":"PVTSSO_needs_more_information","name":"NeedsMoreInformation"},
++                                {"id":"PVTSSO_done","name":"Done"}
++                            ]
++                        }
++                    ]
++                }
++            },
++            "item": {
++                "id": "PVTI_item",
++                "project": {"id": "PVT_project"},
++                "fieldValueByName": {
++                    "name": status,
++                    "optionId": "PVTSSO_current"
++                }
++            }
++        }
++    })
++}
++
++fn status_update_response() -> Value {
++    json!({
++        "data": {
++            "updateProjectV2ItemFieldValue": {
++                "projectV2Item": { "id": "PVTI_item" }
++            }
++        }
++    })
++}
++
+ fn base_reaction(server: &MockServer, policy_version: &str) -> WorkgraphRouterReaction {
+-    WorkgraphRouterReaction::builder("workgraph-router-test")
++    WorkgraphRouterReaction::builder(TEST_REACTION_ID)
+         .with_query(ROUTE_QUERY_ID)
+         .with_policy_id("policy-1")
+         .with_policy_type("rules_v1")
+@@ -182,6 +240,56 @@ fn base_reaction(server: &MockServer, policy_version: &str) -> WorkgraphRouterRe
+         .expect("reaction should build")
+ }
+ 
++fn policy_identity_config(policy_version: &str) -> WorkgraphRouterReactionConfig {
++    WorkgraphRouterReactionConfig {
++        policy_id: "policy-1".to_string(),
++        policy_type: "rules_v1".to_string(),
++        policy_version: policy_version.to_string(),
++        ..WorkgraphRouterReactionConfig::default()
++    }
++}
++
++async fn seed_failed_reservation_state(
++    store: Arc<dyn StateStoreProvider>,
++    candidate: &RoutingCandidate,
++    policy_version: &str,
++) {
++    let reservation = ReservationRecord {
++        reservation_key: candidate.reservation_key(),
++        execution_id: candidate.execution_id.clone(),
++        required_event_type: candidate.required_event_type.clone(),
++        owner_instance_id: Some("legacy-runner".to_string()),
++        policy_id: "policy-1".to_string(),
++        policy_type: "rules_v1".to_string(),
++        policy_version: policy_version.to_string(),
++        decision_id: None,
++        created_at: "2026-01-01T00:00:00Z".to_string(),
++        completed: false,
++    };
++    let outcome = RulesV1PolicyEngine
++        .evaluate(candidate)
++        .expect("rules evaluation");
++    let decision =
++        RoutingDecision::from_policy(&policy_identity_config(policy_version), candidate, outcome);
++
++    let mut state = RoutingStateRecord::new(candidate, &reservation);
++    state.decision = Some(decision.clone());
++    state.selected_transition = Some((decision.from_status.clone(), decision.to_status.clone()));
++    state.progress = SideEffectProgress {
++        decision_comment_written: true,
++        responsibility_written: true,
++        project_status_updated: false,
++    };
++    state.mark_error("simulated interrupted status update", true);
++
++    save_reservation(store.clone(), TEST_REACTION_ID, &reservation)
++        .await
++        .expect("seed reservation");
++    save_routing_state(store, TEST_REACTION_ID, &state)
++        .await
++        .expect("seed routing state");
++}
++
+ async fn initialize_reaction(
+     reaction: &WorkgraphRouterReaction,
+     state_store: Arc<dyn StateStoreProvider>,
+@@ -291,7 +399,10 @@ fn is_project_status_mutation(req: &wiremock::Request) -> bool {
+         return false;
+     }
+     std::str::from_utf8(&req.body)
+-        .map(|body| body.contains("WorkgraphRouterUpdateStatus"))
++        .map(|body| {
++            body.contains("WorkgraphRouterUpdateProjectV2Status")
++                || body.contains("updateProjectV2ItemFieldValue")
++        })
+         .unwrap_or(false)
+ }
+ 
+@@ -309,34 +420,18 @@ async fn mount_common_success_mocks(server: &MockServer, preflight_status: &str)
+         .mount(server)
+         .await;
+ 
+-    let preflight = json!({
+-        "data": {
+-            "node": {
+-                "id": "PVTI_item",
+-                "fieldValueByName": {
+-                    "name": preflight_status
+-                }
+-            }
+-        }
+-    });
++    let preflight = status_snapshot_response(preflight_status);
+     Mock::given(method("POST"))
+         .and(path("/graphql"))
+-        .and(body_string_contains("WorkgraphRouterPreflight"))
++        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+         .respond_with(ResponseTemplate::new(200).set_body_json(preflight))
+         .mount(server)
+         .await;
+ 
+-    let mutation = json!({
+-        "data": {
+-            "workgraphRouterUpdateStatus": {
+-                "projectItemId": "PVTI_item",
+-                "statusName": "ok"
+-            }
+-        }
+-    });
++    let mutation = status_update_response();
+     Mock::given(method("POST"))
+         .and(path("/graphql"))
+-        .and(body_string_contains("WorkgraphRouterUpdateStatus"))
++        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
+         .respond_with(ResponseTemplate::new(200).set_body_json(mutation))
+         .mount(server)
+         .await;
+@@ -449,6 +544,51 @@ async fn duplicate_rows_do_not_duplicate_comments() {
+     );
+ }
+ 
++#[tokio::test]
++#[ignore]
++async fn concurrent_replicas_share_reservation_and_emit_side_effects_once() {
++    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-concurrent");
++    let server = MockServer::start().await;
++    mount_common_success_mocks(&server, "AwaitingRouting").await;
++    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++    let reaction_a = base_reaction(&server, "1.0.0");
++    let reaction_b = base_reaction(&server, "1.0.0");
++    initialize_reaction(&reaction_a, Arc::clone(&store)).await;
++    initialize_reaction(&reaction_b, Arc::clone(&store)).await;
++    reaction_a.start().await.expect("reaction A start");
++    reaction_b.start().await.expect("reaction B start");
++
++    let candidate = sample_candidate();
++    tokio::join!(
++        enqueue_add(&reaction_a, &candidate, 1),
++        enqueue_add(&reaction_b, &candidate, 1)
++    );
++
++    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
++    wait_for_count(&server, is_project_status_mutation, 1).await;
++    tokio::time::sleep(Duration::from_millis(300)).await;
++    reaction_a.stop().await.expect("reaction A stop");
++    reaction_b.stop().await.expect("reaction B stop");
++
++    let requests = server.received_requests().await.expect("requests");
++    let comment_posts = requests
++        .iter()
++        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
++        .count();
++    let status_updates = requests
++        .iter()
++        .filter(|req| is_project_status_mutation(req))
++        .count();
++    assert_eq!(
++        comment_posts, 2,
++        "concurrent replicas must emit exactly one decision/responsibility comment pair"
++    );
++    assert_eq!(
++        status_updates, 1,
++        "concurrent replicas must emit exactly one project status mutation"
++    );
++}
++
+ #[tokio::test]
+ #[ignore]
+ async fn newer_policy_version_cannot_reroute_existing_reservation() {
+@@ -483,6 +623,186 @@ async fn newer_policy_version_cannot_reroute_existing_reservation() {
+     );
+ }
+ 
++#[tokio::test]
++#[ignore]
++async fn retry_with_closed_issue_fails_preflight_and_emits_no_side_effects() {
++    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-closed-retry");
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/repos/drasi-project/drasi-core/issues/42"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"closed"})))
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .and(path("/graphql"))
++        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
++        )
++        .mount(&server)
++        .await;
++
++    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++    let candidate = sample_candidate();
++    seed_failed_reservation_state(Arc::clone(&store), &candidate, "1.0.0").await;
++
++    let reaction = base_reaction(&server, "1.0.0");
++    initialize_reaction(&reaction, Arc::clone(&store)).await;
++    reaction.start().await.expect("reaction start");
++    enqueue_add(&reaction, &candidate, 1).await;
++    tokio::time::sleep(Duration::from_millis(250)).await;
++    reaction.stop().await.expect("reaction stop");
++
++    let requests = server.received_requests().await.expect("requests");
++    let comment_posts = requests
++        .iter()
++        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
++        .count();
++    let status_updates = requests
++        .iter()
++        .filter(|req| is_project_status_mutation(req))
++        .count();
++    assert_eq!(
++        comment_posts, 0,
++        "retry preflight failure must not write comments"
++    );
++    assert_eq!(
++        status_updates, 0,
++        "retry preflight failure must not overwrite project status"
++    );
++}
++
++#[tokio::test]
++#[ignore]
++async fn retry_with_competing_status_fails_preflight_and_does_not_overwrite() {
++    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-competing-status");
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/repos/drasi-project/drasi-core/issues/42"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .and(path("/graphql"))
++        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(status_snapshot_response("InProgress")),
++        )
++        .mount(&server)
++        .await;
++
++    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++    let candidate = sample_candidate();
++    seed_failed_reservation_state(Arc::clone(&store), &candidate, "1.0.0").await;
++
++    let reaction = base_reaction(&server, "1.0.0");
++    initialize_reaction(&reaction, Arc::clone(&store)).await;
++    reaction.start().await.expect("reaction start");
++    enqueue_add(&reaction, &candidate, 1).await;
++    tokio::time::sleep(Duration::from_millis(250)).await;
++    reaction.stop().await.expect("reaction stop");
++
++    let requests = server.received_requests().await.expect("requests");
++    let comment_posts = requests
++        .iter()
++        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
++        .count();
++    let status_updates = requests
++        .iter()
++        .filter(|req| is_project_status_mutation(req))
++        .count();
++    assert_eq!(comment_posts, 0, "competing status must block side effects");
++    assert_eq!(
++        status_updates, 0,
++        "competing status must not be overwritten by retry"
++    );
++}
++
++#[tokio::test]
++#[ignore]
++async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_contract() {
++    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-old-policy-resume");
++    let server = MockServer::start().await;
++    mount_common_success_mocks(&server, "AwaitingRouting").await;
++
++    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++    let candidate = sample_candidate();
++    let mut failed_outcome_candidate = candidate.clone();
++    failed_outcome_candidate.outcome = "failed".to_string();
++    let old_decision = RoutingDecision::from_policy(
++        &policy_identity_config("1.0.0"),
++        &failed_outcome_candidate,
++        RulesV1PolicyEngine
++            .evaluate(&failed_outcome_candidate)
++            .expect("rules evaluation"),
++    );
++
++    let reservation = ReservationRecord {
++        reservation_key: candidate.reservation_key(),
++        execution_id: candidate.execution_id.clone(),
++        required_event_type: candidate.required_event_type.clone(),
++        owner_instance_id: Some("legacy-runner".to_string()),
++        policy_id: "policy-1".to_string(),
++        policy_type: "rules_v1".to_string(),
++        policy_version: "1.0.0".to_string(),
++        decision_id: Some(old_decision.decision_id.clone()),
++        created_at: "2026-01-01T00:00:00Z".to_string(),
++        completed: false,
++    };
++    let mut state = RoutingStateRecord::new(&candidate, &reservation);
++    state.decision = Some(old_decision.clone());
++    state.selected_transition = Some((
++        old_decision.from_status.clone(),
++        old_decision.to_status.clone(),
++    ));
++    state.mark_error("simulated interruption", true);
++    save_reservation(Arc::clone(&store), TEST_REACTION_ID, &reservation)
++        .await
++        .expect("seed reservation");
++    save_routing_state(Arc::clone(&store), TEST_REACTION_ID, &state)
++        .await
++        .expect("seed state");
++
++    let retry = base_reaction(&server, "2.0.0");
++    initialize_reaction(&retry, Arc::clone(&store)).await;
++    retry.start().await.expect("retry start");
++    enqueue_add(&retry, &candidate, 2).await;
++    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
++    wait_for_count(&server, is_project_status_mutation, 1).await;
++    tokio::time::sleep(Duration::from_millis(250)).await;
++    retry.stop().await.expect("retry stop");
++
++    let requests = server.received_requests().await.expect("requests");
++    let decision_payloads: Vec<Value> = requests
++        .iter()
++        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
++        .filter_map(|req| {
++            let outer: Value = serde_json::from_slice(&req.body).ok()?;
++            let body = outer.get("body")?.as_str()?;
++            let inner: Value = serde_json::from_str(body).ok()?;
++            if inner.get("type").and_then(Value::as_str) == Some("workgraph.routing-decision/v1") {
++                Some(inner)
++            } else {
++                None
++            }
++        })
++        .collect();
++    assert_eq!(decision_payloads.len(), 1);
++    let payload = &decision_payloads[0];
++    assert_eq!(
++        payload.pointer("/policy/version").and_then(Value::as_str),
++        Some("1.0.0"),
++        "retry must resume with persisted policy contract, not current config policy version"
++    );
++    assert_eq!(
++        payload
++            .pointer("/transition/toStatus")
++            .and_then(Value::as_str),
++        Some("NeedsMoreInformation"),
++        "retry must use persisted decision transition"
++    );
++}
++
+ #[tokio::test]
+ #[ignore]
+ async fn untrusted_inputs_are_rejected_without_side_effects() {
+@@ -549,7 +869,7 @@ async fn graphql_200_errors_are_treated_as_failures() {
+         .await;
+     Mock::given(method("POST"))
+         .and(path("/graphql"))
+-        .and(body_string_contains("WorkgraphRouterPreflight"))
++        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+             "errors":[{"message":"boom"}],
+             "data": null
+@@ -590,15 +910,10 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
+         .await;
+     Mock::given(method("POST"))
+         .and(path("/graphql"))
+-        .and(body_string_contains("WorkgraphRouterPreflight"))
+-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+-            "data": {
+-                "node": {
+-                    "id":"PVTI_item",
+-                    "fieldValueByName": {"name":"AwaitingRouting"}
+-                }
+-            }
+-        })))
++        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
++        )
+         .mount(&first)
+         .await;
+     Mock::given(method("POST"))
+@@ -614,7 +929,7 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
+         .await;
+     Mock::given(method("POST"))
+         .and(path("/graphql"))
+-        .and(body_string_contains("WorkgraphRouterUpdateStatus"))
++        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
+         .respond_with(ResponseTemplate::new(500).set_body_string("status update failed"))
+         .mount(&first)
+         .await;
+@@ -676,28 +991,16 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
+         .await;
+     Mock::given(method("POST"))
+         .and(path("/graphql"))
+-        .and(body_string_contains("WorkgraphRouterPreflight"))
+-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+-            "data": {
+-                "node": {
+-                    "id": "PVTI_item",
+-                    "fieldValueByName": {"name":"AwaitingRouting"}
+-                }
+-            }
+-        })))
++        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
++        )
+         .mount(&second)
+         .await;
+     Mock::given(method("POST"))
+         .and(path("/graphql"))
+-        .and(body_string_contains("WorkgraphRouterUpdateStatus"))
+-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+-            "data": {
+-                "workgraphRouterUpdateStatus": {
+-                    "projectItemId":"PVTI_item",
+-                    "statusName":"AwaitingIssueRiskProfiling"
+-                }
+-            }
+-        })))
++        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
+         .mount(&second)
+         .await;
+     Mock::given(method("POST"))
+diff --git a/components/state_stores/redb/src/provider.rs b/components/state_stores/redb/src/provider.rs
+index 22e996d52b18b8a5aefa0588cc1dc96b0f8cfb3a..c62f14d9c33c2f1781f952d140e843f1c09b6511 100644
+--- a/components/state_stores/redb/src/provider.rs
++++ b/components/state_stores/redb/src/provider.rs
+@@ -15,7 +15,9 @@
+ //! Redb-based state store provider implementation.
+ 
+ use async_trait::async_trait;
+-use drasi_lib::{StateStoreError, StateStoreProvider, StateStoreResult};
++use drasi_lib::{
++    StateStoreCreateIfAbsentResult, StateStoreError, StateStoreProvider, StateStoreResult,
++};
+ use log::{debug, info};
+ use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+ use std::collections::HashMap;
+@@ -265,6 +267,70 @@ impl StateStoreProvider for RedbStateStoreProvider {
+         .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
+     }
+ 
++    async fn create_if_absent(
++        &self,
++        store_id: &str,
++        key: &str,
++        value: Vec<u8>,
++    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
++        let table_name = self.get_or_create_table_name(store_id).await;
++        let db = self.db.clone();
++        let key = key.to_string();
++        let store_id = store_id.to_string();
++
++        tokio::task::spawn_blocking(move || {
++            let write_txn = db.begin_write().map_err(|e| {
++                StateStoreError::StorageError(format!(
++                    "Failed to begin write transaction for store '{store_id}': {e}"
++                ))
++            })?;
++
++            let result = {
++                let table_def = Self::make_table_def(table_name);
++
++                let mut table = write_txn.open_table(table_def).map_err(|e| {
++                    StateStoreError::StorageError(format!(
++                        "Failed to open table for store '{store_id}': {e}"
++                    ))
++                })?;
++
++                let existing_value = table
++                    .get(key.as_str())
++                    .map_err(|e| {
++                        StateStoreError::StorageError(format!(
++                            "Failed to read key '{key}' in store '{store_id}': {e}"
++                        ))
++                    })?
++                    .map(|existing| existing.value().to_vec());
++
++                if let Some(existing) = existing_value {
++                    Ok(StateStoreCreateIfAbsentResult::Existing(existing))
++                } else {
++                    table.insert(key.as_str(), value.as_slice()).map_err(|e| {
++                        StateStoreError::StorageError(format!(
++                            "Failed to insert key '{key}' into store '{store_id}': {e}"
++                        ))
++                    })?;
++                    Ok(StateStoreCreateIfAbsentResult::Created)
++                }
++            };
++
++            match result {
++                Ok(outcome) => {
++                    write_txn.commit().map_err(|e| {
++                        StateStoreError::StorageError(format!(
++                            "Failed to commit transaction for store '{store_id}': {e}"
++                        ))
++                    })?;
++                    Ok(outcome)
++                }
++                Err(e) => Err(e),
++            }
++        })
++        .await
++        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
++    }
++
+     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+         let table_name = self.get_or_create_table_name(store_id).await;
+         let db = self.db.clone();
+@@ -737,6 +803,31 @@ mod tests {
+         assert_eq!(result, None);
+     }
+ 
++    #[tokio::test]
++    async fn test_redb_state_store_create_if_absent() {
++        let temp_dir = TempDir::new().unwrap();
++        let db_path = temp_dir.path().join("test.redb");
++        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
++
++        let created = provider
++            .create_if_absent("store1", "key1", b"value1".to_vec())
++            .await
++            .unwrap();
++        assert_eq!(created, StateStoreCreateIfAbsentResult::Created);
++
++        let existing = provider
++            .create_if_absent("store1", "key1", b"value2".to_vec())
++            .await
++            .unwrap();
++        assert_eq!(
++            existing,
++            StateStoreCreateIfAbsentResult::Existing(b"value1".to_vec())
++        );
++
++        let value = provider.get("store1", "key1").await.unwrap();
++        assert_eq!(value, Some(b"value1".to_vec()));
++    }
++
+     #[tokio::test]
+     async fn test_redb_state_store_delete() {
+         let temp_dir = TempDir::new().unwrap();
+diff --git a/lib/src/lib.rs b/lib/src/lib.rs
+index 419212fe8f6bda4b98f05ebab0a27cf8cd1369d7..ca9339427aab836b4a01850966a4c46e9c5a8f25 100644
+--- a/lib/src/lib.rs
++++ b/lib/src/lib.rs
+@@ -206,7 +206,8 @@ pub use indexes::IndexBackendPlugin;
+ 
+ /// State store provider traits and default implementation
+ pub use state_store::{
+-    MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
++    MemoryStateStoreProvider, StateStoreCreateIfAbsentResult, StateStoreError, StateStoreProvider,
++    StateStoreResult,
+ };
+ 
+ /// Secret store provider traits and default implementation
+diff --git a/lib/src/state_store/mod.rs b/lib/src/state_store/mod.rs
+index d103900326f0030a3e1379b0f8d145010083ee85..987d922c35b71e967a9f1e4f2058d3b9ee2f75e6 100644
+--- a/lib/src/state_store/mod.rs
++++ b/lib/src/state_store/mod.rs
+@@ -102,6 +102,15 @@ pub enum StateStoreError {
+ /// Result type for state store operations
+ pub type StateStoreResult<T> = Result<T, StateStoreError>;
+ 
++/// Result for [`StateStoreProvider::create_if_absent`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum StateStoreCreateIfAbsentResult {
++    /// The key did not exist and was created with the supplied value.
++    Created,
++    /// The key already existed; contains the current persisted value.
++    Existing(Vec<u8>),
++}
++
+ /// Trait defining the interface for state store providers.
+ ///
+ /// State store providers allow plugins (Sources, BootstrapProviders, and Reactions)
+@@ -173,6 +182,31 @@ pub trait StateStoreProvider: Send + Sync {
+     /// * `Err(e)` - An error occurred
+     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()>;
+ 
++    /// Create a key only if it does not already exist.
++    ///
++    /// Implementations should provide an atomic, durable create-if-absent
++    /// operation where possible. The default implementation is a non-atomic
++    /// fallback (`get` + `set`) provided for compatibility.
++    ///
++    /// # Returns
++    /// * `Ok(StateStoreCreateIfAbsentResult::Created)` when the key was created
++    /// * `Ok(StateStoreCreateIfAbsentResult::Existing(value))` when the key already exists
++    /// * `Err(e)` on storage failure
++    async fn create_if_absent(
++        &self,
++        store_id: &str,
++        key: &str,
++        value: Vec<u8>,
++    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
++        match self.get(store_id, key).await? {
++            Some(existing) => Ok(StateStoreCreateIfAbsentResult::Existing(existing)),
++            None => {
++                self.set(store_id, key, value).await?;
++                Ok(StateStoreCreateIfAbsentResult::Created)
++            }
++        }
++    }
++
+     /// Delete a single key from a store partition.
+     ///
+     /// # Arguments
+@@ -366,6 +400,21 @@ impl StateStoreProvider for MemoryStateStoreProvider {
+         Ok(())
+     }
+ 
++    async fn create_if_absent(
++        &self,
++        store_id: &str,
++        key: &str,
++        value: Vec<u8>,
++    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
++        let mut stores = self.stores.write().await;
++        let store = stores.entry(store_id.to_string()).or_default();
++        if let Some(existing) = store.get(key) {
++            return Ok(StateStoreCreateIfAbsentResult::Existing(existing.clone()));
++        }
++        store.insert(key.to_string(), value);
++        Ok(StateStoreCreateIfAbsentResult::Created)
++    }
++
+     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+         let mut stores = self.stores.write().await;
+         if let Some(store) = stores.get_mut(store_id) {
+@@ -731,4 +780,27 @@ mod tests {
+             .unwrap();
+         provider.sync().await.unwrap();
+     }
++
++    #[tokio::test]
++    async fn test_memory_state_store_create_if_absent() {
++        let provider = MemoryStateStoreProvider::new();
++
++        let created = provider
++            .create_if_absent("store1", "key1", b"value1".to_vec())
++            .await
++            .unwrap();
++        assert_eq!(created, StateStoreCreateIfAbsentResult::Created);
++
++        let existing = provider
++            .create_if_absent("store1", "key1", b"value2".to_vec())
++            .await
++            .unwrap();
++        assert_eq!(
++            existing,
++            StateStoreCreateIfAbsentResult::Existing(b"value1".to_vec())
++        );
++
++        let value = provider.get("store1", "key1").await.unwrap();
++        assert_eq!(value, Some(b"value1".to_vec()));
++    }
+ }
