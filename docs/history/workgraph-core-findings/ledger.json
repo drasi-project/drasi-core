@@ -383,7 +383,7 @@
         "https://github.com/drasi-project/drasi-core/pull/736"
       ],
       "evidenceUrl": "https://github.com/drasi-project/drasi-core/blob/agentofreality-preserve-core-findings/docs/history/workgraph-core-findings/ledger.json",
-      "rationale": "A generic Core stack-overflow fix exists but was merged only to a historical prototype base."
+      "rationale": "#893 tracks the generic Core stack-overflow fix, which was merged only to a historical prototype base."
     },
     {
       "id": "report-L117",
@@ -397,7 +397,7 @@
         "https://github.com/drasi-project/drasi-core/pull/742"
       ],
       "evidenceUrl": "https://github.com/drasi-project/drasi-core/blob/agentofreality-preserve-core-findings/docs/history/workgraph-core-findings/ledger.json",
-      "rationale": "The generic StateStore durability contract and ABI versioning have a historical open draft that must be reused or explicitly dispositioned."
+      "rationale": "#896 tracks the generic StateStore durability contract and ABI versioning; its historical open draft must be reused or explicitly dispositioned."
     },
     {
       "id": "report-L118",
@@ -410,7 +410,7 @@
         "https://github.com/drasi-project/drasi-core/issues/897"
       ],
       "evidenceUrl": "https://github.com/drasi-project/drasi-core/blob/agentofreality-preserve-core-findings/docs/history/workgraph-core-findings/ledger.json",
-      "rationale": "The retained multi-source regression and public fix are generic; current-main survival must be tested before extraction."
+      "rationale": "#897 tracks the generic retained multi-source regression and public fix; current-main survival must be tested before extraction."
     },
     {
       "id": "report-L119",
@@ -423,7 +423,7 @@
         "https://github.com/drasi-project/drasi-core/issues/891"
       ],
       "evidenceUrl": "https://github.com/drasi-project/drasi-core/blob/agentofreality-preserve-core-findings/docs/history/workgraph-core-findings/ledger.json",
-      "rationale": "The WorkGraph fixture was historical, but the SourceBase startup readiness/loss window is generic."
+      "rationale": "#891 tracks the generic SourceBase startup readiness/loss window despite the historical WorkGraph fixture."
     },
     {
       "id": "report-L120",
@@ -436,7 +436,7 @@
         "https://github.com/drasi-project/drasi-core/issues/894"
       ],
       "evidenceUrl": "https://github.com/drasi-project/drasi-core/blob/agentofreality-preserve-core-findings/docs/history/workgraph-core-findings/ledger.json",
-      "rationale": "The dispatch-order defect is generic and distinct from #774; current dispatch_event behavior must be characterized first."
+      "rationale": "#894 tracks the generic dispatch-order defect, which is distinct from #774; current dispatch_event behavior must be characterized first."
     },
     {
       "id": "report-L121",
@@ -478,7 +478,7 @@
         "https://github.com/drasi-project/drasi-core/pull/747"
       ],
       "evidenceUrl": "https://github.com/drasi-project/drasi-core/blob/agentofreality-preserve-core-findings/docs/history/workgraph-core-findings/ledger.json",
-      "rationale": "The generic HTTP response-validation implementation was retained on a prototype branch after its historical PR closed unmerged."
+      "rationale": "#900 tracks the generic HTTP response-validation implementation retained on a prototype branch after its historical PR closed unmerged."
     },
     {
       "id": "report-L135",
