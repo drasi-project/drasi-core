@@ -2237,16 +2237,15 @@ mod tests {
             SourceBaseParams::new("broadcast-ready").with_dispatch_mode(DispatchMode::Broadcast);
         let base = SourceBase::new(params).unwrap();
 
-        let ready = base.wait_for_subscribers();
-        tokio::pin!(ready);
+        let mut ready = Box::pin(base.wait_for_subscribers());
         assert!(matches!(
-            futures::poll!(&mut ready),
+            futures::poll!(ready.as_mut()),
             std::task::Poll::Pending
         ));
 
         let mut receiver = base.create_streaming_receiver().await.unwrap();
         assert!(matches!(
-            futures::poll!(&mut ready),
+            futures::poll!(ready.as_mut()),
             std::task::Poll::Ready(())
         ));
 
@@ -2295,10 +2294,9 @@ mod tests {
         drop(receiver);
         base.clear_dispatchers().await;
 
-        let ready = base.wait_for_subscribers();
-        tokio::pin!(ready);
+        let mut ready = Box::pin(base.wait_for_subscribers());
         assert!(matches!(
-            futures::poll!(&mut ready),
+            futures::poll!(ready.as_mut()),
             std::task::Poll::Pending
         ));
         drop(ready);
@@ -3512,10 +3510,9 @@ mod tests {
         .await
         .unwrap();
 
-        let ready = base.wait_for_subscribers();
-        tokio::pin!(ready);
+        let mut ready = Box::pin(base.wait_for_subscribers());
         assert!(matches!(
-            futures::poll!(&mut ready),
+            futures::poll!(ready.as_mut()),
             std::task::Poll::Ready(())
         ));
 
