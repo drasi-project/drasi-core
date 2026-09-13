@@ -781,6 +781,7 @@ mod tests {
                 optional: false,
             }],
             optional_paths: HashSet::new(),
+            segments: vec![],
         }
     }
 
