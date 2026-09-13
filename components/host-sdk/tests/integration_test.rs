@@ -543,15 +543,26 @@ async fn test_dynamic_source_receives_one_subscriptions_complete_callback() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
     }
-    test_capture::clear();
+
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    const MARKER_ENV: &str = "DRASI_MOCK_SUBSCRIPTIONS_COMPLETE_MARKER";
+    let marker = tempfile::NamedTempFile::new().expect("callback marker file");
+    std::env::set_var(MARKER_ENV, marker.path());
+    let _env_guard = EnvGuard(MARKER_ENV);
 
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
         &path,
         std::ptr::null_mut(),
-        test_capture::log_callback,
+        callbacks::default_log_callback_fn(),
         std::ptr::null_mut(),
-        test_capture::lifecycle_callback,
+        callbacks::default_lifecycle_callback_fn(),
     )
     .expect("Should load mock source plugin");
     let source_id = "subscriptions-complete-ffi-source";
@@ -590,15 +601,12 @@ async fn test_dynamic_source_receives_one_subscriptions_complete_callback() {
 
     core.start().await.expect("Should start DrasiLib");
 
-    let marker = format!("[MOCK-SUBSCRIPTIONS-COMPLETE] source={source_id}");
-    let callback_count = test_capture::logs()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .iter()
-        .filter(|entry| entry.message == marker)
-        .count();
+    let marker_contents =
+        std::fs::read_to_string(marker.path()).expect("read callback marker file");
+    let callbacks: Vec<_> = marker_contents.lines().collect();
     assert_eq!(
-        callback_count, 1,
+        callbacks,
+        vec![source_id],
         "dynamic source callback must run exactly once after both queries subscribe"
     );
 
