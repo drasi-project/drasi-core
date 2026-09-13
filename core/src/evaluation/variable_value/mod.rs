@@ -371,7 +371,7 @@ impl VariableValue {
         }
     }
 
-    pub fn eq_for_groupby(&self, other: &Self) -> bool {
+    pub(crate) fn eq_for_groupby(&self, other: &Self) -> bool {
         match (self, other) {
             (VariableValue::Element(left), VariableValue::Element(right)) => {
                 left.get_reference() == right.get_reference()

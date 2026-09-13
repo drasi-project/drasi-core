@@ -799,7 +799,7 @@ impl CollapsedAggregationResults {
             };
 
             match self.data.remove(&after_key) {
-                Some((existing, before_key)) => {
+                Some((existing, existing_before_key)) => {
                     if let QueryPartEvaluationContext::Aggregation {
                         before: existing_before,
                         default_before: existing_default_before,
@@ -817,7 +817,7 @@ impl CollapsedAggregationResults {
                                     grouping_keys,
                                     row_signature: after_key,
                                 },
-                                before_key,
+                                existing_before_key,
                             ),
                         );
                     }
