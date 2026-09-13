@@ -19,8 +19,7 @@ use super::merge_relation_match;
 use super::merge_node_match;
 
 use crate::evaluation::EvaluationError;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use drasi_query_ast::ast;
@@ -100,32 +99,60 @@ impl MatchPath {
         })
     }
 
-    pub fn get_optional_slots_on_common_paths(
+    /// Finds the slots that must be null in the solution that existed before an
+    /// optional anchor completed its match.
+    pub fn get_optional_slots_for_default(
         &self,
         anchor_slot_num: usize,
-        empty_slots: HashSet<usize>,
+        empty_slots: &HashSet<usize>,
     ) -> HashSet<usize> {
         let mut optional_slots = HashSet::new();
-        for path in &self.slots[anchor_slot_num].paths {
-            let mut has_empty_slots = false;
-            let mut path_slots = HashSet::new();
+        let mut pending_paths = self.slots[anchor_slot_num]
+            .paths
+            .iter()
+            .filter(|path| self.optional_paths.contains(path))
+            .map(|path| (*path, false))
+            .collect::<VecDeque<_>>();
+        let mut processed_paths = HashMap::new();
 
-            for (slot_num, slot) in self.slots.iter().enumerate() {
-                if slot.optional && slot.paths.contains(path) {
-                    if empty_slots.contains(&slot_num) {
-                        has_empty_slots = true;
-                        break;
-                    }
-
-                    if slot_num != anchor_slot_num && slot.paths.len() > 1 {
-                        continue;
-                    }
-
-                    path_slots.insert(slot_num);
+        while let Some((path, upstream_cleared)) = pending_paths.pop_front() {
+            match processed_paths.get(&path) {
+                Some(true) => continue,
+                Some(false) if !upstream_cleared => continue,
+                _ => {
+                    processed_paths.insert(path, upstream_cleared);
                 }
             }
-            if !has_empty_slots {
-                optional_slots.extend(path_slots);
+
+            if !upstream_cleared
+                && self.slots.iter().enumerate().any(|(slot_num, slot)| {
+                    slot.paths.contains(&path) && empty_slots.contains(&slot_num)
+                })
+            {
+                continue;
+            }
+
+            for (slot_num, slot) in self.slots.iter().enumerate() {
+                if !slot.optional || !slot.paths.contains(&path) {
+                    continue;
+                }
+
+                // Optional clauses are left-correlated in query order. Preserve slots
+                // introduced by an earlier clause, but clear shared slots introduced
+                // here and transitively default the later clauses that depend on them.
+                let introduction_path = slot.paths.iter().min().copied();
+                if introduction_path != Some(path) {
+                    continue;
+                }
+
+                if optional_slots.insert(slot_num) {
+                    for downstream_path in &slot.paths {
+                        if *downstream_path > path && self.optional_paths.contains(downstream_path)
+                        {
+                            pending_paths.push_back((*downstream_path, true));
+                        }
+                    }
+                }
             }
         }
 
