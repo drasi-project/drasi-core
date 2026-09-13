@@ -51,6 +51,7 @@ pub use result_index::ResultKey;
 pub use result_index::ResultOwner;
 pub use result_index::ResultSequence;
 pub use result_index::ResultSequenceCounter;
+pub use result_index::RESULT_INDEX_STATE_VERSION;
 pub use session_control::NoOpSessionControl;
 pub use session_control::SessionControl;
 pub use session_control::SessionGuard;
