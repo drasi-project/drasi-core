@@ -1,0 +1,125 @@
+diff --git a/components/reactions/github-project-item-refresh/src/processing.rs b/components/reactions/github-project-item-refresh/src/processing.rs
+index 63c484f387ba30b7c454044d541dab8710ad7d7d..8b34555ffc088ecc7830fe88d3e871a2b8a78cfb 100644
+--- a/components/reactions/github-project-item-refresh/src/processing.rs
++++ b/components/reactions/github-project-item-refresh/src/processing.rs
+@@ -127,12 +127,16 @@ impl RefreshProcessor {
+             reserved_at: Utc::now(),
+         };
+ 
+-        if self.state_store.get_reservation(&key).await?.is_none() {
+-            self.state_store
+-                .set_reservation(&key, &reservation)
+-                .await
+-                .context("persisting delivery reservation")?;
+-        }
++        let reservation = match self.state_store.get_reservation(&key).await? {
++            Some(existing) => existing,
++            None => {
++                self.state_store
++                    .set_reservation(&key, &reservation)
++                    .await
++                    .context("persisting delivery reservation")?;
++                reservation
++            }
++        };
+ 
+         let mut publication = self
+             .state_store
+@@ -184,7 +188,7 @@ impl RefreshProcessor {
+                 .await;
+         }
+ 
+-        if let Some(project_node_id) = &input.project_node_id {
++        if let Some(project_node_id) = &reservation.project_node_id {
+             if project_node_id != &fetched.project_node_id {
+                 let message = format!(
+                     "input project node id '{project_node_id}' does not match fetched project '{}'",
+@@ -198,7 +202,7 @@ impl RefreshProcessor {
+             }
+         }
+ 
+-        if let Some(status_field_node_id) = &input.status_field_node_id {
++        if let Some(status_field_node_id) = &reservation.status_field_node_id {
+             if status_field_node_id != &fetched.status_field_node_id {
+                 let message = format!(
+                     "input StatusFieldNodeId '{status_field_node_id}' does not match fetched status field '{}'",
+@@ -427,8 +431,6 @@ pub fn parse_invalidation_input(row_data: &Value) -> anyhow::Result<Invalidation
+ }
+ 
+ fn urls_match(lhs: &str, rhs: &str) -> bool {
+-    let fallback_match = normalize_raw_url(lhs).eq_ignore_ascii_case(&normalize_raw_url(rhs));
+-
+     match (Url::parse(lhs), Url::parse(rhs)) {
+         (Ok(lhs), Ok(rhs)) => {
+             lhs.scheme() == rhs.scheme()
+@@ -437,14 +439,10 @@ fn urls_match(lhs: &str, rhs: &str) -> bool {
+                 && normalize_path(lhs.path()) == normalize_path(rhs.path())
+                 && lhs.query() == rhs.query()
+         }
+-        _ => fallback_match,
++        _ => false,
+     }
+ }
+ 
+-fn normalize_raw_url(value: &str) -> String {
+-    value.trim().trim_end_matches('/').to_string()
+-}
+-
+ fn normalize_path(path: &str) -> &str {
+     let trimmed = path.trim_end_matches('/');
+     if trimmed.is_empty() {
+diff --git a/components/reactions/github-project-item-refresh/src/tests.rs b/components/reactions/github-project-item-refresh/src/tests.rs
+index f273b3590bb75885364b5280e5d6e6f91b521951..61a464e3bb7e382b4e73a36042973ff9d6373339 100644
+--- a/components/reactions/github-project-item-refresh/src/tests.rs
++++ b/components/reactions/github-project-item-refresh/src/tests.rs
+@@ -1295,6 +1295,19 @@ async fn status_field_node_id_mismatch_is_failed_without_destination_publish() {
+         Some("PVTSSF_wrong")
+     );
+ 
++    let replay_without_constraint = json!({
++        "InvalidationNodeId": "INV_status_mismatch",
++        "DeliveryId": "delivery-status-mismatch",
++        "ProjectItemNodeId": "PVTI_status_mismatch",
++        "ProjectNodeId": "PVT_project1",
++        "InvalidatedAt": "2026-08-13T20:14:00Z"
++    });
++    let replay_error = processor
++        .process_add_row(&replay_without_constraint)
++        .await
++        .expect_err("persisted status field constraint must remain authoritative");
++    assert!(replay_error.to_string().contains("StatusFieldNodeId"));
++
+     let publication = state_store
+         .get_publication(&key)
+         .await
+@@ -1363,6 +1376,30 @@ async fn state_source_url_mismatch_is_rejected_without_redirect_or_fetch() {
+         0,
+         "must reject before GraphQL fetch"
+     );
++
++    let malformed_matching_url = json!({
++        "InvalidationNodeId": "INV_url_malformed",
++        "DeliveryId": "delivery-url-malformed",
++        "ProjectItemNodeId": "PVTI_url_malformed",
++        "ProjectNodeId": "PVT_project1",
++        "StateSourceUrl": "\u{2003}http://127.0.0.1:9001/sources/github-project-state/events",
++        "InvalidatedAt": "2026-08-13T20:21:00Z"
++    });
++    let outcome = processor
++        .process_add_row(&malformed_matching_url)
++        .await
++        .expect("malformed URL should be rejected without network access");
++    assert_eq!(outcome, AddRowOutcome::Rejected);
++    assert!(graphql_server
++        .received_requests()
++        .await
++        .expect("graphql requests")
++        .is_empty());
++    assert!(destination_server
++        .received_requests()
++        .await
++        .expect("destination requests")
++        .is_empty());
+ }
+ 
+ #[test]

@@ -34,5 +34,16 @@
       "public GitHub issue, pull request, branch, and commit URLs",
       "input checksums and exact public revision baselines"
     ]
+  },
+  "portablePatchRecovery": {
+    "patchCount": 20,
+    "index": "patches/index.json",
+    "format": "git diff --binary --full-index <parent> <commit>",
+    "reason": "The original commit objects remained readable locally but did not resolve through a current remote branch or GitHub commit API endpoint.",
+    "excludedMetadata": [
+      "commit author email headers",
+      "raw session provenance",
+      "local repository paths"
+    ]
   }
 }

@@ -28,6 +28,7 @@ There are no unassigned source IDs.
 | Additional existing issues enriched | 5 | #574, #680, #721, #722, #827 |
 | Existing PRs enriched | 19 | #735-#747 subset, #765, #810, #825-#835 stack |
 | New preservation PRs | 1 | #890, draft |
+| Local-only commit patches preserved | 20 | Indexed under `patches/index.json` |
 | Server handoffs | 0 | No finding was established as a current `drasi-server` defect |
 
 All new issues and the preservation PR are assigned to `agentofreality`.
@@ -64,6 +65,10 @@ downgraded.
 - Historical PRs #735 and #736 merged only into a prototype base.
 - Historical PRs #747 and #765 closed unmerged. Their commits are evidence, not
   upstream implementation state.
+- Twenty historical commits no longer resolved through a remote branch or the
+  GitHub commit API. Their sanitized diffs are preserved under
+  [`patches/`](patches/) with exact original commit, parent, changed-file, size,
+  and SHA-256 metadata.
 
 ## Recommended issue-specific implementation sequence
 
@@ -106,4 +111,3 @@ moved or historical because ownership left Core in `b1458cb1`.
   legacy case.
 - Excess-slot retirement behavior and the general accumulator empty-identity
   redesign were explicitly deferred.
-
