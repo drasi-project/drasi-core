@@ -593,6 +593,15 @@ impl Source for MockSource {
     }
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        if let (Ok(path), Some(provider)) = (
+            std::env::var("DRASI_MOCK_STATE_STORE_DURABILITY_MARKER"),
+            context.state_store.as_ref(),
+        ) {
+            if let Err(error) = std::fs::write(&path, provider.is_durable().to_string()) {
+                log::error!("failed to write state-store durability marker '{path}': {error}");
+            }
+        }
+
         // Test-only: exercise the FFI identity-provider clone/drop path across the plugin
         // boundary. Gated entirely behind the `DRASI_MOCK_IDENTITY_CLONE_STRESS` environment
         // variable (read only here) so no test-only knob leaks into the public config schema.

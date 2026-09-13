@@ -19,21 +19,25 @@ use drasi_host_sdk::callbacks;
 use drasi_host_sdk::loader::load_plugin_from_path;
 use libloading::{Library, Symbol};
 
-fn fixture_library_path(directory: &Path) -> PathBuf {
+fn fixture_library_path(directory: &Path, fixture_name: &str) -> PathBuf {
     if cfg!(target_os = "windows") {
-        directory.join("source_vtable_0_14.dll")
+        directory.join(format!("{fixture_name}.dll"))
     } else if cfg!(target_os = "macos") {
-        directory.join("libsource_vtable_0_14.dylib")
+        directory.join(format!("lib{fixture_name}.dylib"))
     } else {
-        directory.join("libsource_vtable_0_14.so")
+        directory.join(format!("lib{fixture_name}.so"))
     }
 }
 
-fn compile_fixture(configuration: Option<&str>) -> (tempfile::TempDir, PathBuf) {
-    let fixture_source =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source_vtable_0_14.rs");
+fn compile_fixture(
+    fixture_name: &str,
+    configuration: Option<&str>,
+) -> (tempfile::TempDir, PathBuf) {
+    let fixture_source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(format!("{fixture_name}.rs"));
     let output_dir = tempfile::tempdir().expect("fixture output directory");
-    let fixture_library = fixture_library_path(output_dir.path());
+    let fixture_library = fixture_library_path(output_dir.path(), fixture_name);
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let mut command = Command::new(rustc);
     command
@@ -52,7 +56,7 @@ fn compile_fixture(configuration: Option<&str>) -> (tempfile::TempDir, PathBuf) 
 
 #[test]
 fn loader_rejects_smaller_source_vtable_before_plugin_init() {
-    let (_output_dir, fixture_library) = compile_fixture(None);
+    let (_output_dir, fixture_library) = compile_fixture("source_vtable_0_14", None);
     let fixture_handle =
         unsafe { Library::new(&fixture_library) }.expect("load old ABI fixture tripwire");
     let init_called: Symbol<unsafe extern "C" fn() -> bool> = unsafe {
@@ -93,8 +97,51 @@ fn loader_rejects_smaller_source_vtable_before_plugin_init() {
 }
 
 #[test]
+fn loader_rejects_smaller_state_store_vtable_before_plugin_init() {
+    let (_output_dir, fixture_library) = compile_fixture("state_store_vtable_0_15", None);
+    let fixture_handle =
+        unsafe { Library::new(&fixture_library) }.expect("load old ABI fixture tripwire");
+    let init_called: Symbol<unsafe extern "C" fn() -> bool> = unsafe {
+        fixture_handle
+            .get(b"old_abi_fixture_init_called")
+            .expect("resolve fixture tripwire")
+    };
+    let state_store_vtable_size: Symbol<unsafe extern "C" fn() -> usize> = unsafe {
+        fixture_handle
+            .get(b"old_abi_fixture_state_store_vtable_size")
+            .expect("resolve old vtable size")
+    };
+    assert!(
+        unsafe { state_store_vtable_size() }
+            < std::mem::size_of::<drasi_plugin_sdk::ffi::StateStoreVtable>(),
+        "fixture must represent the physically smaller pre-0.16 state-store vtable"
+    );
+
+    let error = match load_plugin_from_path(
+        &fixture_library,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    ) {
+        Ok(_) => panic!("0.15 plugin must be rejected before its smaller vtable is read"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("SDK version mismatch"),
+        "expected explicit ABI rejection, got: {error:#}"
+    );
+    assert!(
+        !unsafe { init_called() },
+        "loader must reject incompatible metadata before drasi_plugin_init"
+    );
+}
+
+#[test]
 fn loader_rejects_missing_metadata_before_plugin_init() {
-    let (_output_dir, fixture_library) = compile_fixture(Some("omit_metadata"));
+    let (_output_dir, fixture_library) =
+        compile_fixture("source_vtable_0_14", Some("omit_metadata"));
     let fixture_handle =
         unsafe { Library::new(&fixture_library) }.expect("load metadata-free fixture tripwire");
     let init_called: Symbol<unsafe extern "C" fn() -> bool> = unsafe {
