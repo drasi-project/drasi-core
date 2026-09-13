@@ -107,8 +107,7 @@ impl MatchPathSolution {
             .map(|(slot_num, _)| *slot_num)
             .collect::<HashSet<_>>();
 
-        let opt_slots =
-            match_path.get_optional_slots_on_common_paths(self.anchor_slot, empty_slots);
+        let opt_slots = match_path.get_optional_slots_for_default(self.anchor_slot, &empty_slots);
 
         let mut result = self.clone();
         for slot_num in &opt_slots {
