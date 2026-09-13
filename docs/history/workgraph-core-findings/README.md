@@ -19,8 +19,8 @@ Tracked by [#889](https://github.com/drasi-project/drasi-core/issues/889).
 The source report and index were recovered from local development history on
 September 12, 2026. Raw transcripts, private session metadata, credentials,
 operator configuration, and runtime databases are intentionally not published.
-The final ledger preserves each stable source ID with enough generic detail to
-understand its disposition without those materials.
+A sanitized full report and exact per-record finding details are published so
+the final ledger does not discard the richer technical evidence.
 
 ## Interpretation rules
 
@@ -65,6 +65,10 @@ work does not duplicate that stack.
   dispatch-order repair.
 - #775 is durable query-output restoration. Existing
   [#826](https://github.com/drasi-project/drasi-core/pull/826) must be reused.
+- Dynamic Reaction checkpoint-ownership forwarding belongs to
+  [#820](https://github.com/drasi-project/drasi-core/issues/820). Missing or
+  null plugin metadata bypassing ABI checks is a distinct loader defect tracked
+  by [#902](https://github.com/drasi-project/drasi-core/issues/902).
 - [#810](https://github.com/drasi-project/drasi-core/pull/810) contains the
   isolated #792 candidate but not the later persisted aggregate-replay repair
   in `7be2e1bd`.
@@ -78,6 +82,10 @@ work does not duplicate that stack.
 
 ## Files
 
+- [`source-report-sanitized.md`](source-report-sanitized.md) preserves the full
+  technical report without private development-session provenance.
+- [`evidence.md`](evidence.md) preserves original detail for each of the 139
+  stable source records.
 - [`fix-inventory.json`](fix-inventory.json) records immutable public commits
   and existing PR reuse requirements.
 - [`ledger.json`](ledger.json) contains the complete 139-entry stable-ID
@@ -90,3 +98,8 @@ work does not duplicate that stack.
 - [`patches/index.json`](patches/index.json) inventories 20 sanitized portable
   patches for historical commits that were still available locally but no
   longer resolved through a remote branch or GitHub commit endpoint.
+- [`patches/series/index.json`](patches/series/index.json) supplies verified
+  cumulative reconstruction paths from public commit `43e7d250` for all 20
+  local-only patches.
+- [`patches/dirty/index.json`](patches/dirty/index.json) records the exact
+  interrupted four-file router follow-up and its unvalidated limitations.

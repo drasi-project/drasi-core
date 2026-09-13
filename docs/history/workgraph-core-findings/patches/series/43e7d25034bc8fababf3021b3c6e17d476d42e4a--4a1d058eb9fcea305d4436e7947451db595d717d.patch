@@ -1,0 +1,5417 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 2be4ed5acca54e92497d695b4c78f6214725acdc..df9c2963e3b90d5c975503979788847b2bdff9e7 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -76,6 +76,7 @@ members = [
+   "components/reactions/log",
+   "components/reactions/azure-storage",
+   "components/reactions/eventgrid",
++  "components/reactions/github-project-item-refresh",
+   "components/reactions/loki",
+   "components/reactions/file",
+   "components/reactions/storedproc-mssql",
+@@ -181,6 +182,7 @@ drasi-source-cloudflare-radar = { version = "0.1.6", path = "components/sources/
+ drasi-bootstrap-application = { version = "0.2.11", path = "components/bootstrappers/application" }
+ drasi-reaction-http = { version = "0.3.2", path = "components/reactions/http" }
+ drasi-reaction-grpc = { version = "0.4.2", path = "components/reactions/grpc" }
++drasi-reaction-github-project-item-refresh = { version = "0.1.0", path = "components/reactions/github-project-item-refresh" }
+ drasi-reaction-file = { version = "0.1.3", path = "components/reactions/file" }
+ drasi-reaction-eventgrid = { version = "0.1.0", path = "components/reactions/eventgrid" }
+ drasi-reaction-aws-sqs = { version = "0.1.3", path = "components/reactions/aws-sqs" }
+diff --git a/components/reactions/github-project-item-refresh/CHANGELOG.md b/components/reactions/github-project-item-refresh/CHANGELOG.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c9e41e0c7c1d99efa836d649a1f55249676d8be
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/CHANGELOG.md
+@@ -0,0 +1,5 @@
++# Changelog
++
++## Unreleased
++
++- Added `drasi-reaction-github-project-item-refresh` reaction plugin.
+diff --git a/components/reactions/github-project-item-refresh/Cargo.toml b/components/reactions/github-project-item-refresh/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c0ac7a4630eefeb22dfe2906d5077c28e785c35
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/Cargo.toml
+@@ -0,0 +1,57 @@
++# Copyright 2026 The Drasi Authors.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++[package]
++name = "drasi-reaction-github-project-item-refresh"
++version = "0.1.0"
++edition = "2021"
++authors = ["Drasi Project"]
++description = "GitHub ProjectV2 item status refresh reaction plugin for Drasi"
++license = "Apache-2.0"
++repository = "https://github.com/drasi-project/drasi-core"
++keywords = ["drasi", "plugin", "reaction", "github", "projectv2"]
++categories = ["network-programming"]
++
++[lints]
++workspace = true
++
++[lib]
++crate-type = ["lib", "cdylib"]
++
++[dependencies]
++drasi-lib.workspace = true
++drasi-plugin-sdk = { workspace = true }
++anyhow = "1.0"
++async-trait = "0.1"
++chrono = { version = "0.4", features = ["serde"] }
++httpdate = "1"
++log = "0.4"
++reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
++serde = { version = "1.0", features = ["derive"] }
++serde_json = "1.0"
++thiserror = "2.0"
++tokio = { version = "1.0", features = ["full"] }
++utoipa = { workspace = true }
++
++[dev-dependencies]
++async-trait = "0.1"
++drasi-core.workspace = true
++drasi-source-application.workspace = true
++env_logger = "0.11"
++tokio = { version = "1.0", features = ["full", "test-util"] }
++tokio-test = "0.4"
++wiremock = "0.6"
++
++[features]
++dynamic-plugin = []
+diff --git a/components/reactions/github-project-item-refresh/Makefile b/components/reactions/github-project-item-refresh/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d0369f626337888cc247a6c0e5327c2e9dab6b9
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/Makefile
+@@ -0,0 +1,16 @@
++.PHONY: build test integration-test lint fmt
++
++build:
++	cargo build -p drasi-reaction-github-project-item-refresh
++
++test:
++	cargo test -p drasi-reaction-github-project-item-refresh
++
++integration-test:
++	cargo test -p drasi-reaction-github-project-item-refresh --test integration_test -- --ignored --nocapture
++
++lint:
++	cargo clippy -p drasi-reaction-github-project-item-refresh --all-targets -- -D warnings
++
++fmt:
++	cargo fmt --all
+diff --git a/components/reactions/github-project-item-refresh/README.md b/components/reactions/github-project-item-refresh/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..84cd9b454e2ba9c3a8a5c1e8a2ae9248c6461820
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/README.md
+@@ -0,0 +1,251 @@
++# GitHub Project Item Refresh Reaction
++
++`drasi-reaction-github-project-item-refresh` hydrates authoritative GitHub
++ProjectV2 item status and republishes normalized state to a standard-mode Drasi
++HTTP source.
++
++This reaction is intended for webhook-invalidated pipelines (WorkGraph Phase 2):
++
++1. Dogfood webhook ingestion maps `projects_v2_item.edited` deliveries to
++   `ProjectItemInvalidation` rows.
++2. This reaction consumes those invalidations (ADD diffs only).
++3. It fetches the current status from GitHub GraphQL.
++4. It publishes a deterministic `ProjectItemStatus` node update to a separate
++   HTTP source endpoint.
++
++## Behavior Summary
++
++- Processes **only `ResultDiff::Add`** rows.
++- Ignores `Update`, `Delete`, aggregation, and noop diffs.
++- Validates node IDs and project allowlist rules.
++- Enforces a configured authoritative Status field node ID (`expectedStatusFieldNodeId`) before and after GraphQL hydration.
++- Durably reserves each `(deliveryId, projectItemNodeId)` key.
++- Detects stale/out-of-order refreshes using durable per-item version state.
++- Publishes only after successful GraphQL hydration and destination ACK.
++- Uses strict fail-stop recovery by default (checkpoint does not advance on
++  ambiguous/failed delivery).
++
++## Configuration
++
++```yaml
++reactions:
++  - id: gh-project-item-refresh
++    kind: github-project-item-refresh
++    queries:
++      - project-item-invalidations
++    autoStart: true
++    githubToken:
++      env: GITHUB_TOKEN
++    graphqlUrl: https://api.github.com/graphql
++    graphqlHeaders:
++      X-GitHub-Api-Version:
++        value: "2022-11-28"
++    allowlistedProjectIds:
++      - PVT_kwDOABC123
++    statusFieldName: Status
++    expectedStatusFieldNodeId: PVTSSF_lADOCX0YF84BgNE3zhaadbw
++    destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
++    destinationBearerSecret:
++      env: PROJECT_STATUS_SOURCE_BEARER
++    requestTimeoutMs: 10000
++    deliveryRecordTtlSecs: 604800
++    priorityQueueCapacity: 10000
++    recoveryPolicy: strict
++```
++
++Dynamic reaction configuration fields are flat beside the base server fields
++`id`, `kind`, `queries`, and `autoStart`; do not nest them under `config`.
++
++### Config Fields
++
++| Field | Required | Description |
++|---|---|---|
++| `githubToken` | Yes | GitHub token (prefer env reference) |
++| `graphqlUrl` | No | GitHub GraphQL endpoint (default `https://api.github.com/graphql`) |
++| `graphqlHeaders` | No | Extra GraphQL request headers |
++| `allowlistedProjectIds` | No | Allowed project node IDs (`PVT_*`); empty means allow all |
++| `statusFieldName` | No | Project field name read via `fieldValueByName` (default `Status`) |
++| `expectedStatusFieldNodeId` | Yes | Expected authoritative GitHub ProjectV2 single-select status field node ID (`PVTSSF_*`); enforced as a security constraint |
++| `destinationEventUrl` | Yes | Standard-mode HTTP source event endpoint |
++| `destinationBearerSecret` | No | Optional bearer secret for destination source |
++| `requestTimeoutMs` | No | Shared request timeout for GraphQL and destination HTTP calls |
++| `deliveryRecordTtlSecs` | No | TTL for terminal per-delivery records (default 7 days) |
++| `priorityQueueCapacity` | No | Inbound reaction queue capacity |
++| `recoveryPolicy` | No | `strict` (default) or `auto_skip_gap` |
++
++## Input Contract (query row)
++
++The query row (`ResultDiff::Add.data`) should prefer the lower-camel fields
++below. PascalCase dogfood fields and existing aliases remain supported.
++Preferred contract field names are:
++`invalidationNodeId`, `deliveryId`, `projectItemNodeId`, `projectNodeId`,
++`statusFieldNodeId`, `invalidatedAt`, `stateSourceUrl`.
++
++The canonical invalidation element/property identity is
++`project-item-invalidation:{deliveryId}` and is accepted verbatim as
++`invalidationNodeId`.
++
++| Field | Preferred | Backward-compatible aliases | Required |
++|---|---|---|---|
++| Invalidation node ID | `invalidationNodeId` | `InvalidationNodeId`, `invalidation_node_id`, `id` | Yes |
++| Delivery ID | `deliveryId` | `DeliveryId`, `xGitHubDelivery`, `xGithubDelivery`, `githubDeliveryId` | Yes |
++| Project item node ID | `projectItemNodeId` | `ProjectItemNodeId`, `project_item_node_id` | Yes |
++| Project node ID | `projectNodeId` | `ProjectNodeId`, `project_node_id` | No |
++| Status field node ID | `statusFieldNodeId` | `StatusFieldNodeId` | No |
++| Invalidation/webhook timestamp | `invalidatedAt` | `InvalidatedAt`, `webhookUpdatedAt`, `webhookUpdateTime`, `updatedAt`, `webhook_updated_at` | No |
++| State source URL | `stateSourceUrl` | `StateSourceUrl` | No |
++| Webhook action | `webhookAction` | `action` | No |
++
++### Optional Input Validation
++
++- The upstream query should filter invalidations to the configured changed
++  Status field before invoking this reaction.
++- `statusFieldNodeId` / `StatusFieldNodeId` (when present) must match
++  configured `expectedStatusFieldNodeId`. A mismatch is persisted as a `failed`
++  publication and is rejected before GraphQL/destination access.
++- The authoritative GraphQL `status_field_node_id` must always match configured
++  `expectedStatusFieldNodeId` (even if the row omits `statusFieldNodeId`). A
++  mismatch is persisted as a `failed` publication and no destination publish
++  occurs.
++- For durable reservation consistency, any persisted row `StatusFieldNodeId`
++  remains canonical on retries and is also validated against fetched GraphQL
++  state.
++- `StateSourceUrl` (when present) must match configured `destinationEventUrl`.
++  The input URL is **never** used as a destination override.
++  - Matching uses semantic URL checks when both values parse as URLs:
++    `scheme`, `host`, `port`, `path` (with trailing slash normalization), and
++    query string.
++  - URL fragments are ignored for this comparison.
++  - If parsing fails for either side, validation fails closed.
++  - A mismatch is rejected before GraphQL hydration and before destination
++    publish.
++
++## Output Contract (destination HTTP source event)
++
++The reaction posts a standard `HttpSourceChange` **update** payload:
++
++```json
++{
++  "operation": "update",
++  "element": {
++    "type": "node",
++    "id": "project-item-status:PVTI_xxx",
++    "labels": ["ProjectItemStatus"],
++    "properties": {
++      "projectItemNodeId": "PVTI_xxx",
++      "projectNodeId": "PVT_xxx",
++      "statusFieldNodeId": "PVTSSF_xxx",
++      "statusOptionId": "opt_xxx",
++      "statusName": "In Progress",
++      "updatedAt": "2026-08-13T20:00:00.000Z",
++      "refreshedAt": "2026-08-13T20:00:05.123Z",
++      "triggeringDeliveryId": "delivery-id"
++    }
++  }
++}
++```
++
++Deterministic node ID format:
++
++`project-item-status:{projectItemNodeId}`
++
++## Durable State
++
++Per-reaction durable state keys:
++
++- `reservation:{deliveryId}::{projectItemNodeId}`
++- `publication:{deliveryId}::{projectItemNodeId}`
++- `version:{projectItemNodeId}`
++
++Publication states:
++
++- `reserved`
++- `fetched`
++- `published`
++- `stale`
++- `rejected`
++- `failed`
++- `ambiguous`
++
++## Recovery & Idempotency
++
++- `is_durable() == true`
++- `needs_snapshot_on_fresh_start() == false`
++- `default_recovery_policy() == strict`
++- checkpoint advances only after destination ACK and durable publication state
++
++Idempotency is achieved by:
++
++- durable reservation key dedupe
++- deterministic destination node ID (`project-item-status:{projectItemNodeId}`)
++- deterministic source timestamp from the authoritative GitHub `updatedAt`
++- an `Idempotency-Key` header derived from the delivery and project item IDs
++- stale/version guard on `updatedAt`
++
++Safe GraphQL reads retry automatically. Destination writes are attempted once per
++processing attempt because a transport failure may occur after ingestion.
++In-flight (`fetched`) and ambiguous writes retain the exact fetched state;
++strict recovery replays that same deterministic update and requires a valid
++HTTP Source acknowledgement before recording publication or advancing the
++checkpoint.
++
++Terminal publication/reservation pruning is internal and bounded: the reaction
++attempts one prune pass on the first processed ADD after startup/restart, then
++at most once every 5 minutes. If a prune pass fails, the failure is logged and
++the next ADD remains eligible to retry pruning immediately (no public config
++field controls this interval).
++
++## Security Notes
++
++- GitHub token, GraphQL header values, and destination bearer secret are never logged.
++- Config `Debug` output exposes GraphQL header names but redacts all values.
++- GraphQL and destination failures are logged without credential material.
++
++## Testing
++
++### Unit / focused tests
++
++```bash
++cargo test -p drasi-reaction-github-project-item-refresh
++```
++
++Covered scenarios include:
++
++- success
++- duplicate delivery
++- GraphQL HTTP-200 `errors`
++- null/missing status
++- stale ordering
++- destination failure + ambiguous transport
++- retry + recovery replay
++- allowlist rejection
++- secret redaction
++
++### Integration test (ignored)
++
++```bash
++cargo test -p drasi-reaction-github-project-item-refresh --test integration_test -- --ignored --nocapture
++```
++
++The integration test uses mock GraphQL and destination HTTP servers with a
++durable test state store and verifies insert/update/delete behavior (only insert
++triggers republish).
++
++### Makefile targets
++
++```bash
++make -C components/reactions/github-project-item-refresh build
++make -C components/reactions/github-project-item-refresh test
++make -C components/reactions/github-project-item-refresh integration-test
++make -C components/reactions/github-project-item-refresh lint
++```
++
++## Dogfood Integration Notes
++
++- Point `destinationEventUrl` to the `github-project-state` standard-mode HTTP
++  source endpoint. The Phase 2 dogfood loopback contract is
++  `http://127.0.0.1:9001/sources/github-project-state/events`.
++- Set `expectedStatusFieldNodeId` to the authoritative dogfood Status field:
++  `PVTSSF_lADOCX0YF84BgNE3zhaadbw`.
++- Configure `allowlistedProjectIds` for each dogfood project board.
++- Keep `recoveryPolicy: strict` to avoid silent drops on ambiguous publication.
+diff --git a/components/reactions/github-project-item-refresh/src/config.rs b/components/reactions/github-project-item-refresh/src/config.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..35fb65491220a3dc0b566000a4d0e357a2ea1e2b
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/config.rs
+@@ -0,0 +1,218 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++//! Configuration types for the GitHub ProjectV2 item refresh reaction.
++
++use anyhow::Context;
++use serde::{Deserialize, Serialize};
++use std::collections::HashMap;
++
++fn default_graphql_url() -> String {
++    "https://api.github.com/graphql".to_string()
++}
++
++fn default_request_timeout_ms() -> u64 {
++    10_000
++}
++
++fn default_status_field_name() -> String {
++    "Status".to_string()
++}
++
++fn default_delivery_record_ttl_secs() -> u64 {
++    7 * 24 * 60 * 60
++}
++
++/// Runtime configuration for the reaction.
++#[derive(Clone, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++pub struct GitHubProjectItemRefreshConfig {
++    /// GitHub token used for GraphQL requests.
++    pub github_token: String,
++    /// GraphQL endpoint URL.
++    #[serde(default = "default_graphql_url")]
++    pub graphql_url: String,
++    /// Additional GraphQL request headers.
++    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
++    pub graphql_headers: HashMap<String, String>,
++    /// Optional allowlist of project node IDs.
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub allowlisted_project_ids: Vec<String>,
++    /// Name of the single-select project field representing status.
++    #[serde(default = "default_status_field_name")]
++    pub status_field_name: String,
++    /// Expected single-select status field node ID (`PVTSSF_*`) for defense-in-depth validation.
++    pub expected_status_field_node_id: String,
++    /// Standard-mode HTTP source event endpoint.
++    pub destination_event_url: String,
++    /// Optional bearer token used for destination HTTP source.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub destination_bearer_secret: Option<String>,
++    /// Request timeout in milliseconds for GraphQL and destination HTTP calls.
++    #[serde(default = "default_request_timeout_ms")]
++    pub request_timeout_ms: u64,
++    /// Retention window for terminal per-delivery records before durable pruning.
++    #[serde(default = "default_delivery_record_ttl_secs")]
++    pub delivery_record_ttl_secs: u64,
++}
++
++impl Default for GitHubProjectItemRefreshConfig {
++    fn default() -> Self {
++        Self {
++            github_token: String::new(),
++            graphql_url: default_graphql_url(),
++            graphql_headers: HashMap::new(),
++            allowlisted_project_ids: Vec::new(),
++            status_field_name: default_status_field_name(),
++            expected_status_field_node_id: String::new(),
++            destination_event_url: String::new(),
++            destination_bearer_secret: None,
++            request_timeout_ms: default_request_timeout_ms(),
++            delivery_record_ttl_secs: default_delivery_record_ttl_secs(),
++        }
++    }
++}
++
++impl std::fmt::Debug for GitHubProjectItemRefreshConfig {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        let redacted_headers = self
++            .graphql_headers
++            .keys()
++            .map(|name| (name.as_str(), "[REDACTED]"))
++            .collect::<HashMap<_, _>>();
++
++        f.debug_struct("GitHubProjectItemRefreshConfig")
++            .field("github_token", &redacted_opt(!self.github_token.is_empty()))
++            .field("graphql_url", &self.graphql_url)
++            .field("graphql_headers", &redacted_headers)
++            .field("allowlisted_project_ids", &self.allowlisted_project_ids)
++            .field("status_field_name", &self.status_field_name)
++            .field(
++                "expected_status_field_node_id",
++                &self.expected_status_field_node_id,
++            )
++            .field("destination_event_url", &self.destination_event_url)
++            .field(
++                "destination_bearer_secret",
++                &redacted_opt(self.destination_bearer_secret.is_some()),
++            )
++            .field("request_timeout_ms", &self.request_timeout_ms)
++            .field("delivery_record_ttl_secs", &self.delivery_record_ttl_secs)
++            .finish()
++    }
++}
++
++fn redacted_opt(is_set: bool) -> Option<&'static str> {
++    if is_set {
++        Some("[REDACTED]")
++    } else {
++        None
++    }
++}
++
++impl GitHubProjectItemRefreshConfig {
++    pub fn validate(
++        &self,
++        _query_ids: &[String],
++        priority_queue_capacity: Option<usize>,
++    ) -> anyhow::Result<()> {
++        if self.github_token.trim().is_empty() {
++            anyhow::bail!("`githubToken` must not be empty");
++        }
++        validate_url(&self.graphql_url).context("graphqlUrl")?;
++        validate_url(&self.destination_event_url).context("destinationEventUrl")?;
++        if self.status_field_name.trim().is_empty() {
++            anyhow::bail!("`statusFieldName` must not be empty");
++        }
++        validate_status_field_node_id(&self.expected_status_field_node_id)
++            .context("expectedStatusFieldNodeId")?;
++
++        if self.request_timeout_ms == 0 {
++            anyhow::bail!("`requestTimeoutMs` must be greater than 0");
++        }
++        if self.delivery_record_ttl_secs == 0 {
++            anyhow::bail!("`deliveryRecordTtlSecs` must be greater than 0");
++        }
++
++        if matches!(priority_queue_capacity, Some(0)) {
++            anyhow::bail!("`priorityQueueCapacity` must be greater than 0");
++        }
++
++        for project_id in &self.allowlisted_project_ids {
++            validate_project_node_id(project_id).with_context(|| {
++                format!("`allowlistedProjectIds` contains invalid project id '{project_id}'")
++            })?;
++        }
++
++        for header_name in self.graphql_headers.keys() {
++            reqwest::header::HeaderName::from_bytes(header_name.as_bytes())
++                .with_context(|| format!("invalid GraphQL header name '{header_name}'"))?;
++        }
++
++        Ok(())
++    }
++
++    pub fn is_project_allowed(&self, project_node_id: &str) -> bool {
++        self.allowlisted_project_ids.is_empty()
++            || self
++                .allowlisted_project_ids
++                .iter()
++                .any(|allowed| allowed == project_node_id)
++    }
++}
++
++fn validate_url(raw_url: &str) -> anyhow::Result<()> {
++    let url = reqwest::Url::parse(raw_url).context("invalid URL")?;
++    match url.scheme() {
++        "http" | "https" => {}
++        scheme => anyhow::bail!("unsupported URL scheme '{scheme}'; expected http or https"),
++    }
++    if url.host_str().is_none() {
++        anyhow::bail!("URL must include a host");
++    }
++    Ok(())
++}
++
++pub(crate) fn validate_project_node_id(project_node_id: &str) -> anyhow::Result<()> {
++    if !project_node_id.starts_with("PVT_") {
++        anyhow::bail!("project node id must start with 'PVT_'");
++    }
++    if project_node_id.contains(char::is_whitespace) {
++        anyhow::bail!("project node id must not contain whitespace");
++    }
++    Ok(())
++}
++
++pub(crate) fn validate_project_item_node_id(project_item_node_id: &str) -> anyhow::Result<()> {
++    if !project_item_node_id.starts_with("PVTI_") {
++        anyhow::bail!("project item node id must start with 'PVTI_'");
++    }
++    if project_item_node_id.contains(char::is_whitespace) {
++        anyhow::bail!("project item node id must not contain whitespace");
++    }
++    Ok(())
++}
++
++pub(crate) fn validate_status_field_node_id(status_field_node_id: &str) -> anyhow::Result<()> {
++    if status_field_node_id.trim().is_empty() {
++        anyhow::bail!("status field node id must not be empty");
++    }
++    if !status_field_node_id.starts_with("PVTSSF_") {
++        anyhow::bail!("status field node id must start with 'PVTSSF_'");
++    }
++    if status_field_node_id.contains(char::is_whitespace) {
++        anyhow::bail!("status field node id must not contain whitespace");
++    }
++    Ok(())
++}
+diff --git a/components/reactions/github-project-item-refresh/src/descriptor.rs b/components/reactions/github-project-item-refresh/src/descriptor.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c847b4b624e016cbe40de8d60f031bbd91ad003
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/descriptor.rs
+@@ -0,0 +1,253 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++//! Descriptor for the GitHub project-item refresh reaction plugin.
++
++use std::collections::HashMap;
++
++use drasi_lib::reactions::Reaction;
++use drasi_plugin_sdk::prelude::*;
++use utoipa::OpenApi;
++
++use crate::config::GitHubProjectItemRefreshConfig;
++use crate::GitHubProjectItemRefreshBuilder;
++
++#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
++#[schema(as = reaction::github_project_item_refresh::GitHubProjectItemRefreshConfig)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++pub struct GitHubProjectItemRefreshConfigDto {
++    #[schema(value_type = ConfigValueString)]
++    pub github_token: ConfigValue<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub graphql_url: Option<ConfigValue<String>>,
++    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
++    pub graphql_headers: HashMap<String, ConfigValue<String>>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub allowlisted_project_ids: Vec<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub status_field_name: Option<ConfigValue<String>>,
++    #[schema(value_type = ConfigValueString)]
++    pub expected_status_field_node_id: ConfigValue<String>,
++    #[schema(value_type = ConfigValueString)]
++    pub destination_event_url: ConfigValue<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub destination_bearer_secret: Option<ConfigValue<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueU64>)]
++    pub request_timeout_ms: Option<ConfigValue<u64>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueU64>)]
++    pub delivery_record_ttl_secs: Option<ConfigValue<u64>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueU64>)]
++    pub priority_queue_capacity: Option<ConfigValue<u64>>,
++    /// Recovery policy for publication failures.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub recovery_policy: Option<RecoveryPolicyDto>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
++#[schema(as = reaction::github_project_item_refresh::RecoveryPolicy)]
++#[serde(rename_all = "snake_case")]
++pub enum RecoveryPolicyDto {
++    Strict,
++    AutoSkipGap,
++}
++
++impl From<RecoveryPolicyDto> for drasi_lib::recovery::ReactionRecoveryPolicy {
++    fn from(value: RecoveryPolicyDto) -> Self {
++        match value {
++            RecoveryPolicyDto::Strict => Self::Strict,
++            RecoveryPolicyDto::AutoSkipGap => Self::AutoSkipGap,
++        }
++    }
++}
++
++impl From<&GitHubProjectItemRefreshConfig> for GitHubProjectItemRefreshConfigDto {
++    fn from(config: &GitHubProjectItemRefreshConfig) -> Self {
++        let graphql_headers = config
++            .graphql_headers
++            .iter()
++            .map(|(key, value)| (key.clone(), ConfigValue::Static(value.clone())))
++            .collect::<HashMap<_, _>>();
++
++        Self {
++            github_token: ConfigValue::Static(config.github_token.clone()),
++            graphql_url: Some(ConfigValue::Static(config.graphql_url.clone())),
++            graphql_headers,
++            allowlisted_project_ids: config.allowlisted_project_ids.clone(),
++            status_field_name: Some(ConfigValue::Static(config.status_field_name.clone())),
++            expected_status_field_node_id: ConfigValue::Static(
++                config.expected_status_field_node_id.clone(),
++            ),
++            destination_event_url: ConfigValue::Static(config.destination_event_url.clone()),
++            destination_bearer_secret: config
++                .destination_bearer_secret
++                .as_ref()
++                .map(|secret| ConfigValue::Static(secret.clone())),
++            request_timeout_ms: Some(ConfigValue::Static(config.request_timeout_ms)),
++            delivery_record_ttl_secs: Some(ConfigValue::Static(config.delivery_record_ttl_secs)),
++            priority_queue_capacity: None,
++            recovery_policy: None,
++        }
++    }
++}
++
++#[derive(OpenApi)]
++#[openapi(components(schemas(GitHubProjectItemRefreshConfigDto, RecoveryPolicyDto,)))]
++struct GitHubProjectItemRefreshSchemas;
++
++/// Descriptor for the GitHub project-item refresh reaction plugin.
++pub struct GitHubProjectItemRefreshDescriptor;
++
++#[async_trait]
++impl ReactionPluginDescriptor for GitHubProjectItemRefreshDescriptor {
++    fn kind(&self) -> &str {
++        "github-project-item-refresh"
++    }
++
++    fn config_version(&self) -> &str {
++        "1.0.0"
++    }
++
++    fn config_schema_name(&self) -> &str {
++        "reaction.github_project_item_refresh.GitHubProjectItemRefreshConfig"
++    }
++
++    fn display_name(&self) -> &str {
++        "GitHub Project Item Refresh"
++    }
++
++    fn display_description(&self) -> &str {
++        "Hydrates authoritative GitHub ProjectV2 item status and republishes it to a standard HTTP source."
++    }
++
++    fn display_icon(&self) -> &str {
++        "github"
++    }
++
++    fn config_schema_json(&self) -> String {
++        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
++        let api = GitHubProjectItemRefreshSchemas::openapi();
++        let schemas = serde_json::to_value(
++            &api.components
++                .as_ref()
++                .expect("OpenAPI components missing")
++                .schemas,
++        )
++        .expect("Failed to serialize config schema");
++
++        SchemaUiAnnotator::new(
++            schemas,
++            "reaction.github_project_item_refresh.GitHubProjectItemRefreshConfig",
++        )
++        .expect("root schema not found")
++        .field("githubToken", |f| {
++            f.group("GitHub").order(1).widget("password")
++        })
++        .field("graphqlUrl", |f| {
++            f.group("GitHub")
++                .order(2)
++                .placeholder("https://api.github.com/graphql")
++        })
++        .field("graphqlHeaders", |f| f.group("GitHub").order(3))
++        .field("allowlistedProjectIds", |f| f.group("GitHub").order(4))
++        .field("statusFieldName", |f| {
++            f.group("GitHub").order(5).placeholder("Status")
++        })
++        .field("expectedStatusFieldNodeId", |f| {
++            f.group("GitHub").order(6).placeholder("PVTSSF_...")
++        })
++        .field("destinationEventUrl", |f| f.group("Destination").order(10))
++        .field("destinationBearerSecret", |f| {
++            f.group("Destination").order(11).widget("password")
++        })
++        .field("requestTimeoutMs", |f| {
++            f.group("Advanced").order(20).placeholder("10000")
++        })
++        .field("deliveryRecordTtlSecs", |f| {
++            f.group("Advanced").order(21).placeholder("604800")
++        })
++        .field("priorityQueueCapacity", |f| {
++            f.group("Advanced").order(22).placeholder("10000")
++        })
++        .field("recoveryPolicy", |f| f.group("Advanced").order(23))
++        .annotate()
++    }
++
++    async fn create_reaction(
++        &self,
++        id: &str,
++        query_ids: Vec<String>,
++        config_json: &serde_json::Value,
++        auto_start: bool,
++    ) -> anyhow::Result<Box<dyn Reaction>> {
++        let dto: GitHubProjectItemRefreshConfigDto = serde_json::from_value(config_json.clone())?;
++        let mapper = DtoMapper::new();
++
++        let mut builder = GitHubProjectItemRefreshBuilder::new(id)
++            .with_queries(query_ids)
++            .with_auto_start(auto_start)
++            .with_github_token(mapper.resolve_string(&dto.github_token).await?)
++            .with_expected_status_field_node_id(
++                mapper
++                    .resolve_string(&dto.expected_status_field_node_id)
++                    .await?,
++            )
++            .with_destination_event_url(mapper.resolve_string(&dto.destination_event_url).await?);
++
++        if let Some(graphql_url) = &dto.graphql_url {
++            builder = builder.with_graphql_url(mapper.resolve_string(graphql_url).await?);
++        }
++        if !dto.graphql_headers.is_empty() {
++            let mut resolved_headers = HashMap::new();
++            for (name, value) in &dto.graphql_headers {
++                resolved_headers.insert(name.clone(), mapper.resolve_string(value).await?);
++            }
++            for (name, value) in resolved_headers {
++                builder = builder.with_graphql_header(name, value);
++            }
++        }
++        if !dto.allowlisted_project_ids.is_empty() {
++            builder = builder.with_allowlisted_project_ids(dto.allowlisted_project_ids.clone());
++        }
++        if let Some(status_field_name) = &dto.status_field_name {
++            builder =
++                builder.with_status_field_name(mapper.resolve_string(status_field_name).await?);
++        }
++        if let Some(secret) = &dto.destination_bearer_secret {
++            builder = builder.with_destination_bearer_secret(mapper.resolve_string(secret).await?);
++        }
++        if let Some(timeout_ms) = &dto.request_timeout_ms {
++            builder = builder.with_request_timeout_ms(mapper.resolve_typed(timeout_ms).await?);
++        }
++        if let Some(ttl_secs) = &dto.delivery_record_ttl_secs {
++            builder = builder.with_delivery_record_ttl_secs(mapper.resolve_typed(ttl_secs).await?);
++        }
++        if let Some(cap) = &dto.priority_queue_capacity {
++            let resolved: u64 = mapper.resolve_typed(cap).await?;
++            builder = builder.with_priority_queue_capacity(resolved as usize);
++        }
++        if let Some(policy) = dto.recovery_policy {
++            builder = builder.with_recovery_policy(policy.into());
++        }
++
++        let mut reaction = builder.build()?;
++        reaction.base.set_raw_config(config_json.clone());
++        Ok(Box::new(reaction))
++    }
++}
+diff --git a/components/reactions/github-project-item-refresh/src/destination.rs b/components/reactions/github-project-item-refresh/src/destination.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..59938f6768476a88b9bc53838b5ea1b15b5056d3
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/destination.rs
+@@ -0,0 +1,133 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use reqwest::Client;
++use serde::Deserialize;
++
++use crate::models::{HttpSourceChange, ProjectItemStatusNode};
++
++#[derive(Debug, thiserror::Error)]
++pub enum DestinationPublishError {
++    #[error("transport error while publishing to destination source: {0}")]
++    Transport(String),
++    #[error("destination source rejected payload with HTTP {status}: {body}")]
++    HttpStatus { status: u16, body: String },
++    #[error("destination source returned an invalid acknowledgement: {body}")]
++    InvalidAcknowledgement { body: String },
++    #[error("destination source rejected the event: {message}")]
++    RejectedAcknowledgement { message: String },
++    #[error("destination payload is invalid: {0}")]
++    InvalidPayload(String),
++}
++
++impl DestinationPublishError {
++    pub fn is_ambiguous(&self) -> bool {
++        matches!(
++            self,
++            Self::Transport(_) | Self::InvalidAcknowledgement { .. }
++        )
++    }
++}
++
++#[derive(Debug, Deserialize)]
++struct EventResponse {
++    success: bool,
++    message: String,
++    error: Option<String>,
++}
++
++#[derive(Clone)]
++pub struct DestinationSourceClient {
++    client: Client,
++    destination_event_url: String,
++    bearer_secret: Option<String>,
++}
++
++impl DestinationSourceClient {
++    pub fn new(
++        client: Client,
++        destination_event_url: impl Into<String>,
++        bearer_secret: Option<String>,
++    ) -> Self {
++        Self {
++            client,
++            destination_event_url: destination_event_url.into(),
++            bearer_secret,
++        }
++    }
++
++    pub async fn publish_project_item_status(
++        &self,
++        node: &ProjectItemStatusNode,
++    ) -> Result<(), DestinationPublishError> {
++        let change = HttpSourceChange::update_project_item_status(node)
++            .map_err(|e| DestinationPublishError::InvalidPayload(e.to_string()))?;
++        let idempotency_key = format!(
++            "{}:{}",
++            node.triggering_delivery_id, node.project_item_node_id
++        );
++        let mut request = self
++            .client
++            .post(&self.destination_event_url)
++            .header("Idempotency-Key", idempotency_key)
++            .json(&change);
++
++        if let Some(secret) = &self.bearer_secret {
++            request = request.bearer_auth(secret);
++        }
++
++        let response = request
++            .send()
++            .await
++            .map_err(|e| DestinationPublishError::Transport(e.to_string()))?;
++
++        let status = response.status();
++        let body = response
++            .text()
++            .await
++            .map_err(|e| DestinationPublishError::Transport(e.to_string()))?;
++
++        if !status.is_success() {
++            return Err(DestinationPublishError::HttpStatus {
++                status: status.as_u16(),
++                body: truncate_for_error(&body),
++            });
++        }
++
++        let acknowledgement: EventResponse = serde_json::from_str(&body).map_err(|_| {
++            DestinationPublishError::InvalidAcknowledgement {
++                body: truncate_for_error(&body),
++            }
++        })?;
++        if !acknowledgement.success {
++            let message = acknowledgement
++                .error
++                .filter(|value| !value.trim().is_empty())
++                .unwrap_or(acknowledgement.message);
++            return Err(DestinationPublishError::RejectedAcknowledgement { message });
++        }
++
++        Ok(())
++    }
++}
++
++fn truncate_for_error(raw: &str) -> String {
++    const MAX: usize = 512;
++    if raw.chars().count() <= MAX {
++        return raw.to_string();
++    }
++    let mut truncated = raw.chars().take(MAX).collect::<String>();
++    truncated.push('…');
++    truncated
++}
+diff --git a/components/reactions/github-project-item-refresh/src/graphql.rs b/components/reactions/github-project-item-refresh/src/graphql.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..927fcfdd1ac3ad10fd405ba1c8f3a6cc573b9cc3
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/graphql.rs
+@@ -0,0 +1,417 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use anyhow::Context;
++use chrono::{DateTime, Utc};
++use reqwest::{header::HeaderMap, Client, StatusCode};
++use serde::Deserialize;
++use serde_json::json;
++use std::collections::HashMap;
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
++
++use crate::models::FetchedProjectItemState;
++
++const RATE_LIMIT_FALLBACK_BACKOFF: Duration = Duration::from_millis(100);
++const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
++
++const PROJECT_ITEM_STATUS_QUERY: &str = r#"
++query ProjectItemStatus($projectItemNodeId: ID!, $statusFieldName: String!) {
++  node(id: $projectItemNodeId) {
++    __typename
++    ... on ProjectV2Item {
++      id
++      updatedAt
++      project {
++        id
++      }
++      content {
++        __typename
++        ... on Issue {
++          id
++        }
++        ... on PullRequest {
++          id
++        }
++        ... on DraftIssue {
++          id
++        }
++      }
++      fieldValueByName(name: $statusFieldName) {
++        __typename
++        ... on ProjectV2ItemFieldSingleSelectValue {
++          name
++          optionId
++          field {
++            ... on ProjectV2SingleSelectField {
++              id
++            }
++          }
++        }
++      }
++    }
++  }
++}
++"#;
++
++#[derive(Debug, thiserror::Error)]
++pub enum GraphqlFetchError {
++    #[error("transport error: {0}")]
++    Transport(String),
++    #[error("github graphql responded with HTTP {status}: {body}")]
++    HttpStatus { status: u16, body: String },
++    #[error("github graphql rate-limited with HTTP {status}, retrying in {retry_after:?}")]
++    RateLimited { status: u16, retry_after: Duration },
++    #[error("github graphql returned errors: {0}")]
++    GraphqlErrors(String),
++    #[error("project item '{project_item_node_id}' was not found")]
++    MissingItem { project_item_node_id: String },
++    #[error("node '{project_item_node_id}' had type '{actual}', expected 'ProjectV2Item'")]
++    TypeMismatch {
++        project_item_node_id: String,
++        actual: String,
++    },
++    #[error(
++        "project item '{project_item_node_id}' is missing a required '{status_field_name}' value"
++    )]
++    MissingStatus {
++        project_item_node_id: String,
++        status_field_name: String,
++    },
++    #[error("project item '{project_item_node_id}' is missing required field '{field_name}'")]
++    MissingField {
++        project_item_node_id: String,
++        field_name: &'static str,
++    },
++}
++
++impl GraphqlFetchError {
++    pub fn is_retryable(&self) -> bool {
++        match self {
++            Self::Transport(_) => true,
++            Self::RateLimited { .. } => true,
++            Self::HttpStatus { status, .. } => *status >= 500 || *status == 429,
++            _ => false,
++        }
++    }
++}
++
++#[derive(Clone)]
++pub struct GitHubGraphqlClient {
++    client: Client,
++    url: String,
++    token: String,
++    extra_headers: HashMap<String, String>,
++    status_field_name: String,
++}
++
++impl GitHubGraphqlClient {
++    pub fn new(
++        client: Client,
++        url: impl Into<String>,
++        token: impl Into<String>,
++        extra_headers: HashMap<String, String>,
++        status_field_name: impl Into<String>,
++    ) -> Self {
++        Self {
++            client,
++            url: url.into(),
++            token: token.into(),
++            extra_headers,
++            status_field_name: status_field_name.into(),
++        }
++    }
++
++    pub async fn fetch_project_item_status(
++        &self,
++        project_item_node_id: &str,
++        triggering_delivery_id: &str,
++        refreshed_at: DateTime<Utc>,
++    ) -> Result<FetchedProjectItemState, GraphqlFetchError> {
++        let body = json!({
++            "query": PROJECT_ITEM_STATUS_QUERY,
++            "variables": {
++                "projectItemNodeId": project_item_node_id,
++                "statusFieldName": &self.status_field_name,
++            }
++        });
++
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            reqwest::header::AUTHORIZATION,
++            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.token))
++                .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?,
++        );
++        headers.insert(
++            reqwest::header::ACCEPT,
++            reqwest::header::HeaderValue::from_static("application/json"),
++        );
++        headers.insert(
++            "X-GitHub-Api-Version",
++            reqwest::header::HeaderValue::from_static("2022-11-28"),
++        );
++        for (name, value) in &self.extra_headers {
++            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
++                .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
++            let header_value = reqwest::header::HeaderValue::from_str(value)
++                .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
++            headers.insert(header_name, header_value);
++        }
++
++        let response = self
++            .client
++            .post(&self.url)
++            .headers(headers)
++            .json(&body)
++            .send()
++            .await
++            .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
++
++        let status = response.status();
++        let response_headers = response.headers().clone();
++        let raw_text = response
++            .text()
++            .await
++            .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
++
++        if !status.is_success() {
++            if let Some(retry_after) = rate_limit_retry_after(status, &response_headers) {
++                return Err(GraphqlFetchError::RateLimited {
++                    status: status.as_u16(),
++                    retry_after,
++                });
++            }
++            return Err(GraphqlFetchError::HttpStatus {
++                status: status.as_u16(),
++                body: truncate_for_error(&raw_text),
++            });
++        }
++
++        let envelope: GraphqlEnvelope = serde_json::from_str(&raw_text)
++            .with_context(|| "deserializing GitHub GraphQL response")
++            .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
++
++        if let Some(errors) = envelope.errors {
++            if !errors.is_empty() {
++                let combined = errors
++                    .iter()
++                    .map(|e| e.message.as_str())
++                    .collect::<Vec<_>>()
++                    .join("; ");
++                return Err(GraphqlFetchError::GraphqlErrors(combined));
++            }
++        }
++
++        let data = envelope
++            .data
++            .ok_or_else(|| GraphqlFetchError::MissingItem {
++                project_item_node_id: project_item_node_id.to_string(),
++            })?;
++        let node = data.node.ok_or_else(|| GraphqlFetchError::MissingItem {
++            project_item_node_id: project_item_node_id.to_string(),
++        })?;
++
++        if node.typename != "ProjectV2Item" {
++            return Err(GraphqlFetchError::TypeMismatch {
++                project_item_node_id: project_item_node_id.to_string(),
++                actual: node.typename,
++            });
++        }
++
++        let item_id = node.id.ok_or_else(|| GraphqlFetchError::MissingField {
++            project_item_node_id: project_item_node_id.to_string(),
++            field_name: "id",
++        })?;
++        let updated_at = node
++            .updated_at
++            .ok_or_else(|| GraphqlFetchError::MissingField {
++                project_item_node_id: project_item_node_id.to_string(),
++                field_name: "updatedAt",
++            })?;
++        let project_node_id = node.project.and_then(|project| project.id).ok_or_else(|| {
++            GraphqlFetchError::MissingField {
++                project_item_node_id: project_item_node_id.to_string(),
++                field_name: "project.id",
++            }
++        })?;
++
++        let content_node_id = node.content.as_ref().and_then(|content| content.id.clone());
++        let content_type = node
++            .content
++            .as_ref()
++            .map(|content| content.typename.clone());
++
++        let missing_status = || GraphqlFetchError::MissingStatus {
++            project_item_node_id: project_item_node_id.to_string(),
++            status_field_name: self.status_field_name.clone(),
++        };
++        let status_value = node.field_value_by_name.ok_or_else(&missing_status)?;
++
++        if status_value.typename != "ProjectV2ItemFieldSingleSelectValue" {
++            return Err(missing_status());
++        }
++
++        let status_option_id = status_value.option_id.ok_or_else(&missing_status)?;
++        let status_name = status_value.name.ok_or_else(&missing_status)?;
++        let status_field_node_id = status_value
++            .field
++            .and_then(|field| field.id)
++            .ok_or_else(missing_status)?;
++
++        Ok(FetchedProjectItemState {
++            project_item_node_id: item_id,
++            project_node_id,
++            content_node_id,
++            content_type,
++            status_field_node_id,
++            status_option_id,
++            status_name,
++            updated_at,
++            refreshed_at,
++            triggering_delivery_id: triggering_delivery_id.to_string(),
++        })
++    }
++}
++
++pub(crate) fn rate_limit_retry_after(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
++    match status {
++        StatusCode::FORBIDDEN if is_rate_limited_403(headers) => {
++            Some(parse_rate_limit_delay(headers).unwrap_or(RATE_LIMIT_FALLBACK_BACKOFF))
++        }
++        StatusCode::TOO_MANY_REQUESTS => parse_rate_limit_delay(headers),
++        _ => None,
++    }
++}
++
++fn is_rate_limited_403(headers: &HeaderMap) -> bool {
++    headers.contains_key(reqwest::header::RETRY_AFTER)
++        || headers
++            .get("x-ratelimit-remaining")
++            .and_then(|value| value.to_str().ok())
++            .map(str::trim)
++            == Some("0")
++}
++
++fn parse_rate_limit_delay(headers: &HeaderMap) -> Option<Duration> {
++    parse_retry_after_delay(headers).or_else(|| parse_rate_limit_reset_delay(headers))
++}
++
++fn parse_retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
++    let retry_after = headers
++        .get(reqwest::header::RETRY_AFTER)?
++        .to_str()
++        .ok()?
++        .trim();
++    if let Ok(seconds) = retry_after.parse::<u64>() {
++        return Some(Duration::from_secs(seconds).min(MAX_RATE_LIMIT_WAIT));
++    }
++
++    let at = httpdate::parse_http_date(retry_after).ok()?;
++    let delay = at
++        .duration_since(SystemTime::now())
++        .unwrap_or_else(|_| Duration::from_secs(0));
++    Some(delay.min(MAX_RATE_LIMIT_WAIT))
++}
++
++fn parse_rate_limit_reset_delay(headers: &HeaderMap) -> Option<Duration> {
++    let reset_epoch = headers
++        .get("x-ratelimit-reset")?
++        .to_str()
++        .ok()?
++        .trim()
++        .parse::<u64>()
++        .ok()?;
++    let now_epoch = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .ok()
++        .map(|d| d.as_secs())?;
++    let delay_secs = reset_epoch.saturating_sub(now_epoch);
++    Some(Duration::from_secs(delay_secs).min(MAX_RATE_LIMIT_WAIT))
++}
++
++fn truncate_for_error(raw: &str) -> String {
++    const MAX: usize = 512;
++    if raw.chars().count() <= MAX {
++        return raw.to_string();
++    }
++    let mut truncated = raw.chars().take(MAX).collect::<String>();
++    truncated.push('…');
++    truncated
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlEnvelope {
++    #[serde(default)]
++    data: Option<GraphqlData>,
++    #[serde(default)]
++    errors: Option<Vec<GraphqlErrorItem>>,
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlErrorItem {
++    message: String,
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlData {
++    #[serde(default)]
++    node: Option<GraphqlNode>,
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlNode {
++    #[serde(rename = "__typename")]
++    typename: String,
++    #[serde(default)]
++    id: Option<String>,
++    #[serde(default, rename = "updatedAt")]
++    updated_at: Option<DateTime<Utc>>,
++    #[serde(default)]
++    project: Option<GraphqlProject>,
++    #[serde(default)]
++    content: Option<GraphqlContent>,
++    #[serde(default, rename = "fieldValueByName")]
++    field_value_by_name: Option<GraphqlStatusValue>,
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlProject {
++    #[serde(default)]
++    id: Option<String>,
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlContent {
++    #[serde(rename = "__typename")]
++    typename: String,
++    #[serde(default)]
++    id: Option<String>,
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlStatusValue {
++    #[serde(rename = "__typename")]
++    typename: String,
++    #[serde(default)]
++    name: Option<String>,
++    #[serde(default, rename = "optionId")]
++    option_id: Option<String>,
++    #[serde(default)]
++    field: Option<GraphqlStatusField>,
++}
++
++#[derive(Debug, Deserialize)]
++struct GraphqlStatusField {
++    #[serde(default)]
++    id: Option<String>,
++}
+diff --git a/components/reactions/github-project-item-refresh/src/lib.rs b/components/reactions/github-project-item-refresh/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd222035efe0b95f12fdb734e81ff2ed735c60a8
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/lib.rs
+@@ -0,0 +1,176 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#![allow(unexpected_cfgs)]
++
++//! GitHub ProjectV2 item refresh reaction for Drasi.
++
++pub mod config;
++pub mod descriptor;
++pub(crate) mod destination;
++pub(crate) mod graphql;
++pub(crate) mod models;
++pub(crate) mod processing;
++pub(crate) mod reaction;
++pub(crate) mod state_store;
++
++#[cfg(test)]
++mod tests;
++
++use drasi_lib::recovery::ReactionRecoveryPolicy;
++
++pub use config::GitHubProjectItemRefreshConfig;
++pub use reaction::GitHubProjectItemRefreshReaction;
++
++/// Builder for the GitHub project-item refresh reaction.
++pub struct GitHubProjectItemRefreshBuilder {
++    id: String,
++    queries: Vec<String>,
++    config: GitHubProjectItemRefreshConfig,
++    priority_queue_capacity: Option<usize>,
++    auto_start: bool,
++    recovery_policy: Option<ReactionRecoveryPolicy>,
++}
++
++impl GitHubProjectItemRefreshBuilder {
++    pub fn new(id: impl Into<String>) -> Self {
++        Self {
++            id: id.into(),
++            queries: Vec::new(),
++            config: GitHubProjectItemRefreshConfig::default(),
++            priority_queue_capacity: None,
++            auto_start: true,
++            recovery_policy: None,
++        }
++    }
++
++    pub fn with_queries(mut self, queries: Vec<String>) -> Self {
++        self.queries = queries;
++        self
++    }
++
++    pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
++        self.queries.push(query_id.into());
++        self
++    }
++
++    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
++        self.queries.push(query_id.into());
++        self
++    }
++
++    pub fn with_github_token(mut self, token: impl Into<String>) -> Self {
++        self.config.github_token = token.into();
++        self
++    }
++
++    pub fn with_graphql_url(mut self, url: impl Into<String>) -> Self {
++        self.config.graphql_url = url.into();
++        self
++    }
++
++    pub fn with_graphql_header(
++        mut self,
++        name: impl Into<String>,
++        value: impl Into<String>,
++    ) -> Self {
++        self.config
++            .graphql_headers
++            .insert(name.into(), value.into());
++        self
++    }
++
++    pub fn with_allowlisted_project_ids(mut self, project_ids: Vec<String>) -> Self {
++        self.config.allowlisted_project_ids = project_ids;
++        self
++    }
++
++    pub fn with_status_field_name(mut self, status_field_name: impl Into<String>) -> Self {
++        self.config.status_field_name = status_field_name.into();
++        self
++    }
++
++    pub fn with_expected_status_field_node_id(
++        mut self,
++        expected_status_field_node_id: impl Into<String>,
++    ) -> Self {
++        self.config.expected_status_field_node_id = expected_status_field_node_id.into();
++        self
++    }
++
++    pub fn with_destination_event_url(mut self, url: impl Into<String>) -> Self {
++        self.config.destination_event_url = url.into();
++        self
++    }
++
++    pub fn with_destination_bearer_secret(mut self, bearer_secret: impl Into<String>) -> Self {
++        self.config.destination_bearer_secret = Some(bearer_secret.into());
++        self
++    }
++
++    pub fn with_request_timeout_ms(mut self, timeout_ms: u64) -> Self {
++        self.config.request_timeout_ms = timeout_ms;
++        self
++    }
++
++    pub fn with_delivery_record_ttl_secs(mut self, ttl_secs: u64) -> Self {
++        self.config.delivery_record_ttl_secs = ttl_secs;
++        self
++    }
++
++    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
++        self.priority_queue_capacity = Some(capacity);
++        self
++    }
++
++    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
++        self.auto_start = auto_start;
++        self
++    }
++
++    pub fn with_recovery_policy(mut self, policy: ReactionRecoveryPolicy) -> Self {
++        self.recovery_policy = Some(policy);
++        self
++    }
++
++    pub fn with_config(mut self, config: GitHubProjectItemRefreshConfig) -> Self {
++        self.config = config;
++        self
++    }
++
++    pub fn build(self) -> anyhow::Result<GitHubProjectItemRefreshReaction> {
++        self.config
++            .validate(&self.queries, self.priority_queue_capacity)?;
++        Ok(GitHubProjectItemRefreshReaction::from_builder(
++            self.id,
++            self.queries,
++            self.config,
++            self.priority_queue_capacity,
++            self.auto_start,
++            self.recovery_policy,
++        ))
++    }
++}
++
++/// Dynamic plugin entry point.
++#[cfg(feature = "dynamic-plugin")]
++drasi_plugin_sdk::export_plugin!(
++    plugin_id = "github-project-item-refresh-reaction",
++    core_version = env!("CARGO_PKG_VERSION"),
++    lib_version = env!("CARGO_PKG_VERSION"),
++    plugin_version = env!("CARGO_PKG_VERSION"),
++    source_descriptors = [],
++    reaction_descriptors = [descriptor::GitHubProjectItemRefreshDescriptor],
++    bootstrap_descriptors = [],
++);
+diff --git a/components/reactions/github-project-item-refresh/src/models.rs b/components/reactions/github-project-item-refresh/src/models.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..824cbc0965da4429e20c19b7498bce7da8bc7db4
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/models.rs
+@@ -0,0 +1,245 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use chrono::{DateTime, SecondsFormat, Utc};
++use serde::{Deserialize, Serialize};
++use serde_json::{Map, Value};
++use std::io;
++
++/// Parsed invalidation payload from a query `ADD` row.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct InvalidationInput {
++    pub invalidation_node_id: String,
++    pub delivery_id: String,
++    pub project_item_node_id: String,
++    pub project_node_id: Option<String>,
++    pub status_field_node_id: Option<String>,
++    pub state_source_url: Option<String>,
++    pub webhook_action: Option<String>,
++    pub webhook_updated_at: Option<DateTime<Utc>>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct DeliveryReservation {
++    pub delivery_id: String,
++    pub project_item_node_id: String,
++    pub invalidation_node_id: String,
++    pub project_node_id: Option<String>,
++    pub status_field_node_id: Option<String>,
++    pub state_source_url: Option<String>,
++    pub webhook_action: Option<String>,
++    pub webhook_updated_at: Option<DateTime<Utc>>,
++    pub reserved_at: DateTime<Utc>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum PublicationState {
++    Reserved,
++    Fetched,
++    Published,
++    Stale,
++    Rejected,
++    Failed,
++    Ambiguous,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct FetchedProjectItemState {
++    pub project_item_node_id: String,
++    pub project_node_id: String,
++    pub content_node_id: Option<String>,
++    pub content_type: Option<String>,
++    pub status_field_node_id: String,
++    pub status_option_id: String,
++    pub status_name: String,
++    pub updated_at: DateTime<Utc>,
++    pub refreshed_at: DateTime<Utc>,
++    pub triggering_delivery_id: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct PublicationRecord {
++    pub state: PublicationState,
++    pub attempts: u32,
++    pub last_error: Option<String>,
++    pub fetched_state: Option<FetchedProjectItemState>,
++    pub completed_at: Option<DateTime<Utc>>,
++}
++
++impl PublicationRecord {
++    pub fn reserved() -> Self {
++        Self {
++            state: PublicationState::Reserved,
++            attempts: 0,
++            last_error: None,
++            fetched_state: None,
++            completed_at: None,
++        }
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ItemVersionRecord {
++    pub project_item_node_id: String,
++    pub project_node_id: String,
++    pub status_field_node_id: String,
++    pub status_option_id: String,
++    pub status_name: String,
++    pub updated_at: DateTime<Utc>,
++    pub refreshed_at: DateTime<Utc>,
++    pub triggering_delivery_id: String,
++    pub published_at: DateTime<Utc>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct DeliveryKey {
++    pub delivery_id: String,
++    pub project_item_node_id: String,
++}
++
++impl DeliveryKey {
++    pub fn new(delivery_id: impl Into<String>, project_item_node_id: impl Into<String>) -> Self {
++        Self {
++            delivery_id: delivery_id.into(),
++            project_item_node_id: project_item_node_id.into(),
++        }
++    }
++
++    pub fn as_storage_key(&self) -> String {
++        format!("{}::{}", self.delivery_id, self.project_item_node_id)
++    }
++}
++
++/// Outbound deterministic node representation posted to a standard-mode HTTP source.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ProjectItemStatusNode {
++    pub id: String,
++    pub project_item_node_id: String,
++    pub project_node_id: String,
++    pub status_field_node_id: String,
++    pub status_option_id: String,
++    pub status_name: String,
++    pub updated_at: DateTime<Utc>,
++    pub refreshed_at: DateTime<Utc>,
++    pub triggering_delivery_id: String,
++}
++
++impl ProjectItemStatusNode {
++    pub fn deterministic_node_id(project_item_node_id: &str) -> String {
++        format!("project-item-status:{project_item_node_id}")
++    }
++
++    pub fn from_fetched(fetched: &FetchedProjectItemState) -> Self {
++        Self {
++            id: Self::deterministic_node_id(&fetched.project_item_node_id),
++            project_item_node_id: fetched.project_item_node_id.clone(),
++            project_node_id: fetched.project_node_id.clone(),
++            status_field_node_id: fetched.status_field_node_id.clone(),
++            status_option_id: fetched.status_option_id.clone(),
++            status_name: fetched.status_name.clone(),
++            updated_at: fetched.updated_at,
++            refreshed_at: fetched.refreshed_at,
++            triggering_delivery_id: fetched.triggering_delivery_id.clone(),
++        }
++    }
++
++    pub fn updated_at_rfc3339(&self) -> String {
++        self.updated_at.to_rfc3339_opts(SecondsFormat::Millis, true)
++    }
++
++    pub fn refreshed_at_rfc3339(&self) -> String {
++        self.refreshed_at
++            .to_rfc3339_opts(SecondsFormat::Millis, true)
++    }
++}
++
++#[derive(Debug, Clone, Serialize)]
++#[serde(tag = "operation", rename_all = "lowercase")]
++pub enum HttpSourceChange {
++    Update {
++        element: HttpElement,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        timestamp: Option<u64>,
++    },
++}
++
++#[derive(Debug, Clone, Serialize)]
++#[serde(tag = "type", rename_all = "lowercase")]
++pub enum HttpElement {
++    Node {
++        id: String,
++        labels: Vec<String>,
++        #[serde(default)]
++        properties: Map<String, Value>,
++    },
++}
++
++impl HttpSourceChange {
++    pub fn update_project_item_status(node: &ProjectItemStatusNode) -> Result<Self, io::Error> {
++        let mut properties = Map::new();
++        properties.insert(
++            "projectItemNodeId".to_string(),
++            Value::String(node.project_item_node_id.clone()),
++        );
++        properties.insert(
++            "projectNodeId".to_string(),
++            Value::String(node.project_node_id.clone()),
++        );
++        properties.insert(
++            "statusFieldNodeId".to_string(),
++            Value::String(node.status_field_node_id.clone()),
++        );
++        properties.insert(
++            "statusOptionId".to_string(),
++            Value::String(node.status_option_id.clone()),
++        );
++        properties.insert(
++            "statusName".to_string(),
++            Value::String(node.status_name.clone()),
++        );
++        properties.insert(
++            "updatedAt".to_string(),
++            Value::String(node.updated_at_rfc3339()),
++        );
++        properties.insert(
++            "refreshedAt".to_string(),
++            Value::String(node.refreshed_at_rfc3339()),
++        );
++        properties.insert(
++            "triggeringDeliveryId".to_string(),
++            Value::String(node.triggering_delivery_id.clone()),
++        );
++
++        let timestamp = node
++            .updated_at
++            .timestamp_nanos_opt()
++            .and_then(|value| u64::try_from(value).ok())
++            .ok_or_else(|| {
++                io::Error::new(
++                    io::ErrorKind::InvalidData,
++                    "updatedAt cannot be represented as a non-negative nanosecond timestamp",
++                )
++            })?;
++
++        Ok(Self::Update {
++            element: HttpElement::Node {
++                id: node.id.clone(),
++                labels: vec!["ProjectItemStatus".to_string()],
++                properties,
++            },
++            timestamp: Some(timestamp),
++        })
++    }
++}
+diff --git a/components/reactions/github-project-item-refresh/src/processing.rs b/components/reactions/github-project-item-refresh/src/processing.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca435d02f6ba14cfc300988ce4d2da3883deac65
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/processing.rs
+@@ -0,0 +1,618 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use anyhow::Context;
++use chrono::{DateTime, Utc};
++use log::warn;
++use reqwest::Url;
++use serde_json::Value;
++use std::sync::{Arc, Mutex};
++use std::time::Duration;
++use std::time::Instant;
++
++use crate::config::{
++    validate_project_item_node_id, validate_project_node_id, GitHubProjectItemRefreshConfig,
++};
++use crate::destination::{DestinationPublishError, DestinationSourceClient};
++use crate::graphql::{GitHubGraphqlClient, GraphqlFetchError};
++use crate::models::{
++    DeliveryKey, DeliveryReservation, FetchedProjectItemState, InvalidationInput,
++    ItemVersionRecord, ProjectItemStatusNode, PublicationRecord, PublicationState,
++};
++use crate::state_store::RefreshStateStore;
++
++const MAX_FETCH_ATTEMPTS: u32 = 3;
++const INITIAL_BACKOFF_MS: u64 = 100;
++const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
++const PRUNE_INTERVAL: Duration = Duration::from_secs(5 * 60);
++
++#[derive(Clone)]
++struct PruneThrottle {
++    state: Arc<Mutex<PruneThrottleState>>,
++    interval: Duration,
++}
++
++#[derive(Clone, Copy, Debug, Default)]
++struct PruneThrottleState {
++    last_successful_prune: Option<Instant>,
++    in_progress: bool,
++}
++
++impl PruneThrottle {
++    fn new() -> Self {
++        Self::with_interval(PRUNE_INTERVAL)
++    }
++
++    fn with_interval(interval: Duration) -> Self {
++        Self {
++            state: Arc::new(Mutex::new(PruneThrottleState::default())),
++            interval,
++        }
++    }
++
++    fn try_acquire(&self) -> Option<PrunePermit> {
++        let mut state = lock_prune_state(&self.state);
++        if state.in_progress {
++            return None;
++        }
++        if let Some(last_successful_prune) = state.last_successful_prune {
++            if last_successful_prune.elapsed() < self.interval {
++                return None;
++            }
++        }
++
++        state.in_progress = true;
++        Some(PrunePermit {
++            state: Arc::clone(&self.state),
++        })
++    }
++}
++
++struct PrunePermit {
++    state: Arc<Mutex<PruneThrottleState>>,
++}
++
++impl PrunePermit {
++    fn mark_success(self) {
++        let mut state = lock_prune_state(&self.state);
++        state.last_successful_prune = Some(Instant::now());
++    }
++
++    fn mark_failure(self) {}
++}
++
++impl Drop for PrunePermit {
++    fn drop(&mut self) {
++        lock_prune_state(&self.state).in_progress = false;
++    }
++}
++
++fn lock_prune_state(
++    state: &Mutex<PruneThrottleState>,
++) -> std::sync::MutexGuard<'_, PruneThrottleState> {
++    state
++        .lock()
++        .unwrap_or_else(|poisoned| poisoned.into_inner())
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum AddRowOutcome {
++    Published,
++    Duplicate,
++    Stale,
++    Rejected,
++}
++
++#[derive(Clone)]
++pub struct RefreshProcessor {
++    config: GitHubProjectItemRefreshConfig,
++    state_store: RefreshStateStore,
++    graphql_client: GitHubGraphqlClient,
++    destination_client: DestinationSourceClient,
++    prune_throttle: PruneThrottle,
++}
++
++impl RefreshProcessor {
++    pub fn new(
++        config: GitHubProjectItemRefreshConfig,
++        state_store: RefreshStateStore,
++        graphql_client: GitHubGraphqlClient,
++        destination_client: DestinationSourceClient,
++    ) -> Self {
++        Self {
++            config,
++            state_store,
++            graphql_client,
++            destination_client,
++            prune_throttle: PruneThrottle::new(),
++        }
++    }
++
++    pub async fn process_add_row(&self, row_data: &Value) -> anyhow::Result<AddRowOutcome> {
++        let input = parse_invalidation_input(row_data).context("parsing invalidation row")?;
++        self.process_invalidation(input).await
++    }
++
++    async fn process_invalidation(
++        &self,
++        input: InvalidationInput,
++    ) -> anyhow::Result<AddRowOutcome> {
++        self.maybe_prune_terminal_records().await;
++
++        validate_project_item_node_id(&input.project_item_node_id)
++            .context("validating project item node id")?;
++        if input.delivery_id.trim().is_empty() {
++            anyhow::bail!("delivery id must not be empty");
++        }
++
++        if let Some(project_node_id) = &input.project_node_id {
++            validate_project_node_id(project_node_id).context("validating project node id")?;
++            if !self.config.is_project_allowed(project_node_id) {
++                return self
++                    .mark_rejected(
++                        &input,
++                        format!("project '{project_node_id}' is not allowlisted"),
++                    )
++                    .await;
++            }
++        }
++
++        if let Some(state_source_url) = &input.state_source_url {
++            if !urls_match(state_source_url, &self.config.destination_event_url) {
++                return self
++                        .mark_rejected(
++                            &input,
++                            format!(
++                                "input StateSourceUrl '{state_source_url}' does not match configured destinationEventUrl '{}'",
++                                self.config.destination_event_url
++                            ),
++                        )
++                        .await;
++            }
++        }
++
++        let key = DeliveryKey::new(&input.delivery_id, &input.project_item_node_id);
++        let reservation = DeliveryReservation {
++            delivery_id: input.delivery_id.clone(),
++            project_item_node_id: input.project_item_node_id.clone(),
++            invalidation_node_id: input.invalidation_node_id.clone(),
++            project_node_id: input.project_node_id.clone(),
++            status_field_node_id: input.status_field_node_id.clone(),
++            state_source_url: input.state_source_url.clone(),
++            webhook_action: input.webhook_action.clone(),
++            webhook_updated_at: input.webhook_updated_at,
++            reserved_at: Utc::now(),
++        };
++
++        let reservation = match self.state_store.get_reservation(&key).await? {
++            Some(existing) => existing,
++            None => {
++                self.state_store
++                    .set_reservation(&key, &reservation)
++                    .await
++                    .context("persisting delivery reservation")?;
++                reservation
++            }
++        };
++
++        let mut publication = self
++            .state_store
++            .get_publication(&key)
++            .await?
++            .unwrap_or_else(PublicationRecord::reserved);
++
++        if matches!(
++            publication.state,
++            PublicationState::Published | PublicationState::Stale | PublicationState::Rejected
++        ) {
++            return Ok(AddRowOutcome::Duplicate);
++        }
++
++        let recoverable_fetched_state = match publication.state {
++            PublicationState::Fetched | PublicationState::Ambiguous => {
++                publication.fetched_state.clone()
++            }
++            _ => None,
++        };
++        publication.attempts = publication.attempts.saturating_add(1);
++        publication.state = PublicationState::Reserved;
++        publication.last_error = None;
++        self.state_store
++            .set_publication(&key, &publication)
++            .await
++            .context("writing reservation publication state")?;
++
++        for status_field_node_id in [
++            input.status_field_node_id.as_ref(),
++            reservation.status_field_node_id.as_ref(),
++        ]
++        .into_iter()
++        .flatten()
++        {
++            if status_field_node_id != &self.config.expected_status_field_node_id {
++                let message = format!(
++                    "input StatusFieldNodeId '{status_field_node_id}' does not match configured expectedStatusFieldNodeId '{}'",
++                    self.config.expected_status_field_node_id
++                );
++                self.state_store
++                    .mark_failed(&key, publication, PublicationState::Failed, message.clone())
++                    .await
++                    .context("recording configured status field mismatch")?;
++                anyhow::bail!(message);
++            }
++        }
++
++        let fetched = match recoverable_fetched_state {
++            Some(fetched) => fetched,
++            None => match self.fetch_with_retry(&input).await {
++                Ok(fetched) => fetched,
++                Err(err) => {
++                    self.state_store
++                        .mark_failed(&key, publication, PublicationState::Failed, err.to_string())
++                        .await
++                        .context("recording fetch failure")?;
++                    return Err(err);
++                }
++            },
++        };
++
++        if !self.config.is_project_allowed(&fetched.project_node_id) {
++            return self
++                .mark_rejected(
++                    &input,
++                    format!("project '{}' is not allowlisted", fetched.project_node_id),
++                )
++                .await;
++        }
++
++        if fetched.status_field_node_id != self.config.expected_status_field_node_id {
++            let message = format!(
++                "fetched status field node id '{}' does not match configured expectedStatusFieldNodeId '{}'",
++                fetched.status_field_node_id, self.config.expected_status_field_node_id
++            );
++            self.state_store
++                .mark_failed(&key, publication, PublicationState::Failed, message.clone())
++                .await
++                .context("recording fetched configured status field mismatch")?;
++            anyhow::bail!(message);
++        }
++
++        if let Some(project_node_id) = &reservation.project_node_id {
++            if project_node_id != &fetched.project_node_id {
++                let message = format!(
++                    "input project node id '{project_node_id}' does not match fetched project '{}'",
++                    fetched.project_node_id
++                );
++                self.state_store
++                    .mark_failed(&key, publication, PublicationState::Failed, message.clone())
++                    .await
++                    .context("recording project mismatch")?;
++                anyhow::bail!(message);
++            }
++        }
++
++        if let Some(status_field_node_id) = &reservation.status_field_node_id {
++            if status_field_node_id != &fetched.status_field_node_id {
++                let message = format!(
++                    "input StatusFieldNodeId '{status_field_node_id}' does not match fetched status field '{}'",
++                    fetched.status_field_node_id
++                );
++                self.state_store
++                    .mark_failed(&key, publication, PublicationState::Failed, message.clone())
++                    .await
++                    .context("recording status field mismatch")?;
++                anyhow::bail!(message);
++            }
++        }
++
++        if let Some(version) = self
++            .state_store
++            .get_item_version(&fetched.project_item_node_id)
++            .await?
++        {
++            if fetched.updated_at <= version.updated_at {
++                let stale_record = PublicationRecord {
++                    state: PublicationState::Stale,
++                    attempts: publication.attempts,
++                    last_error: None,
++                    fetched_state: Some(fetched.clone()),
++                    completed_at: Some(Utc::now()),
++                };
++                self.state_store
++                    .set_publication(&key, &stale_record)
++                    .await
++                    .context("recording stale publication state")?;
++                return Ok(AddRowOutcome::Stale);
++            }
++        }
++
++        let fetched_record = PublicationRecord {
++            state: PublicationState::Fetched,
++            attempts: publication.attempts,
++            last_error: None,
++            fetched_state: Some(fetched.clone()),
++            completed_at: None,
++        };
++        self.state_store
++            .set_publication(&key, &fetched_record)
++            .await
++            .context("recording fetched publication state")?;
++
++        let node = ProjectItemStatusNode::from_fetched(&fetched);
++        if let Err(err) = self
++            .destination_client
++            .publish_project_item_status(&node)
++            .await
++        {
++            let failed_state = if err.is_ambiguous() {
++                PublicationState::Ambiguous
++            } else {
++                PublicationState::Failed
++            };
++            self.state_store
++                .mark_failed(&key, fetched_record, failed_state, err.to_string())
++                .await
++                .context("recording publication failure")?;
++            return Err(anyhow::anyhow!(err));
++        }
++
++        let published_at = Utc::now();
++        let version = ItemVersionRecord {
++            project_item_node_id: fetched.project_item_node_id.clone(),
++            project_node_id: fetched.project_node_id.clone(),
++            status_field_node_id: fetched.status_field_node_id.clone(),
++            status_option_id: fetched.status_option_id.clone(),
++            status_name: fetched.status_name.clone(),
++            updated_at: fetched.updated_at,
++            refreshed_at: fetched.refreshed_at,
++            triggering_delivery_id: fetched.triggering_delivery_id.clone(),
++            published_at,
++        };
++        self.state_store
++            .set_item_version(&fetched.project_item_node_id, &version)
++            .await
++            .context("writing item version state")?;
++
++        let published_record = PublicationRecord {
++            state: PublicationState::Published,
++            attempts: publication.attempts,
++            last_error: None,
++            fetched_state: Some(fetched),
++            completed_at: Some(published_at),
++        };
++        self.state_store
++            .set_publication(&key, &published_record)
++            .await
++            .context("recording published state")?;
++
++        Ok(AddRowOutcome::Published)
++    }
++
++    async fn maybe_prune_terminal_records(&self) {
++        let Some(permit) = self.prune_throttle.try_acquire() else {
++            return;
++        };
++
++        match self
++            .state_store
++            .prune_terminal_records_older_than(self.config.delivery_record_ttl_secs, Utc::now())
++            .await
++        {
++            Ok(_) => permit.mark_success(),
++            Err(err) => {
++                warn!("failed to prune terminal delivery records: {err:#}");
++                permit.mark_failure();
++            }
++        }
++    }
++
++    async fn mark_rejected(
++        &self,
++        input: &InvalidationInput,
++        message: String,
++    ) -> anyhow::Result<AddRowOutcome> {
++        let key = DeliveryKey::new(&input.delivery_id, &input.project_item_node_id);
++        let mut publication = self
++            .state_store
++            .get_publication(&key)
++            .await?
++            .unwrap_or_else(PublicationRecord::reserved);
++        publication.attempts = publication.attempts.saturating_add(1);
++        publication.state = PublicationState::Rejected;
++        publication.last_error = Some(message);
++        publication.completed_at = Some(Utc::now());
++        self.state_store
++            .set_publication(&key, &publication)
++            .await
++            .context("recording rejected publication state")?;
++        Ok(AddRowOutcome::Rejected)
++    }
++
++    async fn fetch_with_retry(
++        &self,
++        input: &InvalidationInput,
++    ) -> anyhow::Result<FetchedProjectItemState> {
++        let mut backoff_ms = INITIAL_BACKOFF_MS;
++        for attempt in 1..=MAX_FETCH_ATTEMPTS {
++            let refreshed_at = Utc::now();
++            match self
++                .graphql_client
++                .fetch_project_item_status(
++                    &input.project_item_node_id,
++                    &input.delivery_id,
++                    refreshed_at,
++                )
++                .await
++            {
++                Ok(fetched) => return Ok(fetched),
++                Err(err) => {
++                    if attempt < MAX_FETCH_ATTEMPTS && err.is_retryable() {
++                        let wait = match &err {
++                            GraphqlFetchError::RateLimited { retry_after, .. } => {
++                                (*retry_after).min(MAX_RATE_LIMIT_WAIT)
++                            }
++                            _ => {
++                                let delay = Duration::from_millis(backoff_ms);
++                                backoff_ms = backoff_ms.saturating_mul(2);
++                                delay
++                            }
++                        };
++                        tokio::time::sleep(wait).await;
++                        continue;
++                    }
++                    return Err(map_graphql_error(err));
++                }
++            }
++        }
++        unreachable!("fetch retry loop should always return");
++    }
++}
++
++fn map_graphql_error(err: GraphqlFetchError) -> anyhow::Error {
++    anyhow::anyhow!(err)
++}
++
++pub fn parse_invalidation_input(row_data: &Value) -> anyhow::Result<InvalidationInput> {
++    let object = row_data
++        .as_object()
++        .ok_or_else(|| anyhow::anyhow!("row data must be a JSON object"))?;
++
++    let invalidation_node_id = required_string(
++        object,
++        &[
++            "InvalidationNodeId",
++            "invalidationNodeId",
++            "invalidation_node_id",
++            "id",
++        ],
++        "invalidation node id",
++    )?;
++    let delivery_id = required_string(
++        object,
++        &[
++            "DeliveryId",
++            "deliveryId",
++            "xGitHubDelivery",
++            "xGithubDelivery",
++            "githubDeliveryId",
++        ],
++        "delivery id",
++    )?;
++    let project_item_node_id = required_string(
++        object,
++        &[
++            "ProjectItemNodeId",
++            "projectItemNodeId",
++            "project_item_node_id",
++        ],
++        "project item node id",
++    )?;
++    let project_node_id = optional_string(
++        object,
++        &["ProjectNodeId", "projectNodeId", "project_node_id"],
++    );
++    let status_field_node_id = optional_string(object, &["StatusFieldNodeId", "statusFieldNodeId"]);
++    let state_source_url = optional_string(object, &["StateSourceUrl", "stateSourceUrl"]);
++    let webhook_action = optional_string(object, &["webhookAction", "action"]);
++    let webhook_updated_at = optional_timestamp(
++        object,
++        &[
++            "InvalidatedAt",
++            "invalidatedAt",
++            "webhookUpdatedAt",
++            "webhookUpdateTime",
++            "updatedAt",
++            "webhook_updated_at",
++        ],
++    )?;
++
++    Ok(InvalidationInput {
++        invalidation_node_id,
++        delivery_id,
++        project_item_node_id,
++        project_node_id,
++        status_field_node_id,
++        state_source_url,
++        webhook_action,
++        webhook_updated_at,
++    })
++}
++
++fn urls_match(lhs: &str, rhs: &str) -> bool {
++    match (Url::parse(lhs), Url::parse(rhs)) {
++        (Ok(lhs), Ok(rhs)) => {
++            lhs.scheme() == rhs.scheme()
++                && lhs.host_str() == rhs.host_str()
++                && lhs.port_or_known_default() == rhs.port_or_known_default()
++                && normalize_path(lhs.path()) == normalize_path(rhs.path())
++                && lhs.query() == rhs.query()
++        }
++        _ => false,
++    }
++}
++
++fn normalize_path(path: &str) -> &str {
++    let trimmed = path.trim_end_matches('/');
++    if trimmed.is_empty() {
++        "/"
++    } else {
++        trimmed
++    }
++}
++
++fn required_string(
++    object: &serde_json::Map<String, Value>,
++    names: &[&str],
++    display_name: &str,
++) -> anyhow::Result<String> {
++    optional_string(object, names).ok_or_else(|| anyhow::anyhow!("missing {display_name} field"))
++}
++
++fn optional_string(object: &serde_json::Map<String, Value>, names: &[&str]) -> Option<String> {
++    names.iter().find_map(|name| {
++        object.get(*name).and_then(|value| match value {
++            Value::String(s) if !s.trim().is_empty() => Some(s.to_string()),
++            _ => None,
++        })
++    })
++}
++
++fn optional_timestamp(
++    object: &serde_json::Map<String, Value>,
++    names: &[&str],
++) -> anyhow::Result<Option<DateTime<Utc>>> {
++    for name in names {
++        let Some(value) = object.get(*name) else {
++            continue;
++        };
++        match value {
++            Value::Null => return Ok(None),
++            Value::String(text) => {
++                let parsed = DateTime::parse_from_rfc3339(text)
++                    .with_context(|| format!("invalid RFC3339 timestamp for '{name}'"))?
++                    .with_timezone(&Utc);
++                return Ok(Some(parsed));
++            }
++            Value::Number(number) => {
++                if let Some(unix_secs) = number.as_i64() {
++                    let parsed = DateTime::<Utc>::from_timestamp(unix_secs, 0)
++                        .ok_or_else(|| anyhow::anyhow!("invalid unix seconds for '{name}'"))?;
++                    return Ok(Some(parsed));
++                }
++            }
++            _ => {}
++        }
++    }
++    Ok(None)
++}
+diff --git a/components/reactions/github-project-item-refresh/src/reaction.rs b/components/reactions/github-project-item-refresh/src/reaction.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d28ca11c00f5e93feb7ca6bb24a4aa38f85c9d5
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/reaction.rs
+@@ -0,0 +1,316 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use anyhow::Context;
++use async_trait::async_trait;
++use log::{debug, error, info, warn};
++use reqwest::Client;
++use std::collections::HashMap;
++use std::time::Duration;
++
++use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
++use drasi_lib::managers::log_component_start;
++use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
++use drasi_lib::reactions::common::{CheckpointState, FailureAction};
++use drasi_lib::recovery::ReactionRecoveryPolicy;
++use drasi_lib::Reaction;
++
++use crate::config::GitHubProjectItemRefreshConfig;
++use crate::destination::DestinationSourceClient;
++use crate::graphql::GitHubGraphqlClient;
++use crate::processing::RefreshProcessor;
++use crate::state_store::RefreshStateStore;
++use crate::GitHubProjectItemRefreshBuilder;
++
++pub(crate) const HTTP_USER_AGENT: &str = concat!(
++    "drasi-github-project-item-refresh/",
++    env!("CARGO_PKG_VERSION")
++);
++
++pub struct GitHubProjectItemRefreshReaction {
++    pub(crate) base: ReactionBase,
++    pub(crate) config: GitHubProjectItemRefreshConfig,
++}
++
++impl GitHubProjectItemRefreshReaction {
++    pub fn builder(id: impl Into<String>) -> GitHubProjectItemRefreshBuilder {
++        GitHubProjectItemRefreshBuilder::new(id)
++    }
++
++    pub fn new(
++        id: impl Into<String>,
++        queries: Vec<String>,
++        config: GitHubProjectItemRefreshConfig,
++    ) -> Self {
++        let params = ReactionBaseParams::new(id.into(), queries);
++        Self {
++            base: ReactionBase::new(params),
++            config,
++        }
++    }
++
++    pub(crate) fn from_builder(
++        id: String,
++        queries: Vec<String>,
++        config: GitHubProjectItemRefreshConfig,
++        priority_queue_capacity: Option<usize>,
++        auto_start: bool,
++        recovery_policy: Option<ReactionRecoveryPolicy>,
++    ) -> Self {
++        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
++        if let Some(capacity) = priority_queue_capacity {
++            params = params.with_priority_queue_capacity(capacity);
++        }
++        if let Some(policy) = recovery_policy {
++            params = params.with_recovery_policy(policy);
++        }
++        Self {
++            base: ReactionBase::new(params),
++            config,
++        }
++    }
++
++    fn build_http_client(&self) -> anyhow::Result<Client> {
++        Client::builder()
++            .user_agent(HTTP_USER_AGENT)
++            .timeout(Duration::from_millis(self.config.request_timeout_ms))
++            .pool_idle_timeout(Duration::from_secs(90))
++            .pool_max_idle_per_host(8)
++            .build()
++            .context("building shared HTTP client")
++    }
++}
++
++#[async_trait]
++impl Reaction for GitHubProjectItemRefreshReaction {
++    fn id(&self) -> &str {
++        &self.base.id
++    }
++
++    fn type_name(&self) -> &str {
++        "github-project-item-refresh"
++    }
++
++    fn properties(&self) -> HashMap<String, serde_json::Value> {
++        let dto = crate::descriptor::GitHubProjectItemRefreshConfigDto::from(&self.config);
++        self.base.properties_or_serialize(&dto)
++    }
++
++    fn query_ids(&self) -> Vec<String> {
++        self.base.queries.clone()
++    }
++
++    fn auto_start(&self) -> bool {
++        self.base.get_auto_start()
++    }
++
++    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
++        self.base.initialize(context).await;
++    }
++
++    async fn start(&self) -> anyhow::Result<()> {
++        log_component_start("GitHub Project Item Refresh Reaction", &self.base.id);
++        info!(
++            "[{}] GitHub project item refresh reaction starting",
++            self.base.id
++        );
++
++        if let Err(err) = self.config.validate(&self.base.queries, None) {
++            self.base
++                .set_status(
++                    ComponentStatus::Error,
++                    Some(format!("Invalid reaction config: {err:#}")),
++                )
++                .await;
++            return Err(err);
++        }
++
++        self.base
++            .set_status(
++                ComponentStatus::Starting,
++                Some("Starting GitHub project item refresh reaction".to_string()),
++            )
++            .await;
++
++        let state_store = self.base.state_store().await.ok_or_else(|| {
++            anyhow::anyhow!(
++                "No state store configured. github-project-item-refresh requires durable state"
++            )
++        })?;
++        if !state_store.is_durable() {
++            anyhow::bail!(
++                "github-project-item-refresh requires a durable state store (state store is non-durable)"
++            );
++        }
++
++        let http_client = self.build_http_client()?;
++        let processor = RefreshProcessor::new(
++            self.config.clone(),
++            RefreshStateStore::new(state_store.clone(), self.base.id.clone()),
++            GitHubGraphqlClient::new(
++                http_client.clone(),
++                self.config.graphql_url.clone(),
++                self.config.github_token.clone(),
++                self.config.graphql_headers.clone(),
++                self.config.status_field_name.clone(),
++            ),
++            DestinationSourceClient::new(
++                http_client.clone(),
++                self.config.destination_event_url.clone(),
++                self.config.destination_bearer_secret.clone(),
++            ),
++        );
++
++        let mut shutdown_rx = self.base.create_shutdown_channel().await;
++        let base = self.base.clone_shared();
++        let reaction_name = self.base.id.clone();
++        let policy = self
++            .base
++            .recovery_policy
++            .unwrap_or_else(|| self.default_recovery_policy());
++        let status_handle = self.base.status_handle();
++        let mut checkpoints = CheckpointState::load(&self.base).await;
++
++        let processing_task = tokio::spawn(async move {
++            loop {
++                let query_result_arc = tokio::select! {
++                    biased;
++                    _ = &mut shutdown_rx => {
++                        debug!("[{reaction_name}] Received shutdown signal");
++                        break;
++                    }
++                    result = base.priority_queue.dequeue() => result,
++                };
++                let query_result = query_result_arc.as_ref();
++                if query_result.results.is_empty() {
++                    continue;
++                }
++
++                let query_name = &query_result.query_id;
++                let seq = query_result.sequence;
++                debug!(
++                    "[{reaction_name}] Processing query result seq={seq} query='{query_name}' rows={}",
++                    query_result.results.len()
++                );
++
++                let mut delivery_failed = false;
++                for diff in &query_result.results {
++                    match diff {
++                        ResultDiff::Add { data, .. } => {
++                            if let Err(err) = processor.process_add_row(data).await {
++                                error!(
++                                    "[{reaction_name}] Failed to process invalidation row (query='{query_name}', seq={seq}): {err:#}"
++                                );
++                                delivery_failed = true;
++                                if FailureAction::from_policy(policy) == FailureAction::Stop {
++                                    break;
++                                }
++                            }
++                        }
++                        ResultDiff::Update { .. } | ResultDiff::Delete { .. } => {
++                            debug!(
++                                "[{reaction_name}] Ignoring non-ADD diff for query '{query_name}' seq={seq}"
++                            );
++                        }
++                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
++                    }
++                }
++
++                if delivery_failed {
++                    match FailureAction::from_policy(policy) {
++                        FailureAction::Stop => {
++                            status_handle
++                                .set_status(
++                                    ComponentStatus::Error,
++                                    Some(format!(
++                                        "Delivery failed for query '{query_name}' (seq {seq}); stopped per strict recovery policy"
++                                    )),
++                                )
++                                .await;
++                            return;
++                        }
++                        FailureAction::SkipAndContinue => {
++                            warn!(
++                                "[{reaction_name}] Delivery failure for query '{query_name}' (seq {seq}); skipping per AutoSkipGap policy"
++                            );
++                            if let Err(err) = checkpoints.advance(&base, query_name, seq).await {
++                                error!(
++                                    "[{reaction_name}] Failed to write checkpoint while skipping failed event: {err:#}"
++                                );
++                            }
++                            continue;
++                        }
++                    }
++                }
++
++                if let Err(err) = checkpoints.advance(&base, query_name, seq).await {
++                    error!(
++                        "[{reaction_name}] Failed to write checkpoint for query '{query_name}' (seq {seq}): {err:#}"
++                    );
++                    if FailureAction::from_policy(policy) == FailureAction::Stop {
++                        status_handle
++                            .set_status(
++                                ComponentStatus::Error,
++                                Some(format!(
++                                    "Checkpoint write failed for query '{query_name}' (seq {seq}); stopped per recovery policy"
++                                )),
++                            )
++                            .await;
++                        return;
++                    }
++                }
++            }
++
++            status_handle
++                .set_status(
++                    ComponentStatus::Stopped,
++                    Some("GitHub project item refresh reaction stopped".to_string()),
++                )
++                .await;
++        });
++
++        self.base.set_processing_task(processing_task).await;
++        self.base
++            .set_status(
++                ComponentStatus::Running,
++                Some("GitHub project item refresh reaction running".to_string()),
++            )
++            .await;
++        Ok(())
++    }
++
++    async fn stop(&self) -> anyhow::Result<()> {
++        self.base.stop_common().await
++    }
++
++    async fn status(&self) -> ComponentStatus {
++        self.base.get_status().await
++    }
++
++    async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
++        self.base.enqueue_query_result(result).await
++    }
++
++    fn is_durable(&self) -> bool {
++        true
++    }
++
++    fn needs_snapshot_on_fresh_start(&self) -> bool {
++        false
++    }
++
++    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
++        ReactionRecoveryPolicy::Strict
++    }
++}
+diff --git a/components/reactions/github-project-item-refresh/src/state_store.rs b/components/reactions/github-project-item-refresh/src/state_store.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..33514a3ee6dc795a12e8e47f317fcd97f62273a4
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/state_store.rs
+@@ -0,0 +1,205 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use anyhow::Context;
++use chrono::{DateTime, Duration, Utc};
++use std::sync::Arc;
++
++use drasi_lib::state_store::StateStoreProvider;
++
++use crate::models::{
++    DeliveryKey, DeliveryReservation, ItemVersionRecord, PublicationRecord, PublicationState,
++};
++
++/// Durable state wrapper for reservations, publication attempts, and per-item versions.
++#[derive(Clone)]
++pub struct RefreshStateStore {
++    store: Arc<dyn StateStoreProvider>,
++    store_id: String,
++}
++
++impl RefreshStateStore {
++    pub fn new(store: Arc<dyn StateStoreProvider>, reaction_id: impl Into<String>) -> Self {
++        Self {
++            store,
++            store_id: format!("gh-project-item-refresh:{}", reaction_id.into()),
++        }
++    }
++
++    pub async fn get_reservation(
++        &self,
++        key: &DeliveryKey,
++    ) -> anyhow::Result<Option<DeliveryReservation>> {
++        self.get_typed(&reservation_key(key))
++            .await
++            .context("reading reservation")
++    }
++
++    pub async fn set_reservation(
++        &self,
++        key: &DeliveryKey,
++        value: &DeliveryReservation,
++    ) -> anyhow::Result<()> {
++        self.set_typed(&reservation_key(key), value)
++            .await
++            .context("writing reservation")
++    }
++
++    pub async fn get_publication(
++        &self,
++        key: &DeliveryKey,
++    ) -> anyhow::Result<Option<PublicationRecord>> {
++        self.get_typed(&publication_key(key))
++            .await
++            .context("reading publication record")
++    }
++
++    pub async fn set_publication(
++        &self,
++        key: &DeliveryKey,
++        value: &PublicationRecord,
++    ) -> anyhow::Result<()> {
++        self.set_typed(&publication_key(key), value)
++            .await
++            .context("writing publication record")
++    }
++
++    pub async fn mark_failed(
++        &self,
++        key: &DeliveryKey,
++        mut record: PublicationRecord,
++        state: PublicationState,
++        error_message: impl Into<String>,
++    ) -> anyhow::Result<()> {
++        record.state = state;
++        record.last_error = Some(error_message.into());
++        self.set_publication(key, &record).await
++    }
++
++    pub async fn prune_terminal_records_older_than(
++        &self,
++        ttl_secs: u64,
++        now: DateTime<Utc>,
++    ) -> anyhow::Result<usize> {
++        let keys = self
++            .store
++            .list_keys(&self.store_id)
++            .await
++            .map_err(|e| anyhow::anyhow!(e.to_string()))
++            .context("listing state store keys for pruning")?;
++        let cutoff = now
++            .checked_sub_signed(Duration::seconds(ttl_secs as i64))
++            .unwrap_or(now);
++
++        let mut pruned = 0usize;
++        for key in keys {
++            if !key.starts_with("publication:") {
++                continue;
++            }
++
++            let Some(record) = self.get_typed::<PublicationRecord>(&key).await? else {
++                continue;
++            };
++
++            let is_terminal = matches!(
++                record.state,
++                PublicationState::Published | PublicationState::Stale | PublicationState::Rejected
++            );
++            let Some(completed_at) = record.completed_at else {
++                continue;
++            };
++            if !is_terminal || completed_at >= cutoff {
++                continue;
++            }
++
++            self.store
++                .delete(&self.store_id, &key)
++                .await
++                .map_err(|e| anyhow::anyhow!(e.to_string()))
++                .with_context(|| format!("deleting publication key '{key}'"))?;
++
++            if let Some(suffix) = key.strip_prefix("publication:") {
++                let reservation_key = format!("reservation:{suffix}");
++                self.store
++                    .delete(&self.store_id, &reservation_key)
++                    .await
++                    .map_err(|e| anyhow::anyhow!(e.to_string()))
++                    .with_context(|| format!("deleting reservation key '{reservation_key}'"))?;
++            }
++
++            pruned = pruned.saturating_add(1);
++        }
++
++        Ok(pruned)
++    }
++
++    pub async fn get_item_version(
++        &self,
++        project_item_node_id: &str,
++    ) -> anyhow::Result<Option<ItemVersionRecord>> {
++        self.get_typed(&version_key(project_item_node_id))
++            .await
++            .context("reading item version")
++    }
++
++    pub async fn set_item_version(
++        &self,
++        project_item_node_id: &str,
++        value: &ItemVersionRecord,
++    ) -> anyhow::Result<()> {
++        self.set_typed(&version_key(project_item_node_id), value)
++            .await
++            .context("writing item version")
++    }
++
++    async fn get_typed<T: for<'de> serde::Deserialize<'de>>(
++        &self,
++        key: &str,
++    ) -> anyhow::Result<Option<T>> {
++        let bytes = self
++            .store
++            .get(&self.store_id, key)
++            .await
++            .map_err(|e| anyhow::anyhow!(e.to_string()))
++            .with_context(|| format!("state store get failed for key '{key}'"))?;
++        let Some(bytes) = bytes else {
++            return Ok(None);
++        };
++        let parsed = serde_json::from_slice(&bytes)
++            .with_context(|| format!("deserializing state for key '{key}'"))?;
++        Ok(Some(parsed))
++    }
++
++    async fn set_typed<T: serde::Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
++        let encoded = serde_json::to_vec(value)
++            .with_context(|| format!("serializing state for key '{key}'"))?;
++        self.store
++            .set(&self.store_id, key, encoded)
++            .await
++            .map_err(|e| anyhow::anyhow!(e.to_string()))
++            .with_context(|| format!("state store set failed for key '{key}'"))
++    }
++}
++
++fn reservation_key(key: &DeliveryKey) -> String {
++    format!("reservation:{}", key.as_storage_key())
++}
++
++fn publication_key(key: &DeliveryKey) -> String {
++    format!("publication:{}", key.as_storage_key())
++}
++
++fn version_key(project_item_node_id: &str) -> String {
++    format!("version:{project_item_node_id}")
++}
+diff --git a/components/reactions/github-project-item-refresh/src/tests.rs b/components/reactions/github-project-item-refresh/src/tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..329ce912a20810a5706c6c64a54511fb210aa866
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/src/tests.rs
+@@ -0,0 +1,2094 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use async_trait::async_trait;
++use chrono::{Duration, Utc};
++use reqwest::{
++    header::{HeaderMap, HeaderValue},
++    Client, StatusCode,
++};
++use serde_json::json;
++use std::collections::HashMap;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::sync::{Arc, Mutex as StdMutex};
++use std::time::Duration as StdDuration;
++use tokio::sync::Barrier;
++use wiremock::matchers::{body_string_contains, method};
++use wiremock::{Mock, MockServer, ResponseTemplate};
++
++use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
++use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
++
++use crate::config::GitHubProjectItemRefreshConfig;
++use crate::descriptor::GitHubProjectItemRefreshDescriptor;
++use crate::destination::{DestinationPublishError, DestinationSourceClient};
++use crate::graphql::{rate_limit_retry_after, GitHubGraphqlClient};
++use crate::models::{
++    DeliveryKey, DeliveryReservation, FetchedProjectItemState, HttpElement, HttpSourceChange,
++    ItemVersionRecord, ProjectItemStatusNode, PublicationRecord, PublicationState,
++};
++use crate::processing::{parse_invalidation_input, AddRowOutcome, RefreshProcessor};
++use crate::state_store::RefreshStateStore;
++
++const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
++
++struct DurableMemoryStateStore {
++    inner: drasi_lib::MemoryStateStoreProvider,
++    list_keys_calls: AtomicUsize,
++    list_keys_delay: StdMutex<Option<StdDuration>>,
++}
++
++impl DurableMemoryStateStore {
++    fn new() -> Self {
++        Self::new_with_list_keys_delay(None)
++    }
++
++    fn new_with_list_keys_delay(list_keys_delay: Option<StdDuration>) -> Self {
++        Self {
++            inner: drasi_lib::MemoryStateStoreProvider::new(),
++            list_keys_calls: AtomicUsize::new(0),
++            list_keys_delay: StdMutex::new(list_keys_delay),
++        }
++    }
++
++    fn list_keys_calls(&self) -> usize {
++        self.list_keys_calls.load(Ordering::SeqCst)
++    }
++
++    fn set_list_keys_delay(&self, delay: Option<StdDuration>) {
++        *self
++            .list_keys_delay
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner()) = delay;
++    }
++}
++
++#[async_trait]
++impl StateStoreProvider for DurableMemoryStateStore {
++    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
++        self.inner.get(store_id, key).await
++    }
++
++    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
++        self.inner.set(store_id, key, value).await
++    }
++
++    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
++        self.inner.delete(store_id, key).await
++    }
++
++    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
++        self.inner.contains_key(store_id, key).await
++    }
++
++    async fn get_many(
++        &self,
++        store_id: &str,
++        keys: &[&str],
++    ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
++        self.inner.get_many(store_id, keys).await
++    }
++
++    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
++        self.inner.set_many(store_id, entries).await
++    }
++
++    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
++        self.inner.delete_many(store_id, keys).await
++    }
++
++    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
++        self.inner.clear_store(store_id).await
++    }
++
++    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
++        self.list_keys_calls.fetch_add(1, Ordering::SeqCst);
++        let delay = *self
++            .list_keys_delay
++            .lock()
++            .unwrap_or_else(|poisoned| poisoned.into_inner());
++        if let Some(delay) = delay {
++            tokio::time::sleep(delay).await;
++        }
++        self.inner.list_keys(store_id).await
++    }
++
++    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
++        self.inner.store_exists(store_id).await
++    }
++
++    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
++        self.inner.key_count(store_id).await
++    }
++
++    fn is_durable(&self) -> bool {
++        true
++    }
++}
++
++fn test_row(
++    delivery_id: &str,
++    project_item_node_id: &str,
++    project_node_id: &str,
++) -> serde_json::Value {
++    json!({
++        "invalidationNodeId": format!("project-item-invalidation:{delivery_id}"),
++        "deliveryId": delivery_id,
++        "projectItemNodeId": project_item_node_id,
++        "projectNodeId": project_node_id,
++        "webhookAction": "edited",
++        "invalidatedAt": "2026-08-13T18:00:00Z"
++    })
++}
++
++fn graphql_success_response(
++    project_item_node_id: &str,
++    project_node_id: &str,
++    updated_at: &str,
++    status_name: &str,
++    status_option_id: &str,
++) -> serde_json::Value {
++    graphql_success_response_with_field_id(
++        project_item_node_id,
++        project_node_id,
++        updated_at,
++        status_name,
++        status_option_id,
++        EXPECTED_STATUS_FIELD_NODE_ID,
++    )
++}
++
++fn graphql_success_response_with_field_id(
++    project_item_node_id: &str,
++    project_node_id: &str,
++    updated_at: &str,
++    status_name: &str,
++    status_option_id: &str,
++    status_field_node_id: &str,
++) -> serde_json::Value {
++    json!({
++        "data": {
++            "node": {
++                "__typename": "ProjectV2Item",
++                "id": project_item_node_id,
++                "updatedAt": updated_at,
++                "project": { "id": project_node_id },
++                "content": { "__typename": "Issue", "id": "I_123" },
++                "fieldValueByName": {
++                    "__typename": "ProjectV2ItemFieldSingleSelectValue",
++                    "name": status_name,
++                    "optionId": status_option_id,
++                    "field": { "id": status_field_node_id }
++                }
++            }
++        }
++    })
++}
++
++fn graphql_missing_status_response(
++    project_item_node_id: &str,
++    project_node_id: &str,
++) -> serde_json::Value {
++    json!({
++        "data": {
++            "node": {
++                "__typename": "ProjectV2Item",
++                "id": project_item_node_id,
++                "updatedAt": "2026-08-13T18:01:00Z",
++                "project": { "id": project_node_id },
++                "content": { "__typename": "Issue", "id": "I_123" },
++                "fieldValueByName": null
++            }
++        }
++    })
++}
++
++async fn build_processor(
++    graphql_server: &MockServer,
++    destination_url: String,
++    durable_store: Arc<dyn StateStoreProvider>,
++    allowlist: Vec<String>,
++) -> (RefreshProcessor, RefreshStateStore) {
++    build_processor_with_status_field_name(
++        graphql_server,
++        destination_url,
++        durable_store,
++        allowlist,
++        "Status",
++    )
++    .await
++}
++
++async fn build_processor_with_status_field_name(
++    graphql_server: &MockServer,
++    destination_url: String,
++    durable_store: Arc<dyn StateStoreProvider>,
++    allowlist: Vec<String>,
++    status_field_name: &str,
++) -> (RefreshProcessor, RefreshStateStore) {
++    build_processor_with_status_field_name_and_expected_status_field_node_id(
++        graphql_server,
++        destination_url,
++        durable_store,
++        allowlist,
++        status_field_name,
++        EXPECTED_STATUS_FIELD_NODE_ID,
++    )
++    .await
++}
++
++async fn build_processor_with_status_field_name_and_expected_status_field_node_id(
++    graphql_server: &MockServer,
++    destination_url: String,
++    durable_store: Arc<dyn StateStoreProvider>,
++    allowlist: Vec<String>,
++    status_field_name: &str,
++    expected_status_field_node_id: &str,
++) -> (RefreshProcessor, RefreshStateStore) {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "test-token-not-a-secret".to_string(),
++        graphql_url: graphql_server.uri(),
++        graphql_headers: HashMap::new(),
++        allowlisted_project_ids: allowlist,
++        status_field_name: status_field_name.to_string(),
++        expected_status_field_node_id: expected_status_field_node_id.to_string(),
++        destination_event_url: destination_url.clone(),
++        destination_bearer_secret: Some("dest-secret-token".to_string()),
++        request_timeout_ms: 1_000,
++        delivery_record_ttl_secs: 60,
++    };
++
++    let client = Client::builder()
++        .user_agent(crate::reaction::HTTP_USER_AGENT)
++        .timeout(std::time::Duration::from_millis(config.request_timeout_ms))
++        .build()
++        .expect("client");
++    let store = RefreshStateStore::new(durable_store, "unit-test-reaction");
++    let processor = RefreshProcessor::new(
++        config.clone(),
++        store.clone(),
++        GitHubGraphqlClient::new(
++            client.clone(),
++            config.graphql_url.clone(),
++            config.github_token,
++            config.graphql_headers,
++            config.status_field_name,
++        ),
++        DestinationSourceClient::new(client, destination_url, config.destination_bearer_secret),
++    );
++    (processor, store)
++}
++
++#[test]
++fn parses_valid_invalidation_row() {
++    let row = test_row("delivery-1", "PVTI_item1", "PVT_project1");
++    let parsed = parse_invalidation_input(&row).expect("parse");
++    assert_eq!(parsed.delivery_id, "delivery-1");
++    assert_eq!(parsed.project_item_node_id, "PVTI_item1");
++    assert_eq!(parsed.project_node_id.as_deref(), Some("PVT_project1"));
++}
++
++#[test]
++fn rejects_missing_required_fields() {
++    let row = json!({
++        "deliveryId": "delivery-1"
++    });
++    let err = parse_invalidation_input(&row).expect_err("must fail");
++    assert!(err.to_string().contains("missing invalidation node id"));
++}
++
++#[test]
++fn parses_pascal_case_dogfood_contract_fields() {
++    let row = json!({
++        "InvalidationNodeId": "INV_pascal",
++        "DeliveryId": "delivery-pascal",
++        "ProjectItemNodeId": "PVTI_pascal",
++        "ProjectNodeId": "PVT_pascal",
++        "StatusFieldNodeId": EXPECTED_STATUS_FIELD_NODE_ID,
++        "StateSourceUrl": "http://127.0.0.1:9001/sources/github-project-state/events",
++        "InvalidatedAt": "2026-08-13T18:00:00Z"
++    });
++    let parsed = parse_invalidation_input(&row).expect("parse");
++    assert_eq!(parsed.invalidation_node_id, "INV_pascal");
++    assert_eq!(parsed.delivery_id, "delivery-pascal");
++    assert_eq!(parsed.project_item_node_id, "PVTI_pascal");
++    assert_eq!(parsed.project_node_id.as_deref(), Some("PVT_pascal"));
++    assert_eq!(
++        parsed.status_field_node_id.as_deref(),
++        Some(EXPECTED_STATUS_FIELD_NODE_ID)
++    );
++    assert_eq!(
++        parsed.state_source_url.as_deref(),
++        Some("http://127.0.0.1:9001/sources/github-project-state/events")
++    );
++    assert!(parsed.webhook_updated_at.is_some());
++}
++
++#[test]
++fn invalidated_at_maps_to_webhook_updated_at() {
++    let row = json!({
++        "InvalidationNodeId": "INV_ts",
++        "DeliveryId": "delivery-ts",
++        "ProjectItemNodeId": "PVTI_ts",
++        "InvalidatedAt": "2026-08-13T18:15:00Z"
++    });
++    let parsed = parse_invalidation_input(&row).expect("parse");
++    assert_eq!(parsed.delivery_id, "delivery-ts");
++    assert_eq!(parsed.project_item_node_id, "PVTI_ts");
++    let parsed_timestamp = parsed
++        .webhook_updated_at
++        .expect("invalidatedAt should populate webhook timestamp");
++    assert_eq!(
++        parsed_timestamp.to_rfc3339(),
++        "2026-08-13T18:15:00+00:00".to_string()
++    );
++}
++
++#[test]
++fn lower_camel_invalidated_at_maps_to_webhook_updated_at() {
++    let row = json!({
++        "invalidationNodeId": "INV_ts_lc",
++        "deliveryId": "delivery-ts-lc",
++        "projectItemNodeId": "PVTI_ts_lc",
++        "invalidatedAt": "2026-08-13T18:16:00Z"
++    });
++    let parsed = parse_invalidation_input(&row).expect("parse");
++    let parsed_timestamp = parsed
++        .webhook_updated_at
++        .expect("lower-camel invalidatedAt should populate webhook timestamp");
++    assert_eq!(
++        parsed_timestamp.to_rfc3339(),
++        "2026-08-13T18:16:00+00:00".to_string()
++    );
++}
++
++#[test]
++fn deterministic_node_id_is_stable() {
++    let node_id = ProjectItemStatusNode::deterministic_node_id("PVTI_abcd");
++    assert_eq!(node_id, "project-item-status:PVTI_abcd");
++}
++
++#[test]
++fn update_payload_matches_http_source_contract() {
++    let node = ProjectItemStatusNode {
++        id: "project-item-status:PVTI_abcd".to_string(),
++        project_item_node_id: "PVTI_abcd".to_string(),
++        project_node_id: "PVT_proj".to_string(),
++        status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
++        status_option_id: "opt-in-progress".to_string(),
++        status_name: "In Progress".to_string(),
++        updated_at: Utc::now(),
++        refreshed_at: Utc::now(),
++        triggering_delivery_id: "delivery-1".to_string(),
++    };
++
++    let payload = HttpSourceChange::update_project_item_status(&node).expect("valid timestamp");
++    let serialized = serde_json::to_value(payload).expect("serialize");
++    assert_eq!(serialized["operation"], "update");
++    assert_eq!(serialized["element"]["type"], "node");
++    assert_eq!(
++        serialized["element"]["labels"],
++        json!(["ProjectItemStatus"]),
++        "must target deterministic node label"
++    );
++    assert_eq!(
++        serialized["element"]["properties"]["projectItemNodeId"],
++        json!("PVTI_abcd")
++    );
++}
++
++#[test]
++fn config_debug_redacts_secrets() {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "ghp_super_secret".to_string(),
++        graphql_url: "https://api.github.com/graphql".to_string(),
++        graphql_headers: HashMap::from([(
++            "X-Api-Key".to_string(),
++            "graphql-header-secret".to_string(),
++        )]),
++        allowlisted_project_ids: vec![],
++        status_field_name: "Status".to_string(),
++        expected_status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
++        destination_event_url: "https://dest.example/changes".to_string(),
++        destination_bearer_secret: Some("very-secret".to_string()),
++        request_timeout_ms: 1000,
++        delivery_record_ttl_secs: 3600,
++    };
++
++    let rendered = format!("{config:?}");
++    assert!(!rendered.contains("ghp_super_secret"));
++    assert!(!rendered.contains("very-secret"));
++    assert!(!rendered.contains("graphql-header-secret"));
++    assert!(rendered.contains("X-Api-Key"));
++    assert!(rendered.contains("[REDACTED]"));
++}
++
++#[test]
++fn config_validation_rejects_empty_status_field_name() {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "test-token-not-a-secret".to_string(),
++        graphql_url: "https://api.github.com/graphql".to_string(),
++        graphql_headers: HashMap::new(),
++        allowlisted_project_ids: vec![],
++        status_field_name: "   ".to_string(),
++        expected_status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
++        destination_event_url: "https://dest.example/changes".to_string(),
++        destination_bearer_secret: None,
++        request_timeout_ms: 1000,
++        delivery_record_ttl_secs: 3600,
++    };
++
++    let err = config
++        .validate(&["query".to_string()], Some(10))
++        .expect_err("empty statusFieldName should fail validation");
++    assert!(err.to_string().contains("statusFieldName"));
++}
++
++#[test]
++fn config_deserialization_rejects_missing_expected_status_field_node_id() {
++    let json = json!({
++        "githubToken": "test-token-not-a-secret",
++        "graphqlUrl": "https://api.github.com/graphql",
++        "statusFieldName": "Status",
++        "destinationEventUrl": "https://dest.example/changes",
++        "requestTimeoutMs": 1000,
++        "deliveryRecordTtlSecs": 3600
++    });
++
++    let err = serde_json::from_value::<GitHubProjectItemRefreshConfig>(json)
++        .expect_err("missing expectedStatusFieldNodeId should fail deserialization");
++    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
++}
++
++#[test]
++fn config_validation_rejects_empty_expected_status_field_node_id() {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "test-token-not-a-secret".to_string(),
++        graphql_url: "https://api.github.com/graphql".to_string(),
++        graphql_headers: HashMap::new(),
++        allowlisted_project_ids: vec![],
++        status_field_name: "Status".to_string(),
++        expected_status_field_node_id: "   ".to_string(),
++        destination_event_url: "https://dest.example/changes".to_string(),
++        destination_bearer_secret: None,
++        request_timeout_ms: 1000,
++        delivery_record_ttl_secs: 3600,
++    };
++
++    let err = config
++        .validate(&["query".to_string()], Some(10))
++        .expect_err("empty expectedStatusFieldNodeId should fail validation");
++    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
++}
++
++#[test]
++fn config_validation_rejects_invalid_expected_status_field_node_id() {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "test-token-not-a-secret".to_string(),
++        graphql_url: "https://api.github.com/graphql".to_string(),
++        graphql_headers: HashMap::new(),
++        allowlisted_project_ids: vec![],
++        status_field_name: "Status".to_string(),
++        expected_status_field_node_id: "PVT_invalid".to_string(),
++        destination_event_url: "https://dest.example/changes".to_string(),
++        destination_bearer_secret: None,
++        request_timeout_ms: 1000,
++        delivery_record_ttl_secs: 3600,
++    };
++
++    let err = config
++        .validate(&["query".to_string()], Some(10))
++        .expect_err("invalid expectedStatusFieldNodeId should fail validation");
++    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
++}
++
++#[test]
++fn config_validation_rejects_whitespace_expected_status_field_node_id() {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "test-token-not-a-secret".to_string(),
++        graphql_url: "https://api.github.com/graphql".to_string(),
++        graphql_headers: HashMap::new(),
++        allowlisted_project_ids: vec![],
++        status_field_name: "Status".to_string(),
++        expected_status_field_node_id: format!("{EXPECTED_STATUS_FIELD_NODE_ID} bad"),
++        destination_event_url: "https://dest.example/changes".to_string(),
++        destination_bearer_secret: None,
++        request_timeout_ms: 1000,
++        delivery_record_ttl_secs: 3600,
++    };
++
++    let err = config
++        .validate(&["query".to_string()], Some(10))
++        .expect_err("whitespace in expectedStatusFieldNodeId should fail validation");
++    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
++}
++
++#[test]
++fn config_validation_accepts_valid_expected_status_field_node_id() {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "test-token-not-a-secret".to_string(),
++        graphql_url: "https://api.github.com/graphql".to_string(),
++        graphql_headers: HashMap::new(),
++        allowlisted_project_ids: vec![],
++        status_field_name: "Status".to_string(),
++        expected_status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
++        destination_event_url: "https://dest.example/changes".to_string(),
++        destination_bearer_secret: None,
++        request_timeout_ms: 1000,
++        delivery_record_ttl_secs: 3600,
++    };
++
++    config
++        .validate(&["query".to_string()], Some(10))
++        .expect("valid expectedStatusFieldNodeId should pass validation");
++}
++
++#[tokio::test]
++async fn descriptor_resolves_env_expected_status_field_node_id_and_roundtrips() {
++    let descriptor = GitHubProjectItemRefreshDescriptor;
++    let expected_status_field_expr =
++        "${GH_STATUS_FIELD_NODE_ID_TEST:-PVTSSF_lADOCX0YF84BgNE3zhaadbw}";
++    let config_json = json!({
++        "githubToken": "test-token-not-a-secret",
++        "graphqlUrl": "https://api.github.com/graphql",
++        "statusFieldName": "Status",
++        "expectedStatusFieldNodeId": expected_status_field_expr,
++        "destinationEventUrl": "http://127.0.0.1:9001/sources/github-project-state/events"
++    });
++
++    let reaction = descriptor
++        .create_reaction(
++            "descriptor-roundtrip",
++            vec!["q".to_string()],
++            &config_json,
++            true,
++        )
++        .await
++        .expect("descriptor should resolve config values");
++    let properties = reaction.properties();
++    assert_eq!(
++        properties.get("expectedStatusFieldNodeId"),
++        Some(&json!(expected_status_field_expr))
++    );
++}
++
++#[tokio::test]
++async fn descriptor_fails_when_expected_status_field_node_id_env_is_unset_without_default() {
++    let descriptor = GitHubProjectItemRefreshDescriptor;
++    let config_json = json!({
++        "githubToken": "test-token-not-a-secret",
++        "graphqlUrl": "https://api.github.com/graphql",
++        "statusFieldName": "Status",
++        "expectedStatusFieldNodeId": "${GH_STATUS_FIELD_NODE_ID_TEST_MISSING}",
++        "destinationEventUrl": "http://127.0.0.1:9001/sources/github-project-state/events"
++    });
++
++    let err = descriptor
++        .create_reaction(
++            "descriptor-env-missing",
++            vec!["q".to_string()],
++            &config_json,
++            true,
++        )
++        .await
++        .err()
++        .expect("missing env var should fail descriptor resolution");
++    assert!(err
++        .to_string()
++        .contains("GH_STATUS_FIELD_NODE_ID_TEST_MISSING"));
++}
++
++#[tokio::test]
++async fn process_success_publishes_and_persists_state() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_item1",
++                "PVT_project1",
++                "2026-08-13T18:10:00Z",
++                "In Progress",
++                "opt-in-progress",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec!["PVT_project1".to_string()],
++    )
++    .await;
++
++    let outcome = processor
++        .process_add_row(&test_row("delivery-1", "PVTI_item1", "PVT_project1"))
++        .await
++        .expect("processing succeeds");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let requests = destination_server
++        .received_requests()
++        .await
++        .expect("requests");
++    assert_eq!(requests.len(), 1);
++    assert!(
++        requests[0].headers.get("authorization").is_some(),
++        "destination bearer secret should be sent when configured"
++    );
++    assert_eq!(
++        requests[0]
++            .headers
++            .get("idempotency-key")
++            .and_then(|value| value.to_str().ok()),
++        Some("delivery-1:PVTI_item1")
++    );
++    let destination_payload: serde_json::Value =
++        serde_json::from_slice(&requests[0].body).expect("destination payload");
++    let expected_timestamp = chrono::DateTime::parse_from_rfc3339("2026-08-13T18:10:00Z")
++        .expect("timestamp")
++        .timestamp_nanos_opt()
++        .and_then(|value| u64::try_from(value).ok())
++        .expect("nanosecond timestamp");
++    assert_eq!(destination_payload["timestamp"], json!(expected_timestamp));
++
++    let key = DeliveryKey::new("delivery-1", "PVTI_item1");
++    let publication = state_store
++        .get_publication(&key)
++        .await
++        .expect("store read")
++        .expect("publication record");
++    assert_eq!(publication.state, PublicationState::Published);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 1);
++    let graphql_body: serde_json::Value =
++        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request body");
++    assert_eq!(
++        graphql_body["variables"]["statusFieldName"],
++        json!("Status")
++    );
++    assert_eq!(
++        graphql_requests[0]
++            .headers
++            .get("user-agent")
++            .and_then(|value| value.to_str().ok()),
++        Some(crate::reaction::HTTP_USER_AGENT)
++    );
++    let authorization = graphql_requests[0]
++        .headers
++        .get("authorization")
++        .and_then(|h| h.to_str().ok())
++        .expect("authorization header should be present");
++    assert!(
++        authorization.starts_with("Bearer "),
++        "graphql authorization header should be bearer token"
++    );
++}
++
++#[tokio::test]
++async fn duplicate_delivery_is_deduplicated() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_item2",
++                "PVT_project1",
++                "2026-08-13T18:20:00Z",
++                "Done",
++                "opt-done",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let row = test_row("delivery-dup", "PVTI_item2", "PVT_project1");
++    assert_eq!(
++        processor
++            .process_add_row(&row)
++            .await
++            .expect("first publish"),
++        AddRowOutcome::Published
++    );
++    assert_eq!(
++        processor.process_add_row(&row).await.expect("duplicate"),
++        AddRowOutcome::Duplicate
++    );
++
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("requests");
++    assert_eq!(destination_requests.len(), 1);
++}
++
++#[tokio::test]
++async fn successful_adds_within_interval_trigger_one_prune_scan() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store = Arc::new(DurableMemoryStateStore::new());
++
++    for (item, updated_at) in [
++        ("PVTI_prune_interval_1", "2026-08-13T19:00:00Z"),
++        ("PVTI_prune_interval_2", "2026-08-13T19:01:00Z"),
++        ("PVTI_prune_interval_3", "2026-08-13T19:02:00Z"),
++    ] {
++        Mock::given(method("POST"))
++            .and(body_string_contains(item))
++            .respond_with(
++                ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                    item,
++                    "PVT_project1",
++                    updated_at,
++                    "In Progress",
++                    "opt-ip",
++                )),
++            )
++            .mount(&graphql_server)
++            .await;
++    }
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store.clone(),
++        vec![],
++    )
++    .await;
++
++    for (delivery_id, item_id) in [
++        ("delivery-prune-interval-1", "PVTI_prune_interval_1"),
++        ("delivery-prune-interval-2", "PVTI_prune_interval_2"),
++        ("delivery-prune-interval-3", "PVTI_prune_interval_3"),
++    ] {
++        let outcome = processor
++            .process_add_row(&test_row(delivery_id, item_id, "PVT_project1"))
++            .await
++            .expect("invalidation should be published");
++        assert_eq!(outcome, AddRowOutcome::Published);
++    }
++
++    assert_eq!(
++        durable_store.list_keys_calls(),
++        1,
++        "multiple successful ADDs within interval should run one prune scan"
++    );
++}
++
++#[tokio::test]
++async fn concurrent_adds_across_clones_share_prune_throttle() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store = Arc::new(DurableMemoryStateStore::new_with_list_keys_delay(Some(
++        StdDuration::from_millis(150),
++    )));
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_prune_clone_1"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_prune_clone_1",
++                "PVT_project1",
++                "2026-08-13T19:10:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_prune_clone_2"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_prune_clone_2",
++                "PVT_project1",
++                "2026-08-13T19:11:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store.clone(),
++        vec![],
++    )
++    .await;
++    let processor_one = processor.clone();
++    let processor_two = processor;
++    let start_barrier = Arc::new(Barrier::new(3));
++
++    let row_one = test_row(
++        "delivery-prune-clone-1",
++        "PVTI_prune_clone_1",
++        "PVT_project1",
++    );
++    let row_two = test_row(
++        "delivery-prune-clone-2",
++        "PVTI_prune_clone_2",
++        "PVT_project1",
++    );
++
++    let barrier_one = Arc::clone(&start_barrier);
++    let task_one = tokio::spawn(async move {
++        barrier_one.wait().await;
++        processor_one.process_add_row(&row_one).await
++    });
++    let barrier_two = Arc::clone(&start_barrier);
++    let task_two = tokio::spawn(async move {
++        barrier_two.wait().await;
++        processor_two.process_add_row(&row_two).await
++    });
++
++    start_barrier.wait().await;
++    assert_eq!(
++        task_one
++            .await
++            .expect("task one join")
++            .expect("task one result"),
++        AddRowOutcome::Published
++    );
++    assert_eq!(
++        task_two
++            .await
++            .expect("task two join")
++            .expect("task two result"),
++        AddRowOutcome::Published
++    );
++
++    assert_eq!(
++        durable_store.list_keys_calls(),
++        1,
++        "concurrent cloned processors should dedupe prune scans"
++    );
++}
++
++#[tokio::test]
++async fn cancelled_prune_is_immediately_retryable() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store = Arc::new(DurableMemoryStateStore::new_with_list_keys_delay(Some(
++        StdDuration::from_secs(5),
++    )));
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_prune_after_cancel"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_prune_after_cancel",
++                "PVT_project1",
++                "2026-08-13T19:12:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store.clone(),
++        vec![],
++    )
++    .await;
++    let cancelled_processor = processor.clone();
++    let cancelled = tokio::spawn(async move {
++        cancelled_processor
++            .process_add_row(&test_row(
++                "delivery-prune-cancelled",
++                "PVTI_prune_cancelled",
++                "PVT_project1",
++            ))
++            .await
++    });
++
++    for _ in 0..100 {
++        if durable_store.list_keys_calls() == 1 {
++            break;
++        }
++        tokio::time::sleep(StdDuration::from_millis(5)).await;
++    }
++    assert_eq!(durable_store.list_keys_calls(), 1, "prune should start");
++    durable_store.set_list_keys_delay(None);
++    cancelled.abort();
++    assert!(cancelled
++        .await
++        .expect_err("task should be cancelled")
++        .is_cancelled());
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-prune-after-cancel",
++            "PVTI_prune_after_cancel",
++            "PVT_project1",
++        ))
++        .await
++        .expect("next ADD should retry pruning and continue");
++    assert_eq!(outcome, AddRowOutcome::Published);
++    assert_eq!(
++        durable_store.list_keys_calls(),
++        2,
++        "cancelled prune must not leave the shared throttle stuck"
++    );
++}
++
++#[tokio::test]
++async fn graphql_http_200_errors_are_explicit_failures() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "errors": [{"message": "bad credentials"}]
++        })))
++        .mount(&graphql_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let row = test_row("delivery-err", "PVTI_item_err", "PVT_project1");
++    let err = processor
++        .process_add_row(&row)
++        .await
++        .expect_err("must fail");
++    assert!(err.to_string().contains("github graphql returned errors"));
++
++    let key = DeliveryKey::new("delivery-err", "PVTI_item_err");
++    let publication = state_store
++        .get_publication(&key)
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++}
++
++#[tokio::test]
++async fn missing_status_is_explicit_failure() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_missing_status_response(
++                "PVTI_missing_status",
++                "PVT_project1",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let row = test_row(
++        "delivery-missing-status",
++        "PVTI_missing_status",
++        "PVT_project1",
++    );
++    let err = processor
++        .process_add_row(&row)
++        .await
++        .expect_err("must fail");
++    assert!(err
++        .to_string()
++        .contains("missing a required 'Status' value"));
++
++    let key = DeliveryKey::new("delivery-missing-status", "PVTI_missing_status");
++    let publication = state_store
++        .get_publication(&key)
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++}
++
++#[tokio::test]
++async fn stale_ordering_is_rejected_without_republish() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_stale_item",
++                "PVT_project1",
++                "2026-08-13T18:00:00Z",
++                "Todo",
++                "opt-todo",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    state_store
++        .set_item_version(
++            "PVTI_stale_item",
++            &ItemVersionRecord {
++                project_item_node_id: "PVTI_stale_item".to_string(),
++                project_node_id: "PVT_project1".to_string(),
++                status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
++                status_option_id: "opt-done".to_string(),
++                status_name: "Done".to_string(),
++                updated_at: Utc::now() + Duration::minutes(5),
++                refreshed_at: Utc::now(),
++                triggering_delivery_id: "previous-delivery".to_string(),
++                published_at: Utc::now(),
++            },
++        )
++        .await
++        .expect("seed version");
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-stale",
++            "PVTI_stale_item",
++            "PVT_project1",
++        ))
++        .await
++        .expect("stale should be handled");
++    assert_eq!(outcome, AddRowOutcome::Stale);
++
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("requests");
++    assert_eq!(destination_requests.len(), 0);
++}
++
++#[tokio::test]
++async fn destination_failure_and_ambiguity_are_persisted() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_dest_fail",
++                "PVT_project1",
++                "2026-08-13T18:30:00Z",
++                "Blocked",
++                "opt-blocked",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(500))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store.clone(),
++        vec![],
++    )
++    .await;
++    let row = test_row("delivery-dest-fail", "PVTI_dest_fail", "PVT_project1");
++    let err = processor
++        .process_add_row(&row)
++        .await
++        .expect_err("must fail");
++    assert!(err
++        .to_string()
++        .contains("destination source rejected payload"));
++    let publication = state_store
++        .get_publication(&DeliveryKey::new("delivery-dest-fail", "PVTI_dest_fail"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++    let rejected_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    assert_eq!(
++        rejected_requests.len(),
++        1,
++        "destination writes must not retry automatically"
++    );
++
++    let (ambiguous_processor, ambiguous_store) = build_processor(
++        &graphql_server,
++        "http://127.0.0.1:9/unreachable".to_string(),
++        durable_store,
++        vec![],
++    )
++    .await;
++    let ambiguous_row = test_row("delivery-ambiguous", "PVTI_ambiguous", "PVT_project1");
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_ambiguous"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_ambiguous",
++                "PVT_project1",
++                "2026-08-13T18:31:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++
++    let _ = ambiguous_processor
++        .process_add_row(&ambiguous_row)
++        .await
++        .expect_err("transport failure should fail");
++    let ambiguous_publication = ambiguous_store
++        .get_publication(&DeliveryKey::new("delivery-ambiguous", "PVTI_ambiguous"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(ambiguous_publication.state, PublicationState::Ambiguous);
++}
++
++#[tokio::test]
++async fn destination_requires_a_valid_positive_acknowledgement() {
++    let destination_server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_string("not an HTTP source response"))
++        .mount(&destination_server)
++        .await;
++
++    let client = DestinationSourceClient::new(
++        Client::new(),
++        destination_server.uri(),
++        Option::<String>::None,
++    );
++    let node = ProjectItemStatusNode {
++        id: ProjectItemStatusNode::deterministic_node_id("PVTI_ack"),
++        project_item_node_id: "PVTI_ack".to_string(),
++        project_node_id: "PVT_project1".to_string(),
++        status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
++        status_option_id: "opt-ip".to_string(),
++        status_name: "In Progress".to_string(),
++        updated_at: Utc::now(),
++        refreshed_at: Utc::now(),
++        triggering_delivery_id: "delivery-ack".to_string(),
++    };
++
++    let error = client
++        .publish_project_item_status(&node)
++        .await
++        .expect_err("invalid acknowledgement must fail");
++    assert!(matches!(
++        error,
++        DestinationPublishError::InvalidAcknowledgement { .. }
++    ));
++    assert!(error.is_ambiguous());
++}
++
++#[tokio::test]
++async fn recovery_from_fetched_state_replays_the_persisted_payload() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let key = DeliveryKey::new("delivery-fetched", "PVTI_fetched");
++    let fetched_state = FetchedProjectItemState {
++        project_item_node_id: "PVTI_fetched".to_string(),
++        project_node_id: "PVT_project1".to_string(),
++        content_node_id: Some("I_123".to_string()),
++        content_type: Some("Issue".to_string()),
++        status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
++        status_option_id: "opt-persisted".to_string(),
++        status_name: "Persisted".to_string(),
++        updated_at: chrono::DateTime::parse_from_rfc3339("2026-08-13T19:05:00Z")
++            .expect("timestamp")
++            .with_timezone(&Utc),
++        refreshed_at: Utc::now(),
++        triggering_delivery_id: "delivery-fetched".to_string(),
++    };
++    state_store
++        .set_publication(
++            &key,
++            &PublicationRecord {
++                state: PublicationState::Fetched,
++                attempts: 1,
++                last_error: None,
++                fetched_state: Some(fetched_state),
++                completed_at: None,
++            },
++        )
++        .await
++        .expect("persist fetched state");
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-fetched",
++            "PVTI_fetched",
++            "PVT_project1",
++        ))
++        .await
++        .expect("fetched recovery succeeds");
++    assert_eq!(outcome, AddRowOutcome::Published);
++    assert!(
++        graphql_server
++            .received_requests()
++            .await
++            .expect("GraphQL requests")
++            .is_empty(),
++        "recovery must not replace the persisted payload with a refetch"
++    );
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    let payload: serde_json::Value =
++        serde_json::from_slice(&destination_requests[0].body).expect("destination payload");
++    assert_eq!(
++        payload["element"]["properties"]["statusOptionId"],
++        json!("opt-persisted")
++    );
++}
++
++#[tokio::test]
++async fn retries_safe_reads_and_recovery_from_ambiguous_publication() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_retry"))
++        .respond_with(ResponseTemplate::new(503))
++        .up_to_n_times(1)
++        .with_priority(1)
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_retry"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_retry",
++                "PVT_project1",
++                "2026-08-13T19:00:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        "http://127.0.0.1:9/unreachable".to_string(),
++        durable_store.clone(),
++        vec![],
++    )
++    .await;
++    let row = test_row("delivery-retry", "PVTI_retry", "PVT_project1");
++    let _ = processor
++        .process_add_row(&row)
++        .await
++        .expect_err("first publish is ambiguous");
++    let first_state = state_store
++        .get_publication(&DeliveryKey::new("delivery-retry", "PVTI_retry"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(first_state.state, PublicationState::Ambiguous);
++
++    let (recovery_processor, recovery_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++    let outcome = recovery_processor
++        .process_add_row(&row)
++        .await
++        .expect("recovery publish succeeds");
++    assert_eq!(outcome, AddRowOutcome::Published);
++    let second_state = recovery_store
++        .get_publication(&DeliveryKey::new("delivery-retry", "PVTI_retry"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(second_state.state, PublicationState::Published);
++    assert!(second_state.attempts >= 2);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert!(
++        graphql_requests.len() >= 2,
++        "expected safe read retries; got {}",
++        graphql_requests.len()
++    );
++}
++
++#[test]
++fn rate_limit_delay_prefers_retry_after_and_is_bounded() {
++    let mut headers = HeaderMap::new();
++    headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("1"));
++    headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
++    headers.insert(
++        "x-ratelimit-reset",
++        HeaderValue::from_str(&(Utc::now() + Duration::seconds(3)).timestamp().to_string())
++            .expect("reset header"),
++    );
++    assert_eq!(
++        rate_limit_retry_after(StatusCode::FORBIDDEN, &headers),
++        Some(std::time::Duration::from_secs(1)),
++        "Retry-After must take precedence over x-ratelimit-reset"
++    );
++
++    headers.insert(
++        reqwest::header::RETRY_AFTER,
++        HeaderValue::from_static("9999"),
++    );
++    assert_eq!(
++        rate_limit_retry_after(StatusCode::FORBIDDEN, &headers),
++        Some(std::time::Duration::from_secs(120)),
++        "server-provided delays must be bounded"
++    );
++}
++
++#[tokio::test]
++async fn rate_limit_403_retries_with_retry_after() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited"))
++        .respond_with(
++            ResponseTemplate::new(403)
++                .append_header("retry-after", "0")
++                .append_header("x-ratelimit-remaining", "0"),
++        )
++        .up_to_n_times(1)
++        .with_priority(1)
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_rate_limited",
++                "PVT_project1",
++                "2026-08-13T19:15:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-rate-limit",
++            "PVTI_rate_limited",
++            "PVT_project1",
++        ))
++        .await
++        .expect("rate-limited fetch should retry");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 2, "expected exactly one retry");
++}
++
++#[tokio::test]
++async fn rate_limit_403_retries_with_retry_after_http_date() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    let retry_after_http_date = httpdate::fmt_http_date(std::time::UNIX_EPOCH);
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited_http_date"))
++        .respond_with(
++            ResponseTemplate::new(403)
++                .append_header("retry-after", retry_after_http_date)
++                .append_header("x-ratelimit-remaining", "0"),
++        )
++        .up_to_n_times(1)
++        .with_priority(1)
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited_http_date"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_rate_limited_http_date",
++                "PVT_project1",
++                "2026-08-13T19:16:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-rate-limit-http-date",
++            "PVTI_rate_limited_http_date",
++            "PVT_project1",
++        ))
++        .await
++        .expect("http-date retry-after should be honored");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 2, "expected exactly one retry");
++}
++
++#[tokio::test]
++async fn non_rate_limit_403_does_not_retry() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_forbidden"))
++        .respond_with(
++            ResponseTemplate::new(403)
++                .append_header("x-ratelimit-reset", "9999999999")
++                .append_header("x-ratelimit-remaining", "42")
++                .set_body_string("forbidden"),
++        )
++        .mount(&graphql_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let err = processor
++        .process_add_row(&test_row("delivery-403", "PVTI_forbidden", "PVT_project1"))
++        .await
++        .expect_err("non-rate-limit 403 should be permanent");
++    assert!(err.to_string().contains("HTTP 403"));
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(
++        graphql_requests.len(),
++        1,
++        "403 without rate-limit headers must not retry"
++    );
++
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    assert_eq!(destination_requests.len(), 0);
++
++    let publication = state_store
++        .get_publication(&DeliveryKey::new("delivery-403", "PVTI_forbidden"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++}
++
++#[tokio::test]
++async fn configurable_status_field_name_is_sent_as_graphql_variable() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_custom_status"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_custom_status",
++                "PVT_project1",
++                "2026-08-13T19:20:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor_with_status_field_name(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++        "Workflow Status",
++    )
++    .await;
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-custom-status",
++            "PVTI_custom_status",
++            "PVT_project1",
++        ))
++        .await
++        .expect("custom status field should still hydrate and publish");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 1);
++    let graphql_body: serde_json::Value =
++        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request body");
++    assert_eq!(
++        graphql_body["variables"]["statusFieldName"],
++        json!("Workflow Status")
++    );
++    assert!(
++        graphql_body["query"]
++            .as_str()
++            .expect("query string")
++            .contains("$statusFieldName"),
++        "query must use statusFieldName variable"
++    );
++}
++
++#[tokio::test]
++async fn allowlist_rejection_skips_processing() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec!["PVT_allowlisted".to_string()],
++    )
++    .await;
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-rejected",
++            "PVTI_rejected",
++            "PVT_not_allowlisted",
++        ))
++        .await
++        .expect("allowlist rejection should be non-fatal");
++    assert_eq!(outcome, AddRowOutcome::Rejected);
++
++    let publication = state_store
++        .get_publication(&DeliveryKey::new("delivery-rejected", "PVTI_rejected"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Rejected);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 0);
++}
++
++#[tokio::test]
++async fn row_status_field_node_id_mismatch_blocks_all_network_and_remains_canonical_on_retry() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let row = json!({
++        "InvalidationNodeId": "INV_status_mismatch",
++        "DeliveryId": "delivery-status-mismatch",
++        "ProjectItemNodeId": "PVTI_status_mismatch",
++        "ProjectNodeId": "PVT_project1",
++        "StatusFieldNodeId": "PVTSSF_wrong",
++        "InvalidatedAt": "2026-08-13T20:14:00Z"
++    });
++    let err = processor
++        .process_add_row(&row)
++        .await
++        .expect_err("status field mismatch must fail");
++    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
++
++    let key = DeliveryKey::new("delivery-status-mismatch", "PVTI_status_mismatch");
++    let reservation = state_store
++        .get_reservation(&key)
++        .await
++        .expect("read reservation")
++        .expect("reservation");
++    assert_eq!(
++        reservation.status_field_node_id.as_deref(),
++        Some("PVTSSF_wrong")
++    );
++
++    let replay_without_constraint = json!({
++        "InvalidationNodeId": "INV_status_mismatch",
++        "DeliveryId": "delivery-status-mismatch",
++        "ProjectItemNodeId": "PVTI_status_mismatch",
++        "ProjectNodeId": "PVT_project1",
++        "InvalidatedAt": "2026-08-13T20:14:00Z"
++    });
++    let replay_error = processor
++        .process_add_row(&replay_without_constraint)
++        .await
++        .expect_err("persisted status field constraint must remain authoritative");
++    assert!(replay_error
++        .to_string()
++        .contains("expectedStatusFieldNodeId"));
++
++    let publication = state_store
++        .get_publication(&key)
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    assert_eq!(destination_requests.len(), 0);
++
++    let graphql_requests = graphql_server
++        .received_requests()
++        .await
++        .expect("graphql requests");
++    assert_eq!(
++        graphql_requests.len(),
++        0,
++        "row mismatch must fail before GraphQL"
++    );
++}
++
++#[tokio::test]
++async fn retry_cannot_override_reserved_status_field_with_mismatching_current_row() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++    let key = DeliveryKey::new("delivery-retry-mismatch", "PVTI_retry_mismatch");
++    state_store
++        .set_reservation(
++            &key,
++            &DeliveryReservation {
++                delivery_id: "delivery-retry-mismatch".to_string(),
++                project_item_node_id: "PVTI_retry_mismatch".to_string(),
++                invalidation_node_id: "INV_retry_mismatch".to_string(),
++                project_node_id: Some("PVT_project1".to_string()),
++                status_field_node_id: Some(EXPECTED_STATUS_FIELD_NODE_ID.to_string()),
++                state_source_url: None,
++                webhook_action: Some("edited".to_string()),
++                webhook_updated_at: None,
++                reserved_at: Utc::now(),
++            },
++        )
++        .await
++        .expect("persist reservation");
++
++    let conflicting_retry = json!({
++        "invalidationNodeId": "INV_retry_mismatch",
++        "deliveryId": "delivery-retry-mismatch",
++        "projectItemNodeId": "PVTI_retry_mismatch",
++        "projectNodeId": "PVT_project1",
++        "statusFieldNodeId": "PVTSSF_wrong",
++        "invalidatedAt": "2026-08-13T20:15:00Z"
++    });
++    let error = processor
++        .process_add_row(&conflicting_retry)
++        .await
++        .expect_err("current row mismatch must fail despite a valid reservation");
++    assert!(error.to_string().contains("expectedStatusFieldNodeId"));
++    assert!(graphql_server
++        .received_requests()
++        .await
++        .expect("GraphQL requests")
++        .is_empty());
++    assert!(destination_server
++        .received_requests()
++        .await
++        .expect("destination requests")
++        .is_empty());
++    let publication = state_store
++        .get_publication(&key)
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++}
++
++#[tokio::test]
++async fn graphql_field_id_mismatch_blocks_destination_even_when_row_omits_status_field() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(
++            graphql_success_response_with_field_id(
++                "PVTI_graphql_mismatch",
++                "PVT_project1",
++                "2026-08-13T20:15:00Z",
++                "In Progress",
++                "opt-ip",
++                "PVTSSF_different",
++            ),
++        ))
++        .mount(&graphql_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let row = json!({
++        "invalidationNodeId": "INV_graphql_mismatch",
++        "deliveryId": "delivery-graphql-mismatch",
++        "projectItemNodeId": "PVTI_graphql_mismatch",
++        "projectNodeId": "PVT_project1",
++        "invalidatedAt": "2026-08-13T20:14:00Z"
++    });
++
++    let err = processor
++        .process_add_row(&row)
++        .await
++        .expect_err("authoritative GraphQL field mismatch must fail");
++    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
++
++    let publication = state_store
++        .get_publication(&DeliveryKey::new(
++            "delivery-graphql-mismatch",
++            "PVTI_graphql_mismatch",
++        ))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++
++    let graphql_requests = graphql_server
++        .received_requests()
++        .await
++        .expect("graphql requests");
++    assert_eq!(graphql_requests.len(), 1);
++
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    assert_eq!(destination_requests.len(), 0);
++}
++
++#[tokio::test]
++async fn success_with_canonical_status_field_node_id() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_status_ok",
++                "PVT_project1",
++                "2026-08-13T20:16:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let row = json!({
++        "invalidationNodeId": "INV_status_ok",
++        "deliveryId": "delivery-status-ok",
++        "projectItemNodeId": "PVTI_status_ok",
++        "projectNodeId": "PVT_project1",
++        "statusFieldNodeId": EXPECTED_STATUS_FIELD_NODE_ID,
++        "invalidatedAt": "2026-08-13T20:15:30Z"
++    });
++    let outcome = processor
++        .process_add_row(&row)
++        .await
++        .expect("matching canonical status field id should publish");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let publication = state_store
++        .get_publication(&DeliveryKey::new("delivery-status-ok", "PVTI_status_ok"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Published);
++
++    assert_eq!(
++        destination_server
++            .received_requests()
++            .await
++            .expect("destination requests")
++            .len(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn state_source_url_mismatch_is_rejected_without_redirect_or_fetch() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let row = json!({
++        "InvalidationNodeId": "INV_url_mismatch",
++        "DeliveryId": "delivery-url-mismatch",
++        "ProjectItemNodeId": "PVTI_url_mismatch",
++        "ProjectNodeId": "PVT_project1",
++        "StateSourceUrl": "http://example.invalid/sources/github-project-state/events",
++        "InvalidatedAt": "2026-08-13T20:20:00Z"
++    });
++
++    let outcome = processor
++        .process_add_row(&row)
++        .await
++        .expect("mismatched state source url should be rejected");
++    assert_eq!(outcome, AddRowOutcome::Rejected);
++
++    let publication = state_store
++        .get_publication(&DeliveryKey::new(
++            "delivery-url-mismatch",
++            "PVTI_url_mismatch",
++        ))
++        .await
++        .expect("read publication")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Rejected);
++
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    assert_eq!(destination_requests.len(), 0);
++
++    let graphql_requests = graphql_server
++        .received_requests()
++        .await
++        .expect("graphql requests");
++    assert_eq!(
++        graphql_requests.len(),
++        0,
++        "must reject before GraphQL fetch"
++    );
++
++    let malformed_matching_url = json!({
++        "InvalidationNodeId": "INV_url_malformed",
++        "DeliveryId": "delivery-url-malformed",
++        "ProjectItemNodeId": "PVTI_url_malformed",
++        "ProjectNodeId": "PVT_project1",
++        "StateSourceUrl": "\u{2003}http://127.0.0.1:9001/sources/github-project-state/events",
++        "InvalidatedAt": "2026-08-13T20:21:00Z"
++    });
++    let outcome = processor
++        .process_add_row(&malformed_matching_url)
++        .await
++        .expect("malformed URL should be rejected without network access");
++    assert_eq!(outcome, AddRowOutcome::Rejected);
++    assert!(graphql_server
++        .received_requests()
++        .await
++        .expect("graphql requests")
++        .is_empty());
++    assert!(destination_server
++        .received_requests()
++        .await
++        .expect("destination requests")
++        .is_empty());
++}
++
++#[test]
++fn http_source_change_uses_node_contract() {
++    let node = ProjectItemStatusNode {
++        id: "project-item-status:PVTI_x".to_string(),
++        project_item_node_id: "PVTI_x".to_string(),
++        project_node_id: "PVT_p".to_string(),
++        status_field_node_id: "PVTSSF_s".to_string(),
++        status_option_id: "opt".to_string(),
++        status_name: "Todo".to_string(),
++        updated_at: Utc::now(),
++        refreshed_at: Utc::now(),
++        triggering_delivery_id: "delivery".to_string(),
++    };
++    let payload = HttpSourceChange::update_project_item_status(&node).expect("valid timestamp");
++    let HttpSourceChange::Update { element, .. } = payload;
++    let HttpElement::Node { labels, .. } = element;
++    assert_eq!(labels, vec!["ProjectItemStatus".to_string()]);
++}
+diff --git a/components/reactions/github-project-item-refresh/tests/integration_test.rs b/components/reactions/github-project-item-refresh/tests/integration_test.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f94c8d95e9f3f06e2ee519d234e09716133d6bc2
+--- /dev/null
++++ b/components/reactions/github-project-item-refresh/tests/integration_test.rs
+@@ -0,0 +1,290 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use async_trait::async_trait;
++use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
++use drasi_lib::{DrasiLib, Query};
++use drasi_reaction_github_project_item_refresh::GitHubProjectItemRefreshReaction;
++use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
++use serde_json::json;
++use std::collections::HashMap;
++use std::sync::Arc;
++use std::time::Duration;
++use wiremock::matchers::{body_string_contains, method};
++use wiremock::{Mock, MockServer, ResponseTemplate};
++
++const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
++
++struct DurableMemoryStateStore {
++    inner: drasi_lib::MemoryStateStoreProvider,
++}
++
++impl DurableMemoryStateStore {
++    fn new() -> Self {
++        Self {
++            inner: drasi_lib::MemoryStateStoreProvider::new(),
++        }
++    }
++}
++
++#[async_trait]
++impl StateStoreProvider for DurableMemoryStateStore {
++    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
++        self.inner.get(store_id, key).await
++    }
++    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
++        self.inner.set(store_id, key, value).await
++    }
++    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
++        self.inner.delete(store_id, key).await
++    }
++    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
++        self.inner.contains_key(store_id, key).await
++    }
++    async fn get_many(
++        &self,
++        store_id: &str,
++        keys: &[&str],
++    ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
++        self.inner.get_many(store_id, keys).await
++    }
++    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
++        self.inner.set_many(store_id, entries).await
++    }
++    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
++        self.inner.delete_many(store_id, keys).await
++    }
++    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
++        self.inner.clear_store(store_id).await
++    }
++    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
++        self.inner.list_keys(store_id).await
++    }
++    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
++        self.inner.store_exists(store_id).await
++    }
++    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
++        self.inner.key_count(store_id).await
++    }
++    fn is_durable(&self) -> bool {
++        true
++    }
++}
++
++fn graphql_success_response(
++    project_item_node_id: &str,
++    project_node_id: &str,
++) -> serde_json::Value {
++    json!({
++        "data": {
++            "node": {
++                "__typename": "ProjectV2Item",
++                "id": project_item_node_id,
++                "updatedAt": "2026-08-13T20:00:00Z",
++                "project": { "id": project_node_id },
++                "content": { "__typename": "Issue", "id": "I_123" },
++                "fieldValueByName": {
++                    "__typename": "ProjectV2ItemFieldSingleSelectValue",
++                    "name": "In Progress",
++                    "optionId": "opt-in-progress",
++                    "field": { "id": EXPECTED_STATUS_FIELD_NODE_ID }
++                }
++            }
++        }
++    })
++}
++
++async fn wait_for_requests(server: &MockServer, expected: usize, timeout_ms: u64) {
++    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
++    while tokio::time::Instant::now() < deadline {
++        let requests = server.received_requests().await.expect("received requests");
++        if requests.len() >= expected {
++            return;
++        }
++        tokio::time::sleep(Duration::from_millis(50)).await;
++    }
++    let requests = server.received_requests().await.expect("received requests");
++    panic!(
++        "timed out waiting for {expected} requests (got {})",
++        requests.len()
++    );
++}
++
++#[tokio::test]
++#[ignore]
++async fn github_project_item_refresh_end_to_end_add_update_delete() {
++    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
++        .is_test(true)
++        .try_init();
++
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_e2e_item"))
++        .and(body_string_contains("\"statusFieldName\""))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_e2e_item",
++                "PVT_allowlisted_project",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (source, handle) = ApplicationSource::new(
++        "invalidation-source",
++        ApplicationSourceConfig {
++            properties: HashMap::new(),
++            durability: None,
++        },
++    )
++    .expect("create source");
++
++    let query = Query::cypher("invalidation-query")
++        .query(
++            "MATCH (n:ProjectItemInvalidation)
++             RETURN n.InvalidationNodeId AS invalidationNodeId,
++                    n.DeliveryId AS deliveryId,
++                    n.ProjectItemNodeId AS projectItemNodeId,
++                    n.ProjectNodeId AS projectNodeId,
++                    n.StatusFieldNodeId AS statusFieldNodeId,
++                    n.StateSourceUrl AS stateSourceUrl,
++                    n.webhookAction AS webhookAction,
++                    n.InvalidatedAt AS invalidatedAt",
++        )
++        .from_source("invalidation-source")
++        .auto_start(true)
++        .build();
++
++    let reaction = GitHubProjectItemRefreshReaction::builder("gh-refresh-e2e")
++        .with_query("invalidation-query")
++        .with_github_token("test-token-not-a-secret")
++        .with_graphql_url(graphql_server.uri())
++        .with_destination_event_url(destination_server.uri())
++        .with_destination_bearer_secret("dest-secret")
++        .with_allowlisted_project_ids(vec!["PVT_allowlisted_project".to_string()])
++        .with_expected_status_field_node_id(EXPECTED_STATUS_FIELD_NODE_ID)
++        .build()
++        .expect("build reaction");
++
++    let drasi = DrasiLib::builder()
++        .with_id("gh-refresh-integration")
++        .with_state_store_provider(Arc::new(DurableMemoryStateStore::new()))
++        .with_source(source)
++        .with_query(query)
++        .with_reaction(reaction)
++        .build()
++        .await
++        .expect("build drasi");
++
++    drasi.start().await.expect("start drasi");
++    tokio::time::sleep(Duration::from_millis(300)).await;
++
++    // INSERT -> should trigger fetch + publish
++    handle
++        .send_node_insert(
++            "project-item-invalidation:delivery-e2e-1",
++            vec!["ProjectItemInvalidation"],
++            PropertyMapBuilder::new()
++                .with_string(
++                    "InvalidationNodeId",
++                    "project-item-invalidation:delivery-e2e-1",
++                )
++                .with_string("DeliveryId", "delivery-e2e-1")
++                .with_string("ProjectItemNodeId", "PVTI_e2e_item")
++                .with_string("ProjectNodeId", "PVT_allowlisted_project")
++                .with_string("StatusFieldNodeId", EXPECTED_STATUS_FIELD_NODE_ID)
++                .with_string("StateSourceUrl", destination_server.uri())
++                .with_string("webhookAction", "edited")
++                .with_string("invalidatedAt", "2026-08-13T19:59:00Z")
++                .build(),
++        )
++        .await
++        .expect("send insert");
++    wait_for_requests(&destination_server, 1, 5_000).await;
++
++    // UPDATE -> should be ignored by the reaction.
++    handle
++        .send_node_update(
++            "project-item-invalidation:delivery-e2e-1",
++            vec!["ProjectItemInvalidation"],
++            PropertyMapBuilder::new()
++                .with_string(
++                    "InvalidationNodeId",
++                    "project-item-invalidation:delivery-e2e-1",
++                )
++                .with_string("DeliveryId", "delivery-e2e-1")
++                .with_string("ProjectItemNodeId", "PVTI_e2e_item")
++                .with_string("ProjectNodeId", "PVT_allowlisted_project")
++                .with_string("StatusFieldNodeId", EXPECTED_STATUS_FIELD_NODE_ID)
++                .with_string("StateSourceUrl", destination_server.uri())
++                .with_string("webhookAction", "edited")
++                .with_string("invalidatedAt", "2026-08-13T20:00:01Z")
++                .build(),
++        )
++        .await
++        .expect("send update");
++
++    // DELETE -> should be ignored by the reaction.
++    handle
++        .send_delete(
++            "project-item-invalidation:delivery-e2e-1",
++            vec!["ProjectItemInvalidation"],
++        )
++        .await
++        .expect("send delete");
++
++    tokio::time::sleep(Duration::from_millis(500)).await;
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    assert_eq!(
++        destination_requests.len(),
++        1,
++        "only ADD rows should republish to destination source"
++    );
++
++    let graphql_requests = graphql_server
++        .received_requests()
++        .await
++        .expect("graphql requests");
++    assert_eq!(graphql_requests.len(), 1, "update/delete must not refetch");
++    let graphql_body: serde_json::Value =
++        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request json");
++    assert_eq!(graphql_body["variables"]["statusFieldName"], "Status");
++
++    let body: serde_json::Value =
++        serde_json::from_slice(&destination_requests[0].body).expect("destination body json");
++    assert_eq!(body["operation"], "update");
++    assert_eq!(
++        body["element"]["id"], "project-item-status:PVTI_e2e_item",
++        "deterministic ProjectItemStatus node id"
++    );
++    assert_eq!(
++        body["element"]["properties"]["triggeringDeliveryId"],
++        "delivery-e2e-1"
++    );
++
++    drasi.stop().await.expect("stop drasi");
++}
+diff --git a/lib/README.md b/lib/README.md
+index 0a34dc063d89f566320cebf055f67eec11607767..0fb3ac8d6d620e7b29d806c20f61eb9a99d2b3c6 100644
+--- a/lib/README.md
++++ b/lib/README.md
+@@ -817,7 +817,7 @@ impl Reaction for MyReaction {
+ }
+ ```
+ 
+-**Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-grpc`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`.
++**Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-grpc`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`, `drasi-reaction-github-project-item-refresh`.
+ 
+ ### Reaction Recovery
+ 

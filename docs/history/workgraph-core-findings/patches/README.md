@@ -22,3 +22,12 @@ git apply --3way path/to/<commit>.patch
 Prefer issue-specific extraction of surviving generic behavior. Failed
 `--check` on current `main` is expected when the historical component no longer
 exists.
+
+## Preimage and interrupted-work preservation
+
+- [`series/`](series/) contains seven cumulative patches from public remote
+  commit `43e7d25034bc8fababf3021b3c6e17d476d42e4a`. Together they provide a
+  verified reconstruction path for all 20 commit-specific patches.
+- [`dirty/`](dirty/) preserves the exact four-file partial router follow-up
+  recovered after `25bda3bb`. It applied to the reconstructed historical tip
+  but was interrupted before validation or commit.
