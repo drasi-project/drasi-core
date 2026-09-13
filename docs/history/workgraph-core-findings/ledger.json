@@ -26,7 +26,7 @@
         "https://github.com/drasi-project/drasi-core/pull/810"
       ],
       "evidenceUrl": "evidence.md#report-l42",
-      "rationale": "The issue remains open. Draft PR #810 is the curated current-main implementation at 929dc80f; it covers #792 and relates to only the verified runtime subset of #897."
+      "rationale": "The issue remains open. Draft PR #810 is the curated current-main implementation at 929dc80f; it fixes #792 and contains the full historical runtime correction for #897. The matrix failed on 042559d9 and passed after 601e2a34; an exact e759606f run remains pending."
     },
     {
       "id": "report-L43",
@@ -409,12 +409,15 @@
       "sourceSection": "Restart, delivery, and plugin-boundary defects",
       "sourceSubheading": "Earlier PR-only and unfiled repairs",
       "summary": "Retained multi-source queries diverged from freshly constructed queries.",
-      "disposition": "issue-opened",
+      "disposition": "issue-opened-existing-pr",
       "recordUrls": [
-        "https://github.com/drasi-project/drasi-core/issues/897"
+        "https://github.com/drasi-project/drasi-core/issues/897",
+        "https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654327604",
+        "https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654332165",
+        "https://github.com/drasi-project/drasi-core/pull/810"
       ],
       "evidenceUrl": "evidence.md#report-l118",
-      "rationale": "#897 tracks the historical retained/fresh divergence. PR #810 now covers 601e2a34's runtime default-transition and grouping-migration subset with a generic survival test; persisted restart/backend acceptance and the separate replay/result-index state-version repair remain open."
+      "rationale": "#897 tracks an in-process live-history versus fresh-final-snapshot divergence, not a persistent restart. The matrix failed on 042559d9 and passed after 601e2a34. PR #810 contains that runtime correction and relates to #897; direct e759606f execution and the final #792 overlap disposition remain pending."
     },
     {
       "id": "report-L119",

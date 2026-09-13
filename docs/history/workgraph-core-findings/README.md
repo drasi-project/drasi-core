@@ -74,6 +74,13 @@ work does not duplicate that stack.
 - [#810](https://github.com/drasi-project/drasi-core/pull/810) contains the
   isolated #792 candidate but not the later persisted aggregate-replay repair
   in `7be2e1bd`. Its curated draft head is `929dc80f`.
+- In #897, “retained” means a long-running in-process query that saw an earlier
+  grouping value before an update; `601e2a34` did not exercise shutdown,
+  reload, a persistent backend, or result-index restoration. Persistence
+  concerns remain mapped to #775/#821, #822, and #806. The historical matrix
+  failed on parent `042559d9` and passed after `601e2a34`; exact `e759606f`
+  execution remains pending even though the relevant runtime files are
+  unchanged.
 - [#901](https://github.com/drasi-project/drasi-core/pull/901) is the clean
   current-main fix for #893, and
   [#904](https://github.com/drasi-project/drasi-core/pull/904) is the shared

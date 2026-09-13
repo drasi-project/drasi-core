@@ -55,7 +55,7 @@ downgraded.
 | [#894](https://github.com/drasi-project/drasi-core/issues/894) | Source dispatch ordering across plugin ABI | `f54e829c` |
 | [#895](https://github.com/drasi-project/drasi-core/issues/895) | Cypher continuous-query `UNION` | Historical application workaround |
 | [#896](https://github.com/drasi-project/drasi-core/issues/896) | Dynamic StateStore durability contract | `eb777fa7`, `487df491`; #742 is historical stacked evidence only |
-| [#897](https://github.com/drasi-project/drasi-core/issues/897) | Retained multi-source aggregate divergence | `601e2a34` |
+| [#897](https://github.com/drasi-project/drasi-core/issues/897) | In-process live-history aggregate divergence from fresh final snapshot | `601e2a34`; related PR #810 |
 | [#898](https://github.com/drasi-project/drasi-core/issues/898) | `coll.distinct` on unmatched OPTIONAL values | Investigation |
 | [#899](https://github.com/drasi-project/drasi-core/issues/899) | Disconnected MATCH/Cartesian behavior | Investigation |
 | [#900](https://github.com/drasi-project/drasi-core/issues/900) | HTTP 2xx JSON/GraphQL error handling | `16f67030`, `56745f88`, `ee649b9b`, historical PR #747 |
@@ -116,10 +116,12 @@ inseparable root cause.
    #896 as a clean generic layer above #903 while leaving #742/stack 741
    untouched; extract #900 from the final
    `16f67030`/`56745f88`/`ee649b9b` implementation.
-5. **Reproduce before porting:** #897's runtime default-transition subset is
-   now covered by PR #810; reproduce its remaining persisted restart/backend
-   scope and the distinct replay/result-index state-version repair before any
-   extraction. Test #891 from the generic `SourceBase` part of
+5. **Prove the retained/fresh baseline:** #897 is an in-process live-history
+   versus fresh-final-snapshot defect, not a persistence restart. The historical
+   matrix failed on `042559d9` and passed after `601e2a34`; PR #810 contains
+   that runtime correction. Run the test directly on exact `e759606f`, then
+   decide whether #792 fully subsumes #897. Keep persistence concerns with
+   #775/#821, #822, and #806. Test #891 from the generic `SourceBase` part of
    `645af080`; #894 from `f54e829c` after testing current `dispatch_event`
    behavior following #827/#828/#856.
 6. **Unfixed correctness issues:** #795-#799 and #805, prioritized by

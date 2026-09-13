@@ -24,8 +24,9 @@ The original source report SHA-256 is
 **Disposition rationale**
 
 The issue remains open. Draft PR #810 is the curated current-main implementation
-at `929dc80fbe0d33ed6135418d0b04f304a13e81a2`; it covers #792 and relates to
-only the verified runtime subset of #897.
+at `929dc80fbe0d33ed6135418d0b04f304a13e81a2`; it fixes #792 and contains
+the full historical runtime correction for #897. The matrix failed on
+`042559d9` and passed after `601e2a34`; an exact `e759606f` run remains pending.
 
 **Public records**
 
@@ -647,7 +648,7 @@ replacement is layered above PR #903 at
 - **Source section:** Restart, delivery, and plugin-boundary defects
 - **Source subheading:** Earlier PR-only and unfiled repairs
 - **Sanitized source-report line:** 118
-- **Published disposition:** `issue-opened`
+- **Published disposition:** `issue-opened-existing-pr`
 
 **Original finding detail**
 
@@ -655,11 +656,28 @@ replacement is layered above PR #903 at
 
 **Disposition rationale**
 
-#897 tracks the historical retained/fresh divergence. PR #810 now covers 601e2a34's runtime default-transition and grouping-migration subset with a generic survival test; persisted restart/backend acceptance and the separate replay/result-index state-version repair remain open.
+#897 tracks an in-process live-history versus fresh-final-snapshot divergence,
+not a persistent restart. In `retained_multi_source_tests.rs`, both query pairs
+are newly constructed in one process: the retained pair receives an initial
+status and later grouping-key update, while the fresh pair receives the final
+status as an insert. No state store, shutdown, reload, result-index restore, or
+persistent backend is present.
+
+PR #810 carries the generic survival matrix and relates to #897. Exact pre-fix
+evidence records the matrix failing on parent `042559d9` and passing after
+`601e2a34`. The relevant runtime files are unchanged through `e759606f`, so a
+current-main failure is strongly inferred but has not been run directly.
+`601e2a34`'s runtime correction is a subset of #810, and no distinct surviving
+#897 correction was found. The final #792 overlap disposition remains pending.
+Persistence concerns are tracked by #775/#821, #822, and #806 rather than
+added to #897 without a reproduction.
 
 **Public records**
 
 - https://github.com/drasi-project/drasi-core/issues/897
+- https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654327604
+- https://github.com/drasi-project/drasi-core/issues/897#issuecomment-5654332165
+- https://github.com/drasi-project/drasi-core/pull/810
 
 <a id="report-l119"></a>
 ## `report-L119` - Startup Source changes could be lost before downstream dispatch was ready.

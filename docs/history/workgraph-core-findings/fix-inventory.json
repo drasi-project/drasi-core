@@ -13,7 +13,7 @@
     "sanitizedReport": "source-report-sanitized.md",
     "sanitizedReportSha256": "50a607089fa9069c74bccbb21fb80d5cdf5c457ed365503661e6a8c7171d2c3e",
     "perRecordEvidence": "evidence.md",
-    "perRecordEvidenceSha256": "4fc5a96fe03069f3b6f73c48513d12c2e532057d2b4393b0e7bce273828b21bd"
+    "perRecordEvidenceSha256": "eedfdf171bd5db7fd3ddd414d6f95968e218521577691a923210b46d2f47d827"
   },
   "fixes": [
     {
@@ -22,7 +22,7 @@
       "existingPr": 810,
       "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
       "status": "open-draft-isolated-candidate",
-      "note": "The curated draft uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e, fixes #792, and relates to only the verified runtime subset of #897."
+      "note": "The curated draft uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e, fixes #792, and contains the full historical runtime correction for #897. The matrix failed on 042559d9 and passed after 601e2a34; direct e759606f execution remains pending."
     },
     {
       "issues": [793, 794],
@@ -109,8 +109,8 @@
       "issues": [897],
       "existingPr": 810,
       "existingPrHead": "929dc80fbe0d33ed6135418d0b04f304a13e81a2",
-      "status": "runtime-subset-covered-by-pr-810",
-      "note": "PR #810 now carries the generic retained_multi_source survival matrix for the runtime default-transition/group-migration subset. Persisted restart/backend acceptance and the separate replay/result-index state-version repair remain open."
+      "status": "historical-fix-contained-in-active-related-pr",
+      "note": "PR #810 contains the full 601e2a34 runtime correction and carries the generic retained_multi_source live-history/fresh-final-snapshot matrix. The historical matrix failed on 042559d9 and passed after 601e2a34; relevant runtime files are unchanged through e759606f, but that exact revision has not been directly run. No shutdown, reload, persistent backend, or result-index restoration was tested. The final #792 overlap disposition remains pending."
     },
     {
       "commits": ["645af0801f268af61d44f58480e44c3e3a3544be"],
