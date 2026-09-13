@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-12T18:28:14-07:00",
+  "baseline": {
+    "main": "e759606fa065bee0ef9e60017e263f0f85dd0e44",
+    "retainedBranch": "workgraph-generic-recovery",
+    "retainedTip": "fb5d2bda2cbce4284fecbce40cae2a2d74116249"
+  },
+  "sourceEvidence": {
+    "reportSha256": "683a7406e1edd6778f892bd3e849d2440ac8da3fa023aac79c6ac93b37eebbda",
+    "findingRows": 132,
+    "narrativeAnchors": 7
+  },
+  "fixes": [
+    {
+      "issues": [792],
+      "commits": ["d4ad74218754f597f50e9ef45562eb535069aed5"],
+      "existingPr": 810,
+      "status": "open-draft-isolated-candidate",
+      "note": "The PR uses patch-identical commit 62685e467e6f276f2ba4449ca8bfcb5b4aa63c2e."
+    },
+    {
+      "issues": [793, 794],
+      "commits": ["c2b86f9c537bff047c8335e86a078f39264343e2"],
+      "status": "prototype-only"
+    },
+    {
+      "issues": [806],
+      "commits": ["2f129f229f487611bebbba3c9270aca315642401"],
+      "status": "prototype-only"
+    },
+    {
+      "issues": [807],
+      "commits": ["6731189964f90c9fbd08af39fa0e76883bab71b3"],
+      "status": "prototype-only"
+    },
+    {
+      "issues": [808],
+      "commits": [
+        "fcce3f11a38df8cde7355473d05fb9f90bb05baf",
+        "c6615b450b0be85694f2e77460cf892617eb946e"
+      ],
+      "status": "prototype-only-follow-up-required"
+    },
+    {
+      "issues": [809],
+      "commits": [
+        "7691d769b58393940d3e58fe0756300589d39f04",
+        "c6615b450b0be85694f2e77460cf892617eb946e"
+      ],
+      "status": "prototype-only"
+    },
+    {
+      "issues": [774],
+      "commits": ["1bd669a389924cc264ef071f5f97624b5618ef08"],
+      "status": "prototype-only",
+      "note": "f54e829c is dispatch ordering, not this callback."
+    },
+    {
+      "issues": [775, 821],
+      "commits": [
+        "54d02054698bf34bcf3b4afa32ce6bc0480f8055",
+        "e4f2af57f8c8b1b8ac8ec24b20909e05fe7cdae3"
+      ],
+      "existingPr": 826,
+      "status": "existing-upstream-stack"
+    },
+    {
+      "issues": [792],
+      "commits": ["7be2e1bd895196c1e4fbf99a23dbbcbdb4abc8e8"],
+      "status": "prototype-residual-not-in-pr-810",
+      "note": "Persisted grouping identity and bounded WAL recovery share this historical commit and need clean issue-specific extraction."
+    },
+    {
+      "commits": ["8a52f6f3b5dfc438f93d1c53a5f0aee9896d12be"],
+      "existingPr": 736,
+      "status": "merged-only-to-prototype-base",
+      "note": "Deep logical expression evaluation stack-overflow repair."
+    },
+    {
+      "commits": [
+        "eb777fa7966d04d93a4dabe6b22fbab6f75c1f3e",
+        "487df491"
+      ],
+      "existingPr": 742,
+      "status": "open-draft-historical-stack",
+      "note": "StateStore durability and ABI versioning."
+    },
+    {
+      "commits": ["601e2a34b5bce2ec37e26f26818df35f2d27c830"],
+      "status": "remote-prototype-branch",
+      "note": "Retained multi-source query divergence repair."
+    },
+    {
+      "commits": ["645af0801f268af61d44f58480e44c3e3a3544be"],
+      "status": "prototype-only",
+      "note": "Startup Source event retention."
+    },
+    {
+      "commits": ["f54e829c81d6dde581001d8c20338afa6818ddd6"],
+      "status": "prototype-only",
+      "note": "Dispatch ordering across the plugin ABI."
+    },
+    {
+      "commits": ["01dbaf200e2705d86604b819d443df9b93574635"],
+      "status": "remote-prototype-branch",
+      "note": "Changed query row-signature reconciliation."
+    },
+    {
+      "commits": [
+        "cc8d3f712b69fc730b91ce04edf4556e8d2b7899",
+        "eb224595cf297445a13a943572cc5657979dfc8f"
+      ],
+      "issues": [820],
+      "status": "prototype-evidence-existing-issue"
+    },
+    {
+      "commits": [
+        "16f670304b5956a41f316a0ba670d8e0aa7eab9b",
+        "56745f88",
+        "ee649b9b"
+      ],
+      "existingPr": 747,
+      "status": "closed-unmerged-retained-prototype",
+      "note": "HTTP 2xx response JSON validation and exact-number corrections."
+    },
+    {
+      "commits": [
+        "8033ca122ad83cbca7427e7f3b3a83b50775832b",
+        "e26ba15323802e9fe958edcacf720e8845e788eb",
+        "c3b5f54078065372f9b75b4560e3abfb8db354c8"
+      ],
+      "status": "explicitly-parked",
+      "note": "The last commit documents a remaining limitation; it is not another fix."
+    },
+    {
+      "commits": ["2dc5d87833960cffc7a2335215e3d93fdd09089c"],
+      "remoteBranch": "agentofreality-source-owned-workgraph-allocator",
+      "status": "remote-historical-workgraph-specific"
+    }
+  ],
+  "existingDurabilityStack": [
+    {"issue": 743, "pr": 825},
+    {"issue": 821, "pr": 826},
+    {"issue": 822, "pr": 830},
+    {"issue": 824, "pr": 831},
+    {"issue": 819, "pr": 832},
+    {"issue": 820, "pr": 834},
+    {"issue": 823, "pr": 835}
+  ]
+}
