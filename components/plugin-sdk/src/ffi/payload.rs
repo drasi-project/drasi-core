@@ -331,8 +331,13 @@ mod tests {
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
     };
-    use drasi_lib::channels::events::SourceEvent;
+    use drasi_lib::{
+        channels::events::SourceEvent,
+        sources::{SourceBase, SourceBaseParams},
+        DispatchMode,
+    };
     use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     fn sample_node() -> Element {
         let mut props = ElementPropertyMap::new();
@@ -375,6 +380,56 @@ mod tests {
         assert_eq!(
             decoded.timestamp.timestamp_micros(),
             wrapper.timestamp.timestamp_micros()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_source_dispatch_order_survives_ffi_roundtrip() {
+        let base = SourceBase::new(
+            SourceBaseParams::new("ffi-order").with_dispatch_mode(DispatchMode::Channel),
+        )
+        .unwrap();
+        let mut receiver = base.create_streaming_receiver().await.unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let timestamp = DateTime::from_timestamp_micros(1_771_000_000_000_000).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let dispatch_base = base.clone_shared();
+            let dispatch_barrier = barrier.clone();
+            let wrapper = SourceEventWrapper::new(
+                "ffi-order".to_string(),
+                SourceEvent::Change(SourceChange::Insert {
+                    element: sample_node(),
+                }),
+                timestamp,
+            );
+            handles.push(tokio::spawn(async move {
+                dispatch_barrier.wait().await;
+                dispatch_base.dispatch_event(wrapper).await.unwrap();
+            }));
+        }
+
+        barrier.wait().await;
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let mut decoded = Vec::new();
+        for _ in 0..2 {
+            let received = receiver.recv().await.unwrap();
+            let payload = SourceEventPayload::from_wrapper(&received);
+            let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
+            decoded.push(decode_source_event_payload(&bytes).expect("decode"));
+        }
+
+        assert!(
+            decoded[0].sequence < decoded[1].sequence,
+            "SourceBase must enqueue events in assigned sequence order"
+        );
+        assert!(
+            decoded[0].timestamp.timestamp_micros() < decoded[1].timestamp.timestamp_micros(),
+            "the plugin ABI must preserve the per-source dispatch order key"
         );
     }
 
