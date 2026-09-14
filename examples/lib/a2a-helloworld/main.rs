@@ -92,10 +92,7 @@ async fn main() -> Result<()> {
     println!("  A2A endpoint: {endpoint}");
     println!("  Query:        overdue-invoices (no bootstrap — insert invoices via HTTP)");
     println!();
-    println!("Start the Hello World agent first:");
-    println!("  python __main__.py   # from a2a-samples/.../helloworld, port 9999");
-    println!();
-    println!("Then insert an invoice:");
+    println!("Insert an invoice:");
     println!(
         "  curl -X POST http://127.0.0.1:9000/sources/invoices/events -H 'Content-Type: application/json' -d '{{\"operation\":\"insert\",\"element\":{{\"type\":\"node\",\"id\":\"inv-1001\",\"labels\":[\"Invoice\"],\"properties\":{{\"invoiceId\":\"inv-1001\",\"customer\":\"Acme\",\"amount\":1250.5}}}}}}'"
     );
