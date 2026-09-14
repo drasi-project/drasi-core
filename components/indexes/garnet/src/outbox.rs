@@ -80,19 +80,15 @@ impl OutboxWriter for GarnetOutboxWriter {
         let seq_str = sequence.to_string();
 
         if let Some(session_state) = &self.session_state {
-            if session_state
-                .with_active_buffer(|buffer| {
-                    buffer.zset_add(
-                        outbox_key.clone(),
-                        seq_str.as_bytes().to_vec(),
-                        sequence as f64,
-                    );
-                    buffer.hash_set(data_key.clone(), &seq_str, data.to_vec());
-                })?
-                .is_some()
-            {
-                return Ok(());
-            }
+            session_state.with_active_buffer_required(|buffer| {
+                buffer.zset_add(
+                    outbox_key.clone(),
+                    seq_str.as_bytes().to_vec(),
+                    sequence as f64,
+                );
+                buffer.hash_set(data_key.clone(), &seq_str, data.to_vec());
+            })?;
+            return Ok(());
         }
 
         let mut con = self.connection.clone();

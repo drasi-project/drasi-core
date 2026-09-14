@@ -57,6 +57,7 @@ const QUERY_KIND_ENV: &str = "DRASI_ATOMICITY_QUERY_KIND";
 const DURABLE_ENV: &str = "DRASI_ATOMICITY_DURABLE_REACTION";
 const STAGE_ENV: &str = "DRASI_ATOMICITY_STAGE";
 const FAULT_READY_ENV: &str = "DRASI_ATOMICITY_FAULT_READY";
+const BOOTSTRAP_ENV: &str = "DRASI_ATOMICITY_ENABLE_BOOTSTRAP";
 
 const SOURCE_ID: &str = "people-source";
 const QUERY_ID: &str = "people-query";
@@ -678,6 +679,7 @@ fn spawn_phase_child(
     query_kind: &str,
     durable_reaction: bool,
     stage: Option<PersistStage>,
+    enable_bootstrap: bool,
 ) -> Result<()> {
     let executable = std::env::current_exe().context("resolve current test executable")?;
     let mut command = Command::new(executable);
@@ -688,7 +690,8 @@ fn spawn_phase_child(
         .arg("--test-threads=1")
         .env(PHASE_ENV, phase)
         .env(QUERY_KIND_ENV, query_kind)
-        .env(DURABLE_ENV, if durable_reaction { "1" } else { "0" });
+        .env(DURABLE_ENV, if durable_reaction { "1" } else { "0" })
+        .env(BOOTSTRAP_ENV, if enable_bootstrap { "1" } else { "0" });
     if let Some(stage) = stage {
         command.env(STAGE_ENV, stage.as_str());
     }
@@ -841,7 +844,7 @@ async fn build_core(
                 .query(opts.query_text)
                 .from_source(SOURCE_ID)
                 .auto_start(true)
-                .enable_bootstrap(false)
+                .enable_bootstrap(std::env::var(BOOTSTRAP_ENV).ok().as_deref() == Some("1"))
                 .with_outbox_capacity(32)
                 .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
                 .with_recovery_policy(RecoveryPolicy::Strict)
@@ -1031,7 +1034,7 @@ async fn run_mid_txn_failure(stage: PersistStage) -> Result<()> {
         return Ok(());
     }
     let paths = Paths::new(&format!("{stage:?}"))?;
-    spawn_phase_child("fault", &paths, "normal", false, Some(stage))?;
+    spawn_phase_child("fault", &paths, "normal", false, Some(stage), false)?;
     let failed: DurableObservation = serde_json::from_slice(
         &std::fs::read(&paths.fault_ready).context("read fault observation")?,
     )
@@ -1043,7 +1046,7 @@ async fn run_mid_txn_failure(stage: PersistStage) -> Result<()> {
     );
     assert_output_absent(&failed, &format!("{stage:?} after rollback"));
 
-    spawn_phase_child("recover", &paths, "normal", false, None)?;
+    spawn_phase_child("recover", &paths, "normal", false, None, false)?;
     let recovered = read_recover_observation(&paths.ready)?;
     assert_eq!(
         recovered.snapshot_seq, 1,
@@ -1074,6 +1077,37 @@ async fn fail_after_index_before_source_checkpoint_rolls_back() -> Result<()> {
 }
 
 #[tokio::test]
+async fn zero_checkpoint_recovery_with_bootstrap_enabled_replays_wal() -> Result<()> {
+    if in_recover_child() {
+        return Ok(());
+    }
+    let paths = Paths::new("bootstrap-enabled")?;
+    spawn_phase_child(
+        "fault",
+        &paths,
+        "normal",
+        false,
+        Some(PersistStage::BeforeSourceCheckpoint),
+        true,
+    )?;
+    let failed: DurableObservation = serde_json::from_slice(
+        &std::fs::read(&paths.fault_ready).context("read fault observation")?,
+    )
+    .context("parse fault observation")?;
+    assert_eq!(failed.source_sequence.unwrap_or(0), 0);
+    assert_output_absent(&failed, "bootstrap-enabled after rollback");
+
+    spawn_phase_child("recover", &paths, "normal", false, None, true)?;
+    let recovered = read_recover_observation(&paths.ready)?;
+    assert_eq!(
+        recovered.snapshot_seq, 1,
+        "restart with bootstrap enabled must still replay the rolled-back WAL event"
+    );
+    paths.cleanup();
+    Ok(())
+}
+
+#[tokio::test]
 async fn fail_after_source_checkpoint_before_outbox_rolls_back() -> Result<()> {
     run_mid_txn_failure(PersistStage::BeforeOutboxAppend).await
 }
@@ -1100,6 +1134,7 @@ async fn fail_after_commit_before_in_memory_update_hydrates_on_restart() -> Resu
         "normal",
         true,
         Some(PersistStage::AfterCommit),
+        false,
     )?;
     let committed: DurableObservation = serde_json::from_slice(
         &std::fs::read(&paths.fault_ready).context("read fault observation")?,
@@ -1115,7 +1150,7 @@ async fn fail_after_commit_before_in_memory_update_hydrates_on_restart() -> Resu
         "dispatch must not happen after a post-commit failure"
     );
 
-    spawn_phase_child("recover", &paths, "normal", true, None)?;
+    spawn_phase_child("recover", &paths, "normal", true, None, false)?;
     let recovered = read_recover_observation(&paths.ready)?;
     assert_eq!(
         recovered.snapshot_seq, 1,
@@ -1147,6 +1182,7 @@ async fn fail_during_process_due_futures_output_persist_rolls_back() -> Result<(
         "future",
         false,
         Some(PersistStage::BeforeOutboxAppend),
+        false,
     )?;
     let failed: DurableObservation = serde_json::from_slice(
         &std::fs::read(&paths.fault_ready).context("read fault observation")?,
@@ -1165,7 +1201,7 @@ async fn fail_during_process_due_futures_output_persist_rolls_back() -> Result<(
     assert!(failed.outbox_sequences.is_empty());
     assert_eq!(failed.live_row_count, 0);
 
-    spawn_phase_child("recover", &paths, "future", false, None)?;
+    spawn_phase_child("recover", &paths, "future", false, None, false)?;
     let recovered = read_recover_observation(&paths.ready)?;
     assert_eq!(
         recovered.snapshot_seq, 1,

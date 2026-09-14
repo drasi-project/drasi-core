@@ -618,6 +618,22 @@ impl GarnetSessionState {
         let mut guard = self.lock()?;
         Ok(guard.as_mut().map(f))
     }
+
+    /// Like [`with_active_buffer`], but errors if no session is active.
+    ///
+    /// Use this when the caller was created with session state: a missing
+    /// buffer means the session rolled back, and falling through to a
+    /// standalone Redis write would persist data the transaction aborted.
+    pub(crate) fn with_active_buffer_required<R>(
+        &self,
+        f: impl FnOnce(&mut WriteBuffer) -> R,
+    ) -> Result<R, IndexError> {
+        self.with_active_buffer(f)?.ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "operation requires an active session",
+            ))
+        })
+    }
 }
 
 impl Drop for GarnetSessionState {

@@ -1687,6 +1687,10 @@ impl Query for DrasiQuery {
                                     "Query '{}' resuming source '{}' from checkpoint: seq={}",
                                     self.base.config.id, settings.source_id, cp.sequence
                                 );
+                            } else {
+                                // Restart with no checkpoint: replay from seq 0
+                                // instead of treating this as a first-ever bootstrap.
+                                settings.resume_sequence = Some(0);
                             }
                         }
                     }
@@ -1841,6 +1845,7 @@ impl Query for DrasiQuery {
                             checkpoint_sequences_per_source.clear();
                             for settings in &mut subscription_settings {
                                 settings.resume_from = None;
+                                settings.resume_sequence = None;
                             }
                         }
                     },
