@@ -154,7 +154,7 @@ More examples can be found under the [examples](examples) folder.
 Continuous queries support bounded patterns such as
 `MATCH (a)-[relationships:R*1..3]->(b)`. The relationship variable binds to an
 ordered list. See [Variable-length MATCH](docs/variable-length-match.md) for
-bounds, path semantics, and supported combinations.
+bounds, matching, slots, and supported combinations.
 
 ## Dynamic Plugins
 

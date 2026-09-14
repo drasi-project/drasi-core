@@ -67,26 +67,156 @@ The matcher also handles changes to relationship endpoints, types, and propertie
 Existing projection, aggregation, and future-reprocessing functions receive
 the resulting match changes.
 
-## Index layout
+## Why there are two solvers
 
-The matcher reuses one relationship candidate slot for a segment at every depth.
-The number of candidate slots does not grow with the upper bound. Ordered
-relationship lists belong to completed matches, not to the index's scalar
-element slots.
+A query without repetition uses `MatchPathSolver`. A query with a bounded
+repetition uses `VariableLengthSolver`. `QueryBuilder` picks one at build time.
+A running query never switches.
 
-Nodes are fetched directly by reference. They do not need candidate-slot
-memberships. Exact zero-hop segments do not index relationship candidates.
+The fixed solver fills named slots. For `(a)-[r]->(b)-[s]->(c)` the plan is
+five slots: `a`, `r`, `b`, `s`, `c`. A change is tested against each slot. If it
+fits slot `s`, it is pinned there. Neighbors are filled one hop at a time from
+that pin. Joins, `OPTIONAL MATCH`, and source middleware all depend on that
+slot graph.
 
-The engine discovers affected paths from the changed element. Ordinary matching
-does not require a global table of every path or a transitive-closure index.
+A bounded pattern is not extra slots. `(a)-[r:ROAD*1..3]->(b)` does not know
+how many hops a match has, which hop the change is, or which edges belong in
+`r`. That binding is a list. The change is a starting point, not a pin.
 
-Each query keeps only its selected matcher. Fixed-only queries continue to use
-the existing fixed-length solver. The `variable_length` modules implement repeated
-relationship traversal within the same engine, indexes, and query evaluator.
+Teaching `MatchPathSolver` hop ranges would send every one-hop query through a
+walker it does not need. Unrolling `*1..3` into three fixed paths would make
+`r` three separate pins instead of one list. It would also fake trail
+uniqueness. A second solver for the hop range leaves the existing solver
+unchanged for every other query.
+
+## Slots in the element index
+
+The element index does not store paths. It stores each element, the slots that
+element currently fits, and adjacency lists for relationships.
+
+Both solvers ask the same neighbor APIs:
+`get_slot_elements_by_inbound(slot, node)` and
+`get_slot_elements_by_outbound(slot, node)`. The slot integer is what differs.
+
+On the five-slot path, relationship `r` is stored under slot `1`. A lookup of
+slot `3` from `b` returns only edges that belong in `s`. Different hops are
+different lists.
+
+On `(a)-[r:ROAD*1..3]->(b)` the stretch is one slot, `0`. Every matching `ROAD`
+edge is stored under slot `0`, inbound at its start node and outbound at its
+end node. `*1..3` and `*1..10` use that same slot. Nodes get an empty affinity
+list. The solver finds them by walking edges.
+
+The ordered list bound to `r` is not stored. The solver rebuilds it for the
+change. Projected rows go to the result index like any other query.
+
+A hop count does not belong on a stored slot. Portland to Eugene is hop 1 of
+one path and hop 2 of another. Stamping one count on that edge would lie.
+Putting the edge in hop 1, 2, and 3 would return every `ROAD` again. The walker
+already counts hops as the length of the trail it is building in memory.
+
+When a relationship's endpoints change, inbound and outbound keys must move
+even if the slot number stays `0`. Garnet and RocksDB rebuild those keys from
+the previous nodes and the new nodes.
+
+## How a change is matched
+
+The examples use this graph and query:
+
+```text
+Seattle --e1--> Portland --e2--> Eugene --e3--> Medford
+
+MATCH (a:City)-[r:ROAD*1..3]->(b:City)
+RETURN a.id, b.id, [e IN r | e.id]
+```
+
+The bounded solver starts at the changed element and walks both ways under the
+hop budget. It never reuses a relationship on one path. Nodes may repeat. It
+prepares the old snapshot and the new snapshot before any index write. The new
+snapshot is the stored graph plus this one change laid on top.
+
+### Change inside a variable-length stretch
+
+`e2` (Portland to Eugene) is inserted or updated. That edge can sit at more
+than one hop index.
+
+The fixed solver, on `(a)-[r]->(mid)-[s]->(b)`, would pin `e2` in slot `s` and
+fill the nodes that touch it.
+
+The bounded solver cannot pin `e2` to a hop. It walks left from Portland and
+right from Eugene, up to the remaining budget, and keeps every trail whose
+length is in `1..3`:
+
+- Portland to Eugene (`e2`)
+- Seattle to Eugene (`e1`, `e2`)
+- Portland to Medford (`e2`, `e3`)
+- Seattle to Medford (`e1`, `e2`, `e3`)
+
+### Change outside a variable-length stretch
+
+Seattle's name changes. Seattle is an endpoint, not a `ROAD` hop. The bounded
+solver still starts at Seattle and walks 1, 2, and 3 `ROAD` hops.
+
+On `(a)-[:ROAD*1..3]->(b)-[:IN]->(s)`, a change to the `:IN` edge or to `s` is
+also outside the repeating stretch. The solver binds that side first, then
+walks `ROAD` from `b`.
+
+A node change always starts a walk. That includes an internal city with no
+endpoint label, and a node whose labels do not match. Relationship changes
+skip a stretch whose type does not match.
+
+## Tradeoffs and performance
+
+Index size does not grow with the hop cap. Plugin `set_element(element, slots)`
+is unchanged. One-hop queries keep precise per-hop adjacency.
+
+The neighbor lists are coarser. Slot `0` is every `ROAD` on the stretch, not
+"the second hop." From Portland the index returns every matching `ROAD`. The
+walker then drops illegal trails.
+
+Node changes have no slot filter. The fixed solver skips a node that fits no
+slot. The bounded solver walks from every node insert or update. An unrelated
+`(:Other)` insert still charges `max_work`. A tiny work budget can reject that
+insert even when the node cannot appear in a match.
+
+Walk cost grows with branching and the upper bound. A dense `*1..3` can hit
+`max_work`, `max_states`, or `max_matches` on one change. The engine then
+rejects the change with `QueryExecutionError::MatchResourceLimit`. It does not
+emit a partial result.
+
+Each change solves two snapshots. Future wakes still identify a match by
+`group_signature`. They do not share a timer across two paths that only share
+a node.
+
+Storing partial paths in the index would avoid some rewalks. Storage would
+then grow with paths, not edges. One insert would create and delete many
+prefixes. Trail uniqueness needs the edges already used, not a hop count.
+That path index is not present.
+
+## Bootstrap
+
+Bootstrap is a sequence of `SourceChange::Insert` calls. Each insert is one
+prepare, the same as a live change. There is no separate "load the whole
+graph, then match once" pass.
+
+Because node inserts always walk, a large snapshot costs more on a bounded
+query than on a one-hop query. Loading a hub node can exhaust `max_work`
+before later edges arrive. Raise the limits on that query, or load in an
+order that does not present a high-degree node against a dense stretch in one
+insert.
+
+Insert order still converges. An edge whose endpoints are not in the index
+yet produces no match. Inserting the missing node later walks from that node
+and can recover the path. Deleting an internal node drops paths through it.
+Reinserting that node can restore them without reinserting the edges.
+
+Exact zero-hop patterns create a match when a node that satisfies both
+endpoints is inserted, even if no relationship exists yet.
 
 Existing persisted indexes for a query containing repetition must be rebuilt
 when upgrading from an engine that treated that repetition as one hop. The old
-candidate slot layout is not compatible with the bounded matcher.
+candidate slot layout is not compatible with the bounded matcher. A snapshot
+rebuild still drops timer history.
 
 ## Resource limits and failures
 
