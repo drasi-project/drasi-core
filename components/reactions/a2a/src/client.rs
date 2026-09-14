@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
@@ -100,6 +101,21 @@ impl A2AClient {
         Ok(DeliveryResult::Delivered(parsed))
     }
 
+    pub async fn get_task(
+        &self,
+        message_id: &str,
+        task_id: &str,
+    ) -> anyhow::Result<DeliveryResult<SendMessageResult>> {
+        let body = build_get_task_rpc(message_id, task_id);
+        let response = self.send_rpc(&body, "GetTask").await?;
+        let Some(result) = response else {
+            return Ok(DeliveryResult::Dropped);
+        };
+        let parsed = parse_send_message_result(&result)
+            .context("failed to parse GetTask JSON-RPC result")?;
+        Ok(DeliveryResult::Delivered(parsed))
+    }
+
     pub async fn cancel_task(
         &self,
         request: CancelTaskRequest,
@@ -146,7 +162,12 @@ impl A2AClient {
                             .await
                             .context("failed to decode JSON-RPC response body")?;
                         if let Some(error) = rpc.error {
-                            return Err(json_rpc_error(method_name, error.code, &error.message));
+                            return Err(JsonRpcFailure::new(
+                                method_name,
+                                error.code,
+                                &error.message,
+                            )
+                            .into());
                         }
                         let Some(result) = rpc.result else {
                             return Err(anyhow!(
@@ -160,7 +181,12 @@ impl A2AClient {
                     let body = response.text().await.unwrap_or_default();
                     if let Ok(rpc) = serde_json::from_str::<JsonRpcResponse>(&body) {
                         if let Some(error) = rpc.error {
-                            return Err(json_rpc_error(method_name, error.code, &error.message));
+                            return Err(JsonRpcFailure::new(
+                                method_name,
+                                error.code,
+                                &error.message,
+                            )
+                            .into());
                         }
                     }
 
@@ -296,6 +322,15 @@ pub fn build_send_message_rpc(request: &SendMessageRequest) -> Value {
     })
 }
 
+pub fn build_get_task_rpc(message_id: &str, task_id: &str) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": message_id,
+        "method": "GetTask",
+        "params": { "id": task_id },
+    })
+}
+
 pub fn build_cancel_task_rpc(request: &CancelTaskRequest) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -353,11 +388,45 @@ fn sanitize_log_field(s: &str) -> String {
     out
 }
 
-fn json_rpc_error(method_name: &str, code: i64, message: &str) -> anyhow::Error {
-    anyhow!(
-        "A2A {method_name} returned JSON-RPC error {code}: {}",
-        sanitize_log_field(message)
-    )
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JsonRpcFailure {
+    pub method: String,
+    pub code: i64,
+    pub message: String,
+}
+
+impl JsonRpcFailure {
+    fn new(method: &str, code: i64, message: &str) -> Self {
+        Self {
+            method: method.to_string(),
+            code,
+            message: sanitize_log_field(message),
+        }
+    }
+
+    pub fn is_method_not_found(&self) -> bool {
+        self.code == -32601
+    }
+
+    pub fn is_terminal_task(&self) -> bool {
+        self.code == -32602 && self.message.contains("terminal state")
+    }
+}
+
+impl fmt::Display for JsonRpcFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "A2A {} returned JSON-RPC error {}: {}",
+            self.method, self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for JsonRpcFailure {}
+
+pub(crate) fn json_rpc_failure(error: &anyhow::Error) -> Option<&JsonRpcFailure> {
+    error.chain().find_map(|cause| cause.downcast_ref())
 }
 
 fn task_state(value: &Value) -> Option<&str> {

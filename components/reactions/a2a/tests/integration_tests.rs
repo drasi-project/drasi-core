@@ -136,7 +136,7 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
         ))
         .await
         .expect("enqueue update");
-    wait_for_requests(&server, 2, Duration::from_secs(3)).await;
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
 
     reaction
         .enqueue_query_result(mock_source::delete_result(
@@ -146,13 +146,15 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
         ))
         .await
         .expect("enqueue delete");
-    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
+    wait_for_requests(&server, 5, Duration::from_secs(3)).await;
     reaction.stop().await.expect("stop reaction");
 
     let requests = server.received_requests().await.expect("read requests");
     let add_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-    let update_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-    let delete_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    let get_before_update: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let update_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    let get_before_delete: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
+    let delete_body: serde_json::Value = serde_json::from_slice(&requests[4].body).unwrap();
 
     assert_eq!(add_body["method"], json!("SendMessage"));
     assert_eq!(
@@ -175,6 +177,10 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
         update_body["params"]["message"]["metadata"]["activationId"],
         json!("2:q1:5:INV-1")
     );
+    assert_eq!(get_before_update["method"], json!("GetTask"));
+    assert_eq!(get_before_update["params"]["id"], json!("task-1"));
+    assert_eq!(get_before_delete["method"], json!("GetTask"));
+    assert_eq!(get_before_delete["params"]["id"], json!("task-1"));
     assert!(add_body["params"]["message"].get("taskId").is_none());
     assert!(add_body["params"]["message"]["parts"][0]
         .get("kind")
@@ -274,10 +280,28 @@ async fn follow_up_message_keeps_task_so_delete_still_cancels() {
                     "jsonrpc": "2.0",
                     "id": "1",
                     "result": {
+                        "id": "task-1",
+                        "contextId": "ctx-1",
+                        "status": { "state": "TASK_STATE_WORKING" }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
                         "message": {
                             "role": "ROLE_AGENT",
                             "parts": [{"text":"ack"}]
                         }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "id": "task-1",
+                        "contextId": "ctx-1",
+                        "status": { "state": "TASK_STATE_WORKING" }
                     }
                 }),
                 json!({
@@ -313,7 +337,7 @@ async fn follow_up_message_keeps_task_so_delete_still_cancels() {
         ))
         .await
         .expect("enqueue update");
-    wait_for_requests(&server, 2, Duration::from_secs(3)).await;
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
 
     reaction
         .enqueue_query_result(mock_source::delete_result(
@@ -323,16 +347,98 @@ async fn follow_up_message_keeps_task_so_delete_still_cancels() {
         ))
         .await
         .expect("enqueue delete");
-    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
+    wait_for_requests(&server, 5, Duration::from_secs(3)).await;
     reaction.stop().await.expect("stop reaction");
 
     let requests = server.received_requests().await.expect("read requests");
-    let update_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-    let delete_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    let update_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    let delete_body: serde_json::Value = serde_json::from_slice(&requests[4].body).unwrap();
     assert_eq!(update_body["method"], json!("SendMessage"));
     assert_eq!(update_body["params"]["message"]["taskId"], json!("task-1"));
     assert_eq!(delete_body["method"], json!("CancelTask"));
     assert_eq!(delete_body["params"]["id"], json!("task-1"));
+}
+
+#[tokio::test]
+async fn submitted_then_completed_update_creates_new_task() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(OrderedJsonRpc {
+            next: AtomicUsize::new(0),
+            bodies: vec![
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "task": {
+                            "id": "task-1",
+                            "contextId": "ctx-1",
+                            "status": { "state": "TASK_STATE_SUBMITTED" }
+                        }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "id": "task-1",
+                        "contextId": "ctx-1",
+                        "status": { "state": "TASK_STATE_COMPLETED" }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "task": {
+                            "id": "task-2",
+                            "contextId": "ctx-2",
+                            "status": { "state": "TASK_STATE_SUBMITTED" }
+                        }
+                    }
+                }),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, memory_store()).await;
+    reaction.start().await.expect("start reaction");
+
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-11"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_requests(&server, 1, Duration::from_secs(3)).await;
+
+    reaction
+        .enqueue_query_result(mock_source::update_result(
+            "q1",
+            2,
+            json!({"invoiceId":"INV-11","amount":1}),
+            json!({"invoiceId":"INV-11","amount":2}),
+        ))
+        .await
+        .expect("enqueue update");
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
+    reaction.stop().await.expect("stop reaction");
+
+    let requests = server.received_requests().await.expect("read requests");
+    let add_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let get_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let update_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(add_body["method"], json!("SendMessage"));
+    assert!(add_body["params"]["message"].get("taskId").is_none());
+    assert_eq!(get_body["method"], json!("GetTask"));
+    assert_eq!(get_body["params"]["id"], json!("task-1"));
+    assert_eq!(update_body["method"], json!("SendMessage"));
+    assert!(update_body["params"]["message"]["taskId"].is_null());
 }
 
 #[tokio::test]
@@ -473,11 +579,11 @@ async fn activation_survives_process_restart() {
         ))
         .await
         .expect("enqueue update after restart");
-    wait_for_requests(&server, 2, Duration::from_secs(3)).await;
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
     second.stop().await.expect("stop second reaction");
 
     let requests = server.received_requests().await.expect("read requests");
-    let update_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let update_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
     assert_eq!(update_body["method"], json!("SendMessage"));
     assert_eq!(update_body["params"]["message"]["taskId"], json!("task-1"));
 }

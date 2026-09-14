@@ -16,6 +16,7 @@ The reaction has one transport mode: HTTP POST to `endpoint`.
 - A `SendMessage` response parsed as `Task` is mapped by task state:
   - Active: `WORKING`, `SUBMITTED`, `INPUT_REQUIRED`, `AUTH_REQUIRED`
   - Terminal: `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`
+- Before follow-up or cancel, the reaction calls `GetTask`. If the task is already terminal, `terminalUpdatePolicy` applies (`replace` starts a new task). Agents that do not implement `GetTask` keep the cached activation.
 
 ## Configuration
 

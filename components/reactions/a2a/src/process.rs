@@ -29,8 +29,8 @@ use crate::activation::{
     ResultKey,
 };
 use crate::client::{
-    A2AClient, CancelTaskRequest, DeliveryResult, OutboundPart, SendMessageRequest,
-    SendMessageResult,
+    json_rpc_failure, A2AClient, CancelTaskRequest, DeliveryResult, JsonRpcFailure, OutboundPart,
+    SendMessageRequest, SendMessageResult,
 };
 use crate::config::A2AReactionConfig;
 
@@ -208,24 +208,41 @@ async fn process_diff(
     };
 
     let state_key = activation_state_key(&query_result.query_id, &result_key);
-    let activation = load_activation_state(base, activation_cache, &state_key)
+    let mut activation = load_activation_state(base, activation_cache, &state_key)
         .await
         .with_context(|| {
             format!("failed loading activation state key '{state_key}' from state store")
         })?;
-
-    let action = next_action(
-        diff_payload.operation,
-        &activation,
-        config.terminal_update_policy,
-        query_result.sequence,
-    );
     let message_id = message_id(
         reaction_name,
         &query_result.query_id,
         &result_key,
         query_result.sequence,
     );
+    let mut action = next_action(
+        diff_payload.operation,
+        &activation,
+        config.terminal_update_policy,
+        query_result.sequence,
+    );
+    if matches!(action, Action::SendFollowUp { .. } | Action::Cancel { .. }) {
+        activation = refresh_active_task(
+            reaction_name,
+            base,
+            client,
+            activation_cache,
+            &state_key,
+            activation,
+            &message_id,
+        )
+        .await?;
+        action = next_action(
+            diff_payload.operation,
+            &activation,
+            config.terminal_update_policy,
+            query_result.sequence,
+        );
+    }
     let activation_id = activation_id(&query_result.query_id, &result_key);
     let parts = build_parts(
         config,
@@ -235,120 +252,264 @@ async fn process_diff(
         result_key.as_str(),
     )?;
 
-    match action {
-        Action::SendCreate => {
-            let outcome = client
-                .send_message(SendMessageRequest {
-                    message_id: message_id.to_string(),
-                    activation_id,
-                    task_id: None,
-                    parts,
-                    return_immediately: config.return_immediately,
-                })
-                .await
-                .context("SendMessage create RPC failed")?;
-            match outcome {
-                DeliveryResult::Delivered(response) => {
-                    let next_state = response_to_activation(response, message_id, query_result);
-                    save_activation_state(base, activation_cache, &state_key, &next_state)
-                        .await
-                        .with_context(|| {
-                            format!(
+    let mut retried_after_terminal = false;
+    loop {
+        match action {
+            Action::SendCreate => {
+                let outcome = client
+                    .send_message(SendMessageRequest {
+                        message_id: message_id.to_string(),
+                        activation_id: activation_id.clone(),
+                        task_id: None,
+                        parts: parts.clone(),
+                        return_immediately: config.return_immediately,
+                    })
+                    .await
+                    .context("SendMessage create RPC failed")?;
+                match outcome {
+                    DeliveryResult::Delivered(response) => {
+                        let next_state =
+                            response_to_activation(response, message_id.clone(), query_result);
+                        save_activation_state(base, activation_cache, &state_key, &next_state)
+                            .await
+                            .with_context(|| {
+                                format!(
                                 "failed saving activation state key '{state_key}' after SendCreate"
                             )
-                        })?;
+                            })?;
+                    }
+                    DeliveryResult::Dropped => {
+                        debug!(
+                            "[{reaction_name}] SendCreate dropped for query '{}' result key '{}'",
+                            query_result.query_id, result_key
+                        );
+                    }
                 }
-                DeliveryResult::Dropped => {
-                    debug!(
-                        "[{reaction_name}] SendCreate dropped for query '{}' result key '{}'",
-                        query_result.query_id, result_key
-                    );
+                break;
+            }
+            Action::SendFollowUp { task_id } => {
+                match client
+                    .send_message(SendMessageRequest {
+                        message_id: message_id.to_string(),
+                        activation_id: activation_id.clone(),
+                        task_id: Some(task_id),
+                        parts: parts.clone(),
+                        return_immediately: config.return_immediately,
+                    })
+                    .await
+                {
+                    Ok(outcome) => {
+                        match outcome {
+                            DeliveryResult::Delivered(response) => {
+                                let next_state = match response {
+                                    SendMessageResult::Message => match activation {
+                                        ActivationState::Present(existing) => {
+                                            ActivationState::Present(
+                                                existing.with_sequence(query_result.sequence),
+                                            )
+                                        }
+                                        ActivationState::Absent => response_to_activation(
+                                            SendMessageResult::Message,
+                                            message_id.clone(),
+                                            query_result,
+                                        ),
+                                    },
+                                    response => response_to_activation(
+                                        response,
+                                        message_id.clone(),
+                                        query_result,
+                                    ),
+                                };
+                                save_activation_state(
+                                    base,
+                                    activation_cache,
+                                    &state_key,
+                                    &next_state,
+                                )
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                "failed saving activation state key '{state_key}' after SendFollowUp"
+                            )
+                                })?;
+                            }
+                            DeliveryResult::Dropped => {
+                                debug!(
+                            "[{reaction_name}] SendFollowUp dropped for query '{}' result key '{}'",
+                            query_result.query_id, result_key
+                        );
+                            }
+                        }
+                        break;
+                    }
+                    Err(error)
+                        if !retried_after_terminal
+                            && json_rpc_failure(&error)
+                                .is_some_and(JsonRpcFailure::is_terminal_task) =>
+                    {
+                        activation = mark_terminal(activation);
+                        save_activation_state(base, activation_cache, &state_key, &activation)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed saving activation state key '{state_key}' after terminal follow-up"
+                                )
+                            })?;
+                        action = next_action(
+                            diff_payload.operation,
+                            &activation,
+                            config.terminal_update_policy,
+                            query_result.sequence,
+                        );
+                        retried_after_terminal = true;
+                    }
+                    Err(error) => {
+                        return Err(error).context("SendMessage follow-up RPC failed");
+                    }
                 }
             }
-        }
-        Action::SendFollowUp { task_id } => {
-            let outcome = client
-                .send_message(SendMessageRequest {
-                    message_id: message_id.to_string(),
-                    activation_id,
-                    task_id: Some(task_id),
-                    parts,
-                    return_immediately: config.return_immediately,
-                })
-                .await
-                .context("SendMessage follow-up RPC failed")?;
-            match outcome {
-                DeliveryResult::Delivered(response) => {
-                    let next_state = match response {
-                        SendMessageResult::Message => match activation {
-                            ActivationState::Present(existing) => ActivationState::Present(
-                                existing.with_sequence(query_result.sequence),
-                            ),
-                            ActivationState::Absent => response_to_activation(
-                                SendMessageResult::Message,
-                                message_id,
-                                query_result,
-                            ),
-                        },
-                        response => response_to_activation(response, message_id, query_result),
-                    };
-                    save_activation_state(base, activation_cache, &state_key, &next_state)
+            Action::Cancel { task_id } => {
+                match client
+                    .cancel_task(CancelTaskRequest {
+                        message_id: message_id.to_string(),
+                        task_id,
+                    })
+                    .await
+                {
+                    Ok(outcome) => {
+                        if matches!(
+                            outcome,
+                            DeliveryResult::Delivered(()) | DeliveryResult::Dropped
+                        ) {
+                            clear_activation_state(base, activation_cache, &state_key)
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "failed clearing activation state key '{state_key}' after cancel"
+                                    )
+                                })?;
+                        }
+                    }
+                    Err(error)
+                        if json_rpc_failure(&error)
+                            .is_some_and(JsonRpcFailure::is_terminal_task) =>
+                    {
+                        clear_activation_state(base, activation_cache, &state_key)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed clearing activation state key '{state_key}' after terminal cancel"
+                                )
+                            })?;
+                    }
+                    Err(error) => return Err(error).context("CancelTask RPC failed"),
+                }
+                break;
+            }
+            Action::Drop { reason } => {
+                debug!(
+                    "[{reaction_name}] Dropping '{}' diff for query '{}' result key '{}': {reason}",
+                    diff_payload.operation.as_str(),
+                    query_result.query_id,
+                    result_key
+                );
+                if diff_payload.operation == Operation::Delete
+                    && matches!(activation, ActivationState::Present(_))
+                {
+                    clear_activation_state(base, activation_cache, &state_key)
                         .await
                         .with_context(|| {
                             format!(
-                                "failed saving activation state key '{state_key}' after SendFollowUp"
-                            )
-                        })?;
-                }
-                DeliveryResult::Dropped => {
-                    debug!(
-                        "[{reaction_name}] SendFollowUp dropped for query '{}' result key '{}'",
-                        query_result.query_id, result_key
-                    );
-                }
-            }
-        }
-        Action::Cancel { task_id } => {
-            let outcome = client
-                .cancel_task(CancelTaskRequest {
-                    message_id: message_id.to_string(),
-                    task_id,
-                })
-                .await
-                .context("CancelTask RPC failed")?;
-            if matches!(
-                outcome,
-                DeliveryResult::Delivered(()) | DeliveryResult::Dropped
-            ) {
-                clear_activation_state(base, activation_cache, &state_key)
-                    .await
-                    .with_context(|| {
-                        format!("failed clearing activation state key '{state_key}' after cancel")
-                    })?;
-            }
-        }
-        Action::Drop { reason } => {
-            debug!(
-                "[{reaction_name}] Dropping '{}' diff for query '{}' result key '{}': {reason}",
-                diff_payload.operation.as_str(),
-                query_result.query_id,
-                result_key
-            );
-            if diff_payload.operation == Operation::Delete
-                && matches!(activation, ActivationState::Present(_))
-            {
-                clear_activation_state(base, activation_cache, &state_key)
-                    .await
-                    .with_context(|| {
-                        format!(
                             "failed clearing activation state key '{state_key}' after DELETE drop"
                         )
-                    })?;
+                        })?;
+                }
+                break;
             }
         }
     }
 
     Ok(())
+}
+
+async fn refresh_active_task(
+    reaction_name: &str,
+    base: &ReactionBase,
+    client: &A2AClient,
+    activation_cache: &mut HashMap<String, ActivationState>,
+    state_key: &str,
+    activation: ActivationState,
+    message_id: &MessageId,
+) -> anyhow::Result<ActivationState> {
+    let ActivationState::Present(Activation::ActiveTask {
+        task_id, sequence, ..
+    }) = &activation
+    else {
+        return Ok(activation);
+    };
+
+    let outcome = match client.get_task(message_id.as_str(), task_id).await {
+        Ok(outcome) => outcome,
+        Err(error) if json_rpc_failure(&error).is_some_and(JsonRpcFailure::is_method_not_found) => {
+            warn!(
+                "[{reaction_name}] GetTask is not supported; keeping cached activation for '{state_key}'"
+            );
+            return Ok(activation);
+        }
+        Err(error) => return Err(error).context("GetTask RPC failed"),
+    };
+
+    match outcome {
+        DeliveryResult::Dropped => Ok(activation),
+        DeliveryResult::Delivered(SendMessageResult::Message) => Ok(activation),
+        DeliveryResult::Delivered(SendMessageResult::Task {
+            task_id,
+            context_id,
+            state,
+            terminal,
+        }) => {
+            let next = if terminal {
+                ActivationState::Present(Activation::TerminalTask {
+                    task_id,
+                    context_id,
+                    state,
+                    sequence: *sequence,
+                })
+            } else {
+                ActivationState::Present(Activation::ActiveTask {
+                    task_id,
+                    context_id,
+                    state,
+                    sequence: *sequence,
+                })
+            };
+            if next != activation {
+                save_activation_state(base, activation_cache, state_key, &next)
+                    .await
+                    .with_context(|| {
+                        format!("failed saving activation state key '{state_key}' after GetTask")
+                    })?;
+            }
+            Ok(next)
+        }
+    }
+}
+
+fn mark_terminal(activation: ActivationState) -> ActivationState {
+    match activation {
+        ActivationState::Present(Activation::ActiveTask {
+            task_id,
+            context_id,
+            state,
+            sequence,
+        }) => ActivationState::Present(Activation::TerminalTask {
+            task_id,
+            context_id,
+            state,
+            sequence,
+        }),
+        other => other,
+    }
 }
 
 fn response_to_activation(

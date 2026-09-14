@@ -19,8 +19,8 @@ use crate::activation::{
     TerminalUpdatePolicy,
 };
 use crate::client::{
-    build_cancel_task_rpc, build_send_message_rpc, parse_send_message_result, CancelTaskRequest,
-    OutboundPart, SendMessageRequest, SendMessageResult,
+    build_cancel_task_rpc, build_get_task_rpc, build_send_message_rpc, parse_send_message_result,
+    CancelTaskRequest, OutboundPart, SendMessageRequest, SendMessageResult,
 };
 use crate::descriptor::{A2AReactionConfigDto, RecoveryPolicyDto};
 use crate::process::{extract_result_key, DiffPayload};
@@ -214,6 +214,21 @@ fn send_message_parser_distinguishes_task_and_message() {
     .expect("message parse");
     assert_eq!(message, SendMessageResult::Message);
 
+    let get_task = parse_send_message_result(&json!({
+        "id": "task-1",
+        "contextId": "ctx-1",
+        "status": { "state": "TASK_STATE_COMPLETED" }
+    }))
+    .expect("GetTask bare task parse");
+    assert!(matches!(
+        get_task,
+        SendMessageResult::Task {
+            terminal: true,
+            state,
+            ..
+        } if state == "COMPLETED"
+    ));
+
     let invalid = parse_send_message_result(&json!({"id":"not-a-task"}));
     assert!(invalid.is_err());
 
@@ -221,6 +236,15 @@ fn send_message_parser_distinguishes_task_and_message() {
     assert!(malformed_parts.is_err());
     let missing_role = parse_send_message_result(&json!({"parts":[{"text":"x"}]}));
     assert!(missing_role.is_err());
+}
+
+#[test]
+fn get_task_rpc_shape_matches_contract() {
+    let rpc = build_get_task_rpc("msg-1", "task-1");
+    assert_eq!(rpc["jsonrpc"], json!("2.0"));
+    assert_eq!(rpc["method"], json!("GetTask"));
+    assert_eq!(rpc["id"], json!("msg-1"));
+    assert_eq!(rpc["params"]["id"], json!("task-1"));
 }
 
 #[test]
