@@ -576,10 +576,10 @@ impl ReactionManager {
             Ok(cp)
         } else {
             // Fresh start without snapshot bootstrap must not fire side effects
-            // for retained history. Use the sequence captured at subscribe so
-            // results that arrived after the receiver was attached are not
-            // skipped. Do not sample the outbox head later, and do not invent
-            // checkpoint 0 when the head is unknown.
+            // for retained history. Use the sequence captured at subscribe
+            // (after the query is Running, so durable hydrate has finished).
+            // Results published after that attach are delivered; do not invent
+            // checkpoint 0 when subscribe never observed a ready head.
             let Some(seq) = subscribe_as_of else {
                 return Err(anyhow::anyhow!(
                     "Reaction '{reaction_id}': cannot determine query head for \
@@ -1894,6 +1894,7 @@ mod tests {
     async fn validation_allows_non_durable_no_snapshot_strict() {
         let core = build_core().await;
         core.start().await.unwrap();
+        core.start_query("q1").await.unwrap();
 
         let reaction = MockReaction::new("r4", vec!["q1".into()]);
         core.add_reaction(reaction).await.unwrap();
@@ -1910,6 +1911,7 @@ mod tests {
     async fn fresh_start_no_snapshot_starts_at_seq_zero() {
         let core = build_core().await;
         core.start().await.unwrap();
+        core.start_query("q1").await.unwrap();
 
         let mut event_rx = core.subscribe_all_component_events();
 
@@ -2046,25 +2048,18 @@ mod tests {
             .with_policy(ReactionRecoveryPolicy::Strict);
         core.add_reaction(reaction).await.unwrap();
         let result = core.start_reaction("r_stopped").await;
+        assert!(
+            result.is_err(),
+            "fresh trigger must not start against an unready query"
+        );
 
         let cp = crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_stopped", "q1")
             .await
             .unwrap();
-        match result {
-            Ok(()) => {
-                let cp = cp.expect("successful start must persist the known query head");
-                assert_eq!(
-                    cp.sequence, 2,
-                    "must not invent checkpoint 0 over existing history"
-                );
-            }
-            Err(_) => {
-                assert!(
-                    cp.is_none() || cp.as_ref().is_some_and(|c| c.sequence != 0),
-                    "failed start must not persist checkpoint 0 over existing history, got {cp:?}"
-                );
-            }
-        }
+        assert!(
+            cp.is_none(),
+            "failed start must not persist checkpoint 0 over existing history, got {cp:?}"
+        );
     }
 
     // ========================================================================

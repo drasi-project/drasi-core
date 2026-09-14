@@ -216,8 +216,11 @@ pub trait Query: Send + Sync {
         0
     }
 
-    /// Subscribe to query results for reactions
-    /// Returns a broadcast receiver for Arc-wrapped QueryResults
+    /// Subscribe to query results for reactions.
+    ///
+    /// Implementations that hydrate durable output must wait until the query is
+    /// Running so the returned `as_of_sequence` is the persisted head, not 0.
+    /// Head sample and receiver attach must be atomic with result publication.
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
 
     /// Fetch a snapshot of the live result set.
@@ -606,25 +609,26 @@ async fn dispatch_query_results(
         let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
         output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
 
+        // Publish while still holding `output_state` so subscribe cannot sample
+        // this head and then attach after this result has already been sent.
+        debug!(
+            "Query '{query_id}' sending {} results to reactions (seq={})",
+            result.results.len(),
+            result.sequence
+        );
+        let dispatchers = dispatchers.read().await;
+        for dispatcher in dispatchers.iter() {
+            if let Err(e) = dispatcher.dispatch_change(result.clone()).await {
+                debug!("Failed to dispatch result for query '{query_id}': {e}");
+            }
+        }
+
         result
     };
 
     if let Some(writer) = outbox_writer {
         if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
             warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
-        }
-    }
-
-    debug!(
-        "Query '{query_id}' sending {} results to reactions (seq={})",
-        arc_result.results.len(),
-        arc_result.sequence
-    );
-
-    let dispatchers = dispatchers.read().await;
-    for dispatcher in dispatchers.iter() {
-        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
-            debug!("Failed to dispatch result for query '{query_id}': {e}");
         }
     }
 }
@@ -3225,10 +3229,21 @@ impl Query for DrasiQuery {
             reaction_id, self.base.config.id
         );
 
-        // Sample the head *before* attaching the receiver so a later
-        // `fetch_outbox` cannot raise the skip cutoff past results already
-        // buffered for this subscriber.
-        let as_of_sequence = self.output_state.read().await.as_of_sequence();
+        // Wait until hydrate/bootstrap have finished. Sampling sequence 0 from
+        // an uninitialized reconstructed query would persist checkpoint 0 and
+        // replay retained history on the next restart.
+        self.wait_until_running().await.map_err(|e| {
+            anyhow::anyhow!(
+                "Query '{}' is not ready for subscriptions: {e}",
+                self.base.config.id
+            )
+        })?;
+
+        // Hold exclusive output_state across head sample and receiver attach
+        // so a concurrent dispatch cannot assign-and-publish a sequence in
+        // the gap (which Strict recovery would then treat as a hole).
+        let state = self.output_state.write().await;
+        let as_of_sequence = state.as_of_sequence();
         self.base
             .subscribe(&reaction_id, as_of_sequence)
             .await
