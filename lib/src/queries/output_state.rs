@@ -277,10 +277,26 @@ impl QueryOutputState {
     /// Bumps [`generation`](Self::generation) so reactions do not treat the new
     /// sequence 1 as a duplicate of the previous generation.
     pub fn reset(&mut self) {
+        self.reset_from_generation(self.generation);
+    }
+
+    /// Like [`reset`](Self::reset), but bump from `persisted` instead of RAM.
+    ///
+    /// Use this when hydrate never ran, so in-memory generation is still 0
+    /// while disk may already hold a higher value.
+    pub fn reset_from_generation(&mut self, persisted: u64) {
         self.results.clear();
         self.outbox.clear();
         self.as_of_sequence = 0;
-        self.generation = self.generation.saturating_add(1);
+        self.generation = persisted.saturating_add(1);
+        self.initialized = true;
+    }
+
+    /// Mark output as initialized without changing rows or sequence.
+    ///
+    /// Used after a first-run start that skipped durable hydrate so a later
+    /// same-process stop/start does not overwrite bootstrap results.
+    pub fn mark_initialized(&mut self) {
         self.initialized = true;
     }
 
@@ -1170,6 +1186,15 @@ mod tests {
         assert_eq!(state.outbox_len(), 0);
         assert_eq!(state.generation(), 1);
         assert!(state.initialized());
+    }
+
+    #[test]
+    fn reset_from_persisted_generation_does_not_restart_at_one() {
+        let mut state = QueryOutputState::new(10);
+        state.reset_from_generation(4);
+        assert_eq!(state.generation(), 5);
+        assert!(state.initialized());
+        assert_eq!(state.as_of_sequence(), 0);
     }
 
     #[test]
