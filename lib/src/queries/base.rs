@@ -49,8 +49,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::{
-    BroadcastChangeDispatcher, ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher,
-    ComponentStatus, DispatchMode, QueryResult, QuerySubscriptionResponse,
+    ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher, ComponentStatus, DispatchMode,
+    QueryResult, QuerySubscriptionResponse,
 };
 use crate::component_graph::ComponentStatusHandle;
 use crate::config::QueryConfig;
@@ -75,19 +75,9 @@ pub struct QueryBase {
 impl QueryBase {
     /// Create a new QueryBase with the given configuration
     pub fn new(config: QueryConfig) -> Result<Self> {
-        // Determine dispatch mode (default to Channel if not specified)
-        let dispatch_mode = config.dispatch_mode.unwrap_or_default();
-
-        // Set up initial dispatchers based on dispatch mode
-        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>> = Vec::new();
-
-        if dispatch_mode == DispatchMode::Broadcast {
-            // For broadcast mode, create a single broadcast dispatcher
-            let capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
-            let dispatcher = BroadcastChangeDispatcher::<QueryResult>::new(capacity);
-            dispatchers.push(Box::new(dispatcher));
-        }
-        // For channel mode, dispatchers will be created on-demand when subscribing
+        // Per-subscriber queues are created on subscribe. Broadcast uses
+        // unbounded queues so a closed bootstrap gate cannot drop live results.
+        let dispatchers: Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>> = Vec::new();
 
         let status_handle = ComponentStatusHandle::new(&config.id);
 
@@ -139,13 +129,11 @@ impl QueryBase {
 
         let receiver: Box<dyn ChangeReceiver<QueryResult>> = match dispatch_mode {
             DispatchMode::Broadcast => {
-                // For broadcast mode, use the single dispatcher
-                let dispatchers = self.dispatchers.read().await;
-                if let Some(dispatcher) = dispatchers.first() {
-                    dispatcher.create_receiver().await?
-                } else {
-                    return Err(anyhow::anyhow!("No broadcast dispatcher available"));
-                }
+                let dispatcher = crate::channels::UnboundedChangeDispatcher::<QueryResult>::new();
+                let receiver = dispatcher.create_receiver().await?;
+                let mut dispatchers = self.dispatchers.write().await;
+                dispatchers.push(Box::new(dispatcher));
+                receiver
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
@@ -318,13 +306,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_broadcast_mode_starts_with_one_dispatcher() {
+    async fn test_new_broadcast_mode_starts_with_no_dispatchers() {
         let base = QueryBase::new(test_config("q1", Some(DispatchMode::Broadcast))).unwrap();
         let dispatchers = base.dispatchers.read().await;
-        assert_eq!(
-            dispatchers.len(),
-            1,
-            "Broadcast mode should start with one dispatcher"
+        assert!(
+            dispatchers.is_empty(),
+            "Broadcast query dispatchers are created per subscriber"
         );
     }
 
@@ -416,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscribe_broadcast_mode_reuses_single_dispatcher() {
+    async fn test_subscribe_broadcast_mode_creates_dispatcher_per_subscription() {
         let base = QueryBase::new(test_config("q1", Some(DispatchMode::Broadcast))).unwrap();
         let _s1 = base.subscribe("r1", 0).await.unwrap();
         let _s2 = base.subscribe("r2", 0).await.unwrap();
@@ -424,8 +411,8 @@ mod tests {
         let dispatchers = base.dispatchers.read().await;
         assert_eq!(
             dispatchers.len(),
-            1,
-            "Broadcast mode should reuse the single dispatcher"
+            2,
+            "Broadcast query subscriptions use per-subscriber unbounded queues"
         );
     }
 

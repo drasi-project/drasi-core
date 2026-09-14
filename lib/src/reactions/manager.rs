@@ -1135,15 +1135,37 @@ impl ReactionManager {
 
             let forwarder_task = tokio::spawn(
                 async move {
-                    // Wait for the bootstrap gate to open before processing.
-                    // watch::wait_for retains the value, so even late subscribers see it.
-                    // If the sender is dropped (bootstrap failed), exit immediately.
-                    if gate_rx.wait_for(|v| *v).await.is_err() {
-                        log::debug!(
-                            "[{reaction_id_owned}] Gate sender dropped for query '{query_id_clone}' \
-                             — exiting forwarder (bootstrap likely failed)"
-                        );
-                        return;
+                    // Pull results out of the dispatch channel while bootstrap
+                    // holds the gate closed. Leaving them in a small broadcast
+                    // ring drops live events and Strict then dies on the gap.
+                    let mut pending: std::collections::VecDeque<Arc<QueryResult>> =
+                        std::collections::VecDeque::new();
+                    loop {
+                        tokio::select! {
+                            biased;
+                            gate = gate_rx.wait_for(|v| *v) => {
+                                if gate.is_err() {
+                                    log::debug!(
+                                        "[{reaction_id_owned}] Gate sender dropped for query '{query_id_clone}' \
+                                         — exiting forwarder (bootstrap likely failed)"
+                                    );
+                                    return;
+                                }
+                                break;
+                            }
+                            item = receiver.recv() => {
+                                match item {
+                                    Ok(query_result) => pending.push_back(query_result),
+                                    Err(e) => {
+                                        log::debug!(
+                                            "[{reaction_id_owned}] Subscription ended for query \
+                                             '{query_id_clone}' while waiting for gate: {e}"
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Read the initial checkpoint sequence so we can skip stale events
@@ -1158,11 +1180,17 @@ impl ReactionManager {
 
                     log::debug!(
                         "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}' \
-                         (initial_seq={initial_seq})"
+                         (initial_seq={initial_seq}, pending={})",
+                        pending.len()
                     );
 
                     loop {
-                        match receiver.recv().await {
+                        let recv_result = if let Some(query_result) = pending.pop_front() {
+                            Ok(query_result)
+                        } else {
+                            receiver.recv().await
+                        };
+                        match recv_result {
                             Ok(query_result) => {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= initial_seq {
@@ -2059,6 +2087,84 @@ mod tests {
         assert!(
             cp.is_none(),
             "failed start must not persist checkpoint 0 over existing history, got {cp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_trigger_broadcast_does_not_lag_during_gate_wait() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = crate::DrasiLib::builder()
+            .with_id("test-bcast-gate")
+            .with_source(source)
+            .with_query(
+                crate::Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(true)
+                    .with_dispatch_mode(crate::channels::DispatchMode::Broadcast)
+                    .with_dispatch_buffer_capacity(2)
+                    .with_outbox_capacity(100)
+                    .build(),
+            )
+            .with_state_store_provider(store)
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        inject_events(&core, 2).await;
+
+        let reaction = MockReaction::new("r_bcast", vec!["q1".into()])
+            .with_snapshot_on_fresh(false)
+            .with_policy(ReactionRecoveryPolicy::Strict);
+        let enqueued = reaction.enqueued.clone();
+        core.add_reaction(reaction).await.unwrap();
+
+        let flood = async {
+            for i in 0..40 {
+                let source_arc = core
+                    .source_manager
+                    .get_source_instance("src1")
+                    .await
+                    .unwrap();
+                let mock_source = source_arc
+                    .as_any()
+                    .downcast_ref::<TestMockSource>()
+                    .unwrap();
+                mock_source
+                    .inject_event(make_test_insert("src1", &format!("bcast_{i}"), i))
+                    .await
+                    .unwrap();
+            }
+        };
+
+        let (start_res, _) = tokio::join!(core.start_reaction("r_bcast"), flood);
+        start_res.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let status = core.get_reaction_status("r_bcast").await.unwrap();
+        let seqs: Vec<u64> = enqueued.lock().await.iter().map(|r| r.sequence).collect();
+        assert_eq!(
+            status,
+            ComponentStatus::Running,
+            "broadcast lag during gate wait tripped Strict, seqs={seqs:?}"
+        );
+        assert!(
+            seqs.iter().all(|s| *s > 2),
+            "must not replay history 1..=2, got {seqs:?}"
+        );
+        assert!(
+            !seqs.is_empty(),
+            "fresh trigger should receive live results produced after subscribe"
         );
     }
 
