@@ -36,6 +36,49 @@ impl QueryConfiguration for TestCypherConfig {
 static TEST_CONFIG: TestCypherConfig = TestCypherConfig {};
 
 #[test]
+fn bounded_match_scopes_and_property_order() {
+    let parser = CypherParser::new(Arc::new(TestCypherConfig {}));
+    let parsed = parser.parse_scoped(
+        "MATCH (a)-[rs:R*2 {enabled: true}]->(b), (b)-[:S]->(c) MATCH (a)-[:R*1]->(b) WITH a RETURN a",
+    ).unwrap();
+    assert_eq!(parsed.match_scopes, Some(vec![vec![0..2, 2..3], vec![]]));
+    assert_eq!(parsed.query, parser.parse(
+        "MATCH (a)-[rs:R*2 {enabled: true}]->(b), (b)-[:S]->(c) MATCH (a)-[:R*1]->(b) WITH a RETURN a",
+    ).unwrap());
+    assert_eq!(
+        parsed.query.parts[0].match_clauses[0].path[0]
+            .0
+            .variable_length,
+        Some(VariableLengthMatch {
+            min_hops: Some(2),
+            max_hops: None
+        })
+    );
+    assert_eq!(
+        parsed.query.parts[0].match_clauses[0].path[0]
+            .0
+            .property_predicates
+            .len(),
+        1
+    );
+    assert!(parser
+        .parse("MATCH (a)-[:R {enabled: true}*2]->(b) RETURN b")
+        .is_ok());
+    assert!(parser.parse("MATCH (a)-[:R*2..]->(b) RETURN b").is_err());
+}
+
+#[test]
+fn bounded_match_records_discarded_mutation_syntax() {
+    let parser = CypherParser::new(Arc::new(TestCypherConfig {}));
+    for query in [
+        "MATCH (a)-[:R*1]->(b) SET a.x = 1 RETURN a",
+        "MATCH (a)-[:R*1]->(b) DELETE a RETURN b",
+    ] {
+        assert!(parser.parse_scoped(query).unwrap().has_mutations);
+    }
+}
+
+#[test]
 fn return_clause_non_aggregating() {
     let query = cypher::query(
         "MATCH (a) WHERE a.Field1 = 42 RETURN a.name, a.Field2 as F2, $param",

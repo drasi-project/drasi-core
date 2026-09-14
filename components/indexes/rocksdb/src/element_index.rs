@@ -558,10 +558,20 @@ fn set_element_internal(
 
     let new_slots = slots_to_bitset(slot_affinity);
 
+    let previous_relation_nodes = if prev_slots.is_some() {
+        match get_element_internal(context.clone(), &key_hash, txn)? {
+            Some(StoredElement::Relation(r)) => Some((r.in_node, r.out_node)),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let relation_nodes = match &element {
         StoredElement::Relation(r) => Some((r.in_node.clone(), r.out_node.clone())),
         _ => None,
     };
+    let adjacency_changed =
+        prev_slots.as_ref() != Some(&new_slots) || previous_relation_nodes != relation_nodes;
 
     let (element, encoded_element) = {
         let mut buf = BytesMut::new();
@@ -594,37 +604,18 @@ fn set_element_internal(
         Err(e) => return Err(IndexError::other(e)),
     };
 
-    if let Some((in_node, out_node)) = relation_nodes {
-        let mut slots_changed = true;
-
-        if let Some(prev_slots) = prev_slots {
-            if prev_slots == new_slots {
-                slots_changed = false;
-            }
-
-            if slots_changed {
-                for slot in prev_slots.into_iter() {
-                    let inbound_key = encode_inout_key(&in_node, slot, &key_hash);
-                    let outbound_key = encode_inout_key(&out_node, slot, &key_hash);
-
-                    if let Err(err) = txn.delete_cf(&inbound_cf, inbound_key) {
-                        log::error!(
-                            "Failed to delete inbound index {inbound_key:?} for element {key_hash:?}: {err:?}"
-                        );
-                        return Err(IndexError::other(err));
-                    }
-
-                    if let Err(err) = txn.delete_cf(&outbound_cf, outbound_key) {
-                        log::error!(
-                            "Failed to delete outbound index {outbound_key:?} for element {key_hash:?}: {err:?}"
-                        );
-                        return Err(IndexError::other(err));
-                    }
-                }
+    if adjacency_changed {
+        if let (Some(prev_slots), Some((in_node, out_node))) = (prev_slots, previous_relation_nodes)
+        {
+            for slot in prev_slots.iter() {
+                txn.delete_cf(&inbound_cf, encode_inout_key(&in_node, slot, &key_hash))
+                    .map_err(IndexError::other)?;
+                txn.delete_cf(&outbound_cf, encode_inout_key(&out_node, slot, &key_hash))
+                    .map_err(IndexError::other)?;
             }
         }
 
-        if slots_changed {
+        if let Some((in_node, out_node)) = relation_nodes {
             for slot in slot_affinity {
                 let inbound_key = encode_inout_key(&in_node, *slot, &key_hash);
                 let outbound_key = encode_inout_key(&out_node, *slot, &key_hash);

@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,16 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::unwrap_used)]
-mod auto_future_queue_consumer;
-mod continuous_query;
-mod query_builder;
-mod variable_length;
+mod plan;
+mod solver;
 
-pub use crate::path_solver::variable_length::VariableLengthMatchLimits;
-pub use auto_future_queue_consumer::AutoFutureQueueConsumer;
-pub use continuous_query::{ContinuousQuery, DueFutureResult};
-pub use query_builder::QueryBuilder;
-
-#[cfg(test)]
-mod tests;
+pub use plan::VariableLengthMatchLimits;
+pub(crate) use plan::VariableLengthMatchPlan;
+pub(crate) use solver::{GraphView, VariableLengthSolver, WorkBudget};

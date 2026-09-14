@@ -24,6 +24,8 @@ use crate::QueryTestConfig;
 
 struct InMemoryQueryConfig {}
 
+crate::variable_length_match_tests!(variable_length_match, super::InMemoryQueryConfig::new());
+
 impl InMemoryQueryConfig {
     pub fn new() -> Self {
         InMemoryQueryConfig {}

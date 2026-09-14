@@ -110,6 +110,9 @@ impl ScalarFunction for TrueUntil {
         }
 
         if due_time <= context.get_realtime() {
+            if !context.is_this_future_wake(group_signature) {
+                return Ok(VariableValue::Awaiting);
+            }
             if let SideEffects::Apply = context.get_side_effects() {
                 match self
                     .future_queue

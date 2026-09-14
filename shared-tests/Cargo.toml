@@ -13,6 +13,7 @@ workspace = true
 drasi-query-ast.workspace = true
 drasi-core.workspace = true
 drasi-query-cypher.workspace = true
+drasi-query-gql.workspace = true
 drasi-functions-cypher.workspace = true
 drasi-middleware = { workspace = true, features = ["decoder", "map", "parse_json", "promote", "relabel", "unwind"] }
 bytes = "1"
