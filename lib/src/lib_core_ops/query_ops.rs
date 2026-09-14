@@ -92,10 +92,13 @@ impl DrasiLib {
         // still sees the cleanup error so leftover disk state is not silent.
         {
             let mut graph = self.component_graph.write().await;
+            let is_query = graph
+                .get_component(id)
+                .is_some_and(|node| node.kind == crate::component_graph::ComponentKind::Query);
             let runtime_gone = graph
                 .get_runtime::<Arc<dyn crate::queries::Query>>(id)
                 .is_none();
-            if runtime_gone {
+            if is_query && runtime_gone {
                 if let Err(e) = graph.deregister(id) {
                     log::error!(
                         "Query '{id}' runtime was torn down but graph deregister failed: {e}. \
@@ -489,6 +492,20 @@ mod tests {
 
         let result = core.remove_query("does-not-exist").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn remove_query_does_not_deregister_a_source() {
+        let core = build_core_with_source().await;
+
+        let result = core.remove_query("test-source").await;
+        assert!(result.is_err());
+
+        let sources = core.list_sources().await.unwrap();
+        assert!(
+            sources.iter().any(|(id, _)| id == "test-source"),
+            "remove_query must not deregister a source id, got {sources:?}"
+        );
     }
 
     // ========================================================================

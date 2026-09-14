@@ -25,7 +25,7 @@
 mod tests {
     use bytes::Bytes;
     use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
-    use drasi_core::interface::CheckpointStore;
+    use drasi_core::interface::{CheckpointStore, ElementIndex};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -1418,6 +1418,23 @@ mod tests {
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.stage_result_sequence(query_id, sequence).await
         }
+
+        async fn write_output_generation(
+            &self,
+            query_id: &str,
+            generation: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner
+                .write_output_generation(query_id, generation)
+                .await
+        }
+
+        async fn read_output_generation(
+            &self,
+            query_id: &str,
+        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+            self.inner.read_output_generation(query_id).await
+        }
     }
 
     /// Mock persistent plugin that gives each query its own
@@ -2228,17 +2245,41 @@ mod tests {
             }
             self.inner.write_result_sequence(query_id, sequence).await
         }
+
+        async fn write_output_generation(
+            &self,
+            query_id: &str,
+            generation: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner
+                .write_output_generation(query_id, generation)
+                .await
+        }
+
+        async fn read_output_generation(
+            &self,
+            query_id: &str,
+        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+            self.inner.read_output_generation(query_id).await
+        }
     }
 
     /// Mock plugin that uses a pre-created FailableCheckpointStore.
     struct FailablePlugin {
         stores: RwLock<std::collections::HashMap<String, Arc<FailableCheckpointStore>>>,
+        element_indexes: RwLock<
+            std::collections::HashMap<
+                String,
+                Arc<drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex>,
+            >,
+        >,
     }
 
     impl FailablePlugin {
         fn new() -> Self {
             Self {
                 stores: RwLock::new(std::collections::HashMap::new()),
+                element_indexes: RwLock::new(std::collections::HashMap::new()),
             }
         }
 
@@ -2246,6 +2287,21 @@ mod tests {
             let mut map = self.stores.write().await;
             map.entry(query_id.to_string())
                 .or_insert_with(|| Arc::new(FailableCheckpointStore::new()))
+                .clone()
+        }
+
+        async fn get_element_index(
+            &self,
+            query_id: &str,
+        ) -> Arc<drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex>
+        {
+            let mut map = self.element_indexes.write().await;
+            map.entry(query_id.to_string())
+                .or_insert_with(|| {
+                    Arc::new(
+                        drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex::new(),
+                    )
+                })
                 .clone()
         }
     }
@@ -2264,7 +2320,7 @@ mod tests {
 
             let checkpoint_store = self.get_store(query_id).await;
 
-            let element_index = Arc::new(InMemoryElementIndex::new());
+            let element_index = self.get_element_index(query_id).await;
             Ok(drasi_core::interface::CreatedIndexes {
                 set: IndexSet {
                     element_index: element_index.clone(),
@@ -2505,6 +2561,97 @@ mod tests {
         assert!(
             msg.contains("wipe durable output") || msg.contains("result sequence"),
             "Error should mention the output wipe failure: {msg}"
+        );
+    }
+
+    /// If output wipe fails after `clear_checkpoints`, retry must still clear
+    /// leftover graph indexes (first-run path used to skip that).
+    #[tokio::test]
+    async fn test_wipe_failure_then_restart_clears_stale_indexes() {
+        let plugin = Arc::new(FailablePlugin::new());
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_failable_backend(plugin.clone()).await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = CheckpointTestSource::new("stale-idx-src").unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
+        source_manager
+            .start_source("stale-idx-src".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "stale-idx-src",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let config =
+            create_persistent_query_config("stale-idx-query", vec!["stale-idx-src".to_string()]);
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("stale-idx-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "stale-idx-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let element_index = plugin.get_element_index("stale-idx-query").await;
+        let element = drasi_core::models::Element::Node {
+            metadata: drasi_core::models::ElementMetadata {
+                reference: drasi_core::models::ElementReference::new("stale-idx-src", "leftover"),
+                labels: Arc::new([Arc::from("Person")]),
+                effective_from: 1,
+            },
+            properties: drasi_core::models::ElementPropertyMap::new(),
+        };
+        element_index.set_element(&element, &vec![]).await.unwrap();
+        query_manager
+            .stop_query("stale-idx-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "stale-idx-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let store = plugin.get_store("stale-idx-query").await;
+        store.write_config_hash(99999).await.unwrap();
+        store.set_fail_write_result_sequence(true);
+        let failed = query_manager
+            .start_query("stale-idx-query".to_string())
+            .await;
+        assert!(failed.is_err(), "wipe failure should abort start");
+
+        store.set_fail_write_result_sequence(false);
+        query_manager
+            .start_query("stale-idx-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "stale-idx-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let leftover = element_index
+            .get_element(element.get_reference())
+            .await
+            .unwrap();
+        assert!(
+            leftover.is_none(),
+            "retry after a failed wipe must clear leftover graph indexes"
         );
     }
 
