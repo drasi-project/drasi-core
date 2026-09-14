@@ -660,14 +660,19 @@ impl Source for ApplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        // Durable WAL sources replay on every subscribe. `resume_from` /
-        // `resume_sequence` are the last committed checkpoint; missing both
-        // means sequence 0 so an uncommitted source event is reprocessed.
+        // WAL replay vs bootstrap:
+        // - Checkpointed resume (`resume_from` / `resume_sequence`) always replays.
+        // - Zero-checkpoint recovery with bootstrap off replays from seq 0 so
+        //   uncommitted WAL events are reprocessed.
+        // - Fresh subscribe with `enable_bootstrap` still bootstraps, even when
+        //   WAL is enabled.
         let wal_guard = self.wal.read().await;
         if let Some(wal) = wal_guard.as_ref() {
             let resume_seq = if let Some(ref resume_from) = settings.resume_from {
                 if resume_from.len() >= 8 {
-                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default())
+                    Some(u64::from_be_bytes(
+                        resume_from[..8].try_into().unwrap_or_default(),
+                    ))
                 } else {
                     drop(wal_guard);
                     return Err(anyhow::anyhow!(
@@ -676,14 +681,21 @@ impl Source for ApplicationSource {
                     ));
                 }
             } else {
-                settings.resume_sequence.unwrap_or(0)
+                settings.resume_sequence
             };
-            let wal_clone = wal.clone();
-            drop(wal_guard);
-            return self
-                .base
-                .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "Application")
-                .await;
+            if resume_seq.is_some() || !settings.enable_bootstrap {
+                let wal_clone = wal.clone();
+                drop(wal_guard);
+                return self
+                    .base
+                    .subscribe_with_replay(
+                        &settings,
+                        wal_clone.as_ref(),
+                        resume_seq.unwrap_or(0),
+                        "Application",
+                    )
+                    .await;
+            }
         }
         drop(wal_guard);
         self.base

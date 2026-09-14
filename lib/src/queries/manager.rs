@@ -383,6 +383,7 @@ async fn stage_durable_query_output(
     outbox_writer: &Option<Arc<dyn OutboxWriter>>,
     live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
     checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
+    profiling: crate::profiling::ProfilingMetadata,
 ) -> Result<Option<QueryResult>, IndexError> {
     if diffs.is_empty() {
         return Ok(None);
@@ -419,7 +420,7 @@ async fn stage_durable_query_output(
             );
             meta
         },
-        crate::profiling::ProfilingMetadata::new(),
+        profiling,
     );
 
     if let Some(writer) = outbox_writer {
@@ -483,6 +484,40 @@ async fn stage_durable_query_output(
     Ok(Some(query_result))
 }
 
+fn overlay_post_commit_profiling(
+    result: &mut QueryResult,
+    profiling: crate::profiling::ProfilingMetadata,
+) {
+    let staged = result
+        .profiling
+        .get_or_insert_with(crate::profiling::ProfilingMetadata::default);
+    if staged.source_ns.is_none() {
+        staged.source_ns = profiling.source_ns;
+    }
+    if staged.reactivator_start_ns.is_none() {
+        staged.reactivator_start_ns = profiling.reactivator_start_ns;
+    }
+    if staged.reactivator_end_ns.is_none() {
+        staged.reactivator_end_ns = profiling.reactivator_end_ns;
+    }
+    if staged.source_receive_ns.is_none() {
+        staged.source_receive_ns = profiling.source_receive_ns;
+    }
+    if staged.source_send_ns.is_none() {
+        staged.source_send_ns = profiling.source_send_ns;
+    }
+    if staged.query_receive_ns.is_none() {
+        staged.query_receive_ns = profiling.query_receive_ns;
+    }
+    if staged.query_core_call_ns.is_none() {
+        staged.query_core_call_ns = profiling.query_core_call_ns;
+    }
+    staged.query_core_return_ns = profiling
+        .query_core_return_ns
+        .or(staged.query_core_return_ns);
+    staged.query_send_ns = profiling.query_send_ns.or(staged.query_send_ns);
+}
+
 /// Apply committed diffs to in-memory output state and dispatch to reactions.
 ///
 /// Durable output must already have been staged and committed. This path never
@@ -513,7 +548,8 @@ async fn dispatch_query_results(
         let tx_start = std::time::Instant::now();
         let mut state = output_state.write().await;
 
-        let result = if let Some(query_result) = staged_result {
+        let result = if let Some(mut query_result) = staged_result {
+            overlay_post_commit_profiling(&mut query_result, profiling);
             let sequence = query_result.sequence;
             state.apply_committed_sequence(sequence, &converted_results, query_result)
         } else {
@@ -2879,6 +2915,7 @@ impl Query for DrasiQuery {
                                                         &outbox,
                                                         &live,
                                                         &checkpoint_for_output,
+                                                        crate::profiling::ProfilingMetadata::default(),
                                                     )
                                                     .await?;
                                                     staged_seq_for_hook.record(staged)
@@ -2939,6 +2976,7 @@ impl Query for DrasiQuery {
                                     let source_id_for_stage = source_id.clone();
                                     let staged_seq = StagedOutputSequence::new();
                                     let staged_seq_for_hook = staged_seq.clone();
+                                    let profiling_for_stage = profiling.clone();
                                     let hook = move |results: &[QueryPartEvaluationContext]| {
                                         let diffs = evaluation_contexts_to_diffs(results);
                                         async move {
@@ -2962,6 +3000,7 @@ impl Query for DrasiQuery {
                                                 &outbox,
                                                 &live,
                                                 &checkpoint_for_output,
+                                                profiling_for_stage,
                                             )
                                             .await?;
                                             staged_seq_for_hook.record(staged)

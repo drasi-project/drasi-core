@@ -1232,6 +1232,19 @@ async fn happy_path_commits_source_checkpoint_result_sequence_outbox_and_live_ro
                 .collect::<Vec<_>>(),
             vec![1]
         );
+        let profiling = outbox
+            .results
+            .first()
+            .and_then(|result| result.profiling.as_ref())
+            .expect("staged result must keep query profiling");
+        assert!(
+            profiling.query_receive_ns.is_some() && profiling.query_core_call_ns.is_some(),
+            "pre-commit query timings must survive staging: {profiling:?}"
+        );
+        assert!(
+            profiling.query_core_return_ns.is_some() && profiling.query_send_ns.is_some(),
+            "post-commit query timings must be overlaid on the staged result: {profiling:?}"
+        );
         core.shutdown().await?;
     }
 
