@@ -26,6 +26,7 @@ use serde_json::Value;
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_LOG_FIELD_LEN: usize = 512;
+const A2A_PROTOCOL_VERSION: &str = "1.0";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundPart {
@@ -116,6 +117,10 @@ impl A2AClient {
         for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
             let mut headers = HeaderMap::new();
             headers.insert("content-type", HeaderValue::from_static("application/json"));
+            headers.insert(
+                "A2A-Version",
+                HeaderValue::from_static(A2A_PROTOCOL_VERSION),
+            );
             if let Some(token) = &self.token {
                 let mut auth_header = String::from("Bearer ");
                 auth_header.push_str(token);

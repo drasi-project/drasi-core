@@ -155,6 +155,13 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
     let delete_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
 
     assert_eq!(add_body["method"], json!("SendMessage"));
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("A2A-Version")
+            .and_then(|v| v.to_str().ok()),
+        Some("1.0")
+    );
     assert_eq!(add_body["params"]["message"]["role"], json!("ROLE_USER"));
     assert_eq!(
         add_body["params"]["message"]["messageId"],
