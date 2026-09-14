@@ -228,6 +228,15 @@ impl ReactionBase {
         self.auto_start
     }
 
+    /// Instance override if set, otherwise `trait_default` from
+    /// [`Reaction::default_recovery_policy`](crate::Reaction::default_recovery_policy).
+    pub fn resolved_recovery_policy(
+        &self,
+        trait_default: ReactionRecoveryPolicy,
+    ) -> ReactionRecoveryPolicy {
+        self.recovery_policy.unwrap_or(trait_default)
+    }
+
     /// Set the original raw config JSON for lossless persistence roundtrips.
     pub fn set_raw_config(&mut self, config: serde_json::Value) {
         self.raw_config = Some(config);
@@ -516,6 +525,10 @@ impl ReactionBase {
     /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
     ///   orchestration). The loop uses these for dedup and preserves each
     ///   query's `config_hash` when advancing the sequence.
+    /// * `policy` — resolved recovery policy (`ReactionBaseParams` override, or
+    ///   the reaction's [`Reaction::default_recovery_policy`](crate::Reaction::default_recovery_policy)
+    ///   when no override is set). Do not default this to `Strict` if the
+    ///   trait default is something else.
     /// * `handler` — async function receiving a [`QueryResult`].  Return
     ///   `Ok(())` to advance the checkpoint. `Err` leaves the durable
     ///   checkpoint unchanged under `Strict`/`AutoReset`; under `AutoSkipGap`
@@ -525,6 +538,7 @@ impl ReactionBase {
         &self,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
         initial_checkpoints: std::collections::HashMap<String, ReactionCheckpoint>,
+        policy: ReactionRecoveryPolicy,
         handler: F,
     ) -> Result<()>
     where
@@ -533,9 +547,6 @@ impl ReactionBase {
     {
         let mut checkpoints = CheckpointState::load(self).await;
         checkpoints.seed(initial_checkpoints);
-        let policy = self
-            .recovery_policy
-            .unwrap_or(ReactionRecoveryPolicy::Strict);
 
         loop {
             let event = tokio::select! {
@@ -1210,15 +1221,20 @@ mod tests {
 
         let loop_handle = tokio::spawn(async move {
             base_clone
-                .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
-                    let processed = processed_clone.clone();
-                    let count = handler_count_clone.clone();
-                    async move {
-                        processed.lock().await.push(event.sequence);
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
-                    }
-                })
+                .run_standard_loop(
+                    shutdown_rx,
+                    initial_checkpoints,
+                    ReactionRecoveryPolicy::Strict,
+                    |event| {
+                        let processed = processed_clone.clone();
+                        let count = handler_count_clone.clone();
+                        async move {
+                            processed.lock().await.push(event.sequence);
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                )
                 .await
                 .unwrap();
         });
@@ -1287,9 +1303,12 @@ mod tests {
         let base_clone = base.clone_shared();
         let loop_handle = tokio::spawn(async move {
             base_clone
-                .run_standard_loop(shutdown_rx, initial_checkpoints, |_event| async {
-                    Err(anyhow::anyhow!("injected side-effect failure"))
-                })
+                .run_standard_loop(
+                    shutdown_rx,
+                    initial_checkpoints,
+                    ReactionRecoveryPolicy::Strict,
+                    |_event| async { Err(anyhow::anyhow!("injected side-effect failure")) },
+                )
                 .await
         });
 
@@ -1360,9 +1379,12 @@ mod tests {
         let base_clone = base.clone_shared();
         let loop_handle = tokio::spawn(async move {
             base_clone
-                .run_standard_loop(shutdown_rx, initial_checkpoints, |_event| async {
-                    Err(anyhow::anyhow!("injected side-effect failure"))
-                })
+                .run_standard_loop(
+                    shutdown_rx,
+                    initial_checkpoints,
+                    ReactionRecoveryPolicy::AutoSkipGap,
+                    |_event| async { Err(anyhow::anyhow!("injected side-effect failure")) },
+                )
                 .await
                 .unwrap();
         });
@@ -1435,7 +1457,12 @@ mod tests {
         let base_clone = base.clone_shared();
         let loop_handle = tokio::spawn(async move {
             base_clone
-                .run_standard_loop(shutdown_rx, initial_checkpoints, |_event| async { Ok(()) })
+                .run_standard_loop(
+                    shutdown_rx,
+                    initial_checkpoints,
+                    ReactionRecoveryPolicy::AutoReset,
+                    |_event| async { Ok(()) },
+                )
                 .await
                 .unwrap();
         });
@@ -1463,6 +1490,86 @@ mod tests {
         let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
         assert_eq!(cp.sequence, 6);
         assert_eq!(cp.config_hash, 42);
+        assert_ne!(base.get_status().await, ComponentStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn test_run_standard_loop_uses_passed_policy_not_strict_default() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        // No per-instance override on ReactionBaseParams.
+        let params = ReactionBaseParams::new("loop-trait-default", vec!["q1".to_string()]);
+        assert!(params.recovery_policy.is_none());
+        let base = ReactionBase::new(params);
+
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "loop-trait-default",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        let initial = ReactionCheckpoint {
+            sequence: 5,
+            config_hash: 42,
+        };
+        base.write_checkpoint("q1", &initial).await.unwrap();
+        let mut initial_checkpoints = std::collections::HashMap::new();
+        initial_checkpoints.insert("q1".to_string(), initial);
+
+        let result = crate::channels::QueryResult {
+            query_id: "q1".to_string(),
+            sequence: 6,
+            timestamp: chrono::Utc::now(),
+            results: vec![],
+            metadata: Default::default(),
+            profiling: None,
+        };
+        base.enqueue_query_result(result).await.unwrap();
+
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let base_clone = base.clone_shared();
+        let loop_handle = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(
+                    shutdown_rx,
+                    initial_checkpoints,
+                    ReactionRecoveryPolicy::AutoSkipGap,
+                    |_event| async { Err(anyhow::anyhow!("injected side-effect failure")) },
+                )
+                .await
+                .unwrap();
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let seq = base
+                .read_checkpoint("q1")
+                .await
+                .unwrap()
+                .map(|cp| cp.sequence)
+                .unwrap_or(0);
+            if seq >= 6 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("passed AutoSkipGap must apply when params have no override");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let _ = base.stop_common().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            6
+        );
         assert_ne!(base.get_status().await, ComponentStatus::Error);
     }
 }
