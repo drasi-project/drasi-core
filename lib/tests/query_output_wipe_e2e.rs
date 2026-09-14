@@ -197,6 +197,43 @@ async fn delete_and_recreate_same_query_id_starts_at_sequence_zero() -> Result<(
 }
 
 #[tokio::test]
+async fn delete_and_recreate_advances_output_generation() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let (core, handle) = build_core(&tmp, QUERY_V1).await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    assert_eq!(wait_for_seq(&core, 1).await?, 1);
+    let gen_before = {
+        let query = core
+            .query_manager()
+            .get_query_instance(QUERY_ID)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        query.fetch_snapshot().await?.output_generation
+    };
+    assert!(gen_before >= 1, "first start should persist a generation");
+
+    core.remove_query(QUERY_ID).await?;
+    core.add_query(persistent_query(QUERY_V1)).await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+
+    let query = core
+        .query_manager()
+        .get_query_instance(QUERY_ID)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let snapshot = query.fetch_snapshot().await?;
+    assert!(
+        snapshot.output_generation > gen_before,
+        "recreate must advance past persisted generation {gen_before}, got {}",
+        snapshot.output_generation
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn stop_query_same_config_preserves_output() -> Result<()> {
     let tmp = TempDir::new()?;
     let (core, handle) = build_core(&tmp, QUERY_V1).await?;

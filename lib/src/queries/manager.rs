@@ -1654,16 +1654,37 @@ impl Query for DrasiQuery {
                                 .await;
                             return Err(anyhow::anyhow!(msg));
                         }
-                    } else if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
-                        let msg = format!(
-                            "Query '{}' failed to write config hash: {e}",
-                            self.base.config.id
-                        );
-                        error!("{msg}");
-                        self.base
-                            .set_status(ComponentStatus::Error, Some(msg.clone()))
-                            .await;
-                        return Err(anyhow::anyhow!(msg));
+                    } else {
+                        if let Err(ie) = clear_persistent_indexes(
+                            &self.base.config.id,
+                            &element_index,
+                            &archive_index,
+                            &result_index,
+                            &future_queue,
+                        )
+                        .await
+                        {
+                            let msg = format!(
+                                "Query '{}' failed to clear persistent indexes on first run: {ie}",
+                                self.base.config.id
+                            );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
+                        }
+                        if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
+                            let msg = format!(
+                                "Query '{}' failed to write config hash: {e}",
+                                self.base.config.id
+                            );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
+                        }
                     }
                     false
                 }
