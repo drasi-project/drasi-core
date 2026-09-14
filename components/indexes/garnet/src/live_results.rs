@@ -72,20 +72,16 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         let live_key = self.live_key();
 
         if let Some(session_state) = &self.session_state {
-            if session_state
-                .with_active_buffer(|buffer| {
-                    for m in mutations {
-                        let field = m.row_signature.to_string();
-                        match m.data {
-                            Some(data) => buffer.hash_set(live_key.clone(), &field, data.to_vec()),
-                            None => buffer.hash_del(live_key.clone(), &field),
-                        }
+            session_state.with_active_buffer_required(|buffer| {
+                for m in mutations {
+                    let field = m.row_signature.to_string();
+                    match m.data {
+                        Some(data) => buffer.hash_set(live_key.clone(), &field, data.to_vec()),
+                        None => buffer.hash_del(live_key.clone(), &field),
                     }
-                })?
-                .is_some()
-            {
-                return Ok(());
-            }
+                }
+            })?;
+            return Ok(());
         }
 
         let mut con = self.connection.clone();
