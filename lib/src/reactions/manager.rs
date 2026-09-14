@@ -1354,7 +1354,7 @@ impl ReactionManager {
     /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint (serialized via mutex)
     /// - `AutoSkipGap`: jump to current sequence, update checkpoint
     async fn handle_broadcast_gap(ctx: &BroadcastGapContext<'_>) -> Result<()> {
-        let config_hash = query_epoch_hash(&ctx.query).await;
+        let config_hash = query_epoch_hash(ctx.query).await;
 
         match ctx.policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(

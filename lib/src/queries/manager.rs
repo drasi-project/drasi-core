@@ -696,40 +696,45 @@ async fn wipe_durable_output(
     Ok(())
 }
 
+/// Session and index handles needed to wipe graph state during AutoReset.
+struct PersistentIndexHandles<'a> {
+    session_control: &'a Option<Arc<dyn SessionControl>>,
+    element_index: &'a Option<Arc<dyn drasi_core::interface::ElementIndex>>,
+    archive_index: &'a Option<Arc<dyn drasi_core::interface::ElementArchiveIndex>>,
+    result_index: &'a Option<Arc<dyn drasi_core::interface::ResultIndex>>,
+    future_queue: &'a Option<Arc<dyn drasi_core::interface::FutureQueue>>,
+}
+
 /// Wipe graph indexes and source checkpoints, then persist `current_hash`.
 /// Used by config-hash mismatch and by AutoReset after output inconsistency.
 async fn wipe_indexes_and_checkpoints(
     query_id: &str,
     current_hash: u64,
     checkpoint_store: &Arc<dyn CheckpointStore>,
-    session_control: &Option<Arc<dyn SessionControl>>,
-    element_index: &Option<Arc<dyn drasi_core::interface::ElementIndex>>,
-    archive_index: &Option<Arc<dyn drasi_core::interface::ElementArchiveIndex>>,
-    result_index: &Option<Arc<dyn drasi_core::interface::ResultIndex>>,
-    future_queue: &Option<Arc<dyn drasi_core::interface::FutureQueue>>,
+    indexes: PersistentIndexHandles<'_>,
 ) -> anyhow::Result<()> {
-    if let Some(sc) = session_control {
+    if let Some(sc) = indexes.session_control {
         sc.begin()
             .await
             .with_context(|| format!("Query '{query_id}' failed to begin session for rebuild"))?;
     }
     if let Err(ie) = clear_persistent_indexes(
         query_id,
-        element_index,
-        archive_index,
-        result_index,
-        future_queue,
+        indexes.element_index,
+        indexes.archive_index,
+        indexes.result_index,
+        indexes.future_queue,
     )
     .await
     {
-        if let Some(sc) = session_control {
+        if let Some(sc) = indexes.session_control {
             let _ = sc.rollback();
         }
         return Err(ie).context(format!(
             "Query '{query_id}' failed to clear persistent indexes"
         ));
     }
-    if let Some(sc) = session_control {
+    if let Some(sc) = indexes.session_control {
         sc.commit()
             .await
             .with_context(|| format!("Query '{query_id}' failed to commit index wipe"))?;
@@ -753,11 +758,7 @@ async fn autoreset_rebuild_after_output_inconsistency(
     current_hash: u64,
     generation: u64,
     stores: &DurableOutputStores,
-    session_control: &Option<Arc<dyn SessionControl>>,
-    element_index: &Option<Arc<dyn drasi_core::interface::ElementIndex>>,
-    archive_index: &Option<Arc<dyn drasi_core::interface::ElementArchiveIndex>>,
-    result_index: &Option<Arc<dyn drasi_core::interface::ResultIndex>>,
-    future_queue: &Option<Arc<dyn drasi_core::interface::FutureQueue>>,
+    indexes: PersistentIndexHandles<'_>,
 ) -> anyhow::Result<()> {
     stores
         .checkpoint_store
@@ -767,17 +768,7 @@ async fn autoreset_rebuild_after_output_inconsistency(
             format!("Query '{query_id}' failed to persist AutoReset in-progress marker")
         })?;
     wipe_durable_output(query_id, stores, generation).await?;
-    wipe_indexes_and_checkpoints(
-        query_id,
-        current_hash,
-        &stores.checkpoint_store,
-        session_control,
-        element_index,
-        archive_index,
-        result_index,
-        future_queue,
-    )
-    .await
+    wipe_indexes_and_checkpoints(query_id, current_hash, &stores.checkpoint_store, indexes).await
 }
 
 pub struct DrasiQuery {
@@ -1575,11 +1566,13 @@ impl Query for DrasiQuery {
                                 current_hash,
                                 generation,
                                 &stores,
-                                &session_control,
-                                &element_index,
-                                &archive_index,
-                                &result_index,
-                                &future_queue,
+                                PersistentIndexHandles {
+                                    session_control: &session_control,
+                                    element_index: &element_index,
+                                    archive_index: &archive_index,
+                                    result_index: &result_index,
+                                    future_queue: &future_queue,
+                                },
                             )
                             .await
                             {
