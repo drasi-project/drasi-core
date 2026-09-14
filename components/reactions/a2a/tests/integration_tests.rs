@@ -683,3 +683,221 @@ async fn deprovision_clears_activation_state() {
     reaction.deprovision().await.expect("deprovision");
     assert!(store.get("a2a-it", key).await.expect("get after").is_none());
 }
+
+#[tokio::test]
+async fn add_after_gettask_completed_creates_new_task() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(OrderedJsonRpc {
+            next: AtomicUsize::new(0),
+            bodies: vec![
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "task": {
+                            "id": "task-1",
+                            "contextId": "ctx-1",
+                            "status": { "state": "TASK_STATE_SUBMITTED" }
+                        }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "id": "task-1",
+                        "contextId": "ctx-1",
+                        "status": { "state": "TASK_STATE_COMPLETED" }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "task": {
+                            "id": "task-2",
+                            "contextId": "ctx-2",
+                            "status": { "state": "TASK_STATE_WORKING" }
+                        }
+                    }
+                }),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, memory_store()).await;
+    reaction.start().await.expect("start reaction");
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-12"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_requests(&server, 1, Duration::from_secs(3)).await;
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            2,
+            json!({"invoiceId":"INV-12"}),
+        ))
+        .await
+        .expect("enqueue second add");
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
+    reaction.stop().await.expect("stop reaction");
+
+    let requests = server.received_requests().await.expect("read requests");
+    let add_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let get_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let create_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(add_body["method"], json!("SendMessage"));
+    assert_eq!(get_body["method"], json!("GetTask"));
+    assert_eq!(create_body["method"], json!("SendMessage"));
+    assert!(create_body["params"]["message"]["taskId"].is_null());
+}
+
+#[tokio::test]
+async fn gettask_not_found_then_update_creates() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(OrderedJsonRpc {
+            next: AtomicUsize::new(0),
+            bodies: vec![
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "task": {
+                            "id": "task-1",
+                            "contextId": "ctx-1",
+                            "status": { "state": "TASK_STATE_WORKING" }
+                        }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "error": { "code": -32001, "message": "Task not found" }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "task": {
+                            "id": "task-2",
+                            "contextId": "ctx-2",
+                            "status": { "state": "TASK_STATE_SUBMITTED" }
+                        }
+                    }
+                }),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, memory_store()).await;
+    reaction.start().await.expect("start reaction");
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-13"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_requests(&server, 1, Duration::from_secs(3)).await;
+    reaction
+        .enqueue_query_result(mock_source::update_result(
+            "q1",
+            2,
+            json!({"invoiceId":"INV-13"}),
+            json!({"invoiceId":"INV-13","amount":2}),
+        ))
+        .await
+        .expect("enqueue update");
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
+    reaction.stop().await.expect("stop reaction");
+
+    let requests = server.received_requests().await.expect("read requests");
+    let get_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let create_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(get_body["method"], json!("GetTask"));
+    assert_eq!(create_body["method"], json!("SendMessage"));
+    assert!(create_body["params"]["message"]["taskId"].is_null());
+    assert_ne!(reaction.status().await, ComponentStatus::Error);
+}
+
+#[tokio::test]
+async fn cancel_task_not_found_clears_without_error() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(OrderedJsonRpc {
+            next: AtomicUsize::new(0),
+            bodies: vec![
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "task": {
+                            "id": "task-1",
+                            "contextId": "ctx-1",
+                            "status": { "state": "TASK_STATE_WORKING" }
+                        }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {
+                        "id": "task-1",
+                        "contextId": "ctx-1",
+                        "status": { "state": "TASK_STATE_WORKING" }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "error": { "code": -32001, "message": "Task not found" }
+                }),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, memory_store()).await;
+    reaction.start().await.expect("start reaction");
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-14"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_requests(&server, 1, Duration::from_secs(3)).await;
+    reaction
+        .enqueue_query_result(mock_source::delete_result(
+            "q1",
+            2,
+            json!({"invoiceId":"INV-14"}),
+        ))
+        .await
+        .expect("enqueue delete");
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    reaction.stop().await.expect("stop reaction");
+
+    let requests = server.received_requests().await.expect("read requests");
+    let cancel_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(cancel_body["method"], json!("CancelTask"));
+    assert_ne!(reaction.status().await, ComponentStatus::Error);
+}

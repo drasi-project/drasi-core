@@ -20,7 +20,7 @@ use crate::activation::{
 };
 use crate::client::{
     build_cancel_task_rpc, build_get_task_rpc, build_send_message_rpc, parse_send_message_result,
-    CancelTaskRequest, OutboundPart, SendMessageRequest, SendMessageResult,
+    CancelTaskRequest, JsonRpcFailure, OutboundPart, SendMessageRequest, SendMessageResult,
 };
 use crate::descriptor::{A2AReactionConfigDto, RecoveryPolicyDto};
 use crate::process::{extract_result_key, DiffPayload};
@@ -229,6 +229,48 @@ fn send_message_parser_distinguishes_task_and_message() {
         } if state == "COMPLETED"
     ));
 
+    let lowercase_prefix = parse_send_message_result(&json!({
+        "id": "task-1",
+        "status": { "state": "task_state_completed" }
+    }))
+    .expect("lowercase prefix parse");
+    assert!(matches!(
+        lowercase_prefix,
+        SendMessageResult::Task {
+            terminal: true,
+            state,
+            ..
+        } if state == "COMPLETED"
+    ));
+
+    let cancelled = parse_send_message_result(&json!({
+        "id": "task-1",
+        "status": { "state": "CANCELLED" }
+    }))
+    .expect("british cancelled parse");
+    assert!(matches!(
+        cancelled,
+        SendMessageResult::Task {
+            terminal: true,
+            state,
+            ..
+        } if state == "CANCELED"
+    ));
+
+    let hyphenated = parse_send_message_result(&json!({
+        "id": "task-1",
+        "status": { "state": "input-required" }
+    }))
+    .expect("hyphenated state parse");
+    assert!(matches!(
+        hyphenated,
+        SendMessageResult::Task {
+            terminal: false,
+            state,
+            ..
+        } if state == "INPUT_REQUIRED"
+    ));
+
     let invalid = parse_send_message_result(&json!({"id":"not-a-task"}));
     assert!(invalid.is_err());
 
@@ -394,4 +436,33 @@ fn descriptor_recovery_policy_allows_strict_and_auto_skip_gap_only() {
         "recoveryPolicy": "auto_reset"
     }));
     assert!(reset.is_err());
+}
+
+#[test]
+fn json_rpc_failure_classifies_stale_and_gone_tasks() {
+    let gone = JsonRpcFailure {
+        method: "GetTask".into(),
+        code: -32001,
+        message: "Task aa35 is not found".into(),
+    };
+    assert!(gone.is_task_gone());
+    assert!(gone.is_stale_task());
+    assert!(!gone.is_terminal_task());
+
+    let gone_by_message = JsonRpcFailure {
+        method: "CancelTask".into(),
+        code: -32602,
+        message: "Task not found".into(),
+    };
+    assert!(gone_by_message.is_task_gone());
+    assert!(gone_by_message.is_stale_task());
+
+    let terminal = JsonRpcFailure {
+        method: "SendMessage".into(),
+        code: -32602,
+        message: "Task x is in Terminal State: 3".into(),
+    };
+    assert!(terminal.is_terminal_task());
+    assert!(terminal.is_stale_task());
+    assert!(!terminal.is_task_gone());
 }

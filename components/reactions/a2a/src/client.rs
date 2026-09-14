@@ -409,7 +409,15 @@ impl JsonRpcFailure {
     }
 
     pub fn is_terminal_task(&self) -> bool {
-        self.code == -32602 && self.message.contains("terminal state")
+        self.code == -32602 && self.message.to_ascii_lowercase().contains("terminal state")
+    }
+
+    pub fn is_task_gone(&self) -> bool {
+        self.code == -32001 || self.message.to_ascii_lowercase().contains("task not found")
+    }
+
+    pub fn is_stale_task(&self) -> bool {
+        self.is_terminal_task() || self.is_task_gone()
     }
 }
 
@@ -464,10 +472,14 @@ fn parse_task(value: &Value) -> anyhow::Result<SendMessageResult> {
 }
 
 fn normalize_task_state(state: &str) -> String {
-    state
-        .trim()
-        .trim_start_matches("TASK_STATE_")
-        .to_ascii_uppercase()
+    let mut normalized = state.trim().to_ascii_uppercase().replace('-', "_");
+    if let Some(rest) = normalized.strip_prefix("TASK_STATE_") {
+        normalized = rest.to_string();
+    }
+    if normalized == "CANCELLED" {
+        normalized = "CANCELED".to_string();
+    }
+    normalized
 }
 
 fn is_terminal_state(state: &str) -> bool {

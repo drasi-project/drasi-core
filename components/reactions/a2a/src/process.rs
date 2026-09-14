@@ -219,13 +219,16 @@ async fn process_diff(
         &result_key,
         query_result.sequence,
     );
-    let mut action = next_action(
-        diff_payload.operation,
+    let already_applied = matches!(
         &activation,
-        config.terminal_update_policy,
-        query_result.sequence,
+        ActivationState::Present(existing) if existing.sequence() >= query_result.sequence
     );
-    if matches!(action, Action::SendFollowUp { .. } | Action::Cancel { .. }) {
+    if !already_applied
+        && matches!(
+            &activation,
+            ActivationState::Present(Activation::ActiveTask { .. })
+        )
+    {
         activation = refresh_active_task(
             reaction_name,
             base,
@@ -236,13 +239,13 @@ async fn process_diff(
             &message_id,
         )
         .await?;
-        action = next_action(
-            diff_payload.operation,
-            &activation,
-            config.terminal_update_policy,
-            query_result.sequence,
-        );
     }
+    let mut action = next_action(
+        diff_payload.operation,
+        &activation,
+        config.terminal_update_policy,
+        query_result.sequence,
+    );
     let activation_id = activation_id(&query_result.query_id, &result_key);
     let parts = build_parts(
         config,
@@ -345,14 +348,18 @@ async fn process_diff(
                     Err(error)
                         if !retried_after_terminal
                             && json_rpc_failure(&error)
-                                .is_some_and(JsonRpcFailure::is_terminal_task) =>
+                                .is_some_and(JsonRpcFailure::is_stale_task) =>
                     {
-                        activation = mark_terminal(activation);
+                        if json_rpc_failure(&error).is_some_and(JsonRpcFailure::is_task_gone) {
+                            activation = ActivationState::Absent;
+                        } else {
+                            activation = mark_terminal(activation);
+                        }
                         save_activation_state(base, activation_cache, &state_key, &activation)
                             .await
                             .with_context(|| {
                                 format!(
-                                    "failed saving activation state key '{state_key}' after terminal follow-up"
+                                    "failed saving activation state key '{state_key}' after stale follow-up"
                                 )
                             })?;
                         action = next_action(
@@ -391,14 +398,13 @@ async fn process_diff(
                         }
                     }
                     Err(error)
-                        if json_rpc_failure(&error)
-                            .is_some_and(JsonRpcFailure::is_terminal_task) =>
+                        if json_rpc_failure(&error).is_some_and(JsonRpcFailure::is_stale_task) =>
                     {
                         clear_activation_state(base, activation_cache, &state_key)
                             .await
                             .with_context(|| {
                                 format!(
-                                    "failed clearing activation state key '{state_key}' after terminal cancel"
+                                    "failed clearing activation state key '{state_key}' after stale cancel"
                                 )
                             })?;
                     }
@@ -455,6 +461,14 @@ async fn refresh_active_task(
                 "[{reaction_name}] GetTask is not supported; keeping cached activation for '{state_key}'"
             );
             return Ok(activation);
+        }
+        Err(error) if json_rpc_failure(&error).is_some_and(JsonRpcFailure::is_task_gone) => {
+            clear_activation_state(base, activation_cache, state_key)
+                .await
+                .with_context(|| {
+                    format!("failed clearing activation state key '{state_key}' after GetTask not found")
+                })?;
+            return Ok(ActivationState::Absent);
         }
         Err(error) => return Err(error).context("GetTask RPC failed"),
     };
