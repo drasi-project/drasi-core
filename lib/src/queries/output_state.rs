@@ -288,7 +288,7 @@ impl QueryOutputState {
         self.results.clear();
         self.outbox.clear();
         self.as_of_sequence = 0;
-        self.generation = persisted.saturating_add(1);
+        self.generation = next_output_generation(persisted, self.generation);
         self.initialized = true;
     }
 
@@ -318,6 +318,17 @@ impl QueryOutputState {
 /// compare, so they apply recovery policy instead of skipping 1..=N.
 pub fn output_epoch_hash(config_hash: u64, generation: u64) -> u64 {
     config_hash.wrapping_add(generation.wrapping_mul(0x9E3779B97F4A7C15))
+}
+
+/// Next output generation after an AutoReset, including resume of a crash
+/// mid-wipe.
+///
+/// Always bump from `max(disk, RAM)`. Do not subtract 1 from a persisted
+/// value: a crash after the in-progress marker and before the generation
+/// write still has the old generation on disk, and rewriting it lets a
+/// reaction skip the new sequence 1.
+pub(crate) fn next_output_generation(persisted: u64, ram: u64) -> u64 {
+    persisted.max(ram).saturating_add(1)
 }
 
 /// Inconsistency between durable result sequence, outbox, and live rows.
@@ -1195,6 +1206,25 @@ mod tests {
         assert_eq!(state.generation(), 5);
         assert!(state.initialized());
         assert_eq!(state.as_of_sequence(), 0);
+    }
+
+    #[test]
+    fn next_output_generation_always_bumps_from_disk() {
+        assert_eq!(next_output_generation(0, 0), 1);
+        assert_eq!(next_output_generation(1, 0), 2);
+        assert_eq!(next_output_generation(1, 1), 2);
+        assert_eq!(next_output_generation(4, 1), 5);
+    }
+
+    #[test]
+    fn reset_from_generation_bumps_existing_ram_generation() {
+        let mut state = QueryOutputState::new(10);
+        state.reset_from_generation(1);
+        assert_eq!(state.generation(), 2);
+        // Resume after a crash that never wrote the new generation still
+        // has disk=1. Passing that value must not rewrite generation 1.
+        state.reset_from_generation(1);
+        assert_eq!(state.generation(), 3);
     }
 
     #[test]
