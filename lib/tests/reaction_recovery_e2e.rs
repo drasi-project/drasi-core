@@ -841,9 +841,10 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     Ok(())
 }
 
-/// Test 7: Runtime gap with Strict policy — reaction should stop on gap.
+/// Test 7: Query Broadcast delivery is lossless, so a Strict trigger stays up
+/// across a flood that used to overflow a shared ring buffer.
 #[tokio::test]
-async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
+async fn test_strict_trigger_survives_query_broadcast_flood() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
 
     let query = Query::cypher("q1")
@@ -876,48 +877,26 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
             .await?,
     );
 
-    let mut event_rx = core.subscribe_all_component_events();
-
     core.start().await?;
 
-    // Confirm initial delivery works.
     insert_person(&handle, "p1", "Alice", 30).await?;
     let initial = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(initial.len(), 1);
 
-    // Flood to cause broadcast lag — Strict policy should stop the forwarder.
     for i in 0..20 {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
-    // Wait deterministically for the reaction to transition to Error state
-    // (the supervisor fires this after the forwarder breaks on Strict gap).
-    let error_event = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match event_rx.recv().await {
-                Ok(event)
-                    if event.component_id == "rec" && event.status == ComponentStatus::Error =>
-                {
-                    return event;
-                }
-                Ok(_) => continue,
-                Err(_) => panic!("Event channel closed while waiting for Error status"),
-            }
-        }
-    })
-    .await
-    .expect("Timed out waiting for reaction to reach Error status");
-    assert_eq!(error_event.status, ComponentStatus::Error);
-
-    // After strict gap failure, new events should NOT be delivered.
     insert_person(&handle, "p-after", "After", 99).await?;
-    let after = receiver
-        .wait_for_count(1, Duration::from_millis(1000))
-        .await;
+    let after = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(
         after.len(),
-        0,
-        "Strict policy: no events should be delivered after gap"
+        1,
+        "Strict trigger must keep receiving live results; query Broadcast no longer drops on lag"
+    );
+    assert_eq!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
     );
 
     core.stop().await?;

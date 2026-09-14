@@ -358,6 +358,81 @@ where
     }
 }
 
+/// Unbounded per-subscriber dispatcher.
+///
+/// Used for query→reaction Broadcast so live results are not dropped while a
+/// reaction bootstrap gate is closed (tokio `broadcast` is lossy on lag).
+pub struct UnboundedChangeDispatcher<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    tx: mpsc::UnboundedSender<Arc<T>>,
+    rx: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<Arc<T>>>>>,
+}
+
+impl<T> UnboundedChangeDispatcher<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self {
+            tx,
+            rx: Arc::new(tokio::sync::Mutex::new(Some(rx))),
+        }
+    }
+}
+
+impl<T> Default for UnboundedChangeDispatcher<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl<T> ChangeDispatcher<T> for UnboundedChangeDispatcher<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    async fn dispatch_change(&self, change: Arc<T>) -> Result<()> {
+        self.tx
+            .send(change)
+            .map_err(|_| anyhow::anyhow!("Failed to send on unbounded channel"))?;
+        Ok(())
+    }
+
+    async fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {
+        let mut rx_opt = self.rx.lock().await;
+        let rx = rx_opt.take().ok_or_else(|| {
+            anyhow::anyhow!("Receiver already created for this unbounded dispatcher")
+        })?;
+        Ok(Box::new(UnboundedChangeReceiver { rx }))
+    }
+}
+
+pub struct UnboundedChangeReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    rx: mpsc::UnboundedReceiver<Arc<T>>,
+}
+
+#[async_trait]
+impl<T> ChangeReceiver<T> for UnboundedChangeReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    async fn recv(&mut self) -> Result<Arc<T>> {
+        self.rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Unbounded channel closed"))
+    }
+}
+
 /// A composite receiver that yields pre-loaded replay events first, then
 /// delegates to a live channel receiver.
 ///
