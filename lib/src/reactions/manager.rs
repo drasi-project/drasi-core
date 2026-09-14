@@ -513,8 +513,17 @@ impl ReactionManager {
 
         // 5. Persist checkpoints AFTER bootstrap succeeds — a crash before this
         //    point will re-trigger bootstrap on next start (safe).
+        // Catch-up only enqueues; those in-memory sequences must not be written
+        // here or a failed side effect on restart would be skipped.
+        let bootstrap_ids: std::collections::HashSet<&str> = bootstrap_queries
+            .iter()
+            .map(|(query_id, _)| query_id.as_str())
+            .collect();
         if let Some(store) = state_store.as_ref() {
             for (query_id, cp) in &initial_checkpoints {
+                if !bootstrap_ids.contains(query_id.as_str()) {
+                    continue;
+                }
                 if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
                     store.as_ref(),
                     reaction_id,
@@ -630,9 +639,12 @@ impl ReactionManager {
         metrics.record_fetch_outbox();
         match query.fetch_outbox(checkpoint.sequence).await {
             Ok(outbox_resp) => {
-                // Replay outbox entries by enqueuing them.
-                // Track the last successfully enqueued sequence to avoid
-                // advancing the checkpoint past failed entries.
+                // Replay outbox entries by enqueuing them. Advance the returned
+                // (in-memory) checkpoint so the live forwarder does not see a
+                // sequence gap, but do **not** persist: enqueue is not the side
+                // effect. The reaction writes the durable checkpoint after
+                // delivery succeeds. Persisting now would skip N on the next
+                // start if the handler still fails.
                 let mut last_ok_seq = checkpoint.sequence;
                 for entry in &outbox_resp.results {
                     let result = (*entry).as_ref().clone();
@@ -649,27 +661,10 @@ impl ReactionManager {
                     }
                 }
 
-                // Update checkpoint to the latest SUCCESSFULLY replayed sequence.
-                let new_seq = last_ok_seq;
-
-                let cp = ReactionCheckpoint {
-                    sequence: new_seq,
+                Ok(ReactionCheckpoint {
+                    sequence: last_ok_seq,
                     config_hash: checkpoint.config_hash,
-                };
-
-                if new_seq != checkpoint.sequence {
-                    if let Some(store) = state_store.as_ref() {
-                        crate::reactions::checkpoint::write_checkpoint(
-                            store.as_ref(),
-                            reaction_id,
-                            query_id,
-                            &cp,
-                        )
-                        .await?;
-                    }
-                }
-
-                Ok(cp)
+                })
             }
             Err(FetchError::OutboxGap(_gap)) => {
                 info!(
@@ -2327,14 +2322,15 @@ mod tests {
             results.len()
         );
 
-        // Verify: checkpoint should have advanced.
+        // Enqueue is not delivery: the durable checkpoint must stay at the
+        // pre-catch-up position until the reaction's side effect succeeds.
         let cp = crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_catchup", "q1")
             .await
             .unwrap()
             .expect("Checkpoint should exist");
-        assert!(
-            cp.sequence > 0,
-            "Checkpoint sequence should have advanced from 0, got {}",
+        assert_eq!(
+            cp.sequence, 0,
+            "catch-up must not persist the enqueued position, got {}",
             cp.sequence
         );
     }

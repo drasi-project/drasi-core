@@ -239,13 +239,14 @@ impl Reaction for DurableRecordingReaction {
 
         let shutdown = self.base.create_shutdown_channel().await;
         let initial = self.base.read_all_checkpoints().await.unwrap_or_default();
+        let policy = self.base.resolved_recovery_policy(self.recovery_policy);
         let base = self.base.clone_shared();
         let journal = self.journal.clone();
         let crash_after_effect = parse_seq_env(CRASH_AFTER_EFFECT_ENV);
         let fail_effect = parse_seq_env(FAIL_EFFECT_ENV);
         let task = tokio::spawn(async move {
             let result = base
-                .run_standard_loop(shutdown, initial, move |result| {
+                .run_standard_loop(shutdown, initial, policy, move |result| {
                     let journal = journal.clone();
                     async move {
                         if fail_effect == Some(result.sequence) {
@@ -534,6 +535,34 @@ async fn wait_for_journal_sequences(
             anyhow::bail!(
                 "timed out waiting for {expected_count} journal records, got {}",
                 journal_sequences(&records).len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn sequence_occurrences(records: &[JournalRecord], sequence: u64) -> usize {
+    journal_sequences(records)
+        .into_iter()
+        .filter(|value| *value == sequence)
+        .count()
+}
+
+async fn wait_for_journal_sequence_occurrences(
+    path: &Path,
+    sequence: u64,
+    min_count: usize,
+) -> Result<Vec<JournalRecord>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let records = read_journal(path)?;
+        if sequence_occurrences(&records, sequence) >= min_count {
+            return Ok(records);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for sequence {sequence} to appear {min_count} time(s), got {:?}",
+                journal_sequences(&records)
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1575,8 +1604,9 @@ async fn recover_crash_after_effect_phase(paths: &FixturePaths) -> Result<()> {
     );
 
     let journal_before = read_journal(&paths.journal)?;
+    let threes_before = sequence_occurrences(&journal_before, 3);
     assert!(
-        journal_sequences(&journal_before).contains(&3),
+        threes_before >= 1,
         "the crashed process must have committed sequence 3 to the journal; got {:?}",
         journal_sequences(&journal_before)
     );
@@ -1586,29 +1616,27 @@ async fn recover_crash_after_effect_phase(paths: &FixturePaths) -> Result<()> {
     wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
     wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
 
+    let journal_after_replay =
+        wait_for_journal_sequence_occurrences(&paths.journal, 3, threes_before + 1).await?;
+    let threes_after = sequence_occurrences(&journal_after_replay, 3);
+    assert!(
+        threes_after > threes_before,
+        "recovery must deliver sequence 3 again (duplicates allowed); before={threes_before} after={threes_after} journal={:?}",
+        journal_sequences(&journal_after_replay)
+    );
+
     let recovered = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 3).await?;
     assert_eq!(
         recovered.sequence, 3,
         "recovery must replay N and then checkpoint N"
     );
 
-    let journal_after_replay = read_journal(&paths.journal)?;
-    let replay_seqs = journal_sequences(&journal_after_replay);
-    assert!(
-        replay_seqs.contains(&3),
-        "sequence 3 must be present after recovery (duplicates allowed); got {replay_seqs:?}"
-    );
-    assert!(
-        replay_seqs
-            .iter()
-            .filter(|sequence| **sequence == 3)
-            .count()
-            >= 1,
-        "missing sequence 3 after recovery: {replay_seqs:?}"
-    );
-
     insert_person(&fixture.source, "p4", "Dave", false).await?;
-    let final_journal = wait_for_journal_sequences(&paths.journal, replay_seqs.len() + 1).await?;
+    let final_journal = wait_for_journal_sequences(
+        &paths.journal,
+        journal_sequences(&journal_after_replay).len() + 1,
+    )
+    .await?;
     let final_seqs = journal_sequences(&final_journal);
     assert!(
         final_seqs.contains(&4),
@@ -1731,6 +1759,30 @@ async fn recover_fail_effect_phase(paths: &FixturePaths) -> Result<()> {
     Ok(())
 }
 
+async fn recover_fail_effect_again_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture(paths).await?;
+    let checkpoint_before_start = read_reaction_checkpoint(fixture.state_store.as_ref()).await?;
+    assert_eq!(checkpoint_before_start.sequence, 2);
+
+    let _ = fixture.core.start().await;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Error).await?;
+
+    let journal = read_journal(&paths.journal)?;
+    assert_eq!(
+        journal_sequences(&journal),
+        vec![1, 2],
+        "a side effect that still fails on restart must not journal sequence N"
+    );
+    let checkpoint_after = read_reaction_checkpoint(fixture.state_store.as_ref()).await?;
+    assert_eq!(
+        checkpoint_after.sequence, 2,
+        "catch-up must not persist the enqueued position when the side effect still fails"
+    );
+
+    let _ = fixture.core.shutdown().await;
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn rocksdb_redb_crash_after_effect_before_checkpoint() -> Result<()> {
     if std::env::var_os(PHASE_ENV).is_some() {
@@ -1827,6 +1879,39 @@ async fn rocksdb_redb_side_effect_error_does_not_skip() -> Result<()> {
     let recover = run_phase("recover_fail_effect", &paths)?;
     let failure =
         (!recover.status.success()).then(|| child_failure("recover_fail_effect", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_side_effect_error_again_does_not_advance_checkpoint() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase_with_env("seed_fail_effect", &paths, &[(FAIL_EFFECT_ENV, "3")])?;
+    if !seed.status.success() {
+        let message = child_failure("seed_fail_effect", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    let recover = run_phase_with_env(
+        "recover_fail_effect_again",
+        &paths,
+        &[(FAIL_EFFECT_ENV, "3")],
+    )?;
+    let failure =
+        (!recover.status.success()).then(|| child_failure("recover_fail_effect_again", &recover));
     let cleanup = std::fs::remove_dir_all(&root);
     if let Some(message) = failure {
         anyhow::bail!(message);
@@ -1938,6 +2023,9 @@ async fn reaction_recovery_conformance_phase() -> Result<()> {
         }
         Ok(phase) if phase == "recover_fail_effect" => {
             recover_fail_effect_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "recover_fail_effect_again" => {
+            recover_fail_effect_again_phase(&FixturePaths::from_env()?).await
         }
         Ok(other) => anyhow::bail!("unknown conformance phase '{other}'"),
         Err(std::env::VarError::NotPresent) => Ok(()),
