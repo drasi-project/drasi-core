@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use drasi_query_ast::api::QueryParser;
 
@@ -187,13 +184,6 @@ impl QueryBuilder {
             self.variable_length_limits,
         )?;
         let query = parsed.query;
-        let match_path = match &variable_length_plan {
-            Some(_) => MatchPath {
-                slots: Vec::new(),
-                optional_paths: HashSet::new(),
-            },
-            None => MatchPath::from_query(&query.parts[0])?,
-        };
 
         let element_index = match self.element_index.take() {
             Some(index) => index,
@@ -264,14 +254,16 @@ impl QueryBuilder {
             }
         }?;
 
-        element_index.set_joins(&match_path, &self.joins).await;
-
         let matcher = match variable_length_plan {
             Some(plan) => Matcher::VariableLength(plan),
-            None => Matcher::Fixed(FixedMatcher {
-                match_path: Arc::new(match_path),
-                path_solver: Arc::new(MatchPathSolver::new(element_index.clone())),
-            }),
+            None => {
+                let match_path = MatchPath::from_query(&query.parts[0])?;
+                element_index.set_joins(&match_path, &self.joins).await;
+                Matcher::Fixed(FixedMatcher {
+                    match_path: Arc::new(match_path),
+                    path_solver: Arc::new(MatchPathSolver::new(element_index.clone())),
+                })
+            }
         };
         Ok(ContinuousQuery::new_with_matcher(
             Arc::new(query),
