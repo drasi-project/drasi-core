@@ -92,6 +92,8 @@ async fn main() -> Result<()> {
     println!("  A2A endpoint: {endpoint}");
     println!("  Query:        overdue-invoices (no bootstrap — insert invoices via HTTP)");
     println!();
+    println!("Start Hello World first (Python 3.10+): python __main__.py");
+    println!();
     println!("Insert an invoice:");
     println!(
         "  curl -X POST http://127.0.0.1:9000/sources/invoices/events -H 'Content-Type: application/json' -d '{{\"operation\":\"insert\",\"element\":{{\"type\":\"node\",\"id\":\"inv-1001\",\"labels\":[\"Invoice\"],\"properties\":{{\"invoiceId\":\"inv-1001\",\"customer\":\"Acme\",\"amount\":1250.5}}}}}}'"
