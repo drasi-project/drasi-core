@@ -26,6 +26,8 @@ mod tests {
     use bytes::Bytes;
     use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
     use drasi_core::interface::{CheckpointStore, ElementIndex};
+    use drasi_core::models::QueryJoin;
+    use drasi_core::path_solver::match_path::MatchPath;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -2264,15 +2266,106 @@ mod tests {
         }
     }
 
+    /// Element index that can fail `clear()` after durable hash/output writes.
+    struct ClearFailingElementIndex {
+        inner: Arc<drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex>,
+        fail_clear: std::sync::atomic::AtomicBool,
+    }
+
+    impl ClearFailingElementIndex {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(
+                    drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex::new(
+                    ),
+                ),
+                fail_clear: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_clear(&self, fail: bool) {
+            self.fail_clear
+                .store(fail, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ElementIndex for ClearFailingElementIndex {
+        async fn get_element(
+            &self,
+            element_ref: &drasi_core::models::ElementReference,
+        ) -> Result<Option<Arc<drasi_core::models::Element>>, drasi_core::interface::IndexError>
+        {
+            self.inner.get_element(element_ref).await
+        }
+
+        async fn set_element(
+            &self,
+            element: &drasi_core::models::Element,
+            slot_affinity: &Vec<usize>,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner.set_element(element, slot_affinity).await
+        }
+
+        async fn delete_element(
+            &self,
+            element_ref: &drasi_core::models::ElementReference,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner.delete_element(element_ref).await
+        }
+
+        async fn get_slot_element_by_ref(
+            &self,
+            slot: usize,
+            element_ref: &drasi_core::models::ElementReference,
+        ) -> Result<Option<Arc<drasi_core::models::Element>>, drasi_core::interface::IndexError>
+        {
+            self.inner.get_slot_element_by_ref(slot, element_ref).await
+        }
+
+        async fn get_slot_elements_by_inbound(
+            &self,
+            slot: usize,
+            inbound_ref: &drasi_core::models::ElementReference,
+        ) -> Result<drasi_core::interface::ElementStream, drasi_core::interface::IndexError>
+        {
+            self.inner
+                .get_slot_elements_by_inbound(slot, inbound_ref)
+                .await
+        }
+
+        async fn get_slot_elements_by_outbound(
+            &self,
+            slot: usize,
+            outbound_ref: &drasi_core::models::ElementReference,
+        ) -> Result<drasi_core::interface::ElementStream, drasi_core::interface::IndexError>
+        {
+            self.inner
+                .get_slot_elements_by_outbound(slot, outbound_ref)
+                .await
+        }
+
+        async fn clear(&self) -> Result<(), drasi_core::interface::IndexError> {
+            if self.fail_clear.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(drasi_core::interface::IndexError::other(
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "injected element index clear failure",
+                    ),
+                ));
+            }
+            self.inner.clear().await
+        }
+
+        async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+            self.inner.set_joins(match_path, joins).await
+        }
+    }
+
     /// Mock plugin that uses a pre-created FailableCheckpointStore.
     struct FailablePlugin {
         stores: RwLock<std::collections::HashMap<String, Arc<FailableCheckpointStore>>>,
-        element_indexes: RwLock<
-            std::collections::HashMap<
-                String,
-                Arc<drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex>,
-            >,
-        >,
+        element_indexes: RwLock<std::collections::HashMap<String, Arc<ClearFailingElementIndex>>>,
     }
 
     impl FailablePlugin {
@@ -2290,18 +2383,10 @@ mod tests {
                 .clone()
         }
 
-        async fn get_element_index(
-            &self,
-            query_id: &str,
-        ) -> Arc<drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex>
-        {
+        async fn get_element_index(&self, query_id: &str) -> Arc<ClearFailingElementIndex> {
             let mut map = self.element_indexes.write().await;
             map.entry(query_id.to_string())
-                .or_insert_with(|| {
-                    Arc::new(
-                        drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex::new(),
-                    )
-                })
+                .or_insert_with(|| Arc::new(ClearFailingElementIndex::new()))
                 .clone()
         }
     }
@@ -2324,7 +2409,7 @@ mod tests {
             Ok(drasi_core::interface::CreatedIndexes {
                 set: IndexSet {
                     element_index: element_index.clone(),
-                    archive_index: element_index,
+                    archive_index: element_index.inner.clone(),
                     result_index: Arc::new(InMemoryResultIndex::new()),
                     future_queue: Arc::new(InMemoryFutureQueue::new()),
                     session_control: Arc::new(NoOpSessionControl),
@@ -2448,6 +2533,13 @@ mod tests {
         assert!(
             cp.is_none(),
             "Stale checkpoint should be cleared after config hash read failure"
+        );
+
+        store.set_fail_read_config_hash(false);
+        let stored_hash = store.read_config_hash().await.unwrap();
+        assert!(
+            stored_hash.is_some(),
+            "hash-read-failure wipe must persist the new config hash so the next start is not another first-run wipe"
         );
     }
 
@@ -2652,6 +2744,191 @@ mod tests {
         assert!(
             leftover.is_none(),
             "retry after a failed wipe must clear leftover graph indexes"
+        );
+    }
+
+    /// If mismatch writes the new config hash before index clear fails, retry
+    /// takes the MATCH path and hydrates leftover graph state.
+    #[tokio::test]
+    async fn test_mismatch_index_clear_failure_does_not_leave_matching_hash() {
+        let plugin = Arc::new(FailablePlugin::new());
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_failable_backend(plugin.clone()).await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = CheckpointTestSource::new("mismatch-idx-src").unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
+        source_manager
+            .start_source("mismatch-idx-src".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "mismatch-idx-src",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let config = create_persistent_query_config(
+            "mismatch-idx-query",
+            vec!["mismatch-idx-src".to_string()],
+        );
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("mismatch-idx-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "mismatch-idx-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let element_index = plugin.get_element_index("mismatch-idx-query").await;
+        let element = drasi_core::models::Element::Node {
+            metadata: drasi_core::models::ElementMetadata {
+                reference: drasi_core::models::ElementReference::new(
+                    "mismatch-idx-src",
+                    "stale-after-hash",
+                ),
+                labels: Arc::new([Arc::from("Person")]),
+                effective_from: 1,
+            },
+            properties: drasi_core::models::ElementPropertyMap::new(),
+        };
+        element_index.set_element(&element, &vec![]).await.unwrap();
+        query_manager
+            .stop_query("mismatch-idx-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "mismatch-idx-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let store = plugin.get_store("mismatch-idx-query").await;
+        let current_hash = store.read_config_hash().await.unwrap();
+        assert!(current_hash.is_some(), "first start should persist a hash");
+        store.write_config_hash(99999).await.unwrap();
+        element_index.set_fail_clear(true);
+
+        let failed = query_manager
+            .start_query("mismatch-idx-query".to_string())
+            .await;
+        assert!(
+            failed.is_err(),
+            "index clear failure on mismatch should abort start"
+        );
+
+        element_index.set_fail_clear(false);
+        query_manager
+            .start_query("mismatch-idx-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "mismatch-idx-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let leftover = element_index
+            .get_element(element.get_reference())
+            .await
+            .unwrap();
+        assert!(
+            leftover.is_none(),
+            "retry after mismatch index-clear failure must not hydrate leftover graph indexes"
+        );
+    }
+
+    /// AutoReset resume (in-progress marker) must adopt persisted generation
+    /// before reset, or it writes generation 1 over N.
+    #[tokio::test]
+    async fn test_autoreset_resume_adopts_persisted_generation() {
+        let plugin = Arc::new(FailablePlugin::new());
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_failable_backend(plugin.clone()).await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = CheckpointTestSource::new("autoreset-gen-src").unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
+        source_manager
+            .start_source("autoreset-gen-src".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "autoreset-gen-src",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let config = create_persistent_query_config(
+            "autoreset-gen-query",
+            vec!["autoreset-gen-src".to_string()],
+        );
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("autoreset-gen-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "autoreset-gen-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        query_manager
+            .stop_query("autoreset-gen-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "autoreset-gen-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let store = plugin.get_store("autoreset-gen-query").await;
+        let current_hash = store
+            .read_config_hash()
+            .await
+            .unwrap()
+            .expect("first start should persist a hash");
+        store
+            .write_output_generation("autoreset-gen-query", 5)
+            .await
+            .unwrap();
+        store.write_config_hash(!current_hash).await.unwrap();
+        store.set_fail_clear_checkpoints(true);
+
+        let failed = query_manager
+            .start_query("autoreset-gen-query".to_string())
+            .await;
+        assert!(
+            failed.is_err(),
+            "injected clear_checkpoints failure should abort AutoReset resume"
+        );
+
+        let generation = store
+            .read_output_generation("autoreset-gen-query")
+            .await
+            .unwrap();
+        assert_eq!(
+            generation,
+            Some(6),
+            "AutoReset resume must persist persisted_generation + 1, not restart at 1"
         );
     }
 
