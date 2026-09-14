@@ -545,6 +545,16 @@ fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
     !current_hash
 }
 
+async fn persisted_output_generation(stores: &DurableOutputStores, query_id: &str) -> u64 {
+    stores
+        .checkpoint_store
+        .read_output_generation(query_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
 /// Load durable live rows, outbox entries, and result sequence into in-memory
 /// `QueryOutputState` before the query accepts subscriptions or processes events.
 ///
@@ -1262,9 +1272,15 @@ impl Query for DrasiQuery {
                         outbox_writer: self.outbox_writer.read().await.clone(),
                         live_results_writer: self.live_results_writer.read().await.clone(),
                     };
+                    let persisted =
+                        persisted_output_generation(&stores, &self.base.config.id).await;
                     let generation = {
                         let mut state = self.output_state.write().await;
-                        state.reset();
+                        if persisted > 0 {
+                            state.reset_from_generation(persisted.saturating_sub(1));
+                        } else {
+                            state.reset_from_generation(0);
+                        }
                         state.generation()
                     };
                     if let Err(e) =
@@ -1556,9 +1572,12 @@ impl Query for DrasiQuery {
                                 self.base.config.id
                             );
                             let current_hash = super::compute_config_hash(&self.base.config);
+                            let persisted =
+                                persisted_output_generation(&stores, &self.base.config.id).await;
                             let generation = {
                                 let mut state = self.output_state.write().await;
-                                state.reset();
+                                let from = persisted.max(state.generation());
+                                state.reset_from_generation(from);
                                 state.generation()
                             };
                             if let Err(e) = autoreset_rebuild_after_output_inconsistency(
@@ -1595,6 +1614,10 @@ impl Query for DrasiQuery {
                     },
                 }
             }
+        } else {
+            // First run / config mismatch skipped durable hydrate. Mark initialized
+            // so a same-process stop/start does not replace bootstrap results.
+            self.output_state.write().await.mark_initialized();
         }
 
         // Set up FutureQueueSource for temporal query support.
@@ -1856,6 +1879,31 @@ impl Query for DrasiQuery {
                                             // abort startup rather than mixing stale state with
                                             // a fresh bootstrap.
                                             if has_persistent_backend {
+                                                let current_hash =
+                                                    super::compute_config_hash(&self.base.config);
+                                                // Persist the in-progress marker before any
+                                                // graph/checkpoint clear so a crash cannot
+                                                // hydrate leftover live rows on the next start.
+                                                if let Err(e) = checkpoint_store
+                                                    .write_config_hash(
+                                                        output_reset_in_progress_hash(current_hash),
+                                                    )
+                                                    .await
+                                                {
+                                                    let msg = format!(
+                                                        "Query '{}' AutoReset failed to persist in-progress marker: {e}",
+                                                        self.base.config.id
+                                                    );
+                                                    error!("{msg}");
+                                                    self.base
+                                                        .set_status(
+                                                            ComponentStatus::Error,
+                                                            Some(msg.clone()),
+                                                        )
+                                                        .await;
+                                                    return Err(anyhow::anyhow!(msg));
+                                                }
+
                                                 // Begin a session for the clear operations
                                                 if let Some(sc) = &session_control {
                                                     if let Err(e) = sc.begin().await {
@@ -1903,40 +1951,6 @@ impl Query for DrasiQuery {
                                                         "AutoReset aborted: failed to clear persistent indexes: {ie}",
                                                     ));
                                                 }
-                                                if let Err(ce) =
-                                                    checkpoint_store.clear_checkpoints().await
-                                                {
-                                                    // Rollback on failure
-                                                    if let Some(sc) = &session_control {
-                                                        let _ = sc.rollback();
-                                                    }
-                                                    let msg = format!(
-                                                        "Query '{}' auto-reset failed: could not clear checkpoints: {ce}",
-                                                        self.base.config.id
-                                                    );
-                                                    error!("{msg}");
-                                                    self.base
-                                                        .set_status(
-                                                            ComponentStatus::Error,
-                                                            Some(msg),
-                                                        )
-                                                        .await;
-                                                    return Err(anyhow::anyhow!(
-                                                        "AutoReset aborted: failed to clear checkpoints: {ce}",
-                                                    ));
-                                                }
-                                                // Write current config hash so next normal restart resumes correctly
-                                                let current_hash =
-                                                    super::compute_config_hash(&self.base.config);
-                                                if let Err(he) = checkpoint_store
-                                                    .write_config_hash(current_hash)
-                                                    .await
-                                                {
-                                                    warn!(
-                                                        "Query '{}' failed to write config hash during auto-reset: {he}",
-                                                        self.base.config.id
-                                                    );
-                                                }
 
                                                 // Commit the clearing session
                                                 if let Some(sc) = &session_control {
@@ -1963,9 +1977,15 @@ impl Query for DrasiQuery {
                                                         .await
                                                         .clone(),
                                                 };
+                                                let persisted = persisted_output_generation(
+                                                    &stores,
+                                                    &self.base.config.id,
+                                                )
+                                                .await;
                                                 let generation = {
                                                     let mut state = self.output_state.write().await;
-                                                    state.reset();
+                                                    let from = persisted.max(state.generation());
+                                                    state.reset_from_generation(from);
                                                     state.generation()
                                                 };
                                                 if let Err(e) = wipe_durable_output(
@@ -1987,6 +2007,34 @@ impl Query for DrasiQuery {
                                                         )
                                                         .await;
                                                     return Err(anyhow::anyhow!(msg));
+                                                }
+
+                                                if let Err(ce) =
+                                                    checkpoint_store.clear_checkpoints().await
+                                                {
+                                                    let msg = format!(
+                                                        "Query '{}' auto-reset failed: could not clear checkpoints: {ce}",
+                                                        self.base.config.id
+                                                    );
+                                                    error!("{msg}");
+                                                    self.base
+                                                        .set_status(
+                                                            ComponentStatus::Error,
+                                                            Some(msg),
+                                                        )
+                                                        .await;
+                                                    return Err(anyhow::anyhow!(
+                                                        "AutoReset aborted: failed to clear checkpoints: {ce}",
+                                                    ));
+                                                }
+                                                if let Err(he) = checkpoint_store
+                                                    .write_config_hash(current_hash)
+                                                    .await
+                                                {
+                                                    warn!(
+                                                        "Query '{}' failed to write config hash during auto-reset: {he}",
+                                                        self.base.config.id
+                                                    );
                                                 }
                                             }
 
