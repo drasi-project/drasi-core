@@ -25,7 +25,8 @@ use drasi_lib::state_store::StateStoreError;
 use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::activation::{
-    next_action, Action, Activation, ActivationState, MessageId, Operation, ResultKey,
+    length_prefixed, next_action, Action, Activation, ActivationState, MessageId, Operation,
+    ResultKey,
 };
 use crate::client::{
     A2AClient, CancelTaskRequest, DeliveryResult, OutboundPart, SendMessageRequest,
@@ -110,9 +111,7 @@ pub(crate) async fn run_loop(
                     "[{reaction_name}] Failed processing query '{}' seq {}: {error:#}",
                     query_result.query_id, query_result.sequence
                 );
-                if FailureAction::from_policy(policy) == FailureAction::Stop {
-                    break;
-                }
+                break;
             }
         }
 
@@ -219,6 +218,7 @@ async fn process_diff(
         diff_payload.operation,
         &activation,
         config.terminal_update_policy,
+        query_result.sequence,
     );
     let message_id = message_id(
         reaction_name,
@@ -226,7 +226,7 @@ async fn process_diff(
         &result_key,
         query_result.sequence,
     );
-    let activation_id = activation_id(&query_result.query_id, &result_key, query_result.sequence);
+    let activation_id = activation_id(&query_result.query_id, &result_key);
     let parts = build_parts(
         config,
         handlebars,
@@ -280,7 +280,16 @@ async fn process_diff(
             match outcome {
                 DeliveryResult::Delivered(response) => {
                     let next_state = match response {
-                        SendMessageResult::Message => activation.clone(),
+                        SendMessageResult::Message => match activation {
+                            ActivationState::Present(existing) => ActivationState::Present(
+                                existing.with_sequence(query_result.sequence),
+                            ),
+                            ActivationState::Absent => response_to_activation(
+                                SendMessageResult::Message,
+                                message_id,
+                                query_result,
+                            ),
+                        },
                         response => response_to_activation(response, message_id, query_result),
                     };
                     save_activation_state(base, activation_cache, &state_key, &next_state)
@@ -555,15 +564,21 @@ fn message_id(
     result_key: &ResultKey,
     sequence: u64,
 ) -> MessageId {
-    MessageId(format!("{reaction_id}-{query_id}-{result_key}-{sequence}"))
+    MessageId(format!(
+        "{}:{sequence}",
+        length_prefixed(&[reaction_id, query_id, result_key.as_str()])
+    ))
 }
 
-fn activation_id(query_id: &str, result_key: &ResultKey, sequence: u64) -> String {
-    format!("{query_id}:{result_key}:{sequence}")
+fn activation_id(query_id: &str, result_key: &ResultKey) -> String {
+    length_prefixed(&[query_id, result_key.as_str()])
 }
 
 fn activation_state_key(query_id: &str, result_key: &ResultKey) -> String {
-    format!("{ACTIVATION_STATE_KEY_PREFIX}:{query_id}:{result_key}")
+    format!(
+        "{ACTIVATION_STATE_KEY_PREFIX}:{}",
+        length_prefixed(&[query_id, result_key.as_str()])
+    )
 }
 
 async fn load_activation_state(

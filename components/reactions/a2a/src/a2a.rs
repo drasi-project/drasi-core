@@ -193,4 +193,8 @@ impl Reaction for A2AReaction {
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
         ReactionRecoveryPolicy::Strict
     }
+
+    async fn deprovision(&self) -> anyhow::Result<()> {
+        self.base.deprovision_common().await
+    }
 }

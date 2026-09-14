@@ -19,8 +19,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::component_graph::ComponentGraph;
 use drasi_lib::context::ReactionRuntimeContext;
+use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{MemoryStateStoreProvider, Reaction};
 use drasi_reaction_a2a::{A2AReaction, TerminalUpdatePolicy};
 use serde_json::json;
@@ -156,7 +158,15 @@ async fn add_update_delete_sendmessage_followup_and_cancel() {
     assert_eq!(add_body["params"]["message"]["role"], json!("ROLE_USER"));
     assert_eq!(
         add_body["params"]["message"]["messageId"],
-        json!("a2a-it-q1-INV-1-1")
+        json!("6:a2a-it:2:q1:5:INV-1:1")
+    );
+    assert_eq!(
+        add_body["params"]["message"]["metadata"]["activationId"],
+        json!("2:q1:5:INV-1")
+    );
+    assert_eq!(
+        update_body["params"]["message"]["metadata"]["activationId"],
+        json!("2:q1:5:INV-1")
     );
     assert!(add_body["params"]["message"].get("taskId").is_none());
     assert!(add_body["params"]["message"]["parts"][0]
@@ -417,13 +427,11 @@ async fn replay_does_not_issue_extra_create() {
         ))
         .await
         .expect("enqueue replay add");
-    wait_for_requests(&server, 2, Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
     reaction.stop().await.expect("stop reaction");
 
     let requests = server.received_requests().await.expect("read requests");
-    let replay_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-    assert_eq!(replay_body["method"], json!("SendMessage"));
-    assert_eq!(replay_body["params"]["message"]["taskId"], json!("task-1"));
+    assert_eq!(requests.len(), 1);
 }
 
 #[tokio::test]
@@ -465,4 +473,100 @@ async fn activation_survives_process_restart() {
     let update_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
     assert_eq!(update_body["method"], json!("SendMessage"));
     assert_eq!(update_body["params"]["message"]["taskId"], json!("task-1"));
+}
+
+async fn wait_for_error(reaction: &A2AReaction, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if reaction.status().await == ComponentStatus::Error {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for Error status, got {:?}",
+                reaction.status().await
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn json_rpc_error_on_http_400_fails_delivery() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "error": { "code": -32600, "message": "bad request" }
+        })))
+        .mount(&server)
+        .await;
+
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, memory_store()).await;
+    reaction.start().await.expect("start reaction");
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-9"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_error(&reaction, Duration::from_secs(3)).await;
+    reaction.stop().await.expect("stop reaction");
+}
+
+#[tokio::test]
+async fn success_without_result_fails_delivery() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": "1"
+        })))
+        .mount(&server)
+        .await;
+
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, memory_store()).await;
+    reaction.start().await.expect("start reaction");
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-10"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_error(&reaction, Duration::from_secs(3)).await;
+    reaction.stop().await.expect("stop reaction");
+}
+
+#[tokio::test]
+async fn deprovision_clears_activation_state() {
+    let server = mock_server::start().await;
+    mount_send_message_task(&server, "WORKING").await;
+    let store = memory_store();
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, store.clone()).await;
+    reaction.start().await.expect("start reaction");
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-8"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_requests(&server, 1, Duration::from_secs(3)).await;
+    reaction.stop().await.expect("stop reaction");
+
+    let key = "activation:2:q1:5:INV-8";
+    assert!(store.get("a2a-it", key).await.expect("get").is_some());
+    reaction.deprovision().await.expect("deprovision");
+    assert!(store.get("a2a-it", key).await.expect("get after").is_none());
 }

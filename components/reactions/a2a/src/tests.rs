@@ -15,7 +15,8 @@
 use serde_json::json;
 
 use crate::activation::{
-    next_action, Action, Activation, ActivationState, MessageId, Operation, TerminalUpdatePolicy,
+    length_prefixed, next_action, Action, Activation, ActivationState, MessageId, Operation,
+    TerminalUpdatePolicy,
 };
 use crate::client::{
     build_cancel_task_rpc, build_send_message_rpc, parse_send_message_result, CancelTaskRequest,
@@ -49,24 +50,25 @@ fn next_action_table_cells_are_covered() {
         next_action(
             Operation::Add,
             &ActivationState::Absent,
-            TerminalUpdatePolicy::Replace
+            TerminalUpdatePolicy::Replace,
+            1
         ),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace),
-        Action::SendFollowUp { .. }
-    ));
-    assert!(matches!(
-        next_action(Operation::Add, &one_shot, TerminalUpdatePolicy::Replace),
+        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 2),
         Action::Drop { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Replace),
+        next_action(Operation::Add, &one_shot, TerminalUpdatePolicy::Replace, 2),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Replace, 2),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Ignore),
+        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Ignore, 2),
         Action::Drop { .. }
     ));
 
@@ -74,45 +76,72 @@ fn next_action_table_cells_are_covered() {
         next_action(
             Operation::Update,
             &ActivationState::Absent,
-            TerminalUpdatePolicy::Replace
+            TerminalUpdatePolicy::Replace,
+            1
         ),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Update, &active, TerminalUpdatePolicy::Replace),
+        next_action(Operation::Update, &active, TerminalUpdatePolicy::Replace, 2),
         Action::SendFollowUp { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Update, &one_shot, TerminalUpdatePolicy::Replace),
+        next_action(
+            Operation::Update,
+            &one_shot,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
         Action::Drop { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Update, &terminal, TerminalUpdatePolicy::Replace),
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Update, &terminal, TerminalUpdatePolicy::Ignore),
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Ignore,
+            2
+        ),
         Action::Drop { .. }
     ));
 
     assert!(matches!(
-        next_action(Operation::Delete, &active, TerminalUpdatePolicy::Replace),
+        next_action(Operation::Delete, &active, TerminalUpdatePolicy::Replace, 2),
         Action::Cancel { .. }
     ));
     assert!(matches!(
         next_action(
             Operation::Delete,
             &ActivationState::Absent,
-            TerminalUpdatePolicy::Replace
+            TerminalUpdatePolicy::Replace,
+            1
         ),
         Action::Drop { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Delete, &one_shot, TerminalUpdatePolicy::Replace),
+        next_action(
+            Operation::Delete,
+            &one_shot,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
         Action::Drop { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Delete, &terminal, TerminalUpdatePolicy::Replace),
+        next_action(
+            Operation::Delete,
+            &terminal,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
         Action::Drop { .. }
     ));
 }
@@ -187,6 +216,11 @@ fn send_message_parser_distinguishes_task_and_message() {
 
     let invalid = parse_send_message_result(&json!({"id":"not-a-task"}));
     assert!(invalid.is_err());
+
+    let malformed_parts = parse_send_message_result(&json!({"parts": null}));
+    assert!(malformed_parts.is_err());
+    let missing_role = parse_send_message_result(&json!({"parts":[{"text":"x"}]}));
+    assert!(missing_role.is_err());
 }
 
 #[test]
@@ -204,7 +238,7 @@ fn cancel_task_rpc_shape_matches_contract() {
 fn send_message_rpc_shape_sets_role_and_parts() {
     let rpc = build_send_message_rpc(&SendMessageRequest {
         message_id: "msg-1".to_string(),
-        activation_id: "query:key:1".to_string(),
+        activation_id: length_prefixed(&["query", "key"]),
         task_id: None,
         parts: vec![
             OutboundPart::Text("Investigate".to_string()),
@@ -226,7 +260,7 @@ fn send_message_rpc_shape_sets_role_and_parts() {
     );
     assert_eq!(
         rpc["params"]["message"]["metadata"]["activationId"],
-        json!("query:key:1")
+        json!(length_prefixed(&["query", "key"]))
     );
     let parts = &rpc["params"]["message"]["parts"];
     assert!(parts[0].get("kind").is_none());
@@ -248,13 +282,50 @@ fn terminal_policy_replace_vs_ignore() {
     });
 
     assert!(matches!(
-        next_action(Operation::Update, &terminal, TerminalUpdatePolicy::Replace),
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Update, &terminal, TerminalUpdatePolicy::Ignore),
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Ignore,
+            2
+        ),
         Action::Drop { .. }
     ));
+}
+
+#[test]
+fn replayed_sequence_is_dropped() {
+    let active = ActivationState::Present(Activation::ActiveTask {
+        task_id: "task-1".to_string(),
+        context_id: "ctx-1".to_string(),
+        state: "WORKING".to_string(),
+        sequence: 4,
+    });
+    assert!(matches!(
+        next_action(Operation::Update, &active, TerminalUpdatePolicy::Replace, 4),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 3),
+        Action::Drop { .. }
+    ));
+}
+
+#[test]
+fn length_prefixed_ids_do_not_collide() {
+    let left = length_prefixed(&["q", "a:b"]);
+    let right = length_prefixed(&["q:a", "b"]);
+    assert_ne!(left, right);
+    assert_eq!(left, "1:q:3:a:b");
+    assert_eq!(right, "3:q:a:1:b");
 }
 
 #[test]

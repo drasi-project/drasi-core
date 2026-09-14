@@ -25,6 +25,7 @@ use serde_json::Value;
 
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_LOG_FIELD_LEN: usize = 512;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundPart {
@@ -140,28 +141,35 @@ impl A2AClient {
                             .await
                             .context("failed to decode JSON-RPC response body")?;
                         if let Some(error) = rpc.error {
-                            return Err(anyhow!(
-                                "A2A {method_name} returned JSON-RPC error {}: {}",
-                                error.code,
-                                error.message
-                            ));
+                            return Err(json_rpc_error(method_name, error.code, &error.message));
                         }
-                        return Ok(rpc.result);
+                        let Some(result) = rpc.result else {
+                            return Err(anyhow!(
+                                "A2A {method_name} JSON-RPC success response omitted result"
+                            ));
+                        };
+                        return Ok(Some(result));
+                    }
+
+                    let status_code = status.as_u16();
+                    let body = response.text().await.unwrap_or_default();
+                    if let Ok(rpc) = serde_json::from_str::<JsonRpcResponse>(&body) {
+                        if let Some(error) = rpc.error {
+                            return Err(json_rpc_error(method_name, error.code, &error.message));
+                        }
                     }
 
                     if is_retryable_status(status) {
                         if attempt < MAX_DELIVERY_ATTEMPTS {
                             warn!(
-                                "A2A {method_name} HTTP status {} on attempt {attempt}, retrying",
-                                status.as_u16()
+                                "A2A {method_name} HTTP status {status_code} on attempt {attempt}, retrying"
                             );
                             tokio::time::sleep(backoff).await;
                             backoff = backoff.saturating_mul(2);
                             continue;
                         }
                         anyhow::bail!(
-                            "A2A {method_name} failed with retryable status {} after {} attempts",
-                            status.as_u16(),
+                            "A2A {method_name} failed with retryable status {status_code} after {} attempts",
                             MAX_DELIVERY_ATTEMPTS
                         );
                     }
@@ -321,7 +329,30 @@ fn looks_like_task(value: &Value) -> bool {
 }
 
 fn looks_like_message(value: &Value) -> bool {
-    value.get("parts").is_some()
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    obj.get("role").and_then(Value::as_str).is_some()
+        && obj.get("parts").and_then(Value::as_array).is_some()
+}
+
+fn sanitize_log_field(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .take(MAX_LOG_FIELD_LEN)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if s.chars().count() > MAX_LOG_FIELD_LEN {
+        out.push('…');
+    }
+    out
+}
+
+fn json_rpc_error(method_name: &str, code: i64, message: &str) -> anyhow::Error {
+    anyhow!(
+        "A2A {method_name} returned JSON-RPC error {code}: {}",
+        sanitize_log_field(message)
+    )
 }
 
 fn task_state(value: &Value) -> Option<&str> {

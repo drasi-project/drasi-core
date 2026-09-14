@@ -90,6 +90,60 @@ pub enum Activation {
     },
 }
 
+impl Activation {
+    pub fn sequence(&self) -> u64 {
+        match self {
+            Activation::OneShot { sequence, .. }
+            | Activation::ActiveTask { sequence, .. }
+            | Activation::TerminalTask { sequence, .. } => *sequence,
+        }
+    }
+
+    pub fn with_sequence(self, sequence: u64) -> Self {
+        match self {
+            Activation::OneShot { message_id, .. } => Activation::OneShot {
+                message_id,
+                sequence,
+            },
+            Activation::ActiveTask {
+                task_id,
+                context_id,
+                state,
+                ..
+            } => Activation::ActiveTask {
+                task_id,
+                context_id,
+                state,
+                sequence,
+            },
+            Activation::TerminalTask {
+                task_id,
+                context_id,
+                state,
+                ..
+            } => Activation::TerminalTask {
+                task_id,
+                context_id,
+                state,
+                sequence,
+            },
+        }
+    }
+}
+
+pub(crate) fn length_prefixed(parts: &[&str]) -> String {
+    let mut out = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(':');
+        }
+        out.push_str(&part.len().to_string());
+        out.push(':');
+        out.push_str(part);
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivationState {
     Absent,
@@ -108,14 +162,21 @@ pub fn next_action(
     operation: Operation,
     activation: &ActivationState,
     policy: TerminalUpdatePolicy,
+    sequence: u64,
 ) -> Action {
+    if let ActivationState::Present(existing) = activation {
+        if existing.sequence() >= sequence {
+            return Action::Drop {
+                reason: "diff sequence already applied",
+            };
+        }
+    }
+
     match (operation, activation) {
         (Operation::Add, ActivationState::Absent) => Action::SendCreate,
-        (Operation::Add, ActivationState::Present(Activation::ActiveTask { task_id, .. })) => {
-            Action::SendFollowUp {
-                task_id: task_id.clone(),
-            }
-        }
+        (Operation::Add, ActivationState::Present(Activation::ActiveTask { .. })) => Action::Drop {
+            reason: "ADD ignored for active task",
+        },
         (Operation::Add, ActivationState::Present(Activation::OneShot { .. })) => Action::Drop {
             reason: "ADD ignored for one-shot activation",
         },
