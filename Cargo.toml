@@ -167,6 +167,8 @@ roaring = ">=0.11.2, <0.11.4"
 utoipa = { version = "4", features = ["chrono"] }
 drasi-index-rocksdb = { version = "0.6.2", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.3.5", path = "components/indexes/garnet" }
+drasi-state-store-redb = { version = "0.2.6", path = "components/state_stores/redb" }
+drasi-wal-redb = { version = "0.2.8", path = "components/wals/redb" }
 
 # Component plugins
 drasi-source-mssql = { version = "0.2.10", path = "components/sources/mssql" }

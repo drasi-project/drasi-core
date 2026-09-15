@@ -79,6 +79,10 @@ impl GarnetCheckpointStore {
     fn result_sequence_key(&self) -> String {
         format!("ss:{{{}}}:result_seq", self.query_id)
     }
+
+    fn output_generation_key(&self) -> String {
+        format!("ss:{{{}}}:output_gen", self.query_id)
+    }
 }
 
 #[async_trait]
@@ -306,6 +310,28 @@ impl CheckpointStore for GarnetCheckpointStore {
 
     async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
         let key = self.result_sequence_key();
+        let mut con = self.connection.clone();
+        match con.get::<String, Option<u64>>(key).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(IndexError::other(e)),
+        }
+    }
+
+    async fn write_output_generation(
+        &self,
+        _query_id: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        let key = self.output_generation_key();
+        let mut con = self.connection.clone();
+        con.set::<&str, String, ()>(&key, generation.to_string())
+            .await
+            .map_err(IndexError::other)?;
+        Ok(())
+    }
+
+    async fn read_output_generation(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+        let key = self.output_generation_key();
         let mut con = self.connection.clone();
         match con.get::<String, Option<u64>>(key).await {
             Ok(v) => Ok(v),
