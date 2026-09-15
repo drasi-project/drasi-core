@@ -597,6 +597,7 @@ mod tests {
             nodes: HashSet::from(["Item".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         }
     }

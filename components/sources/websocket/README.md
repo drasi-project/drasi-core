@@ -6,41 +6,61 @@ after each handshake, mapping, bounded subscriber backpressure, and reconnects.
 
 ## Configuration
 
-```yaml
-url: "wss://feed.example.com/events"
-headers:
-  - name: Authorization
-    value:
-      kind: Secret
-      name: feed-token
+```rust
+use std::collections::HashMap;
 
-initialMessages:
-  - '{"type":"subscribe","stream":"sensors"}'
+use drasi_source_websocket::{
+    EffectiveFromConfig, ElementTemplate, ElementType, HeaderConfig, OperationType,
+    ReconnectConfig, SourceMapping, TimestampFormat, WebSocketSource, WebSocketSourceConfig,
+};
+use serde_json::json;
 
-itemsPath: events
-mappings:
-  - operationFrom: payload.op
-    operationMap:
-      insert: insert
-      update: update
-      delete: delete
-    elementType: node
-    effectiveFrom:
-      value: "{{payload.ts}}"
-      format: unix_millis
-    template:
-      id: "{{payload.id}}"
-      labels: ["Sensor"]
-      properties:
-        value: "{{payload.value}}"
-
-reconnect:
-  enabled: true
-  delayMs: 1000
-  maxDelayMs: 30000
-
-maxMessageSizeBytes: 1048576
-bufferCapacity: 64
+let source = WebSocketSource::new(
+    "sensor-feed",
+    WebSocketSourceConfig {
+        url: "wss://feed.example.com/events".to_string(),
+        headers: vec![HeaderConfig {
+            name: "Authorization".to_string(),
+            value: std::env::var("FEED_TOKEN")?,
+        }],
+        initial_messages: vec![
+            r#"{"type":"subscribe","stream":"sensors"}"#.to_string(),
+        ],
+        items_path: "events".to_string(),
+        mappings: vec![SourceMapping {
+            when: None,
+            operation: None,
+            operation_from: Some("payload.op".to_string()),
+            operation_map: Some(HashMap::from([
+                ("insert".to_string(), OperationType::Insert),
+                ("update".to_string(), OperationType::Update),
+                ("delete".to_string(), OperationType::Delete),
+            ])),
+            element_type: ElementType::Node,
+            effective_from: Some(EffectiveFromConfig::Explicit {
+                value: "{{payload.ts}}".to_string(),
+                format: TimestampFormat::UnixMillis,
+            }),
+            template: ElementTemplate {
+                id: "{{payload.id}}".to_string(),
+                labels: vec!["Sensor".to_string()],
+                properties: Some(json!({
+                    "value": "{{payload.value}}",
+                })),
+                from: None,
+                to: None,
+            },
+        }],
+        reconnect: ReconnectConfig {
+            enabled: true,
+            delay_ms: 1_000,
+            max_delay_ms: Some(30_000),
+        },
+        max_message_size_bytes: 1_048_576,
+        buffer_capacity: 64,
+        ..Default::default()
+    },
+)?;
 ```
 
 | Setting | Default | Valid values |
@@ -125,8 +145,8 @@ as `envelope`, and the source ID as `source_id`. Mapping paths and templates may
 address nested values. Mappings are checked in declaration order, and only the
 first match is applied. A valid message with no matching mapping produces no
 graph change. If the selected mapping cannot be applied, including a missing or
-unmapped dynamic `operationFrom`, the source logs a fixed summary without input
-values and skips the item.
+unmapped dynamic `operationFrom`, the source logs a warning with the mapping's
+one-based configuration index, without input values, and skips the item.
 
 When `effectiveFrom` is omitted or its rendered value is empty, the mapping
 engine uses the current Unix time in milliseconds. A simple template string is

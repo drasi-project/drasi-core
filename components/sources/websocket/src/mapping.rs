@@ -19,7 +19,7 @@ use drasi_core::models::SourceChange;
 use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_source_mapping::{ElementType, SourceMapping, SourceMappingEngine};
 use serde_json::{json, Value};
-use tracing::debug;
+use tracing::warn;
 
 use crate::config::WebSocketSourceConfig;
 
@@ -150,7 +150,10 @@ impl FrameMapper {
                 match self.engine.process_mapping(mapping, &context, source_id) {
                     Ok(change) => changes.push(change),
                     Err(_) => {
-                        debug!("[{source_id}] Skipping WebSocket item that could not be mapped")
+                        warn!(
+                            mapping_index = mapping_index + 1,
+                            "[{source_id}] Skipping WebSocket item that could not be mapped"
+                        )
                     }
                 }
                 break;
