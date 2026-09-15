@@ -19,8 +19,14 @@
 //! Requires a running Redis instance. Uses testcontainers via `shared_tests::redis_helpers`.
 //! Tests are marked `#[ignore]` for CI environments without Docker.
 
-use drasi_core::interface::{LiveResultsWriter, OutboxWriter, RowMutation};
-use drasi_index_garnet::{GarnetLiveResultsWriter, GarnetOutboxWriter};
+use std::sync::Arc;
+
+use drasi_core::interface::{
+    LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SessionGuard,
+};
+use drasi_index_garnet::{
+    GarnetLiveResultsWriter, GarnetOutboxWriter, GarnetSessionControl, GarnetSessionState,
+};
 use shared_tests::redis_helpers::{setup_redis, RedisGuard};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -145,6 +151,98 @@ async fn test_garnet_outbox_trim_before() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].0, 4);
     assert_eq!(entries[1].0, 5);
+}
+
+fn outbox_sequences(entries: &[(u64, Vec<u8>)]) -> Vec<u64> {
+    entries.iter().map(|(seq, _)| *seq).collect()
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_garnet_outbox_trim_before_without_active_session() {
+    let con = get_connection().await;
+    let qid = unique_query_id();
+    let direct = GarnetOutboxWriter::new(&qid, con.clone());
+    for i in 1..=5 {
+        direct.append(&qid, i, b"data").await.unwrap();
+    }
+
+    let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+    let writer = GarnetOutboxWriter::new(&qid, con).with_session_state(session_state);
+    let removed = writer.trim_before(&qid, 4).await.unwrap();
+    assert_eq!(removed, 3);
+    assert_eq!(
+        outbox_sequences(&writer.read_from(&qid, 0).await.unwrap()),
+        vec![4, 5]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_garnet_outbox_trim_before_in_session_rolls_back() {
+    let con = get_connection().await;
+    let qid = unique_query_id();
+    let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+    let session_control: Arc<dyn SessionControl> =
+        Arc::new(GarnetSessionControl::new(session_state.clone()));
+    let writer = GarnetOutboxWriter::new(&qid, con).with_session_state(session_state);
+
+    {
+        let guard = SessionGuard::begin(session_control.clone())
+            .await
+            .expect("begin");
+        for seq in 1..=4 {
+            writer.append(&qid, seq, b"data").await.unwrap();
+        }
+        guard.commit().await.expect("commit");
+    }
+
+    {
+        let guard = SessionGuard::begin(session_control.clone())
+            .await
+            .expect("begin");
+        writer.append(&qid, 5, b"five").await.unwrap();
+        writer.trim_before(&qid, 4).await.unwrap();
+        drop(guard);
+    }
+    assert_eq!(
+        outbox_sequences(&writer.read_from(&qid, 0).await.unwrap()),
+        vec![1, 2, 3, 4]
+    );
+
+    {
+        let guard = SessionGuard::begin(session_control).await.expect("begin");
+        writer.append(&qid, 5, b"five").await.unwrap();
+        writer.trim_before(&qid, 4).await.unwrap();
+        guard.commit().await.expect("commit");
+    }
+    assert_eq!(
+        outbox_sequences(&writer.read_from(&qid, 0).await.unwrap()),
+        vec![4, 5]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_garnet_outbox_trim_to_capacity_sees_uncommitted_appends() {
+    let con = get_connection().await;
+    let qid = unique_query_id();
+    let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+    let session_control: Arc<dyn SessionControl> =
+        Arc::new(GarnetSessionControl::new(session_state.clone()));
+    let writer = GarnetOutboxWriter::new(&qid, con).with_session_state(session_state);
+
+    let guard = SessionGuard::begin(session_control).await.expect("begin");
+    for seq in 1..=5 {
+        writer.append(&qid, seq, b"data").await.unwrap();
+    }
+    let removed = writer.trim_to_capacity(&qid, 2).await.unwrap();
+    assert_eq!(removed, 3);
+    guard.commit().await.expect("commit");
+    assert_eq!(
+        outbox_sequences(&writer.read_from(&qid, 0).await.unwrap()),
+        vec![4, 5]
+    );
 }
 
 #[tokio::test]
