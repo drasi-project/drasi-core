@@ -71,7 +71,21 @@ pub trait OutboxWriter: Send + Sync {
     /// Returns the number of entries removed. When a session is active,
     /// deletes are staged in that session so they commit atomically with a
     /// preceding [`append`](Self::append).
-    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError>;
+    ///
+    /// The default implementation keeps `[retain_from, latest]` by calling
+    /// [`trim_to_capacity`](Self::trim_to_capacity). It is not session-atomic.
+    /// Backends that join an outer transaction must override this.
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        let Some(latest) = self.read_latest_sequence(query_id).await? else {
+            return Ok(0);
+        };
+        if latest < retain_from {
+            return self.trim_to_capacity(query_id, 0).await;
+        }
+        let keep = usize::try_from(latest.saturating_sub(retain_from).saturating_add(1))
+            .unwrap_or(usize::MAX);
+        self.trim_to_capacity(query_id, keep).await
+    }
 
     /// Trim the outbox to at most `capacity` entries, removing the oldest.
     ///
