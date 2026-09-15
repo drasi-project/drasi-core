@@ -47,8 +47,8 @@ use crate::managers::{
 use crate::metrics::QueryOutputMetrics;
 use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
-    reconcile_durable_output, DurableOutputInconsistency, FetchError, OutboxGap, OutboxResponse,
-    QueryOutputState, SnapshotResponse,
+    next_output_generation, reconcile_durable_output, DurableOutputInconsistency, FetchError,
+    OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -557,15 +557,24 @@ async fn persisted_output_generation(
         .map(|value| value.unwrap_or(0))
 }
 
-async fn bump_output_generation_from_disk(
+/// Planned generation bump. RAM is not mutated until durable wipe succeeds.
+#[derive(Clone, Copy)]
+struct OutputGenerationPlan {
+    persisted: u64,
+    next: u64,
+}
+
+async fn plan_output_generation(
     output_state: &RwLock<QueryOutputState>,
     stores: &DurableOutputStores,
     query_id: &str,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<OutputGenerationPlan> {
     let persisted = persisted_output_generation(stores, query_id).await?;
-    let mut state = output_state.write().await;
-    state.reset_from_generation(persisted);
-    Ok(state.generation())
+    let ram = output_state.read().await.generation();
+    Ok(OutputGenerationPlan {
+        persisted,
+        next: next_output_generation(persisted, ram),
+    })
 }
 
 async fn durable_output_is_dirty(
@@ -817,7 +826,8 @@ async fn wipe_indexes_and_checkpoints(
 async fn autoreset_rebuild_after_output_inconsistency(
     query_id: &str,
     current_hash: u64,
-    generation: u64,
+    plan: OutputGenerationPlan,
+    output_state: &RwLock<QueryOutputState>,
     stores: &DurableOutputStores,
     indexes: PersistentIndexHandles<'_>,
 ) -> anyhow::Result<()> {
@@ -828,7 +838,13 @@ async fn autoreset_rebuild_after_output_inconsistency(
         .with_context(|| {
             format!("Query '{query_id}' failed to persist AutoReset in-progress marker")
         })?;
-    wipe_durable_output(query_id, stores, generation).await?;
+    wipe_durable_output(query_id, stores, plan.next).await?;
+    // RAM reset only after durable output is gone. A failed marker write
+    // must leave initialized state intact so a same-process retry hydrates.
+    output_state
+        .write()
+        .await
+        .reset_from_generation(plan.persisted);
     wipe_indexes_and_checkpoints(query_id, current_hash, &stores.checkpoint_store, indexes).await
 }
 
@@ -838,7 +854,8 @@ async fn autoreset_rebuild_after_output_inconsistency(
 async fn rebuild_output_and_indexes_in_open_session(
     query_id: &str,
     current_hash: u64,
-    generation: u64,
+    plan: OutputGenerationPlan,
+    output_state: &RwLock<QueryOutputState>,
     stores: &DurableOutputStores,
     indexes: PersistentIndexHandles<'_>,
 ) -> anyhow::Result<()> {
@@ -849,7 +866,11 @@ async fn rebuild_output_and_indexes_in_open_session(
         .with_context(|| {
             format!("Query '{query_id}' failed to persist AutoReset in-progress marker")
         })?;
-    wipe_durable_output(query_id, stores, generation).await?;
+    wipe_durable_output(query_id, stores, plan.next).await?;
+    output_state
+        .write()
+        .await
+        .reset_from_generation(plan.persisted);
     if let Err(ie) = clear_persistent_indexes(
         query_id,
         indexes.element_index,
@@ -1375,14 +1396,14 @@ impl Query for DrasiQuery {
                         "Query '{}' found incomplete AutoReset marker, finishing output and index wipe",
                         self.base.config.id
                     );
-                    let generation = match bump_output_generation_from_disk(
+                    let plan = match plan_output_generation(
                         &self.output_state,
                         &stores,
                         &self.base.config.id,
                     )
                     .await
                     {
-                        Ok(generation) => generation,
+                        Ok(plan) => plan,
                         Err(e) => {
                             let msg = format!(
                                 "Query '{}' failed to read output generation while finishing AutoReset: {e}",
@@ -1398,7 +1419,8 @@ impl Query for DrasiQuery {
                     if let Err(e) = rebuild_output_and_indexes_in_open_session(
                         &self.base.config.id,
                         current_hash,
-                        generation,
+                        plan,
+                        &self.output_state,
                         &stores,
                         index_handles,
                     )
@@ -1421,14 +1443,14 @@ impl Query for DrasiQuery {
                         "Query '{}' config hash changed ({stored_hash} -> {current_hash}), clearing all persistent state for full bootstrap",
                         self.base.config.id
                     );
-                    let generation = match bump_output_generation_from_disk(
+                    let plan = match plan_output_generation(
                         &self.output_state,
                         &stores,
                         &self.base.config.id,
                     )
                     .await
                     {
-                        Ok(generation) => generation,
+                        Ok(plan) => plan,
                         Err(e) => {
                             let msg = format!(
                                 "Query '{}' failed to read output generation on config change: {e}",
@@ -1444,7 +1466,8 @@ impl Query for DrasiQuery {
                     if let Err(e) = rebuild_output_and_indexes_in_open_session(
                         &self.base.config.id,
                         current_hash,
-                        generation,
+                        plan,
+                        &self.output_state,
                         &stores,
                         index_handles,
                     )
@@ -1486,14 +1509,14 @@ impl Query for DrasiQuery {
                             "Query '{}' first run found leftover durable output; wiping before bootstrap",
                             self.base.config.id
                         );
-                        let generation = match bump_output_generation_from_disk(
+                        let plan = match plan_output_generation(
                             &self.output_state,
                             &stores,
                             &self.base.config.id,
                         )
                         .await
                         {
-                            Ok(generation) => generation,
+                            Ok(plan) => plan,
                             Err(e) => {
                                 let msg = format!(
                                     "Query '{}' failed to read output generation on first run: {e}",
@@ -1509,7 +1532,8 @@ impl Query for DrasiQuery {
                         if let Err(e) = rebuild_output_and_indexes_in_open_session(
                             &self.base.config.id,
                             current_hash,
-                            generation,
+                            plan,
+                            &self.output_state,
                             &stores,
                             index_handles,
                         )
@@ -1543,14 +1567,14 @@ impl Query for DrasiQuery {
                         "Query '{}' failed to read config hash, clearing persistent state and starting fresh: {e}",
                         self.base.config.id
                     );
-                    let generation = match bump_output_generation_from_disk(
+                    let plan = match plan_output_generation(
                         &self.output_state,
                         &stores,
                         &self.base.config.id,
                     )
                     .await
                     {
-                        Ok(generation) => generation,
+                        Ok(plan) => plan,
                         Err(ge) => {
                             let msg = format!(
                                 "Query '{}' failed to read output generation after config hash read failure: {ge}",
@@ -1566,7 +1590,8 @@ impl Query for DrasiQuery {
                     if let Err(re) = rebuild_output_and_indexes_in_open_session(
                         &self.base.config.id,
                         current_hash,
-                        generation,
+                        plan,
+                        &self.output_state,
                         &stores,
                         index_handles,
                     )
@@ -1713,14 +1738,14 @@ impl Query for DrasiQuery {
                                 self.base.config.id
                             );
                             let current_hash = super::compute_config_hash(&self.base.config);
-                            let generation = match bump_output_generation_from_disk(
+                            let plan = match plan_output_generation(
                                 &self.output_state,
                                 &stores,
                                 &self.base.config.id,
                             )
                             .await
                             {
-                                Ok(generation) => generation,
+                                Ok(plan) => plan,
                                 Err(e) => {
                                     let msg = format!(
                                         "Query '{}' failed to read output generation before AutoReset: {e}",
@@ -1736,7 +1761,8 @@ impl Query for DrasiQuery {
                             if let Err(e) = autoreset_rebuild_after_output_inconsistency(
                                 &self.base.config.id,
                                 current_hash,
-                                generation,
+                                plan,
+                                &self.output_state,
                                 &stores,
                                 PersistentIndexHandles {
                                     session_control: &session_control,
@@ -2047,37 +2073,37 @@ impl Query for DrasiQuery {
                                                         .await
                                                         .clone(),
                                                 };
-                                                let generation =
-                                                    match bump_output_generation_from_disk(
-                                                        &self.output_state,
-                                                        &stores,
-                                                        &self.base.config.id,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(generation) => generation,
-                                                        Err(e) => {
-                                                            let msg = format!(
+                                                let plan = match plan_output_generation(
+                                                    &self.output_state,
+                                                    &stores,
+                                                    &self.base.config.id,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(plan) => plan,
+                                                    Err(e) => {
+                                                        let msg = format!(
                                                             "Query '{}' failed to read output generation before source-gap AutoReset: {e}",
                                                             self.base.config.id
                                                         );
-                                                            error!("{msg}");
-                                                            self.base
-                                                                .set_status(
-                                                                    ComponentStatus::Error,
-                                                                    Some(msg.clone()),
-                                                                )
-                                                                .await;
-                                                            return Err(anyhow::anyhow!(msg));
-                                                        }
-                                                    };
+                                                        error!("{msg}");
+                                                        self.base
+                                                            .set_status(
+                                                                ComponentStatus::Error,
+                                                                Some(msg.clone()),
+                                                            )
+                                                            .await;
+                                                        return Err(anyhow::anyhow!(msg));
+                                                    }
+                                                };
                                                 // Marker, then output wipe, then indexes. A crash
                                                 // mid-clear is finished on the next start.
                                                 if let Err(e) =
                                                     autoreset_rebuild_after_output_inconsistency(
                                                         &self.base.config.id,
                                                         current_hash,
-                                                        generation,
+                                                        plan,
+                                                        &self.output_state,
                                                         &stores,
                                                         PersistentIndexHandles {
                                                             session_control: &session_control,
