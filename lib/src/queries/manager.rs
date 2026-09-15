@@ -1712,9 +1712,11 @@ impl Query for DrasiQuery {
                                     "Query '{}' resuming source '{}' from checkpoint: seq={}",
                                     self.base.config.id, settings.source_id, cp.sequence
                                 );
-                            } else {
-                                // Restart with no checkpoint: replay from seq 0
-                                // instead of treating this as a first-ever bootstrap.
+                            } else if !settings.enable_bootstrap {
+                                // Streaming-only query: no checkpoint means replay
+                                // WAL from seq 0. Bootstrap-enabled queries stay
+                                // on the bootstrap path so an unfinished first
+                                // snapshot is not skipped.
                                 settings.resume_sequence = Some(0);
                             }
                         }

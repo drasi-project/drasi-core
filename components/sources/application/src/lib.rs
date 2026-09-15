@@ -660,10 +660,10 @@ impl Source for ApplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        // Replay only when the query asked to resume (`resume_from` or
-        // `resume_sequence`). Restart-without-checkpoint sets
-        // `resume_sequence = Some(0)` so WAL events are reprocessed. Fresh
-        // start and AutoReset leave resume unset and still bootstrap.
+        // Replay when the query asked to resume, or when bootstrap is
+        // requested but no provider is configured (WAL-only application
+        // sources). A configured provider must still run on a restart
+        // with no checkpoint — resume_sequence=0 would skip it.
         let wal_guard = self.wal.read().await;
         if let Some(wal) = wal_guard.as_ref() {
             let resume_seq = if let Some(ref resume_from) = settings.resume_from {
@@ -681,7 +681,12 @@ impl Source for ApplicationSource {
             } else {
                 settings.resume_sequence
             };
-            if let Some(seq) = resume_seq {
+            let replay_seq = match resume_seq {
+                Some(seq) => Some(seq),
+                None if settings.enable_bootstrap && !self.base.has_bootstrap_provider() => Some(0),
+                None => None,
+            };
+            if let Some(seq) = replay_seq {
                 let wal_clone = wal.clone();
                 drop(wal_guard);
                 return self

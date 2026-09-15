@@ -23,11 +23,16 @@ use drasi_core::interface::{
 };
 use drasi_core::models::ElementReference;
 use drasi_index_rocksdb::RocksDbIndexProvider;
+use drasi_lib::bootstrap::{
+    BootstrapContext as SourceBootstrapContext, BootstrapProvider, BootstrapRequest,
+    BootstrapResult,
+};
+use drasi_lib::channels::BootstrapEventSender;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
     CapacityPolicy, DrasiLib, DurabilityConfig, Query, Reaction, ReactionBase, ReactionBaseParams,
-    ReactionCheckpoint, ReactionRecoveryPolicy, ReactionRuntimeContext, RecoveryPolicy,
+    ReactionCheckpoint, ReactionRecoveryPolicy, ReactionRuntimeContext, RecoveryPolicy, Source,
     StateStoreProvider, StorageBackendRef,
 };
 use drasi_source_application::{
@@ -58,6 +63,8 @@ const DURABLE_ENV: &str = "DRASI_ATOMICITY_DURABLE_REACTION";
 const STAGE_ENV: &str = "DRASI_ATOMICITY_STAGE";
 const FAULT_READY_ENV: &str = "DRASI_ATOMICITY_FAULT_READY";
 const BOOTSTRAP_ENV: &str = "DRASI_ATOMICITY_ENABLE_BOOTSTRAP";
+const BOOTSTRAP_MARKER_ENV: &str = "DRASI_ATOMICITY_BOOTSTRAP_MARKER";
+const ATTACH_PROVIDER_ENV: &str = "DRASI_ATOMICITY_ATTACH_PROVIDER";
 
 const SOURCE_ID: &str = "people-source";
 const QUERY_ID: &str = "people-query";
@@ -605,6 +612,7 @@ struct Paths {
     journal: PathBuf,
     ready: PathBuf,
     fault_ready: PathBuf,
+    bootstrap_marker: PathBuf,
 }
 
 impl Paths {
@@ -627,6 +635,7 @@ impl Paths {
             journal: root.join("reaction-journal.jsonl"),
             ready: root.join("recover-ready.json"),
             fault_ready: root.join("fault-ready.json"),
+            bootstrap_marker: root.join("bootstrap-calls"),
         };
         std::fs::create_dir_all(&paths.rocks)?;
         std::fs::create_dir_all(&paths.wal_a)?;
@@ -649,6 +658,9 @@ impl Paths {
             journal: PathBuf::from(std::env::var(JOURNAL_ENV).context("journal path")?),
             ready: PathBuf::from(std::env::var(READY_ENV).context("ready path")?),
             fault_ready: PathBuf::from(std::env::var(FAULT_READY_ENV).context("fault ready path")?),
+            bootstrap_marker: PathBuf::from(
+                std::env::var(BOOTSTRAP_MARKER_ENV).unwrap_or_else(|_| "unused-bootstrap".into()),
+            ),
         })
     }
 
@@ -659,7 +671,8 @@ impl Paths {
             .env(STATE_ENV, &self.state)
             .env(JOURNAL_ENV, &self.journal)
             .env(READY_ENV, &self.ready)
-            .env(FAULT_READY_ENV, &self.fault_ready);
+            .env(FAULT_READY_ENV, &self.fault_ready)
+            .env(BOOTSTRAP_MARKER_ENV, &self.bootstrap_marker);
     }
 }
 
@@ -680,6 +693,7 @@ fn spawn_phase_child(
     durable_reaction: bool,
     stage: Option<PersistStage>,
     enable_bootstrap: bool,
+    attach_provider: bool,
 ) -> Result<()> {
     let executable = std::env::current_exe().context("resolve current test executable")?;
     let mut command = Command::new(executable);
@@ -691,7 +705,8 @@ fn spawn_phase_child(
         .env(PHASE_ENV, phase)
         .env(QUERY_KIND_ENV, query_kind)
         .env(DURABLE_ENV, if durable_reaction { "1" } else { "0" })
-        .env(BOOTSTRAP_ENV, if enable_bootstrap { "1" } else { "0" });
+        .env(BOOTSTRAP_ENV, if enable_bootstrap { "1" } else { "0" })
+        .env(ATTACH_PROVIDER_ENV, if attach_provider { "1" } else { "0" });
     if let Some(stage) = stage {
         command.env(STAGE_ENV, stage.as_str());
     }
@@ -835,6 +850,13 @@ async fn build_core(
         }),
     };
     let (source, handle) = ApplicationSource::new(SOURCE_ID, source_config)?;
+    if std::env::var(ATTACH_PROVIDER_ENV).ok().as_deref() == Some("1") {
+        source
+            .set_bootstrap_provider(Box::new(RecordingSourceBootstrap {
+                marker: paths.bootstrap_marker.clone(),
+            }))
+            .await;
+    }
     let wal = Arc::new(RedbWalProvider::new(&opts.wal));
     let mut builder = DrasiLib::builder()
         .with_id("query-output-atomicity")
@@ -1034,7 +1056,7 @@ async fn run_mid_txn_failure(stage: PersistStage) -> Result<()> {
         return Ok(());
     }
     let paths = Paths::new(&format!("{stage:?}"))?;
-    spawn_phase_child("fault", &paths, "normal", false, Some(stage), false)?;
+    spawn_phase_child("fault", &paths, "normal", false, Some(stage), false, false)?;
     let failed: DurableObservation = serde_json::from_slice(
         &std::fs::read(&paths.fault_ready).context("read fault observation")?,
     )
@@ -1046,7 +1068,7 @@ async fn run_mid_txn_failure(stage: PersistStage) -> Result<()> {
     );
     assert_output_absent(&failed, &format!("{stage:?} after rollback"));
 
-    spawn_phase_child("recover", &paths, "normal", false, None, false)?;
+    spawn_phase_child("recover", &paths, "normal", false, None, false, false)?;
     let recovered = read_recover_observation(&paths.ready)?;
     assert_eq!(
         recovered.snapshot_seq, 1,
@@ -1089,6 +1111,7 @@ async fn zero_checkpoint_recovery_with_bootstrap_enabled_replays_wal() -> Result
         false,
         Some(PersistStage::BeforeSourceCheckpoint),
         true,
+        false,
     )?;
     let failed: DurableObservation = serde_json::from_slice(
         &std::fs::read(&paths.fault_ready).context("read fault observation")?,
@@ -1097,11 +1120,30 @@ async fn zero_checkpoint_recovery_with_bootstrap_enabled_replays_wal() -> Result
     assert_eq!(failed.source_sequence.unwrap_or(0), 0);
     assert_output_absent(&failed, "bootstrap-enabled after rollback");
 
-    spawn_phase_child("recover", &paths, "normal", false, None, true)?;
+    spawn_phase_child("recover", &paths, "normal", false, None, true, false)?;
     let recovered = read_recover_observation(&paths.ready)?;
     assert_eq!(
         recovered.snapshot_seq, 1,
         "restart with bootstrap enabled must still replay the rolled-back WAL event"
+    );
+    paths.cleanup();
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_without_checkpoint_still_bootstraps() -> Result<()> {
+    if in_recover_child() {
+        return Ok(());
+    }
+    let paths = Paths::new("bootstrap-restart")?;
+    spawn_phase_child("bootstrap_idle", &paths, "normal", false, None, true, true)?;
+    let first = bootstrap_call_count(&paths.bootstrap_marker)?;
+    assert_eq!(first, 1, "first start must invoke bootstrap");
+    spawn_phase_child("bootstrap_idle", &paths, "normal", false, None, true, true)?;
+    let second = bootstrap_call_count(&paths.bootstrap_marker)?;
+    assert_eq!(
+        second, 2,
+        "restart with no checkpoint must invoke bootstrap again, got {second}"
     );
     paths.cleanup();
     Ok(())
@@ -1135,6 +1177,7 @@ async fn fail_after_commit_before_in_memory_update_hydrates_on_restart() -> Resu
         true,
         Some(PersistStage::AfterCommit),
         false,
+        false,
     )?;
     let committed: DurableObservation = serde_json::from_slice(
         &std::fs::read(&paths.fault_ready).context("read fault observation")?,
@@ -1150,7 +1193,7 @@ async fn fail_after_commit_before_in_memory_update_hydrates_on_restart() -> Resu
         "dispatch must not happen after a post-commit failure"
     );
 
-    spawn_phase_child("recover", &paths, "normal", true, None, false)?;
+    spawn_phase_child("recover", &paths, "normal", true, None, false, false)?;
     let recovered = read_recover_observation(&paths.ready)?;
     assert_eq!(
         recovered.snapshot_seq, 1,
@@ -1183,6 +1226,7 @@ async fn fail_during_process_due_futures_output_persist_rolls_back() -> Result<(
         false,
         Some(PersistStage::BeforeOutboxAppend),
         false,
+        false,
     )?;
     let failed: DurableObservation = serde_json::from_slice(
         &std::fs::read(&paths.fault_ready).context("read fault observation")?,
@@ -1201,7 +1245,7 @@ async fn fail_during_process_due_futures_output_persist_rolls_back() -> Result<(
     assert!(failed.outbox_sequences.is_empty());
     assert_eq!(failed.live_row_count, 0);
 
-    spawn_phase_child("recover", &paths, "future", false, None, false)?;
+    spawn_phase_child("recover", &paths, "future", false, None, false, false)?;
     let recovered = read_recover_observation(&paths.ready)?;
     assert_eq!(
         recovered.snapshot_seq, 1,
@@ -1307,8 +1351,62 @@ async fn query_output_atomicity_phase() -> Result<()> {
     match std::env::var(PHASE_ENV).ok().as_deref() {
         Some("fault") => run_fault_phase().await,
         Some("recover") => run_recover_phase().await,
+        Some("bootstrap_idle") => run_bootstrap_idle_phase().await,
         _ => Ok(()),
     }
+}
+
+struct RecordingSourceBootstrap {
+    marker: PathBuf,
+}
+
+#[async_trait]
+impl BootstrapProvider for RecordingSourceBootstrap {
+    async fn bootstrap(
+        &self,
+        _request: BootstrapRequest,
+        _context: &SourceBootstrapContext,
+        _event_tx: BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+    ) -> anyhow::Result<BootstrapResult> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.marker)
+            .context("open bootstrap marker")?;
+        file.write_all(b"call\n")?;
+        file.sync_all()?;
+        Ok(BootstrapResult::default())
+    }
+}
+
+fn bootstrap_call_count(path: &Path) -> Result<usize> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(contents.lines().filter(|line| !line.is_empty()).count()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error).context("read bootstrap marker"),
+    }
+}
+
+async fn run_bootstrap_idle_phase() -> Result<()> {
+    let paths = Paths::from_env()?;
+    let (core, source) = build_core(
+        &paths,
+        FixtureOpts {
+            query_text: QUERY_TEXT,
+            fault: None,
+            include_reaction: false,
+            durable_reaction: false,
+            captured: Arc::new(RwLock::new(Vec::new())),
+            wal: paths.wal_a.clone(),
+        },
+    )
+    .await?;
+    start_running(&core).await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    shutdown_and_release(core, source).await?;
+    Ok(())
 }
 
 async fn run_fault_phase() -> Result<()> {
