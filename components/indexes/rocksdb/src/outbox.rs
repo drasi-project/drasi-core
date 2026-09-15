@@ -109,6 +109,33 @@ fn delete_keys(
     }
 }
 
+fn collect_prefix_keys(
+    iter: impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
+    prefix: &[u8],
+    retain_from: Option<u64>,
+) -> Result<Vec<Vec<u8>>, IndexError> {
+    let mut keys = Vec::new();
+    for item in iter {
+        match item {
+            Ok((key, _)) => {
+                if !key.starts_with(prefix) {
+                    break;
+                }
+                match retain_from {
+                    Some(retain_from) => match sequence_from_key(&key, prefix.len()) {
+                        Some(seq) if seq < retain_from => keys.push(key.to_vec()),
+                        Some(_) => break,
+                        None => {}
+                    },
+                    None => keys.push(key.to_vec()),
+                }
+            }
+            Err(e) => return Err(IndexError::other(e)),
+        }
+    }
+    Ok(keys)
+}
+
 #[async_trait]
 impl OutboxWriter for RocksDbOutboxWriter {
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
@@ -241,29 +268,35 @@ impl OutboxWriter for RocksDbOutboxWriter {
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            let iter = db.iterator_cf(
-                &cf,
-                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-            let mut keys: Vec<Vec<u8>> = Vec::new();
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        match sequence_from_key(&key, prefix.len()) {
-                            Some(seq) if seq < retain_from => keys.push(key.to_vec()),
-                            Some(_) => break,
-                            None => {}
-                        }
+            if require_session {
+                session_state.with_txn(|txn| {
+                    let keys = collect_prefix_keys(
+                        txn.iterator_cf(
+                            &cf,
+                            IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+                        ),
+                        &prefix,
+                        Some(retain_from),
+                    )?;
+                    let removed = keys.len();
+                    for key in &keys {
+                        txn.delete_cf(&cf, key).map_err(IndexError::other)?;
                     }
-                    Err(e) => return Err(IndexError::other(e)),
-                }
+                    Ok(removed)
+                })
+            } else {
+                let keys = collect_prefix_keys(
+                    db.iterator_cf(
+                        &cf,
+                        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+                    ),
+                    &prefix,
+                    Some(retain_from),
+                )?;
+                let removed = keys.len();
+                delete_keys(&db, &session_state, false, &cf, &keys)?;
+                Ok(removed)
             }
-            let removed = keys.len();
-            delete_keys(&db, &session_state, require_session, &cf, &keys)?;
-            Ok(removed)
         })
         .await
         .map_err(IndexError::other)?
@@ -277,23 +310,27 @@ impl OutboxWriter for RocksDbOutboxWriter {
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-
-            let iter = db.iterator_cf(
-                &cf,
-                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-            let mut keys: Vec<Vec<u8>> = Vec::new();
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        keys.push(key.to_vec());
-                    }
-                    Err(e) => return Err(IndexError::other(e)),
-                }
-            }
+            let keys = if require_session {
+                session_state.with_txn(|txn| {
+                    collect_prefix_keys(
+                        txn.iterator_cf(
+                            &cf,
+                            IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+                        ),
+                        &prefix,
+                        None,
+                    )
+                })?
+            } else {
+                collect_prefix_keys(
+                    db.iterator_cf(
+                        &cf,
+                        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+                    ),
+                    &prefix,
+                    None,
+                )?
+            };
 
             let total = keys.len();
             if total <= capacity {
