@@ -420,7 +420,13 @@ async fn stage_durable_query_output(
         return Ok(None);
     }
 
-    let next_seq = output_state.read().await.as_of_sequence().saturating_add(1);
+    let (next_seq, outbox_capacity) = {
+        let state = output_state.read().await;
+        (
+            state.as_of_sequence().saturating_add(1),
+            state.outbox_capacity(),
+        )
+    };
     let query_result = QueryResult::with_profiling(
         query_id.to_string(),
         next_seq,
@@ -451,7 +457,12 @@ async fn stage_durable_query_output(
                 "Query '{query_id}' failed to serialize result seq={next_seq} for outbox: {e}"
             ))
         })?;
-        writer.append(query_id, next_seq, &data).await?;
+        let retain_from = next_seq
+            .saturating_sub(outbox_capacity as u64)
+            .saturating_add(1);
+        writer
+            .append_and_trim(query_id, next_seq, &data, retain_from)
+            .await?;
     }
 
     if let Some(writer) = live_results_writer {
@@ -542,8 +553,8 @@ fn overlay_post_commit_profiling(
 
 /// Apply committed diffs to in-memory output state and dispatch to reactions.
 ///
-/// Durable output must already have been staged and committed. This path never
-/// writes durable state except a best-effort outbox trim after success.
+/// Durable output must already have been staged and committed. This path does
+/// not write durable state; outbox eviction is staged with the append.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
@@ -551,8 +562,6 @@ async fn dispatch_query_results(
     query_id: &str,
     output_state: &RwLock<QueryOutputState>,
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
-    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
-    outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
     staged_result: Option<QueryResult>,
@@ -566,7 +575,7 @@ async fn dispatch_query_results(
         return;
     }
 
-    let arc_result = {
+    {
         let tx_start = std::time::Instant::now();
         let mut state = output_state.write().await;
 
@@ -622,14 +631,6 @@ async fn dispatch_query_results(
             if let Err(e) = dispatcher.dispatch_change(result.clone()).await {
                 debug!("Failed to dispatch result for query '{query_id}': {e}");
             }
-        }
-
-        result
-    };
-
-    if let Some(writer) = outbox_writer {
-        if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
-            warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
         }
     }
 }
@@ -2834,7 +2835,6 @@ impl Query for DrasiQuery {
         let position_handles_for_processor = position_handles;
         let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
         let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
-        let outbox_capacity_for_processor = self.output_state.read().await.outbox_capacity();
         let output_metrics_for_processor = self.output_metrics.clone();
         let source_ids_for_processor: Vec<String> = self
             .base
@@ -3009,8 +3009,6 @@ impl Query for DrasiQuery {
                                                         &query_id,
                                                         &output_state,
                                                         &base_dispatchers,
-                                                        &outbox_writer_for_processor,
-                                                        outbox_capacity_for_processor,
                                                         profiling,
                                                         &output_metrics_for_processor,
                                                         staged_seq.take(),
@@ -3108,8 +3106,6 @@ impl Query for DrasiQuery {
                                                     &query_id,
                                                     &output_state,
                                                     &base_dispatchers,
-                                                    &outbox_writer_for_processor,
-                                                    outbox_capacity_for_processor,
                                                     profiling,
                                                     &output_metrics_for_processor,
                                                     staged_seq.take(),
