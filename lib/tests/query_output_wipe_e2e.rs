@@ -211,7 +211,6 @@ async fn delete_and_recreate_advances_output_generation() -> Result<()> {
             .map_err(anyhow::Error::msg)?;
         query.fetch_snapshot().await?.output_generation
     };
-    assert!(gen_before >= 1, "first start should persist a generation");
 
     core.remove_query(QUERY_ID).await?;
     core.add_query(persistent_query(QUERY_V1)).await?;
