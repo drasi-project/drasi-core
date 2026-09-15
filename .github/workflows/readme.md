@@ -194,7 +194,7 @@ This runs automatically during the release process - no manual invocation needed
   - Note: Performance tests are skipped for draft pull requests.
 
 ### [test-integration.yml](test-integration.yml)
-- **Purpose**: Runs `#[ignore]`d plugin integration and end-to-end tests (Postgres, MySQL, MSSQL, Kafka, Neo4j, Kubernetes, Oracle, OTel, Cloudflare Radar, Loki, RabbitMQ, SQS, Azure Storage, Garnet). Live-network tests that need credentials are not included.
+- **Purpose**: Runs `#[ignore]`d plugin integration and end-to-end tests that start containers. The package list is discovered from the workspace (`cargo run -p xtask -- list-integration-test-matrix`), so new crates are included automatically. Live-network tests that need credentials are not included.
 - **Trigger**:
   - Pull requests to `main`, `feature/*`, `feature-lib`, or `release/*` (non-draft).
   - Manual `workflow_dispatch`.

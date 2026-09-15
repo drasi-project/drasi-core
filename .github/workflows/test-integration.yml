@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Runs #[ignore]d plugin integration/e2e tests that need external services.
+# Runs #[ignore]d plugin integration/e2e tests that start containers.
+# The package list is discovered from the workspace (xtask
+# list-integration-test-matrix), so new crates are picked up automatically.
 # Default `cargo test` (test.yml) skips these. Live-network / credential
 # ignored tests are not included.
 
@@ -37,84 +39,74 @@ permissions:
   contents: read
 
 jobs:
+  discover:
+    name: Discover integration tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_jobs: ${{ steps.matrix.outputs.has_jobs }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo registry
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo index
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+
+      - name: Cache Cargo build
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-xtask-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-xtask-
+            ${{ runner.os }}-cargo-build-
+
+      - name: Build integration test matrix
+        id: matrix
+        run: |
+          matrix="$(cargo run -p xtask --quiet -- list-integration-test-matrix)"
+          {
+            echo "matrix<<EOF"
+            echo "${matrix}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if echo "${matrix}" | grep -q '"include":\[\]'; then
+            echo "has_jobs=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_jobs=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Discovered matrix:"
+          echo "${matrix}"
+
   integration:
     name: ${{ matrix.name }}
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: discover
+    if: >-
+      ${{ !cancelled()
+        && needs.discover.result == 'success'
+        && needs.discover.outputs.has_jobs == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: Postgres source
-            timeout: 60
-            extra: none
-            command: |
-              cargo test -p drasi-source-postgres --test integration_tests -- --ignored --nocapture --test-threads=1
-
-          - name: MySQL source
-            timeout: 45
-            extra: none
-            command: |
-              cargo test -p drasi-source-mysql --test integration_test -- --ignored --nocapture --test-threads=1
-
-          - name: MSSQL source
-            timeout: 60
-            extra: none
-            command: |
-              cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture --test-threads=1
-
-          - name: Kafka source
-            timeout: 45
-            extra: none
-            command: |
-              cargo test -p drasi-source-kafka --test integration -- --ignored --nocapture --test-threads=1
-
-          - name: Neo4j source
-            timeout: 45
-            extra: none
-            command: |
-              cargo test -p drasi-source-neo4j --test integration_tests -- --ignored --nocapture --test-threads=1
-
-          - name: Kubernetes source
-            timeout: 60
-            extra: none
-            command: |
-              cargo test -p drasi-source-kubernetes --test integration_tests -- --ignored --nocapture --test-threads=1
-
-          - name: Oracle source
-            timeout: 90
-            extra: oracle
-            command: |
-              cargo test -p drasi-source-oracle --test integration_test -- --ignored --nocapture --test-threads=1
-
-          - name: OTel source
-            timeout: 45
-            extra: none
-            command: |
-              cargo test -p drasi-source-otel --test integration_test -- --ignored --nocapture --test-threads=1
-
-          - name: Cloudflare Radar source
-            timeout: 45
-            extra: none
-            command: |
-              cargo test -p drasi-source-cloudflare-radar --test integration_test -- --ignored --nocapture --test-threads=1
-
-          - name: Reactions
-            timeout: 60
-            extra: none
-            command: |
-              cargo test -p drasi-reaction-loki --test loki_integration_tests -- --ignored --nocapture --test-threads=1
-              cargo test -p drasi-reaction-rabbitmq --test integration_test -- --ignored --nocapture --test-threads=1
-              cargo test -p drasi-reaction-aws-sqs --test sqs_tests -- --ignored --nocapture --test-threads=1
-              cargo test -p drasi-reaction-azure-storage --test integration_tests -- --ignored --nocapture --test-threads=1
-
-          - name: Garnet index
-            timeout: 45
-            extra: none
-            command: |
-              cargo test -p drasi-index-garnet -- --ignored --nocapture --test-threads=1
-
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -169,10 +161,11 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-integration-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-integration-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-integration-${{ matrix.name }}-
+            ${{ runner.os }}-cargo-integration-${{ matrix.package }}-
             ${{ runner.os }}-cargo-build-
 
       - name: Run ignored integration tests
-        run: ${{ matrix.command }}
+        run: |
+          cargo test -p ${{ matrix.package }} --test ${{ matrix.test }} -- --ignored --nocapture --test-threads=1

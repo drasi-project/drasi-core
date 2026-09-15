@@ -14,6 +14,8 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod integration_matrix;
+
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -382,6 +384,7 @@ fn main() {
         Some("build-plugins") => build_plugins(&args[2..]),
         Some("check-publish-dependency-cycles") => check_publish_dependency_cycles(),
         Some("list-plugins") => list_plugins(),
+        Some("list-integration-test-matrix") => list_integration_test_matrix(),
         Some("publish-plugins") => publish_plugins(&args[2..]),
         _ => {
             eprintln!("Usage: cargo xtask <command>");
@@ -394,6 +397,9 @@ fn main() {
                 "  check-publish-dependency-cycles  Check publishable packages for dev-dependency cycles"
             );
             eprintln!("  list-plugins               List all discovered dynamic plugin crates");
+            eprintln!(
+                "  list-integration-test-matrix  List ignored container integration tests as a GitHub Actions matrix"
+            );
             eprintln!("  publish-plugins [OPTIONS]   Publish built plugins as OCI artifacts");
             eprintln!();
             eprintln!("build-plugins options:");
@@ -418,6 +424,16 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn list_integration_test_matrix() {
+    let metadata = load_cargo_metadata(true);
+    let packages = metadata.packages.into_iter().filter_map(|package| {
+        let dir = package.manifest_path.parent()?.to_path_buf();
+        Some((package.name, dir))
+    });
+    let jobs = integration_matrix::discover_jobs(packages);
+    integration_matrix::print_matrix(&jobs);
 }
 
 fn list_plugins() {
@@ -1327,6 +1343,53 @@ fn triple_to_arch_suffix(triple: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_ignored_container_integration_tests_in_workspace() {
+        let metadata = load_cargo_metadata(true);
+        let packages = metadata.packages.into_iter().filter_map(|package| {
+            let dir = package.manifest_path.parent()?.to_path_buf();
+            Some((package.name, dir))
+        });
+        let jobs = integration_matrix::discover_jobs(packages);
+        let keys: BTreeSet<(String, String)> = jobs
+            .iter()
+            .map(|job| (job.package.clone(), job.test.clone()))
+            .collect();
+
+        for expected in [
+            ("drasi-source-postgres", "integration_tests"),
+            ("drasi-source-mysql", "integration_test"),
+            ("drasi-source-mssql", "integration_test"),
+            ("drasi-source-kafka", "integration"),
+            ("drasi-source-neo4j", "integration_tests"),
+            ("drasi-source-kubernetes", "integration_tests"),
+            ("drasi-source-oracle", "integration_test"),
+            ("drasi-source-otel", "integration_test"),
+            ("drasi-source-cloudflare-radar", "integration_test"),
+            ("drasi-reaction-loki", "loki_integration_tests"),
+            ("drasi-reaction-rabbitmq", "integration_test"),
+            ("drasi-reaction-aws-sqs", "sqs_tests"),
+            ("drasi-reaction-azure-storage", "integration_tests"),
+            ("drasi-index-garnet", "outbox_live_results_tests"),
+            ("drasi-index-garnet", "scenario_tests"),
+        ] {
+            assert!(
+                keys.contains(&(expected.0.to_string(), expected.1.to_string())),
+                "expected to discover {} / {}, got {keys:?}",
+                expected.0,
+                expected.1
+            );
+        }
+
+        assert!(!keys.iter().any(|(package, _)| package == "drasi-host-sdk"));
+        assert!(!keys
+            .iter()
+            .any(|(package, test)| package.contains("storedproc") && test == "recovery_e2e"));
+        assert!(!keys
+            .iter()
+            .any(|(package, _)| package == "drasi-reaction-eventgrid"));
+    }
 
     fn package(name: &str, publishable: bool, dependencies: Vec<Dependency>) -> Package {
         Package {
