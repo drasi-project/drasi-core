@@ -457,11 +457,12 @@ async fn stage_durable_query_output(
                 "Query '{query_id}' failed to serialize result seq={next_seq} for outbox: {e}"
             ))
         })?;
-        writer.append(query_id, next_seq, &data).await?;
         let retain_from = next_seq
             .saturating_sub(outbox_capacity as u64)
             .saturating_add(1);
-        writer.trim_before(query_id, retain_from).await?;
+        writer
+            .append_and_trim(query_id, next_seq, &data, retain_from)
+            .await?;
     }
 
     if let Some(writer) = live_results_writer {
