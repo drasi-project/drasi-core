@@ -63,6 +63,8 @@ impl A2AReactionBuilder {
         self
     }
 
+    /// Alias of [`with_query`](Self::with_query); reads naturally at call
+    /// sites (e.g. `…from_query("orders")…`).
     pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self

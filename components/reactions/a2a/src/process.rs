@@ -36,6 +36,7 @@ use crate::config::A2AReactionConfig;
 
 const ACTIVATION_STATE_KEY_PREFIX: &str = "activation";
 const DATA_MEDIA_TYPE: &str = "application/vnd.drasi.change+json";
+const MAX_ACTIVATION_CACHE: usize = 10_000;
 
 pub fn build_handlebars() -> Handlebars<'static> {
     let mut handlebars = Handlebars::new();
@@ -573,7 +574,7 @@ pub(crate) struct DiffPayload {
 }
 
 impl DiffPayload {
-    fn from_result_diff(diff: &ResultDiff) -> Option<Self> {
+    pub(crate) fn from_result_diff(diff: &ResultDiff) -> Option<Self> {
         match diff {
             ResultDiff::Add { data, .. } => Some(Self {
                 operation: Operation::Add,
@@ -769,7 +770,7 @@ async fn load_activation_state(
     }
 
     let Some(store) = base.state_store().await else {
-        activation_cache.insert(state_key.to_string(), ActivationState::Absent);
+        remember_activation(activation_cache, state_key, ActivationState::Absent);
         return Ok(ActivationState::Absent);
     };
 
@@ -788,7 +789,7 @@ async fn load_activation_state(
         }
         None => ActivationState::Absent,
     };
-    activation_cache.insert(state_key.to_string(), state.clone());
+    remember_activation(activation_cache, state_key, state.clone());
     Ok(state)
 }
 
@@ -798,7 +799,7 @@ async fn save_activation_state(
     state_key: &str,
     state: &ActivationState,
 ) -> anyhow::Result<()> {
-    activation_cache.insert(state_key.to_string(), state.clone());
+    remember_activation(activation_cache, state_key, state.clone());
     if let ActivationState::Absent = state {
         clear_activation_state(base, activation_cache, state_key).await?;
         return Ok(());
@@ -834,6 +835,17 @@ async fn clear_activation_state(
         .map_err(state_store_error)
         .with_context(|| format!("state store delete failed for key '{state_key}'"))?;
     Ok(())
+}
+
+fn remember_activation(
+    cache: &mut HashMap<String, ActivationState>,
+    state_key: &str,
+    state: ActivationState,
+) {
+    if cache.len() >= MAX_ACTIVATION_CACHE && !cache.contains_key(state_key) {
+        cache.clear();
+    }
+    cache.insert(state_key.to_string(), state);
 }
 
 fn state_store_error(error: StateStoreError) -> anyhow::Error {

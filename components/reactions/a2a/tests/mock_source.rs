@@ -59,3 +59,38 @@ pub fn delete_result(query_id: &str, sequence: u64, before: Value) -> QueryResul
         HashMap::new(),
     )
 }
+
+pub fn aggregation_result(
+    query_id: &str,
+    sequence: u64,
+    before: Option<Value>,
+    after: Value,
+) -> QueryResult {
+    QueryResult::new(
+        query_id.to_string(),
+        sequence,
+        Utc::now(),
+        vec![ResultDiff::Aggregation {
+            before,
+            after,
+            row_signature: 0,
+        }],
+        HashMap::new(),
+    )
+}
+
+pub fn noop_then_add(query_id: &str, sequence: u64, after: Value) -> QueryResult {
+    QueryResult::new(
+        query_id.to_string(),
+        sequence,
+        Utc::now(),
+        vec![
+            ResultDiff::Noop,
+            ResultDiff::Add {
+                data: after,
+                row_signature: 0,
+            },
+        ],
+        HashMap::new(),
+    )
+}

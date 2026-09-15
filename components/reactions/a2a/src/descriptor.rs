@@ -225,9 +225,8 @@ impl ReactionPluginDescriptor for A2AReactionDescriptor {
         }
         if let Some(capacity) = &dto.priority_queue_capacity {
             let resolved: u64 = mapper.resolve_typed(capacity).await?;
-            let capacity = usize::try_from(resolved).map_err(|_| {
-                anyhow::anyhow!("`priorityQueueCapacity` does not fit in usize")
-            })?;
+            let capacity = usize::try_from(resolved)
+                .map_err(|_| anyhow::anyhow!("`priorityQueueCapacity` does not fit in usize"))?;
             builder = builder.with_priority_queue_capacity(capacity);
         }
         if let Some(policy) = dto.recovery_policy {

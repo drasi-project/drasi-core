@@ -28,11 +28,11 @@ use drasi_lib::component_graph::ComponentGraph;
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{MemoryStateStoreProvider, Reaction, ReactionRecoveryPolicy};
+use drasi_reaction_a2a::activation::ActivationState;
 use drasi_reaction_a2a::client::{
     build_cancel_task_rpc, build_get_task_rpc, build_send_message_rpc, parse_send_message_result,
     CancelTaskRequest, OutboundPart, SendMessageRequest, SendMessageResult,
 };
-use drasi_reaction_a2a::activation::ActivationState;
 use drasi_reaction_a2a::{
     next_action, A2AReaction, A2AReactionConfig, Action, Activation, MessageId, Operation,
     TerminalUpdatePolicy,
@@ -377,56 +377,20 @@ fn run_parser(report: &mut Report) {
             json!({"role":"ROLE_USER","parts":[{"text":"x"}]}),
             Ok("message"),
         ),
-        (
-            "missing id",
-            json!({"status":{"state":"WORKING"}}),
-            Err(()),
-        ),
-        (
-            "missing state",
-            json!({"id":"t"}),
-            Err(()),
-        ),
-        (
-            "empty object",
-            json!({}),
-            Err(()),
-        ),
-        (
-            "null",
-            json!(null),
-            Err(()),
-        ),
-        (
-            "array",
-            json!([]),
-            Err(()),
-        ),
-        (
-            "string",
-            json!("task"),
-            Err(()),
-        ),
-        (
-            "parts null",
-            json!({"parts": null}),
-            Err(()),
-        ),
+        ("missing id", json!({"status":{"state":"WORKING"}}), Err(())),
+        ("missing state", json!({"id":"t"}), Err(())),
+        ("empty object", json!({}), Err(())),
+        ("null", json!(null), Err(())),
+        ("array", json!([]), Err(())),
+        ("string", json!("task"), Err(())),
+        ("parts null", json!({"parts": null}), Err(())),
         (
             "parts without role",
             json!({"parts":[{"text":"x"}]}),
             Err(()),
         ),
-        (
-            "role without parts",
-            json!({"role":"ROLE_AGENT"}),
-            Err(()),
-        ),
-        (
-            "message not object",
-            json!({"message": "nope"}),
-            Err(()),
-        ),
+        ("role without parts", json!({"role":"ROLE_AGENT"}), Err(())),
+        ("message not object", json!({"message": "nope"}), Err(())),
         (
             "task missing id",
             json!({"task":{"status":{"state":"WORKING"}}}),
@@ -633,12 +597,7 @@ fn run_config(report: &mut Report) {
         ),
         (
             "bad template",
-            cfg(
-                "http://localhost/",
-                5000,
-                vec!["id"],
-                Some("{{#unclosed"),
-            ),
+            cfg("http://localhost/", 5000, vec!["id"], Some("{{#unclosed")),
             None,
             false,
         ),
@@ -752,7 +711,9 @@ fn run_rpc(report: &mut Report) {
         ),
         (
             "create untagged parts",
-            create["params"]["message"]["parts"][0].get("kind").is_none(),
+            create["params"]["message"]["parts"][0]
+                .get("kind")
+                .is_none(),
             "kind present".into(),
         ),
         (
@@ -1106,7 +1067,10 @@ fn process_cases() -> Vec<ProcCase> {
             token: None,
             template: None,
             keys: &["invoiceId"],
-            bodies: vec![task_body("task-1", "COMPLETED"), task_body("task-2", "WORKING")],
+            bodies: vec![
+                task_body("task-1", "COMPLETED"),
+                task_body("task-2", "WORKING"),
+            ],
             events: vec![
                 Event::Add {
                     seq: 1,
@@ -1265,7 +1229,10 @@ fn process_cases() -> Vec<ProcCase> {
             token: None,
             template: None,
             keys: &["invoiceId"],
-            bodies: vec![task_body("task-1", "COMPLETED"), task_body("task-2", "WORKING")],
+            bodies: vec![
+                task_body("task-1", "COMPLETED"),
+                task_body("task-2", "WORKING"),
+            ],
             events: vec![
                 Event::Add {
                     seq: 1,
@@ -1420,7 +1387,10 @@ fn process_cases() -> Vec<ProcCase> {
             token: None,
             template: None,
             keys: &["invoiceId"],
-            bodies: vec![task_body("task-1", "FAILED"), task_body("task-2", "WORKING")],
+            bodies: vec![
+                task_body("task-1", "FAILED"),
+                task_body("task-2", "WORKING"),
+            ],
             events: vec![
                 Event::Add {
                     seq: 1,
@@ -2143,7 +2113,9 @@ async fn run_one_process(case: &ProcCase) -> Result<(), String> {
         if !ok {
             let got = server.received_requests().await.unwrap_or_default().len();
             let _ = reaction.stop().await;
-            return Err(format!("timeout waiting {expected_len} requests, got {got}"));
+            return Err(format!(
+                "timeout waiting {expected_len} requests, got {got}"
+            ));
         }
     } else {
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -2240,12 +2212,9 @@ async fn run_live(report: &mut Report) {
         return;
     }
 
-    let client = drasi_reaction_a2a::client::A2AClient::new(
-        "http://127.0.0.1:9999/".into(),
-        None,
-        5000,
-    )
-    .expect("client");
+    let client =
+        drasi_reaction_a2a::client::A2AClient::new("http://127.0.0.1:9999/".into(), None, 5000)
+            .expect("client");
 
     let create = client
         .send_message(SendMessageRequest {
@@ -2263,7 +2232,11 @@ async fn run_live(report: &mut Report) {
             state,
             ..
         })) => {
-            report.pass("L001", "live", format!("create state={state} terminal={terminal}"));
+            report.pass(
+                "L001",
+                "live",
+                format!("create state={state} terminal={terminal}"),
+            );
             let got = client.get_task("gauntlet-get", &task_id).await;
             match got {
                 Ok(drasi_reaction_a2a::client::DeliveryResult::Delivered(
@@ -2327,7 +2300,12 @@ async fn run_live(report: &mut Report) {
             if body.contains("-32009") || body.contains("not supported") {
                 report.pass("L004", "live", "missing A2A-Version rejected");
             } else {
-                report.probe("L004", "live", "missing A2A-Version body", body.chars().take(180).collect::<String>());
+                report.probe(
+                    "L004",
+                    "live",
+                    "missing A2A-Version body",
+                    body.chars().take(180).collect::<String>(),
+                );
             }
         }
         Err(e) => report.skip("L004", "live", "curl missing version", e.to_string()),
@@ -2352,7 +2330,12 @@ async fn run_live(report: &mut Report) {
             if body.contains("TASK_STATE_SUBMITTED") || body.contains("task") {
                 report.pass("L005", "live", "A2A-Version 1.0 accepted");
             } else {
-                report.fail("L005", "live", "A2A-Version 1.0", body.chars().take(180).collect::<String>());
+                report.fail(
+                    "L005",
+                    "live",
+                    "A2A-Version 1.0",
+                    body.chars().take(180).collect::<String>(),
+                );
             }
         }
         Err(e) => report.fail("L005", "live", "curl versioned", e.to_string()),
@@ -2514,7 +2497,12 @@ async fn run_live(report: &mut Report) {
             if body.contains("-32601") {
                 report.pass("L013", "live", "tasks/get method not found");
             } else {
-                report.probe("L013", "live", "tasks/get", body.chars().take(120).collect::<String>());
+                report.probe(
+                    "L013",
+                    "live",
+                    "tasks/get",
+                    body.chars().take(120).collect::<String>(),
+                );
             }
         }
         Err(e) => report.fail("L013", "live", "tasks/get", e.to_string()),

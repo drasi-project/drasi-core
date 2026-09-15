@@ -27,6 +27,7 @@ use serde_json::Value;
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_LOG_FIELD_LEN: usize = 512;
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const A2A_PROTOCOL_VERSION: &str = "1.0";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,10 +157,9 @@ impl A2AClient {
             match response {
                 Ok(response) => {
                     let status = response.status();
+                    let body = read_limited_body(response).await?;
                     if status.is_success() {
-                        let rpc: JsonRpcResponse = response
-                            .json()
-                            .await
+                        let rpc: JsonRpcResponse = serde_json::from_slice(&body)
                             .context("failed to decode JSON-RPC response body")?;
                         if let Some(error) = rpc.error {
                             return Err(JsonRpcFailure::new(
@@ -178,8 +178,7 @@ impl A2AClient {
                     }
 
                     let status_code = status.as_u16();
-                    let body = response.text().await.unwrap_or_default();
-                    if let Ok(rpc) = serde_json::from_str::<JsonRpcResponse>(&body) {
+                    if let Ok(rpc) = serde_json::from_slice::<JsonRpcResponse>(&body) {
                         if let Some(error) = rpc.error {
                             return Err(JsonRpcFailure::new(
                                 method_name,
@@ -188,6 +187,12 @@ impl A2AClient {
                             )
                             .into());
                         }
+                    }
+
+                    if is_auth_failure(status) {
+                        anyhow::bail!(
+                            "A2A {method_name} failed with HTTP {status_code} auth/permission rejection"
+                        );
                     }
 
                     if is_retryable_status(status) {
@@ -200,8 +205,7 @@ impl A2AClient {
                             continue;
                         }
                         anyhow::bail!(
-                            "A2A {method_name} failed with retryable status {status_code} after {} attempts",
-                            MAX_DELIVERY_ATTEMPTS
+                            "A2A {method_name} failed with retryable status {status_code} after {MAX_DELIVERY_ATTEMPTS} attempts"
                         );
                     }
 
@@ -225,17 +229,42 @@ impl A2AClient {
     }
 }
 
+async fn read_limited_body(mut response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
+    if let Some(len) = response.content_length() {
+        if len > MAX_RESPONSE_BYTES as u64 {
+            anyhow::bail!("A2A response Content-Length {len} exceeds {MAX_RESPONSE_BYTES} bytes");
+        }
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("failed to read A2A response body")?
+    {
+        let next = body.len().saturating_add(chunk.len());
+        if next > MAX_RESPONSE_BYTES {
+            anyhow::bail!("A2A response body exceeds {MAX_RESPONSE_BYTES} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn is_auth_failure(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::PROXY_AUTHENTICATION_REQUIRED
+    )
+}
+
 fn is_retryable_status(status: StatusCode) -> bool {
     status.is_server_error()
         || status.as_u16() == 425
         || matches!(
             status,
-            StatusCode::REQUEST_TIMEOUT
-                | StatusCode::CONFLICT
-                | StatusCode::TOO_MANY_REQUESTS
-                | StatusCode::UNAUTHORIZED
-                | StatusCode::FORBIDDEN
-                | StatusCode::PROXY_AUTHENTICATION_REQUIRED
+            StatusCode::REQUEST_TIMEOUT | StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS
         )
 }
 
@@ -376,7 +405,7 @@ fn looks_like_message(value: &Value) -> bool {
         && obj.get("parts").and_then(Value::as_array).is_some()
 }
 
-fn sanitize_log_field(s: &str) -> String {
+pub(crate) fn sanitize_log_field(s: &str) -> String {
     let mut out: String = s
         .chars()
         .take(MAX_LOG_FIELD_LEN)

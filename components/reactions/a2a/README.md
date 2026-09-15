@@ -34,7 +34,7 @@ priorityQueueCapacity: 10000
 recoveryPolicy: strict
 ```
 
-- `endpoint` is required.
+- `endpoint` is required. It is trusted operator configuration (`http`/`https`). Loopback and private addresses are allowed so local agents can be used.
 - `resultKeyFields` is required.
 - `terminalUpdatePolicy` defaults to `replace`.
 - `returnImmediately` defaults to `true`.
@@ -66,9 +66,11 @@ Each `SendMessage` includes a data part:
 
 ## Delivery policy
 
-- Retry then fail-stop: transport/connect failures, HTTP `5xx`, `408`, `409`, `425`, `429`, `401`, `403`, `407`.
+- Retry then fail-stop: transport/connect failures, HTTP `5xx`, `408`, `409`, `425`, `429`.
+- Auth/permission (`401`, `403`, `407`) fail-stop immediately. The bearer token is static, so retries cannot succeed.
 - Drop and continue: most other `4xx`.
 - JSON-RPC application errors fail-stop so the query outbox can replay.
+- Response bodies are capped at 1 MiB.
 
 ## Idempotency note
 

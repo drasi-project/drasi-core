@@ -59,6 +59,11 @@ impl Default for A2AReactionConfig {
 }
 
 impl A2AReactionConfig {
+    /// Validates operator configuration.
+    ///
+    /// `endpoint` is trusted input. Loopback and private addresses are allowed
+    /// so local A2A agents can be used. Do not populate it from untrusted
+    /// sources.
     pub fn validate(
         &self,
         _query_ids: &[String],

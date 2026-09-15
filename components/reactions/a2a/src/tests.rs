@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_lib::channels::ResultDiff;
+use drasi_lib::Reaction;
+use drasi_plugin_sdk::ReactionPluginDescriptor;
 use serde_json::json;
 
 use crate::activation::{
@@ -20,12 +23,12 @@ use crate::activation::{
 };
 use crate::client::{
     build_cancel_task_rpc, build_get_task_rpc, build_send_message_rpc, parse_send_message_result,
-    CancelTaskRequest, JsonRpcFailure, OutboundPart, SendMessageRequest, SendMessageResult,
+    sanitize_log_field, CancelTaskRequest, JsonRpcFailure, OutboundPart, SendMessageRequest,
+    SendMessageResult,
 };
-use crate::descriptor::{A2AReactionConfigDto, RecoveryPolicyDto};
+use crate::descriptor::{A2AReactionConfigDto, A2AReactionDescriptor, RecoveryPolicyDto};
 use crate::process::{extract_result_key, DiffPayload};
 use crate::{A2AReaction, A2AReactionBuilder};
-use drasi_lib::Reaction;
 
 #[test]
 fn next_action_table_cells_are_covered() {
@@ -465,4 +468,113 @@ fn json_rpc_failure_classifies_stale_and_gone_tasks() {
     assert!(terminal.is_terminal_task());
     assert!(terminal.is_stale_task());
     assert!(!terminal.is_task_gone());
+}
+
+#[test]
+fn sanitize_log_field_strips_controls_and_truncates() {
+    assert_eq!(sanitize_log_field("ok\nline\t!"), "ok line !");
+    let long = "a".repeat(513);
+    let out = sanitize_log_field(&long);
+    assert!(out.ends_with('…'));
+    assert_eq!(out.chars().count(), 513);
+}
+
+#[test]
+fn aggregation_diff_maps_to_update_and_noop_is_skipped() {
+    let with_before = DiffPayload::from_result_diff(&ResultDiff::Aggregation {
+        before: Some(json!({"invoiceId":"INV-1","amount":1})),
+        after: json!({"invoiceId":"INV-1","amount":2}),
+        row_signature: 0,
+    })
+    .expect("aggregation with before");
+    assert_eq!(with_before.operation, Operation::Update);
+    assert_eq!(
+        extract_result_key(&with_before, &["invoiceId".to_string()]).unwrap(),
+        crate::activation::ResultKey("INV-1".to_string())
+    );
+
+    let first = DiffPayload::from_result_diff(&ResultDiff::Aggregation {
+        before: None,
+        after: json!({"invoiceId":"INV-1","amount":1}),
+        row_signature: 0,
+    })
+    .expect("aggregation without before");
+    assert_eq!(first.operation, Operation::Update);
+    assert!(first.before.is_none());
+    assert_eq!(first.after, Some(json!({"invoiceId":"INV-1","amount":1})));
+
+    assert!(DiffPayload::from_result_diff(&ResultDiff::Noop).is_none());
+}
+
+#[test]
+fn descriptor_kind_and_schema() {
+    let d = A2AReactionDescriptor;
+    assert_eq!(d.kind(), "a2a");
+    assert_eq!(d.config_version(), "1.0.0");
+    assert_eq!(d.config_schema_name(), "reaction.a2a.A2AReactionConfig");
+    assert_eq!(d.display_name(), "A2A");
+    assert!(!d.display_description().is_empty());
+    assert_eq!(d.display_icon(), "link");
+    let schema = d.config_schema_json();
+    assert!(schema.contains("A2AReactionConfig"));
+    assert!(schema.contains("endpoint"));
+    assert!(schema.contains("resultKeyFields"));
+}
+
+#[tokio::test]
+async fn descriptor_creates_reaction_from_json() {
+    let d = A2AReactionDescriptor;
+    let cfg = json!({
+        "endpoint": "http://localhost:8080",
+        "resultKeyFields": ["invoiceId"],
+        "timeoutMs": 3000,
+        "terminalUpdatePolicy": "ignore"
+    });
+    let r = d
+        .create_reaction("a2a-r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .expect("create reaction");
+    assert_eq!(r.id(), "a2a-r");
+    assert_eq!(r.type_name(), "a2a");
+    let p = r.properties();
+    assert_eq!(p.get("endpoint"), Some(&json!("http://localhost:8080")));
+    assert_eq!(p.get("timeoutMs"), Some(&json!(3000)));
+}
+
+#[tokio::test]
+async fn descriptor_rejects_unknown_fields_and_missing_keys() {
+    let d = A2AReactionDescriptor;
+    let unknown = d
+        .create_reaction(
+            "a2a-r",
+            vec!["q1".to_string()],
+            &json!({
+                "endpoint": "http://localhost:8080",
+                "resultKeyFields": ["invoiceId"],
+                "notAField": true
+            }),
+            true,
+        )
+        .await
+        .err()
+        .expect("unknown field");
+    assert!(
+        unknown.to_string().contains("unknown field"),
+        "error should reject unknown fields: {unknown}"
+    );
+
+    let missing_keys = d
+        .create_reaction(
+            "a2a-r",
+            vec!["q1".to_string()],
+            &json!({ "endpoint": "http://localhost:8080" }),
+            true,
+        )
+        .await
+        .err()
+        .expect("missing result key fields");
+    assert!(
+        missing_keys.to_string().contains("resultKeyFields"),
+        "error should require resultKeyFields: {missing_keys}"
+    );
 }

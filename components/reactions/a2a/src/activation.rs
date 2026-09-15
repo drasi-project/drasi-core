@@ -131,6 +131,9 @@ impl Activation {
     }
 }
 
+/// Encode identity parts as `len:part` segments joined by `:`.
+/// Length prefixes keep keys inspectable and prevent collisions when a
+/// part itself contains `:`.
 pub(crate) fn length_prefixed(parts: &[&str]) -> String {
     let mut out = String::new();
     for (i, part) in parts.iter().enumerate() {
