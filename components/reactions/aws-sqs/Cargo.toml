@@ -43,6 +43,9 @@ aws-sdk-sqs = { version = "1", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
+# aws-smithy-json 0.63 does not compile against aws-smithy-types 1.7. CI has no
+# Cargo.lock, so pin types until the SDK crates pull smithy-json 0.64+.
+aws-smithy-types = "=1.6.3"
 chrono = "0.4"
 handlebars = "5.1"
 log = "0.4"
