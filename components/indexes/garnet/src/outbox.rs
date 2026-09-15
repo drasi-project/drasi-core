@@ -96,14 +96,12 @@ impl GarnetOutboxWriter {
         }
 
         let mut con = self.connection.clone();
-        for seq_str in sequences {
-            con.zrem::<&str, &str, ()>(outbox_key, seq_str)
-                .await
-                .map_err(IndexError::other)?;
-            con.hdel::<&str, &str, ()>(data_key, seq_str)
-                .await
-                .map_err(IndexError::other)?;
-        }
+        let mut pipe = redis::pipe();
+        pipe.zrem(outbox_key, sequences).ignore();
+        pipe.hdel(data_key, sequences).ignore();
+        pipe.query_async::<_, ()>(&mut con)
+            .await
+            .map_err(IndexError::other)?;
         Ok(())
     }
 
