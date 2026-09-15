@@ -193,6 +193,13 @@ This runs automatically during the release process - no manual invocation needed
 - **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
   - Note: Performance tests are skipped for draft pull requests.
 
+### [test-integration.yml](test-integration.yml)
+- **Purpose**: Runs `#[ignore]`d plugin integration and end-to-end tests that start containers. The package list is discovered from the workspace (`cargo run -p xtask -- list-integration-test-matrix`), so new crates are included automatically. Live-network tests that need credentials are not included.
+- **Trigger**:
+  - Pull requests to `main`, `feature/*`, `feature-lib`, or `release/*` (non-draft).
+  - Manual `workflow_dispatch`.
+- **Notes**: Default `cargo test` in [test.yml](test.yml) skips these tests. Run locally with `cargo test -p <crate> -- --ignored`.
+
 
 ## Viewing Workflow Status
 
