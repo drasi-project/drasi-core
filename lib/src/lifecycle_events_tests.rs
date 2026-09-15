@@ -375,6 +375,24 @@ mod tests {
             &[(ComponentStatus::Added, "added")],
         );
 
+        // Subscribe requires a running query (subscribe-time head).
+        core.start_source("r-src").await.unwrap();
+        let _ = collect_events_until(
+            &mut event_rx,
+            "r-src",
+            |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
+            EVENT_TIMEOUT,
+        )
+        .await;
+        core.start_query("r-query").await.unwrap();
+        let _ = collect_events_until(
+            &mut event_rx,
+            "r-query",
+            |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
+            EVENT_TIMEOUT,
+        )
+        .await;
+
         // Start reaction
         core.start_reaction("test-rxn").await.unwrap();
         let events = collect_events_until(

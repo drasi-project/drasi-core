@@ -569,6 +569,7 @@ mod tests {
             .await
             .unwrap();
         core.start().await.unwrap();
+        core.start_query("q1").await.unwrap();
         core
     }
 
