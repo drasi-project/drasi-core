@@ -40,6 +40,44 @@ pub struct WebSocketSource {
     lifecycle: Mutex<()>,
 }
 
+struct PositionlessBootstrapProvider {
+    source_id: String,
+    inner: Box<dyn BootstrapProvider + 'static>,
+}
+
+#[async_trait]
+impl BootstrapProvider for PositionlessBootstrapProvider {
+    async fn bootstrap(
+        &self,
+        request: drasi_lib::bootstrap::BootstrapRequest,
+        context: &drasi_lib::bootstrap::BootstrapContext,
+        event_tx: drasi_lib::channels::BootstrapEventSender,
+        settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<drasi_lib::bootstrap::BootstrapResult> {
+        let mut result = self
+            .inner
+            .bootstrap(request, context, event_tx, settings)
+            .await?;
+        if result.source_position.take().is_some() {
+            warn!(
+                "[{}] Ignoring source position returned by WebSocket bootstrap provider",
+                self.source_id
+            );
+        }
+        Ok(result)
+    }
+}
+
+fn positionless_bootstrap_provider(
+    source_id: &str,
+    provider: Box<dyn BootstrapProvider + 'static>,
+) -> Box<dyn BootstrapProvider + 'static> {
+    Box::new(PositionlessBootstrapProvider {
+        source_id: source_id.to_string(),
+        inner: provider,
+    })
+}
+
 impl WebSocketSource {
     /// Creates a source from a complete configuration.
     ///
@@ -186,7 +224,10 @@ impl WebSocketSourceBuilder {
 
     /// Sets an external bootstrap provider.
     pub fn with_bootstrap_provider(mut self, provider: impl BootstrapProvider + 'static) -> Self {
-        self.bootstrap_provider = Some(Box::new(provider));
+        self.bootstrap_provider = Some(positionless_bootstrap_provider(
+            &self.id,
+            Box::new(provider),
+        ));
         self
     }
 
@@ -302,7 +343,9 @@ impl Source for WebSocketSource {
     }
 
     async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
-        self.base.set_bootstrap_provider(provider).await;
+        self.base
+            .set_bootstrap_provider(positionless_bootstrap_provider(&self.base.id, provider))
+            .await;
     }
 }
 
@@ -816,6 +859,7 @@ mod tests {
 
         struct RecordingBootstrapProvider {
             called: Arc<AtomicBool>,
+            returns_position: bool,
         }
 
         #[async_trait]
@@ -830,18 +874,19 @@ mod tests {
                 self.called.store(true, Ordering::SeqCst);
                 Ok(BootstrapResult {
                     event_count: 0,
-                    source_position: None,
+                    source_position: self.returns_position.then(|| vec![1].into()),
                 })
             }
         }
 
         #[tokio::test]
-        async fn builder_attaches_bootstrap_provider() {
+        async fn builder_strips_bootstrap_source_position() {
             let called = Arc::new(AtomicBool::new(false));
             let source = WebSocketSource::builder("source")
                 .with_config(config())
                 .with_bootstrap_provider(RecordingBootstrapProvider {
                     called: called.clone(),
+                    returns_position: true,
                 })
                 .build()
                 .unwrap();
@@ -863,7 +908,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn set_bootstrap_provider_delegates_without_a_source_position() {
+        async fn setter_strips_bootstrap_source_position() {
             let called = Arc::new(AtomicBool::new(false));
             let source = WebSocketSource::builder("source")
                 .with_config(config())
@@ -872,6 +917,7 @@ mod tests {
             source
                 .set_bootstrap_provider(Box::new(RecordingBootstrapProvider {
                     called: called.clone(),
+                    returns_position: true,
                 }))
                 .await;
 

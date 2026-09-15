@@ -85,6 +85,7 @@
 mod config;
 pub mod descriptor;
 mod mapping;
+mod mapping_config;
 mod source;
 mod transport;
 
@@ -101,7 +102,7 @@ pub use drasi_source_mapping::{
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "websocket-source",
     core_version = "0.5.8",
-    lib_version = "0.9.0",
+    lib_version = "0.9.1",
     plugin_version = env!("CARGO_PKG_VERSION"),
     source_descriptors = [descriptor::WebSocketSourceDescriptor],
     reaction_descriptors = [],
@@ -115,7 +116,7 @@ mod dynamic_plugin_tests {
         let metadata = unsafe { &*super::drasi_plugin_metadata() };
 
         assert_eq!(unsafe { metadata.core_version.as_str() }, "0.5.8");
-        assert_eq!(unsafe { metadata.lib_version.as_str() }, "0.9.0");
+        assert_eq!(unsafe { metadata.lib_version.as_str() }, "0.9.1");
         assert_eq!(
             unsafe { metadata.plugin_version.as_str() },
             env!("CARGO_PKG_VERSION")

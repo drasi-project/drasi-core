@@ -14,14 +14,10 @@
 
 //! Dynamic plugin descriptor and configuration DTOs.
 
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
 use drasi_plugin_sdk::prelude::*;
-use drasi_source_mapping::{
-    EffectiveFromConfig, EffectiveFromConfigDto, ElementTemplate, ElementTemplateDto, ElementType,
-    ElementTypeDto, MappingCondition, MappingConditionDto, OperationType, OperationTypeDto,
-    SourceMapping, SourceMappingDto, TimestampFormat, TimestampFormatDto,
-};
+use drasi_source_mapping::SourceMappingDto;
 use utoipa::OpenApi;
 
 use crate::{
@@ -29,6 +25,11 @@ use crate::{
         DEFAULT_ALLOW_INSECURE, DEFAULT_BUFFER_CAPACITY, DEFAULT_CONNECT_TIMEOUT_MS,
         DEFAULT_ITEMS_PATH, DEFAULT_MAX_MESSAGE_SIZE_BYTES, DEFAULT_RECONNECT_DELAY_MS,
         DEFAULT_RECONNECT_ENABLED,
+    },
+    mapping_config::{
+        mapping_to_dto, EffectiveFromConfigSchema, ElementTemplateSchema, ElementTypeSchema,
+        ExplicitEffectiveFromConfigSchema, MappingConditionSchema, OperationTypeSchema,
+        SourceMappingSchema, TimestampFormatSchema,
     },
     HeaderConfig, ReconnectConfig, WebSocketSourceBuilder, WebSocketSourceConfig,
 };
@@ -81,121 +82,6 @@ impl Default for ReconnectConfigDto {
             max_delay_ms: None,
         }
     }
-}
-
-/// OpenAPI shape for a WebSocket source mapping.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::SourceMapping)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SourceMappingSchema {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<MappingConditionSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<OperationTypeSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_from: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_map: Option<HashMap<String, OperationTypeSchema>>,
-    pub element_type: ElementTypeSchema,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_from: Option<EffectiveFromConfigSchema>,
-    pub template: ElementTemplateSchema,
-}
-
-/// OpenAPI shape for a WebSocket mapping condition.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::MappingCondition)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct MappingConditionSchema {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub equals: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub contains: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub regex: Option<String>,
-}
-
-/// OpenAPI shape for a mapping operation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::OperationType)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum OperationTypeSchema {
-    Insert,
-    Update,
-    Delete,
-}
-
-/// OpenAPI shape for a mapped graph element.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::ElementType)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ElementTypeSchema {
-    Node,
-    Relation,
-}
-
-/// OpenAPI shape for a mapping timestamp.
-#[derive(Debug, Clone, Serialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::EffectiveFromConfig)]
-#[serde(untagged)]
-pub(crate) enum EffectiveFromConfigSchema {
-    Simple(String),
-    Explicit(ExplicitEffectiveFromConfigSchema),
-}
-
-impl<'de> Deserialize<'de> for EffectiveFromConfigSchema {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match value {
-            serde_json::Value::String(value) => Ok(Self::Simple(value)),
-            serde_json::Value::Object(_) => serde_json::from_value(value)
-                .map(Self::Explicit)
-                .map_err(serde::de::Error::custom),
-            _ => Err(serde::de::Error::custom(
-                "effectiveFrom must be a template string or explicit object",
-            )),
-        }
-    }
-}
-
-/// OpenAPI shape for an explicit mapping timestamp.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::ExplicitEffectiveFromConfig)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ExplicitEffectiveFromConfigSchema {
-    pub value: String,
-    pub format: TimestampFormatSchema,
-}
-
-/// OpenAPI shape for an explicit timestamp format.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::TimestampFormat)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TimestampFormatSchema {
-    Iso8601,
-    UnixSeconds,
-    UnixMillis,
-    UnixNanos,
-}
-
-/// OpenAPI shape for an element template.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::websocket::ElementTemplate)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ElementTemplateSchema {
-    pub id: String,
-    pub labels: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub properties: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<String>,
 }
 
 /// WebSocket source configuration DTO.
@@ -393,77 +279,6 @@ impl From<&WebSocketSourceConfig> for WebSocketSourceConfigDto {
             max_message_size_bytes: ConfigValue::Static(config.max_message_size_bytes),
             buffer_capacity: ConfigValue::Static(config.buffer_capacity),
         }
-    }
-}
-
-fn mapping_to_dto(mapping: &SourceMapping) -> SourceMappingDto {
-    SourceMappingDto {
-        when: mapping.when.as_ref().map(condition_to_dto),
-        operation: mapping.operation.as_ref().map(operation_to_dto),
-        operation_from: mapping.operation_from.clone(),
-        operation_map: mapping.operation_map.as_ref().map(|operations| {
-            operations
-                .iter()
-                .map(|(name, operation)| (name.clone(), operation_to_dto(operation)))
-                .collect::<HashMap<_, _>>()
-        }),
-        element_type: element_type_to_dto(&mapping.element_type),
-        effective_from: mapping.effective_from.as_ref().map(effective_from_to_dto),
-        template: template_to_dto(&mapping.template),
-    }
-}
-
-fn condition_to_dto(condition: &MappingCondition) -> MappingConditionDto {
-    MappingConditionDto {
-        header: condition.header.clone(),
-        field: condition.field.clone(),
-        equals: condition.equals.clone(),
-        contains: condition.contains.clone(),
-        regex: condition.regex.clone(),
-    }
-}
-
-fn operation_to_dto(operation: &OperationType) -> OperationTypeDto {
-    match operation {
-        OperationType::Insert => OperationTypeDto::Insert,
-        OperationType::Update => OperationTypeDto::Update,
-        OperationType::Delete => OperationTypeDto::Delete,
-    }
-}
-
-fn element_type_to_dto(element_type: &ElementType) -> ElementTypeDto {
-    match element_type {
-        ElementType::Node => ElementTypeDto::Node,
-        ElementType::Relation => ElementTypeDto::Relation,
-    }
-}
-
-fn effective_from_to_dto(effective_from: &EffectiveFromConfig) -> EffectiveFromConfigDto {
-    match effective_from {
-        EffectiveFromConfig::Simple(value) => EffectiveFromConfigDto::Simple(value.clone()),
-        EffectiveFromConfig::Explicit { value, format } => EffectiveFromConfigDto::Explicit {
-            value: value.clone(),
-            format: timestamp_format_to_dto(format),
-        },
-    }
-}
-
-fn timestamp_format_to_dto(format: &TimestampFormat) -> TimestampFormatDto {
-    match format {
-        TimestampFormat::Iso8601 => TimestampFormatDto::Iso8601,
-        TimestampFormat::UnixSeconds => TimestampFormatDto::UnixSeconds,
-        TimestampFormat::UnixMillis => TimestampFormatDto::UnixMillis,
-        TimestampFormat::UnixNanos => TimestampFormatDto::UnixNanos,
-    }
-}
-
-fn template_to_dto(template: &ElementTemplate) -> ElementTemplateDto {
-    ElementTemplateDto {
-        id: template.id.clone(),
-        labels: template.labels.clone(),
-        properties: template.properties.clone(),
-        from: template.from.clone(),
-        to: template.to.clone(),
     }
 }
 
@@ -749,6 +564,11 @@ mod tests {
     }
 
     mod schema_validation {
+        use drasi_source_mapping::{
+            EffectiveFromConfigDto, ElementTemplateDto, ElementTypeDto, MappingConditionDto,
+            OperationTypeDto, TimestampFormatDto,
+        };
+
         use super::*;
 
         impl From<SourceMappingDto> for SourceMappingSchema {

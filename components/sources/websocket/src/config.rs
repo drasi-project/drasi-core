@@ -150,6 +150,7 @@ pub struct WebSocketSourceConfig {
     #[serde(default = "default_items_path")]
     pub items_path: String,
     /// Payload mappings that produce graph changes. Required; 1–64 mappings.
+    #[serde(with = "crate::mapping_config::mapping_serde")]
     pub mappings: Vec<SourceMapping>,
     /// Maximum accepted WebSocket message and frame size. Default: 1 MiB;
     /// valid range: 1 KiB–16 MiB.
@@ -463,11 +464,99 @@ mod tests {
         }
 
         #[test]
-        fn omitted_optional_fields_use_runtime_defaults() {
-            let mapping_json = serde_json::to_value(mapping()).unwrap();
+        fn mapping_configuration_uses_strict_camel_case_json() {
             let config: WebSocketSourceConfig = serde_json::from_value(serde_json::json!({
                 "url": "wss://example.com/events",
-                "mappings": [mapping_json]
+                "mappings": [{
+                    "operation": "insert",
+                    "elementType": "node",
+                    "template": {
+                        "id": "{{payload.id}}",
+                        "labels": ["Item"]
+                    }
+                }]
+            }))
+            .unwrap();
+
+            let serialized = serde_json::to_value(config).unwrap();
+            assert_eq!(serialized["mappings"][0]["elementType"], "node");
+            assert!(serialized["mappings"][0].get("element_type").is_none());
+
+            for unknown_config in [
+                serde_json::json!({
+                    "url": "wss://example.com/events",
+                    "mappings": [{
+                        "operation": "insert",
+                        "elementType": "node",
+                        "unexpectedMapping": true,
+                        "template": {
+                            "id": "{{payload.id}}",
+                            "labels": ["Item"]
+                        }
+                    }]
+                }),
+                serde_json::json!({
+                    "url": "wss://example.com/events",
+                    "mappings": [{
+                        "when": {
+                            "field": "payload.kind",
+                            "equal": "sensor"
+                        },
+                        "operation": "insert",
+                        "elementType": "node",
+                        "template": {
+                            "id": "{{payload.id}}",
+                            "labels": ["Item"]
+                        }
+                    }]
+                }),
+                serde_json::json!({
+                    "url": "wss://example.com/events",
+                    "mappings": [{
+                        "operation": "insert",
+                        "elementType": "node",
+                        "effectiveFrom": {
+                            "value": "{{payload.timestamp}}",
+                            "format": "unix_millis",
+                            "unexpected": true
+                        },
+                        "template": {
+                            "id": "{{payload.id}}",
+                            "labels": ["Item"]
+                        }
+                    }]
+                }),
+                serde_json::json!({
+                    "url": "wss://example.com/events",
+                    "mappings": [{
+                        "operation": "insert",
+                        "elementType": "node",
+                        "template": {
+                            "id": "{{payload.id}}",
+                            "labels": ["Item"],
+                            "propertiez": {}
+                        }
+                    }]
+                }),
+            ] {
+                let error = serde_json::from_value::<WebSocketSourceConfig>(unknown_config)
+                    .expect_err("unknown nested mapping field should be rejected");
+                assert!(error.to_string().contains("unknown field"), "{error}");
+            }
+        }
+
+        #[test]
+        fn omitted_optional_fields_use_runtime_defaults() {
+            let config: WebSocketSourceConfig = serde_json::from_value(serde_json::json!({
+                "url": "wss://example.com/events",
+                "mappings": [{
+                    "operation": "insert",
+                    "elementType": "node",
+                    "template": {
+                        "id": "{{payload.id}}",
+                        "labels": ["Item"]
+                    }
+                }]
             }))
             .unwrap();
             let expected = WebSocketSourceConfig {

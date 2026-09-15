@@ -222,9 +222,9 @@ stable mapped IDs and idempotent upstream or query semantics where duplicates
 matter.
 
 There is no built-in bootstrap provider, though an external provider can be
-attached through the standard `SourceBase` path. Such a provider must not
-return a source position, and there is no atomic boundary between its snapshot
-and the live WebSocket stream.
+attached through the standard `SourceBase` path. The source ignores any source
+position returned by that provider because there is no atomic boundary between
+its snapshot and the live WebSocket stream.
 
 During shutdown, queued and in-flight frames get a 250 ms dispatch grace period.
 If a subscriber remains blocked, shutdown abandons the remaining work;
