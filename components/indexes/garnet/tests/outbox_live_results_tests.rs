@@ -129,6 +129,26 @@ async fn test_garnet_outbox_trim_to_capacity() {
 
 #[tokio::test]
 #[ignore]
+async fn test_garnet_outbox_trim_before() {
+    let con = get_connection().await;
+    let qid = unique_query_id();
+    let writer = GarnetOutboxWriter::new(&qid, con);
+
+    for i in 1..=5 {
+        writer.append(&qid, i, b"data").await.unwrap();
+    }
+
+    let removed = writer.trim_before(&qid, 4).await.unwrap();
+    assert_eq!(removed, 3);
+
+    let entries = writer.read_from(&qid, 0).await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0, 4);
+    assert_eq!(entries[1].0, 5);
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_garnet_outbox_trim_no_op() {
     let con = get_connection().await;
     let qid = unique_query_id();

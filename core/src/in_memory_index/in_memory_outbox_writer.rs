@@ -89,6 +89,20 @@ impl OutboxWriter for InMemoryOutboxWriter {
         Ok(())
     }
 
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        let mut store = self.data.write().await;
+        let map = match store.get_mut(query_id) {
+            Some(map) => map,
+            None => return Ok(0),
+        };
+        let keys_to_remove: Vec<u64> = map.range(..retain_from).map(|(key, _)| *key).collect();
+        let removed = keys_to_remove.len();
+        for key in keys_to_remove {
+            map.remove(&key);
+        }
+        Ok(removed)
+    }
+
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let mut store = self.data.write().await;
         let map = match store.get_mut(query_id) {
@@ -172,6 +186,31 @@ mod tests {
         writer.append("q1", 1, b"data").await.unwrap();
         let removed = writer.trim_to_capacity("q1", 5).await.unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_trim_before() {
+        let writer = InMemoryOutboxWriter::new();
+        for i in 1..=5 {
+            writer.append("q1", i, b"data").await.unwrap();
+        }
+        let removed = writer.trim_before("q1", 4).await.unwrap();
+        assert_eq!(removed, 3);
+
+        let entries = writer.read_from("q1", 0).await.unwrap();
+        assert_eq!(
+            entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trim_before_no_op() {
+        let writer = InMemoryOutboxWriter::new();
+        writer.append("q1", 5, b"data").await.unwrap();
+        let removed = writer.trim_before("q1", 5).await.unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(writer.read_from("q1", 0).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

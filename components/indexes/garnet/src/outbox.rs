@@ -69,6 +69,38 @@ impl GarnetOutboxWriter {
     fn data_key(&self) -> String {
         format!("outbox_data:{{{}}}", self.query_id)
     }
+
+    async fn remove_sequences(
+        &self,
+        outbox_key: &str,
+        data_key: &str,
+        sequences: &[String],
+    ) -> Result<(), IndexError> {
+        if sequences.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(session_state) = &self.session_state {
+            session_state.with_active_buffer_required(|buffer| {
+                for seq_str in sequences {
+                    buffer.zset_remove(outbox_key.to_string(), seq_str.as_bytes().to_vec());
+                    buffer.hash_del(data_key.to_string(), seq_str);
+                }
+            })?;
+            return Ok(());
+        }
+
+        let mut con = self.connection.clone();
+        for seq_str in sequences {
+            con.zrem::<&str, &str, ()>(outbox_key, seq_str)
+                .await
+                .map_err(IndexError::other)?;
+            con.hdel::<&str, &str, ()>(data_key, seq_str)
+                .await
+                .map_err(IndexError::other)?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -197,13 +229,32 @@ impl OutboxWriter for GarnetOutboxWriter {
         Ok(())
     }
 
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        let _ = query_id;
+        let mut con = self.connection.clone();
+        let outbox_key = self.outbox_key();
+        let data_key = self.data_key();
+        let max = format!("({retain_from}");
+
+        let sequences_to_remove: Vec<String> = cmd("ZRANGEBYSCORE")
+            .arg(&outbox_key)
+            .arg("-inf")
+            .arg(&max)
+            .query_async(&mut con)
+            .await
+            .map_err(IndexError::other)?;
+
+        self.remove_sequences(&outbox_key, &data_key, &sequences_to_remove)
+            .await?;
+        Ok(sequences_to_remove.len())
+    }
+
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let _ = query_id;
         let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();
         let data_key = self.data_key();
 
-        // Get total count
         let total: usize = con
             .zcard::<&str, usize>(&outbox_key)
             .await
@@ -215,7 +266,6 @@ impl OutboxWriter for GarnetOutboxWriter {
 
         let to_remove = total - capacity;
 
-        // Get the sequences to remove (lowest N)
         let sequences_to_remove: Vec<String> = cmd("ZRANGE")
             .arg(&outbox_key)
             .arg(0)
@@ -224,18 +274,8 @@ impl OutboxWriter for GarnetOutboxWriter {
             .await
             .map_err(IndexError::other)?;
 
-        // Remove from sorted set (by rank)
-        con.zremrangebyrank::<&str, ()>(&outbox_key, 0, (to_remove - 1) as isize)
-            .await
-            .map_err(IndexError::other)?;
-
-        // Remove data entries from hash
-        for seq_str in &sequences_to_remove {
-            con.hdel::<&str, &str, ()>(&data_key, seq_str)
-                .await
-                .map_err(IndexError::other)?;
-        }
-
+        self.remove_sequences(&outbox_key, &data_key, &sequences_to_remove)
+            .await?;
         Ok(to_remove)
     }
 }
