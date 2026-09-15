@@ -25,8 +25,8 @@
 mod tests {
     use bytes::Bytes;
     use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
-    use drasi_core::interface::{CheckpointStore, ElementIndex};
-    use drasi_core::models::QueryJoin;
+    use drasi_core::interface::{CheckpointStore, ElementArchiveIndex, ElementIndex};
+    use drasi_core::models::{ElementTimestamp, QueryJoin, TimestampRange};
     use drasi_core::path_solver::match_path::MatchPath;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -2270,6 +2270,7 @@ mod tests {
     struct ClearFailingElementIndex {
         inner: Arc<drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex>,
         fail_clear: std::sync::atomic::AtomicBool,
+        fail_clear_archive: std::sync::atomic::AtomicBool,
     }
 
     impl ClearFailingElementIndex {
@@ -2280,11 +2281,17 @@ mod tests {
                     ),
                 ),
                 fail_clear: std::sync::atomic::AtomicBool::new(false),
+                fail_clear_archive: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
         fn set_fail_clear(&self, fail: bool) {
             self.fail_clear
+                .store(fail, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn set_fail_clear_archive(&self, fail: bool) {
+            self.fail_clear_archive
                 .store(fail, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -2354,11 +2361,47 @@ mod tests {
                     ),
                 ));
             }
-            self.inner.clear().await
+            ElementIndex::clear(&*self.inner).await
         }
 
         async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
             self.inner.set_joins(match_path, joins).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ElementArchiveIndex for ClearFailingElementIndex {
+        async fn get_element_as_at(
+            &self,
+            element_ref: &drasi_core::models::ElementReference,
+            time: ElementTimestamp,
+        ) -> Result<Option<Arc<drasi_core::models::Element>>, drasi_core::interface::IndexError>
+        {
+            self.inner.get_element_as_at(element_ref, time).await
+        }
+
+        async fn get_element_versions(
+            &self,
+            element_ref: &drasi_core::models::ElementReference,
+            range: TimestampRange<ElementTimestamp>,
+        ) -> Result<drasi_core::interface::ElementStream, drasi_core::interface::IndexError>
+        {
+            self.inner.get_element_versions(element_ref, range).await
+        }
+
+        async fn clear(&self) -> Result<(), drasi_core::interface::IndexError> {
+            if self
+                .fail_clear_archive
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(drasi_core::interface::IndexError::other(
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "injected archive index clear failure",
+                    ),
+                ));
+            }
+            ElementArchiveIndex::clear(&*self.inner).await
         }
     }
 
@@ -2409,7 +2452,7 @@ mod tests {
             Ok(drasi_core::interface::CreatedIndexes {
                 set: IndexSet {
                     element_index: element_index.clone(),
-                    archive_index: element_index.inner.clone(),
+                    archive_index: element_index.clone(),
                     result_index: Arc::new(InMemoryResultIndex::new()),
                     future_queue: Arc::new(InMemoryFutureQueue::new()),
                     session_control: Arc::new(NoOpSessionControl),
@@ -2959,6 +3002,7 @@ mod tests {
             "teardown-fail-query",
             vec!["teardown-fail-src".to_string()],
         );
+        let expected_in_progress = Some(!crate::queries::compute_config_hash(&config));
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
             .start_query("teardown-fail-query".to_string())
@@ -2996,13 +3040,86 @@ mod tests {
         let stored_hash = store.read_config_hash().await.unwrap();
         assert_eq!(
             stored_hash,
-            Some(12345),
-            "Config hash must remain when checkpoint clear fails on removal"
+            expected_in_progress,
+            "Removal must persist reset-in-progress before checkpoint clear so recreate cannot resume the old hash"
         );
         let cp = store.read_checkpoint("teardown-fail-src").await.unwrap();
         assert!(
             cp.is_some(),
             "Source checkpoint must remain when checkpoint clear fails on removal"
+        );
+    }
+
+    /// If archive clear fails after element clear, removal must already have
+    /// marked reset-in-progress so recreate cannot resume old checkpoints
+    /// against a half-wiped graph.
+    #[tokio::test]
+    async fn test_teardown_archive_clear_failure_marks_reset_in_progress() {
+        let plugin = Arc::new(FailablePlugin::new());
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_failable_backend(plugin.clone()).await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = CheckpointTestSource::new("archive-fail-src").unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
+        source_manager
+            .start_source("archive-fail-src".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "archive-fail-src",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let config = create_persistent_query_config(
+            "archive-fail-query",
+            vec!["archive-fail-src".to_string()],
+        );
+        let current_hash = crate::queries::compute_config_hash(&config);
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("archive-fail-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "archive-fail-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let store = plugin.get_store("archive-fail-query").await;
+        store
+            .stage_checkpoint("archive-fail-src", 7, None)
+            .await
+            .unwrap();
+        plugin
+            .get_element_index("archive-fail-query")
+            .await
+            .set_fail_clear_archive(true);
+
+        let result = query_manager
+            .teardown_query("archive-fail-query".to_string())
+            .await;
+        assert!(
+            result.is_err(),
+            "teardown_query should fail when archive clear fails"
+        );
+
+        let stored_hash = store.read_config_hash().await.unwrap();
+        assert_eq!(
+            stored_hash,
+            Some(!current_hash),
+            "archive-clear failure must leave reset-in-progress, not the old config hash"
+        );
+        let cp = store.read_checkpoint("archive-fail-src").await.unwrap();
+        assert!(
+            cp.is_some(),
+            "source checkpoint must remain until removal cleanup finishes"
         );
     }
 }

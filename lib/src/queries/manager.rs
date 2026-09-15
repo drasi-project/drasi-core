@@ -3652,6 +3652,21 @@ impl QueryManager {
                         .with_context(|| {
                             format!("Query '{id}' failed to begin session for removal cleanup")
                         })?;
+                    // Mark reset-in-progress before touching indexes. A mid-clear
+                    // failure (e.g. archive after element) is not rolled back by
+                    // RocksDB session abort; the next start must finish the wipe
+                    // instead of resuming old checkpoints against a half-empty graph.
+                    if let Some(checkpoint_store) = &created.checkpoint_store {
+                        let current_hash = super::compute_config_hash(&config);
+                        checkpoint_store
+                            .write_config_hash(output_reset_in_progress_hash(current_hash))
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "Query '{id}' failed to persist removal reset-in-progress marker"
+                                )
+                            })?;
+                    }
                     clear_persistent_indexes(
                         &id,
                         &Some(created.set.element_index),
