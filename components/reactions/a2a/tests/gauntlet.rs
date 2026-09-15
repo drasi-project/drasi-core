@@ -125,6 +125,7 @@ impl Report {
         });
     }
 
+    #[allow(clippy::print_stdout)]
     fn print(&self) {
         let mut pass = 0;
         let mut fail = 0;
@@ -132,8 +133,8 @@ impl Report {
         let mut skip = 0;
         println!("\n===== A2A REACTION GAUNTLET =====");
         println!(
-            "{:<8} {:<8} {:<10} {:<52} {}",
-            "ID", "LAYER", "STATUS", "NAME", "DETAIL"
+            "{:<8} {:<8} {:<10} {:<52} DETAIL",
+            "ID", "LAYER", "STATUS", "NAME"
         );
         for row in &self.rows {
             let status = match row.status {
@@ -2084,7 +2085,7 @@ async fn run_one_process(case: &ProcCase) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
             }
             Event::Delete { seq, invoice } => {
-                let mut data = invoice_doc(*invoice, 1.0);
+                let mut data = invoice_doc(invoice, 1.0);
                 if case.keys == ["nested.id"] {
                     data = json!({"nested":{"id": invoice}});
                 } else if case.keys == ["invoiceId", "customer"] {
@@ -2193,7 +2194,7 @@ async fn run_one_process(case: &ProcCase) -> Result<(), String> {
 
 fn live_up() -> bool {
     TcpStream::connect_timeout(
-        &"127.0.0.1:9999".parse().unwrap(),
+        &"127.0.0.1:9999".parse().expect("live agent address"),
         Duration::from_millis(200),
     )
     .is_ok()
