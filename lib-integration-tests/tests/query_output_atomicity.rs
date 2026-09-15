@@ -318,6 +318,10 @@ impl OutboxWriter for FailingOutboxWriter {
         self.inner.clear(query_id).await
     }
 
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        self.inner.trim_before(query_id, retain_from).await
+    }
+
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         self.inner.trim_to_capacity(query_id, capacity).await
     }
