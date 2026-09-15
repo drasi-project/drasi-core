@@ -435,7 +435,7 @@ fn assert_new_generation_outbox(sequences: &[u64], latest: u64) {
         sequences.windows(2).all(|w| w[1] == w[0] + 1),
         "new-config outbox must be contiguous, got {sequences:?}"
     );
-    assert_eq!(*sequences.last().unwrap(), latest);
+    assert_eq!(sequences.last(), Some(&latest));
 }
 
 async fn wait_for_wipe(core: &DrasiLib) -> Result<u64> {
