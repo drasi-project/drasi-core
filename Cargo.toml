@@ -66,6 +66,7 @@ members = [
 
   # Reaction Plugins
   "components/reactions/http",
+  "components/reactions/a2a",
   "components/reactions/grpc",
   "components/reactions/aws-sqs",
   "components/reactions/sse",
