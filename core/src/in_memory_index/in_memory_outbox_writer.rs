@@ -252,6 +252,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_append_and_trim_keeps_tail() {
+        let writer = InMemoryOutboxWriter::new();
+        writer.append("q1", 1, b"a").await.unwrap();
+        writer.append("q1", 2, b"b").await.unwrap();
+        let removed = writer.append_and_trim("q1", 3, b"c", 2).await.unwrap();
+        assert_eq!(removed, 1);
+        let entries = writer.read_from("q1", 0).await.unwrap();
+        assert_eq!(
+            entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[tokio::test]
     async fn test_default_trim_before_uses_trim_to_capacity() {
         let writer = LegacyOutbox(InMemoryOutboxWriter::new());
         for i in 1..=10 {

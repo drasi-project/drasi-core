@@ -136,6 +136,31 @@ fn collect_prefix_keys(
     Ok(keys)
 }
 
+fn collect_keys_for_trim(
+    db: &IndexDb,
+    session_state: &RocksDbSessionState,
+    require_session: bool,
+    cf: &impl rocksdb::AsColumnFamilyRef,
+    prefix: &[u8],
+    retain_from: Option<u64>,
+) -> Result<Vec<Vec<u8>>, IndexError> {
+    if require_session {
+        session_state.with_txn(|txn| {
+            collect_prefix_keys(
+                txn.iterator_cf(cf, IteratorMode::From(prefix, rocksdb::Direction::Forward)),
+                prefix,
+                retain_from,
+            )
+        })
+    } else {
+        collect_prefix_keys(
+            db.iterator_cf(cf, IteratorMode::From(prefix, rocksdb::Direction::Forward)),
+            prefix,
+            retain_from,
+        )
+    }
+}
+
 #[async_trait]
 impl OutboxWriter for RocksDbOutboxWriter {
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
@@ -268,35 +293,17 @@ impl OutboxWriter for RocksDbOutboxWriter {
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            if require_session {
-                session_state.with_txn(|txn| {
-                    let keys = collect_prefix_keys(
-                        txn.iterator_cf(
-                            &cf,
-                            IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-                        ),
-                        &prefix,
-                        Some(retain_from),
-                    )?;
-                    let removed = keys.len();
-                    for key in &keys {
-                        txn.delete_cf(&cf, key).map_err(IndexError::other)?;
-                    }
-                    Ok(removed)
-                })
-            } else {
-                let keys = collect_prefix_keys(
-                    db.iterator_cf(
-                        &cf,
-                        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-                    ),
-                    &prefix,
-                    Some(retain_from),
-                )?;
-                let removed = keys.len();
-                delete_keys(&db, &session_state, false, &cf, &keys)?;
-                Ok(removed)
-            }
+            let keys = collect_keys_for_trim(
+                &db,
+                &session_state,
+                require_session,
+                &cf,
+                &prefix,
+                Some(retain_from),
+            )?;
+            let removed = keys.len();
+            delete_keys(&db, &session_state, require_session, &cf, &keys)?;
+            Ok(removed)
         })
         .await
         .map_err(IndexError::other)?
@@ -310,33 +317,12 @@ impl OutboxWriter for RocksDbOutboxWriter {
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            let keys = if require_session {
-                session_state.with_txn(|txn| {
-                    collect_prefix_keys(
-                        txn.iterator_cf(
-                            &cf,
-                            IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-                        ),
-                        &prefix,
-                        None,
-                    )
-                })?
-            } else {
-                collect_prefix_keys(
-                    db.iterator_cf(
-                        &cf,
-                        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-                    ),
-                    &prefix,
-                    None,
-                )?
-            };
-
+            let keys =
+                collect_keys_for_trim(&db, &session_state, require_session, &cf, &prefix, None)?;
             let total = keys.len();
             if total <= capacity {
                 return Ok(0);
             }
-
             let to_remove = total - capacity;
             delete_keys(
                 &db,
