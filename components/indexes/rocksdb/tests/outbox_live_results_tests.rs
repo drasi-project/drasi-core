@@ -465,3 +465,90 @@ async fn test_outbox_and_live_results_roll_back_with_session() {
     assert_eq!(entries, vec![(1, b"committed".to_vec())]);
     assert_eq!(live.row_count("q1").await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn test_outbox_trim_before_rolls_back_with_session() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+    let session_control: Arc<dyn SessionControl> =
+        Arc::new(RocksDbSessionControl::new(session_state.clone()));
+    let outbox = RocksDbOutboxWriter::new(db, session_state);
+
+    for seq in 1..=4 {
+        outbox.append("q1", seq, b"data").await.unwrap();
+    }
+
+    {
+        let guard = SessionGuard::begin(session_control.clone())
+            .await
+            .expect("begin");
+        outbox.append("q1", 5, b"five").await.unwrap();
+        outbox.trim_before("q1", 4).await.unwrap();
+        drop(guard);
+    }
+
+    let rolled_back: Vec<u64> = outbox
+        .read_from("q1", 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(seq, _)| seq)
+        .collect();
+    assert_eq!(rolled_back, vec![1, 2, 3, 4]);
+
+    {
+        let guard = SessionGuard::begin(session_control.clone())
+            .await
+            .expect("begin");
+        outbox.append("q1", 5, b"five").await.unwrap();
+        let removed = outbox.trim_before("q1", 4).await.unwrap();
+        assert_eq!(removed, 3);
+        guard.commit().await.expect("commit");
+    }
+
+    let committed: Vec<u64> = outbox
+        .read_from("q1", 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(seq, _)| seq)
+        .collect();
+    assert_eq!(committed, vec![4, 5]);
+}
+
+#[tokio::test]
+async fn test_outbox_trim_before_survives_reopen() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().to_str().unwrap().to_string();
+
+    {
+        let db = open_db(&path, "q1");
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control: Arc<dyn SessionControl> =
+            Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let outbox = RocksDbOutboxWriter::new(db, session_state);
+
+        for seq in 1..=3 {
+            outbox.append("q1", seq, b"data").await.unwrap();
+        }
+
+        let guard = SessionGuard::begin(session_control).await.expect("begin");
+        outbox.append("q1", 4, b"four").await.unwrap();
+        outbox.trim_before("q1", 3).await.unwrap();
+        guard.commit().await.expect("commit");
+    }
+
+    {
+        let db = open_db(&path, "q1");
+        let writer = outbox_writer(db);
+        let sequences: Vec<u64> = writer
+            .read_from("q1", 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+        assert_eq!(sequences, vec![3, 4]);
+    }
+}

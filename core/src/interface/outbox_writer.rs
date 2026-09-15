@@ -23,10 +23,11 @@
 //!
 //! ## Key semantics
 //!
-//! - **append**: Store a result at a given sequence. The outbox is bounded by
-//!   capacity; implementations may evict the oldest entries.
+//! - **append**: Store a result at a given sequence. Does not evict.
 //! - **read_from**: Return all entries with sequence > `after_sequence`, in order.
-//! - **trim_to_capacity**: Explicitly evict oldest entries beyond a limit.
+//! - **trim_before**: Delete entries with sequence `< retain_from`. Call this in
+//!   the same session as `append` so the committed ring is bounded.
+//! - **trim_to_capacity**: Explicitly evict oldest entries beyond a count limit.
 
 use async_trait::async_trait;
 
@@ -41,6 +42,8 @@ pub trait OutboxWriter: Send + Sync {
     /// Append a serialized query result entry.
     ///
     /// If the outbox already contains an entry at this sequence, it is overwritten.
+    /// This does not evict older entries; callers that bound the ring must
+    /// [`trim_before`](Self::trim_before) in the same session before commit.
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError>;
 
     /// Read all entries with sequence strictly greater than `after_sequence`.
@@ -63,9 +66,17 @@ pub trait OutboxWriter: Send + Sync {
     /// Used during `AutoReset` recovery and reaction deprovisioning.
     async fn clear(&self, query_id: &str) -> Result<(), IndexError>;
 
+    /// Delete outbox entries with sequence strictly less than `retain_from`.
+    ///
+    /// Returns the number of entries removed. When a session is active,
+    /// deletes are staged in that session so they commit atomically with a
+    /// preceding [`append`](Self::append).
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError>;
+
     /// Trim the outbox to at most `capacity` entries, removing the oldest.
     ///
     /// Returns the number of entries removed. If the outbox has ≤ `capacity`
-    /// entries, this is a no-op returning 0.
+    /// entries, this is a no-op returning 0. When a session is active, deletes
+    /// are staged in that session.
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError>;
 }
