@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Resolved `resultKeyFields` value used to correlate diffs with an A2A task.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResultKey(pub String);
 
@@ -29,6 +30,7 @@ impl std::fmt::Display for ResultKey {
     }
 }
 
+/// Deterministic A2A `messageId`: length-prefixed identity plus `sequence`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MessageId(pub String);
 
@@ -44,6 +46,7 @@ impl std::fmt::Display for MessageId {
     }
 }
 
+/// What to do when a follow-up arrives after the remote task is terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalUpdatePolicy {
@@ -52,6 +55,7 @@ pub enum TerminalUpdatePolicy {
     Ignore,
 }
 
+/// Query-result operation mapped onto A2A create / follow-up / cancel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     Add,
@@ -69,6 +73,7 @@ impl Operation {
     }
 }
 
+/// Persisted per-result-key view of the remote A2A task or one-shot message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activation {
@@ -153,6 +158,7 @@ pub enum ActivationState {
     Present(Activation),
 }
 
+/// Next A2A call for a diff given current [`Activation`] state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     SendCreate,
@@ -161,6 +167,7 @@ pub enum Action {
     Drop { reason: &'static str },
 }
 
+/// Choose create, follow-up, cancel, or drop from the current activation.
 pub fn next_action(
     operation: Operation,
     activation: &ActivationState,

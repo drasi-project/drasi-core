@@ -1,6 +1,6 @@
 # Drasi A2A Reaction
 
-`drasi-reaction-a2a` sends Drasi continuous query diffs to an A2A-compatible JSON-RPC 2.0 endpoint.
+`drasi-reaction-a2a` sends Drasi continuous query diffs to an A2A-compatible endpoint using JSON-RPC 2.0 envelopes. The A2A protocol version is sent separately as the `A2A-Version: 1.0` HTTP header.
 
 ## Endpoint and agentgateway
 
@@ -74,7 +74,7 @@ Each `SendMessage` includes a data part:
 
 ## Idempotency note
 
-`messageId` is deterministic: `{reactionId}-{queryId}-{resultKey}-{sequence}`.  
+`messageId` is `{length_prefixed(reactionId, queryId, resultKey)}:{sequence}`, where each part is encoded as `len:part` so values that contain `:` cannot collide.  
 Endpoints that deduplicate by message id converge on replay.  
 If a crash happens after `SendMessage` succeeds but before activation state persistence, a duplicate task can still occur.
 

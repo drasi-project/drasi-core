@@ -14,6 +14,30 @@
 
 #![allow(unexpected_cfgs)]
 
+//! A2A JSON-RPC reaction plugin for Drasi.
+//!
+//! Forwards continuous query diffs to an A2A-compatible JSON-RPC 2.0
+//! endpoint via `SendMessage`/`CancelTask`, tracking task activation so
+//! `UPDATE`/`DELETE` follow up on or cancel the right task. See
+//! [`A2AReactionConfig`] and the crate `README.md` for configuration and
+//! wire format.
+//!
+//! ## Quick start
+//!
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! use drasi_reaction_a2a::A2AReaction;
+//!
+//! let reaction = A2AReaction::builder("agent")
+//!     .with_query("overdue-invoices")
+//!     .with_endpoint("https://agent.example.com/")
+//!     .with_result_key_fields(["invoiceId"])
+//!     .build()?;
+//! # let _ = reaction;
+//! # Ok(())
+//! # }
+//! ```
+
 pub mod a2a;
 pub mod activation;
 pub mod client;
@@ -32,6 +56,10 @@ pub use activation::{
 };
 pub use config::A2AReactionConfig;
 
+/// Builder for [`A2AReaction`].
+///
+/// `endpoint` and `resultKeyFields` are required. See the crate `README.md`
+/// for defaults and wire behavior.
 pub struct A2AReactionBuilder {
     id: String,
     queries: Vec<String>,
@@ -85,6 +113,7 @@ impl A2AReactionBuilder {
         self
     }
 
+    /// Fields used to correlate diffs with an A2A task. Required.
     pub fn with_result_key_fields<I, S>(mut self, fields: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -99,11 +128,15 @@ impl A2AReactionBuilder {
         self
     }
 
+    /// What to do when a follow-up arrives after the remote task is
+    /// terminal. Defaults to [`TerminalUpdatePolicy::Replace`].
     pub fn with_terminal_update_policy(mut self, policy: TerminalUpdatePolicy) -> Self {
         self.config.terminal_update_policy = policy;
         self
     }
 
+    /// When true (default), `SendMessage` uses `returnImmediately` so the
+    /// reaction does not wait for the agent to finish.
     pub fn with_return_immediately(mut self, return_immediately: bool) -> Self {
         self.config.return_immediately = return_immediately;
         self

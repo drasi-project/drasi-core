@@ -26,20 +26,28 @@ fn default_return_immediately() -> bool {
     true
 }
 
+/// Configuration for the A2A reaction. YAML keys are camelCase.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct A2AReactionConfig {
+    /// Trusted operator URL (`http`/`https`). Required.
     pub endpoint: String,
+    /// Optional bearer token sent as `Authorization`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// Per-request timeout in milliseconds. Defaults to 5000.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// Fields used to correlate diffs with an A2A task. Required.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub result_key_fields: Vec<String>,
+    /// Optional Handlebars text part rendered beside the change payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_template: Option<String>,
+    /// Follow-up policy after the remote task is terminal. Defaults to replace.
     #[serde(default)]
     pub terminal_update_policy: TerminalUpdatePolicy,
+    /// When true (default), `SendMessage` does not wait for the agent to finish.
     #[serde(default = "default_return_immediately")]
     pub return_immediately: bool,
 }
