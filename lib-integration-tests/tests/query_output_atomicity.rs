@@ -80,6 +80,7 @@ RETURN p.personId AS id, p.name AS name, p.active AS active";
 enum PersistStage {
     BeforeSourceCheckpoint,
     BeforeOutboxAppend,
+    BeforeOutboxTrim,
     BeforeLiveResultsApply,
     BeforeResultSequence,
     AfterCommit,
@@ -90,6 +91,7 @@ impl PersistStage {
         match self {
             Self::BeforeSourceCheckpoint => "BeforeSourceCheckpoint",
             Self::BeforeOutboxAppend => "BeforeOutboxAppend",
+            Self::BeforeOutboxTrim => "BeforeOutboxTrim",
             Self::BeforeLiveResultsApply => "BeforeLiveResultsApply",
             Self::BeforeResultSequence => "BeforeResultSequence",
             Self::AfterCommit => "AfterCommit",
@@ -100,6 +102,7 @@ impl PersistStage {
         match value {
             "BeforeSourceCheckpoint" => Ok(Self::BeforeSourceCheckpoint),
             "BeforeOutboxAppend" => Ok(Self::BeforeOutboxAppend),
+            "BeforeOutboxTrim" => Ok(Self::BeforeOutboxTrim),
             "BeforeLiveResultsApply" => Ok(Self::BeforeLiveResultsApply),
             "BeforeResultSequence" => Ok(Self::BeforeResultSequence),
             "AfterCommit" => Ok(Self::AfterCommit),
@@ -319,6 +322,9 @@ impl OutboxWriter for FailingOutboxWriter {
     }
 
     async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        if self.fault.should_fail(PersistStage::BeforeOutboxTrim) {
+            return Err(injected(PersistStage::BeforeOutboxTrim));
+        }
         self.inner.trim_before(query_id, retain_from).await
     }
 
@@ -1170,6 +1176,11 @@ async fn restart_without_checkpoint_still_bootstraps() -> Result<()> {
 #[tokio::test]
 async fn fail_after_source_checkpoint_before_outbox_rolls_back() -> Result<()> {
     run_mid_txn_failure(PersistStage::BeforeOutboxAppend).await
+}
+
+#[tokio::test]
+async fn fail_after_outbox_append_before_trim_rolls_back() -> Result<()> {
+    run_mid_txn_failure(PersistStage::BeforeOutboxTrim).await
 }
 
 #[tokio::test]

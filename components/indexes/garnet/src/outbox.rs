@@ -236,7 +236,7 @@ impl OutboxWriter for GarnetOutboxWriter {
         let data_key = self.data_key();
         let max = format!("({retain_from}");
 
-        let sequences_to_remove: Vec<String> = cmd("ZRANGEBYSCORE")
+        let mut sequences_to_remove: Vec<String> = cmd("ZRANGEBYSCORE")
             .arg(&outbox_key)
             .arg("-inf")
             .arg(&max)
@@ -244,9 +244,31 @@ impl OutboxWriter for GarnetOutboxWriter {
             .await
             .map_err(IndexError::other)?;
 
+        if let Some(session_state) = &self.session_state {
+            session_state.with_active_buffer(|buffer| {
+                if let crate::session_state::BufferReadResult::Found(deltas) =
+                    buffer.zset_get_deltas(&outbox_key)
+                {
+                    for member in deltas.added.keys() {
+                        if let Ok(seq_str) = std::str::from_utf8(member) {
+                            if seq_str
+                                .parse::<u64>()
+                                .ok()
+                                .is_some_and(|seq| seq < retain_from)
+                                && !sequences_to_remove.iter().any(|s| s == seq_str)
+                            {
+                                sequences_to_remove.push(seq_str.to_string());
+                            }
+                        }
+                    }
+                }
+            })?;
+        }
+
+        let removed = sequences_to_remove.len();
         self.remove_sequences(&outbox_key, &data_key, &sequences_to_remove)
             .await?;
-        Ok(sequences_to_remove.len())
+        Ok(removed)
     }
 
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
