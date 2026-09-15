@@ -17,7 +17,7 @@ The reaction has one transport mode: HTTP POST to `endpoint`.
   - Active: `WORKING`, `SUBMITTED`, `INPUT_REQUIRED`, `AUTH_REQUIRED`
   - Terminal: `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`
   - `TASK_STATE_` prefixes are stripped without regard to case. `CANCELLED` maps to `CANCELED`. Hyphens become underscores.
-- Before acting on a cached active task, the reaction calls `GetTask`. If the task is terminal, `terminalUpdatePolicy` applies (`replace` starts a new task). `GetTask` or `CancelTask` `Task not found` (`-32001`) clears the cached activation. Agents that do not implement `GetTask` keep the cached activation.
+- Before acting on a cached active task, the reaction calls `GetTask`. If the task is terminal, `terminalUpdatePolicy` applies (`replace` starts a new task). `GetTask` or `CancelTask` `Task not found` (`-32001`) clears the cached activation. An HTTP-level cancel drop keeps the cached activation. Agents that do not implement `GetTask` keep the cached activation.
 
 ## Configuration
 

@@ -383,11 +383,8 @@ async fn process_diff(
                     })
                     .await
                 {
-                    Ok(outcome) => {
-                        if matches!(
-                            outcome,
-                            DeliveryResult::Delivered(()) | DeliveryResult::Dropped
-                        ) {
+                    Ok(outcome) => match outcome {
+                        DeliveryResult::Delivered(()) => {
                             clear_activation_state(base, activation_cache, &state_key)
                                 .await
                                 .with_context(|| {
@@ -396,7 +393,13 @@ async fn process_diff(
                                     )
                                 })?;
                         }
-                    }
+                        DeliveryResult::Dropped => {
+                            debug!(
+                                "[{reaction_name}] CancelTask dropped for query '{}' result key '{}'; keeping cached activation",
+                                query_result.query_id, result_key
+                            );
+                        }
+                    },
                     Err(error)
                         if json_rpc_failure(&error).is_some_and(JsonRpcFailure::is_stale_task) =>
                     {

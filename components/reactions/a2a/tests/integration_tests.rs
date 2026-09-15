@@ -45,6 +45,21 @@ impl Respond for OrderedJsonRpc {
     }
 }
 
+struct OrderedResponses {
+    next: AtomicUsize,
+    responses: Vec<ResponseTemplate>,
+}
+
+impl Respond for OrderedResponses {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let index = self.next.fetch_add(1, Ordering::SeqCst);
+        self.responses
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| self.responses.last().cloned().expect("ordered responses"))
+    }
+}
+
 async fn initialize_with_store(reaction: &A2AReaction, store: Arc<MemoryStateStoreProvider>) {
     let (graph, _rx) = ComponentGraph::new("a2a-it");
     let context = ReactionRuntimeContext::new(
@@ -900,4 +915,90 @@ async fn cancel_task_not_found_clears_without_error() {
     let cancel_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
     assert_eq!(cancel_body["method"], json!("CancelTask"));
     assert_ne!(reaction.status().await, ComponentStatus::Error);
+}
+
+#[tokio::test]
+async fn cancel_http_drop_keeps_activation_for_follow_up() {
+    let working = json!({
+        "jsonrpc": "2.0",
+        "id": "1",
+        "result": {
+            "task": {
+                "id": "task-1",
+                "contextId": "ctx-1",
+                "status": { "state": "TASK_STATE_WORKING" }
+            }
+        }
+    });
+    let get_working = json!({
+        "jsonrpc": "2.0",
+        "id": "1",
+        "result": {
+            "id": "task-1",
+            "contextId": "ctx-1",
+            "status": { "state": "TASK_STATE_WORKING" }
+        }
+    });
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(OrderedResponses {
+            next: AtomicUsize::new(0),
+            responses: vec![
+                ResponseTemplate::new(200).set_body_json(working.clone()),
+                ResponseTemplate::new(200).set_body_json(get_working.clone()),
+                ResponseTemplate::new(400).set_body_string("nope"),
+                ResponseTemplate::new(200).set_body_json(get_working),
+                ResponseTemplate::new(200).set_body_json(working),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let store = memory_store();
+    let reaction = make_reaction(&server, TerminalUpdatePolicy::Replace);
+    initialize_with_store(&reaction, store.clone()).await;
+    reaction.start().await.expect("start reaction");
+    reaction
+        .enqueue_query_result(mock_source::add_result(
+            "q1",
+            1,
+            json!({"invoiceId":"INV-15"}),
+        ))
+        .await
+        .expect("enqueue add");
+    wait_for_requests(&server, 1, Duration::from_secs(3)).await;
+    reaction
+        .enqueue_query_result(mock_source::delete_result(
+            "q1",
+            2,
+            json!({"invoiceId":"INV-15"}),
+        ))
+        .await
+        .expect("enqueue delete");
+    wait_for_requests(&server, 3, Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let key = "activation:2:q1:6:INV-15";
+    assert!(store.get("a2a-it", key).await.expect("get").is_some());
+    assert_ne!(reaction.status().await, ComponentStatus::Error);
+
+    reaction
+        .enqueue_query_result(mock_source::update_result(
+            "q1",
+            3,
+            json!({"invoiceId":"INV-15"}),
+            json!({"invoiceId":"INV-15","amount":2}),
+        ))
+        .await
+        .expect("enqueue update");
+    wait_for_requests(&server, 5, Duration::from_secs(3)).await;
+    reaction.stop().await.expect("stop reaction");
+
+    let requests = server.received_requests().await.expect("read requests");
+    let cancel_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    let follow_up: serde_json::Value = serde_json::from_slice(&requests[4].body).unwrap();
+    assert_eq!(cancel_body["method"], json!("CancelTask"));
+    assert_eq!(follow_up["method"], json!("SendMessage"));
+    assert_eq!(follow_up["params"]["message"]["taskId"], json!("task-1"));
 }
