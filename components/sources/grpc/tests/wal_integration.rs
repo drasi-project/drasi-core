@@ -251,13 +251,13 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event4.sequence.unwrap(), 4);
+    assert_eq!(event4.sequence, 4);
 
     let event5 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event5.sequence.unwrap(), 5);
+    assert_eq!(event5.sequence, 5);
 
     source.stop().await.unwrap();
 }
@@ -357,8 +357,7 @@ async fn test_grpc_sequence_stamped_without_durability() {
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
         assert_eq!(
-            event.sequence,
-            Some(expected_seq),
+            event.sequence, expected_seq,
             "event {expected_seq} should carry a framework sequence with durability off"
         );
     }

@@ -17,11 +17,11 @@
 //! This module provides a type alias to the generic priority queue for source events.
 //! The generic implementation is located in channels::priority_queue.
 
-use crate::channels::events::SourceEventWrapper;
+use crate::channels::events::StampedSourceEvent;
 
 /// Priority queue specialized for SourceEvents
 /// This is now a type alias to the generic priority queue implementation
-pub type PriorityQueue = crate::channels::priority_queue::PriorityQueue<SourceEventWrapper>;
+pub type PriorityQueue = crate::channels::priority_queue::PriorityQueue<StampedSourceEvent>;
 
 /// Re-export metrics type for compatibility
 pub use crate::channels::priority_queue::PriorityQueueMetrics;
@@ -29,7 +29,7 @@ pub use crate::channels::priority_queue::PriorityQueueMetrics;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::events::{SourceEvent, SourceEventWrapper};
+    use crate::channels::events::{SourceEvent, SourceEventDraft, StampedSourceEvent};
     use chrono::Utc;
     use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
     use std::sync::Arc;
@@ -37,7 +37,7 @@ mod tests {
     fn create_test_event(
         source_id: &str,
         timestamp: chrono::DateTime<Utc>,
-    ) -> Arc<SourceEventWrapper> {
+    ) -> Arc<StampedSourceEvent> {
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -49,10 +49,13 @@ mod tests {
             },
         };
 
-        Arc::new(SourceEventWrapper::new(
-            source_id.to_string(),
-            SourceEvent::Change(change),
-            timestamp,
+        Arc::new(StampedSourceEvent::stamp(
+            SourceEventDraft::new(
+                source_id.to_string(),
+                SourceEvent::Change(change),
+                timestamp,
+            ),
+            0,
         ))
     }
 

@@ -633,7 +633,7 @@ async fn start(&self) -> Result<()> {
     let task = tokio::spawn(async move {
         loop {
             let change = /* produce the next SourceChange */;
-            let wrapper = SourceEventWrapper::new(
+            let draft = SourceEventDraft::new(
                 base.id().to_string(),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
@@ -641,7 +641,7 @@ async fn start(&self) -> Result<()> {
 
             // The framework stamps a monotonic sequence here (even with
             // durability disabled) and preserves any source_position you set.
-            if let Err(e) = base.dispatch_event(wrapper).await {
+            if let Err(e) = base.dispatch_event(draft).await {
                 debug!("dispatch failed (no subscribers): {e}");
             }
         }

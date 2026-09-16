@@ -27,12 +27,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::channels::events::{BootstrapEvent, SourceEventWrapper};
+use drasi_lib::channels::events::{BootstrapEvent, StampedSourceEvent};
 use drasi_lib::channels::ChangeReceiver;
 use drasi_plugin_sdk::ffi::payload::{consume_bootstrap_event, consume_source_event};
 use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent};
 
-/// Decode a plugin-sent `FfiSourceEvent` into a **host-owned** `SourceEventWrapper`.
+/// Decode a plugin-sent `FfiSourceEvent` into a **host-owned** `StampedSourceEvent`.
 ///
 /// The payload crosses the cdylib boundary as MessagePack bytes (issue #602): the
 /// host deserializes its own copy and frees the plugin's buffer via the
@@ -40,7 +40,7 @@ use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent
 /// `repr(Rust)` memory. Returns `None` if the payload cannot be decoded (the
 /// plugin buffer is freed regardless). Delegates to the canonical
 /// [`consume_source_event`], where the size/null hardening lives.
-fn decode_source_event(ffi_event: &FfiSourceEvent) -> Option<SourceEventWrapper> {
+fn decode_source_event(ffi_event: &FfiSourceEvent) -> Option<StampedSourceEvent> {
     unsafe { consume_source_event(ffi_event) }
 }
 
@@ -53,7 +53,7 @@ fn decode_bootstrap_event(ffi_event: &FfiBootstrapEvent) -> Option<BootstrapEven
 /// Context passed to the push callback. Holds the std mpsc sender and a
 /// tokio Notify to wake the host receiver.
 struct PushCallbackContext {
-    tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Arc<SourceEventWrapper>>>>,
+    tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Arc<StampedSourceEvent>>>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -141,14 +141,14 @@ impl Drop for FfiReceiverState {
     }
 }
 
-/// Wraps an `FfiChangeReceiver` into a `ChangeReceiver<SourceEventWrapper>`.
+/// Wraps an `FfiChangeReceiver` into a `ChangeReceiver<StampedSourceEvent>`.
 ///
 /// On creation, calls `start_push_fn` to have the plugin push events via
 /// callback into a local `std::sync::mpsc` channel. The `recv()` method
 /// waits on a `tokio::sync::Notify` and then drains from the std channel,
 /// avoiding any cross-cdylib tokio usage.
 pub struct ChangeReceiverProxy {
-    rx: std::sync::mpsc::Receiver<Arc<SourceEventWrapper>>,
+    rx: std::sync::mpsc::Receiver<Arc<StampedSourceEvent>>,
     notify: Arc<tokio::sync::Notify>,
     /// Prevent the callback context from being freed while the plugin forwarder runs.
     _callback_ctx: Arc<PushCallbackContext>,
@@ -195,8 +195,8 @@ impl ChangeReceiverProxy {
 }
 
 #[async_trait]
-impl ChangeReceiver<SourceEventWrapper> for ChangeReceiverProxy {
-    async fn recv(&mut self) -> anyhow::Result<Arc<SourceEventWrapper>> {
+impl ChangeReceiver<StampedSourceEvent> for ChangeReceiverProxy {
+    async fn recv(&mut self) -> anyhow::Result<Arc<StampedSourceEvent>> {
         loop {
             // Try to receive without blocking first
             match self.rx.try_recv() {
@@ -475,7 +475,7 @@ mod ownership_tests {
             source_id: "src-1".to_string(),
             event: SourceEvent::Change(SourceChange::Insert { element: node() }),
             timestamp_us: 1_771_000_000_000_000,
-            sequence: Some(99),
+            sequence: 99,
             source_position: Some(b"binlog:1".to_vec()),
         };
         let raw = make_source_event(&payload, counting_drop_src_valid);
@@ -483,7 +483,7 @@ mod ownership_tests {
 
         let wrapper = decode_source_event(ffi).expect("host-owned wrapper");
         assert_eq!(wrapper.source_id, "src-1");
-        assert_eq!(wrapper.sequence, Some(99));
+        assert_eq!(wrapper.sequence, 99);
         assert_eq!(wrapper.source_position.as_deref(), Some(&b"binlog:1"[..]));
         assert_eq!(wrapper.event, payload.event);
 
@@ -587,7 +587,7 @@ mod ownership_tests {
 
     #[test]
     fn change_callback_reclaims_leaked_arc_exactly_once_on_send_failure() {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<SourceEventWrapper>>(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<StampedSourceEvent>>(4);
         let ctx = Arc::new(PushCallbackContext {
             tx: std::sync::Mutex::new(Some(tx)),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -603,7 +603,7 @@ mod ownership_tests {
             source_id: "s".to_string(),
             event: SourceEvent::Change(SourceChange::Insert { element: node() }),
             timestamp_us: 0,
-            sequence: None,
+            sequence: 0,
             source_position: None,
         };
         let ev = make_source_event(&payload, free_only_drop);

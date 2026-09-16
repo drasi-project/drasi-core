@@ -106,7 +106,8 @@ context later and again in [Appendix B](#appendix-b--glossary).
 | Term | What it is |
 |------|------------|
 | **`SourceChange`** | The graph mutation you emit: an `Insert`, `Update`, or `Delete` of a node or relation. |
-| **`SourceEventWrapper`** | The envelope `SourceBase` dispatches: a `SourceChange` plus sequence, timestamp, and optional `source_position`. |
+| **`SourceEventDraft`** | The unstamped envelope you build and hand to `SourceBase`: a `SourceChange` plus timestamp and optional `source_position`. It has **no sequence field**. |
+| **`StampedSourceEvent`** | The downstream envelope `SourceBase` produces from a draft: adds the framework-assigned `sequence: u64`. |
 | **`SourceBase`** | The helper you embed in your source struct. It owns subscriptions, dispatch, status, sequencing, replay, and shutdown. |
 | **Bootstrap** | The initial snapshot a query receives before live changes, produced by a `BootstrapProvider` — separately from streaming. |
 | **Framework sequence** | A monotonic `u64` that `SourceBase` stamps on every event, used for ordering and query checkpoints. |
@@ -119,7 +120,8 @@ context later and again in [Appendix B](#appendix-b--glossary).
 
 1. **Sources are active producers.** A Source owns the connection, listener,
    poller, consumer, or in-memory API that ingests data from an external system.
-   It pushes `SourceEventWrapper` values to the runtime through `SourceBase`.
+   It pushes `SourceEventDraft` values to the runtime through `SourceBase`, which
+   stamps them into `StampedSourceEvent` values.
 
 2. **Queries subscribe to Sources.** Sources do not know query text and do not
    evaluate Cypher / GQL. The runtime calls `subscribe(settings)` for each query that
@@ -129,7 +131,7 @@ context later and again in [Appendix B](#appendix-b--glossary).
 3. **The emitted shape is fixed.** Sources may transform external payloads into a
    graph model, but after that transformation they always emit the same Drasi
    data contract: `SourceChange::Insert`, `Update`, or `Delete` wrapped in
-   `SourceEventWrapper`. Sources do not use reaction-style output templates.
+   a `SourceEventDraft`. Sources do not use reaction-style output templates.
 
 4. **Resilience is part of the Source contract.** A Source must be explicit about
    whether it can replay from a persisted position. Native-log sources use
@@ -648,7 +650,8 @@ Typical Source lifecycle:
 2. **Initialize** — runtime calls `initialize(SourceRuntimeContext)`.
 3. **Start** — connect to external systems and spawn ingestion tasks.
 4. **Subscribe** — queries call `subscribe(settings)` and receive event channels.
-5. **Stream** — source dispatches live `SourceEventWrapper` values.
+5. **Stream** — source dispatches live `SourceEventDraft` values, which
+   `SourceBase` stamps into `StampedSourceEvent` values.
 6. **Stop** — signal tasks, wait briefly, abort if necessary, clear stale
    channel-mode dispatchers.
 7. **Deprovision** — optional permanent cleanup when a source is deleted with
@@ -738,7 +741,7 @@ Query subscribe(enable_bootstrap = true)
 
 Important rules:
 
-- Bootstrap providers send `BootstrapEvent` values, not `SourceEventWrapper`
+- Bootstrap providers send `BootstrapEvent` values, not `SourceEventDraft`
   values.
 - `resume_from` overrides bootstrap. A resuming query already has indexed state,
   so re-bootstrapping would corrupt it.
@@ -878,7 +881,7 @@ pub trait Source: Send + Sync {
 ### Public import paths
 
 Every type you need has a stable public path. **Copy these imports rather than
-guessing** — the obvious roots (`drasi_lib::SourceEventWrapper`,
+guessing** — the obvious roots (`drasi_lib::SourceEventDraft`,
 `drasi_lib::models::*`) do not exist. Most types live in `drasi_lib`, but the
 **event data-contract** types come from `drasi_core`, and the event/bootstrap
 channel types live under `drasi_lib::channels`.
@@ -891,7 +894,7 @@ channel types live under `drasi_lib::channels`.
 | `DispatchMode`, `ComponentStatus`, `SubscriptionResponse` | `use drasi_lib::{DispatchMode, ComponentStatus, SubscriptionResponse};` |
 | `SourceSubscriptionSettings` | `use drasi_lib::SourceSubscriptionSettings;` (also at `drasi_lib::config::SourceSubscriptionSettings`) |
 | `PositionComparator`, `ByteLexPositionComparator` | `use drasi_lib::{PositionComparator, ByteLexPositionComparator};` |
-| `SourceEvent`, `SourceEventWrapper` | `use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};` |
+| `SourceEvent`, `SourceEventDraft` | `use drasi_lib::channels::events::{SourceEvent, SourceEventDraft};` |
 | `StateStoreProvider`, `StateStoreResult`, `StateStoreError` | `use drasi_lib::{StateStoreProvider, StateStoreResult, StateStoreError};` |
 | `WalProvider`, `WriteAheadLogConfig`, `WalError`, `CapacityPolicy` | `use drasi_lib::{WalProvider, WriteAheadLogConfig, WalError, CapacityPolicy};` |
 | `BootstrapProvider` | `use drasi_lib::BootstrapProvider;` |
@@ -995,7 +998,7 @@ subscribe(query B, enable_bootstrap = true, resume_from = None)
     ↓
 on_subscriptions_complete()
     ↓
-dispatch live SourceEventWrapper values
+dispatch live SourceEventDraft values (framework stamps → StampedSourceEvent)
 ```
 
 Restart with query checkpoint:
@@ -1183,18 +1186,19 @@ self.base.dispatch_source_change(change).await?;
 ```
 
 Use `dispatch_event()` when you need to attach `source_position` or custom
-profiling metadata:
+profiling metadata. You build an unstamped [`SourceEventDraft`] — it has **no
+sequence field** — and `dispatch_event` stamps the framework sequence for you:
 
 ```rust,ignore
-use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::events::{SourceEvent, SourceEventDraft};
 
-let mut wrapper = SourceEventWrapper::new(
+let mut draft = SourceEventDraft::new(
     self.base.id.clone(),
     SourceEvent::Change(change),
     chrono::Utc::now(),
 );
-wrapper.set_source_position(bytes::Bytes::from(lsn.to_be_bytes().to_vec()));
-self.base.dispatch_event(wrapper).await?;
+draft.set_source_position(bytes::Bytes::from(lsn.to_be_bytes().to_vec()));
+self.base.dispatch_event(draft).await?;
 ```
 
 Use `dispatch_events_batch()` when a poll cycle or database read produces many
@@ -1320,25 +1324,52 @@ Map external types deliberately:
 - avoid lossy float conversions for values that must be exact
 - avoid embedding opaque source payloads unless queries actually need them
 
-### `SourceEventWrapper`
+### `SourceEventDraft` and `StampedSourceEvent`
 
-`SourceBase` dispatches `SourceEventWrapper` values:
+Source authors construct an unstamped [`SourceEventDraft`]. It has **no sequence
+field** — you cannot set or forget one:
 
 ```rust,ignore
-pub struct SourceEventWrapper {
+pub struct SourceEventDraft {
     pub source_id: String,
     pub event: SourceEvent,
     pub timestamp: DateTime<Utc>,
     pub profiling: Option<ProfilingMetadata>,
-    pub sequence: Option<u64>,
+    pub source_position: Option<Bytes>,
+    /// WAL fast-path only; leave `None` and let the framework assign.
+    pub supplied_sequence: Option<u64>,
+}
+```
+
+`SourceBase::dispatch_event()` / `dispatch_events_batch()` are the **only** bridge
+from a draft to the downstream, stamped event:
+
+```rust,ignore
+pub struct StampedSourceEvent {
+    pub source_id: String,
+    pub event: SourceEvent,
+    pub timestamp: DateTime<Utc>,
+    pub profiling: Option<ProfilingMetadata>,
+    pub sequence: u64, // mandatory — assigned by the framework
     pub source_position: Option<Bytes>,
 }
 ```
 
-`SourceBase::dispatch_event()` assigns `sequence` when it is `None`. Sources
-should set `source_position` before dispatch when the event has a replayable
-upstream position. `source_position` is opaque to the framework and must be no
-larger than 64 KB for checkpoint persistence.
+The framework assigns `sequence` on dispatch (using `supplied_sequence` only if
+you set it — the WAL fast-path). Set `source_position` before dispatch when the
+event has a replayable upstream position. `source_position` is opaque to the
+framework and must be no larger than 64 KB for checkpoint persistence.
+
+> **Source-author checklist** — the fastest way is the right way:
+> 1. Build a `SourceEventDraft` (`new` or `with_profiling`) — you never touch
+>    sequence numbers.
+> 2. If the event has a replayable upstream cursor, attach it with
+>    `draft.set_source_position(bytes)`.
+> 3. Call `self.base.dispatch_event(draft)` (or `dispatch_events_batch(drafts)`).
+>    The framework stamps a monotonic `sequence`; every downstream consumer sees
+>    a `StampedSourceEvent` with `sequence: u64`.
+> 4. Only WAL sources with their own durable ordinal set
+>    `draft.supplied_sequence = Some(n)`; every other source leaves it `None`.
 
 ### Why there is no source templating
 
@@ -1367,7 +1398,7 @@ Use this when the external system already has a durable ordered change log:
 
 Required behavior:
 
-1. Encode the upstream position into `SourceEventWrapper.source_position`.
+1. Encode the upstream position into `SourceEventDraft.source_position`.
 2. On subscribe, parse `settings.resume_from`.
 3. Validate that the requested position is still available.
 4. Rewind, seek, or restart the ingestion task if needed.
@@ -1380,7 +1411,7 @@ validating `resume_from` on the way in — look like this. Every call below is
 compile-tested against `drasi-lib` 0.8 / `drasi-core` 0.5:
 
 ```rust,ignore
-use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::events::{SourceEvent, SourceEventDraft};
 use drasi_lib::{ByteLexPositionComparator, SourceError};
 
 // --- In start(): register the comparator once, then stream. ---
@@ -1388,13 +1419,13 @@ self.base.set_position_comparator(ByteLexPositionComparator).await;
 
 // `clone_shared()` yields a task-owned handle that dispatches through the
 // same SourceBase. Per event, stamp the upstream position (big-endian bytes):
-let mut wrapper = SourceEventWrapper::new(
+let mut draft = SourceEventDraft::new(
     source_id.clone(),
     SourceEvent::Change(change),
     chrono::Utc::now(),
 );
-wrapper.set_source_position(bytes::Bytes::from(offset.to_be_bytes().to_vec()));
-base.dispatch_event(wrapper).await?;
+draft.set_source_position(bytes::Bytes::from(offset.to_be_bytes().to_vec()));
+base.dispatch_event(draft).await?;
 
 // Periodically: everything up to the confirmed position is safe to acknowledge
 // upstream (commit the offset / flush the LSN) and prune. NEVER advance past the
@@ -1425,7 +1456,7 @@ async fn subscribe(&self, settings: SourceSubscriptionSettings) -> Result<Subscr
 Notes that the compiler will otherwise teach you the hard way:
 
 - `set_position_comparator` is `async` and takes the comparator **by value**.
-- `SourceEvent` / `SourceEventWrapper` import from `drasi_lib::channels::events`.
+- `SourceEvent` / `SourceEventDraft` import from `drasi_lib::channels::events`.
 - `compute_confirmed_position()` returns the confirmed framework **sequence**
   (`u64`); `compute_confirmed_source_position()` returns the corresponding opaque
   **position bytes**. Use the sequence to `prune_position_map`, the bytes to
@@ -2598,7 +2629,7 @@ The following types and traits cross the dynamic plugin boundary:
 - `Source` trait methods through `SourceVtable`
 - `SourceSubscriptionSettings` fields deconstructed into FFI arguments
 - `SubscriptionResponse` reconstructed field-by-field
-- `SourceEventWrapper`, `BootstrapEvent`, and `SourceChange` as opaque pointers
+- `StampedSourceEvent`, `BootstrapEvent`, and `SourceChange` as opaque pointers
 - `ComponentStatus` and `DispatchMode` as FFI enums
 - `BootstrapProvider` through cross-plugin vtables
 
@@ -2904,9 +2935,9 @@ restart can dispatch events to dead receivers and silently lose data.
 
 Several source types cross the dynamic plugin FFI boundary. If you modify
 `Source`, `SourceSubscriptionSettings`, `SubscriptionResponse`,
-`SourceEventWrapper`, `BootstrapEvent`, `SourceChange`, `ComponentStatus`, or
-`DispatchMode`, update the plugin SDK/host SDK mappings and bump the FFI SDK
-version.
+`SourceEventDraft`, `StampedSourceEvent`, `BootstrapEvent`, `SourceChange`,
+`ComponentStatus`, or `DispatchMode`, update the plugin SDK/host SDK mappings and
+bump the FFI SDK version.
 
 ---
 
@@ -2938,7 +2969,7 @@ pub struct SourceSubscriptionSettings {
 pub struct SubscriptionResponse {
     pub query_id: String,
     pub source_id: String,
-    pub receiver: Box<dyn ChangeReceiver<SourceEventWrapper>>,
+    pub receiver: Box<dyn ChangeReceiver<StampedSourceEvent>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
     pub position_handle: Option<Arc<AtomicU64>>,
     pub bootstrap_result_receiver: Option<oneshot::Receiver<anyhow::Result<BootstrapResult>>>,
@@ -2953,12 +2984,21 @@ pub enum SourceEvent {
     Control(SourceControl),
 }
 
-pub struct SourceEventWrapper {
+pub struct SourceEventDraft {
     pub source_id: String,
     pub event: SourceEvent,
     pub timestamp: DateTime<Utc>,
     pub profiling: Option<ProfilingMetadata>,
-    pub sequence: Option<u64>,
+    pub source_position: Option<Bytes>,
+    pub supplied_sequence: Option<u64>,
+}
+
+pub struct StampedSourceEvent {
+    pub source_id: String,
+    pub event: SourceEvent,
+    pub timestamp: DateTime<Utc>,
+    pub profiling: Option<ProfilingMetadata>,
+    pub sequence: u64,
     pub source_position: Option<Bytes>,
 }
 ```
@@ -3046,7 +3086,8 @@ pub enum CapacityPolicy {
 | Bootstrap | Initial data snapshot for a query. |
 | Streaming | Live change delivery after subscription. |
 | `SourceChange` | Insert, update, or delete graph mutation consumed by the query engine. |
-| `SourceEventWrapper` | Envelope around `SourceChange` with source ID, timestamp, sequence, source position, and profiling metadata. |
+| `SourceEventDraft` | Unstamped envelope around `SourceChange` (source ID, timestamp, optional source position) that a source builds; has no sequence field. |
+| `StampedSourceEvent` | Framework-produced envelope that adds the mandatory `sequence: u64` to a dispatched draft. |
 | Framework sequence | Monotonic `u64` assigned by `SourceBase` for ordering and query checkpoints. |
 | Source position | Opaque bytes owned by the Source that identify an upstream replay position. |
 | Position handle | Shared atomic used by a query to report its last durably processed framework sequence back to the Source. |

@@ -184,7 +184,7 @@ pub struct SourceBase {
     /// [`clone_shared`](Self::clone_shared) to move an owned `SourceBase` into a
     /// background task.
     pub(crate) dispatchers:
-        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<StampedSourceEvent> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
     /// State store provider (extracted from context for convenience)
@@ -334,13 +334,13 @@ impl SourceBase {
         let dispatch_buffer_capacity = params.dispatch_buffer_capacity.unwrap_or(1000);
 
         // Set up initial dispatchers based on dispatch mode
-        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>> =
+        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<StampedSourceEvent> + Send + Sync>> =
             Vec::new();
 
         if dispatch_mode == DispatchMode::Broadcast {
             // For broadcast mode, create a single broadcast dispatcher
             let dispatcher =
-                BroadcastChangeDispatcher::<SourceEventWrapper>::new(dispatch_buffer_capacity);
+                BroadcastChangeDispatcher::<StampedSourceEvent>::new(dispatch_buffer_capacity);
             dispatchers.push(Box::new(dispatcher));
         }
         // For channel mode, dispatchers will be created on-demand when subscribing
@@ -763,8 +763,8 @@ impl SourceBase {
     /// This is a helper method that can be used by sources with custom subscribe logic.
     pub async fn create_streaming_receiver(
         &self,
-    ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
-        let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match self.dispatch_mode {
+    ) -> Result<Box<dyn ChangeReceiver<StampedSourceEvent>>> {
+        let receiver: Box<dyn ChangeReceiver<StampedSourceEvent>> = match self.dispatch_mode {
             DispatchMode::Broadcast => {
                 // For broadcast mode, use the single dispatcher
                 let dispatchers = self.dispatchers.read().await;
@@ -776,7 +776,7 @@ impl SourceBase {
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
-                let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(
+                let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(
                     self.dispatch_buffer_capacity,
                 );
                 let receiver = dispatcher.create_receiver().await?;
@@ -1046,7 +1046,7 @@ impl SourceBase {
 
         // Create dedicated channel for this subscriber
         let dispatcher = crate::channels::dispatcher::ChannelChangeDispatcher::<
-            crate::channels::events::SourceEventWrapper,
+            crate::channels::events::StampedSourceEvent,
         >::new(self.dispatch_buffer_capacity);
         let live_receiver = dispatcher.create_receiver().await?;
 
@@ -1074,17 +1074,17 @@ impl SourceBase {
             Vec::new()
         };
 
-        // Build replay wrappers
+        // Build replay events (already stamped with their WAL sequence)
         let replay_wrappers: std::collections::VecDeque<
-            std::sync::Arc<crate::channels::events::SourceEventWrapper>,
+            std::sync::Arc<crate::channels::events::StampedSourceEvent>,
         > = replay_events
             .into_iter()
             .map(|(seq, change)| {
-                std::sync::Arc::new(crate::channels::events::SourceEventWrapper {
+                std::sync::Arc::new(crate::channels::events::StampedSourceEvent {
                     source_id: self.id.clone(),
                     event: crate::channels::events::SourceEvent::Change(change),
                     timestamp: chrono::Utc::now(),
-                    sequence: Some(seq),
+                    sequence: seq,
                     source_position: Some(bytes::Bytes::from(seq.to_be_bytes().to_vec())),
                     profiling: None,
                 })
@@ -1102,7 +1102,7 @@ impl SourceBase {
 
         // Composite receiver: replay first, then live
         let composite: Box<
-            dyn crate::channels::ChangeReceiver<crate::channels::events::SourceEventWrapper>,
+            dyn crate::channels::ChangeReceiver<crate::channels::events::StampedSourceEvent>,
         > = Box::new(ReplayThenLiveReceiver::new(replay_wrappers, live_receiver));
 
         // Position handle — initialize to the resume sequence so a resuming
@@ -1271,16 +1271,16 @@ impl SourceBase {
     ///
     /// This method handles the common pattern of:
     /// - Creating profiling metadata with timestamp
-    /// - Wrapping the change in a SourceEventWrapper
-    /// - Dispatching to all subscribers
+    /// - Wrapping the change in a [`SourceEventDraft`]
+    /// - Dispatching to all subscribers (which stamps the sequence)
     /// - Handling the no-subscriber case gracefully
     pub async fn dispatch_source_change(&self, change: SourceChange) -> Result<()> {
         // Create profiling metadata
         let mut profiling = profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(profiling::timestamp_ns());
 
-        // Create event wrapper
-        let wrapper = SourceEventWrapper::with_profiling(
+        // Create the unstamped draft
+        let draft = SourceEventDraft::with_profiling(
             self.id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
@@ -1288,7 +1288,7 @@ impl SourceBase {
         );
 
         // Dispatch event
-        self.dispatch_event(wrapper).await
+        self.dispatch_event(draft).await
     }
 
     /// Maximum allowed size for source position bytes (64KB).
@@ -1321,16 +1321,19 @@ impl SourceBase {
         next
     }
 
-    /// Dispatch a SourceEventWrapper to all subscribers.
+    /// Dispatch a [`SourceEventDraft`] to all subscribers, stamping it with a
+    /// framework-assigned monotonic sequence.
     ///
-    /// This is a generic method for dispatching any SourceEvent.
-    /// It handles Arc-wrapping for zero-copy sharing and logs
-    /// when there are no subscribers.
-    /// The framework stamps every event with a monotonic sequence number.
-    pub async fn dispatch_event(&self, mut wrapper: SourceEventWrapper) -> Result<()> {
+    /// This is the sole bridge from an unstamped, source-authored draft to a
+    /// downstream [`StampedSourceEvent`]. It handles Arc-wrapping for zero-copy
+    /// sharing and logs when there are no subscribers. If the draft supplies its
+    /// own `supplied_sequence` (the WAL fast-path), that value is used and the
+    /// counter is advanced past it; otherwise the framework assigns the next
+    /// sequence. Either way the resulting event always carries a sequence.
+    pub async fn dispatch_event(&self, draft: SourceEventDraft) -> Result<()> {
         // Warn about oversized source positions; the checkpoint layer will
         // enforce the limit and preserve the last good position.
-        if let Some(ref pos) = wrapper.source_position {
+        if let Some(ref pos) = draft.source_position {
             if pos.len() > Self::MAX_SOURCE_POSITION_BYTES {
                 warn!(
                     "[{}] Source position is large ({} bytes > {} limit); \
@@ -1349,14 +1352,18 @@ impl SourceBase {
         // and SequenceDedup never mistakes a reordered event for a replay (#640).
         let mut last_dispatch_ts = self.dispatch_order.lock().await;
 
-        // Framework assigns the monotonic sequence (skip if pre-set by WAL)
-        if let Some(seq) = wrapper.sequence {
-            // Pre-set by WAL — advance counter to maintain monotonicity
+        // Framework assigns the monotonic sequence (honor a source-supplied one).
+        let sequence = if let Some(seq) = draft.supplied_sequence {
+            // Source-supplied (WAL fast-path) — advance counter to stay monotonic
             self.next_sequence
                 .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
+            seq
         } else {
-            wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
-        }
+            self.next_sequence.fetch_add(1, Ordering::Relaxed)
+        };
+
+        // Stamp the draft into a downstream event.
+        let mut wrapper = StampedSourceEvent::stamp(draft, sequence);
 
         // Keep per-source timestamps strictly increasing in sequence order so
         // the timestamp-keyed priority queue cannot reorder same-source events.
@@ -1364,11 +1371,11 @@ impl SourceBase {
             Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
         // Record sequence→source_position mapping for confirmed-position lookups.
-        if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
+        if let Some(ref pos) = wrapper.source_position {
             self.sequence_position_map
                 .write()
                 .await
-                .insert(seq, pos.clone());
+                .insert(wrapper.sequence, pos.clone());
         }
 
         debug!("[{}] Dispatching event: {:?}", self.id, &wrapper);
@@ -1438,8 +1445,8 @@ impl SourceBase {
     /// the entire batch. This is more efficient than calling
     /// [`dispatch_event()`](Self::dispatch_event) per-event when the source
     /// processes multiple rows per poll cycle.
-    pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
-        if events.is_empty() {
+    pub async fn dispatch_events_batch(&self, drafts: Vec<SourceEventDraft>) -> Result<()> {
+        if drafts.is_empty() {
             return Ok(());
         }
 
@@ -1451,8 +1458,8 @@ impl SourceBase {
         let dispatchers = self.dispatchers.read().await;
         let comparator = self.position_comparator.read().await;
 
-        for mut wrapper in events {
-            if let Some(ref pos) = wrapper.source_position {
+        for draft in drafts {
+            if let Some(ref pos) = draft.source_position {
                 if pos.len() > Self::MAX_SOURCE_POSITION_BYTES {
                     warn!(
                         "[{}] Source position is large ({} bytes > {} limit); \
@@ -1464,13 +1471,17 @@ impl SourceBase {
                 }
             }
 
-            // Framework assigns the monotonic sequence (skip if pre-set by WAL)
-            if let Some(seq) = wrapper.sequence {
+            // Framework assigns the monotonic sequence (honor a source-supplied one).
+            let sequence = if let Some(seq) = draft.supplied_sequence {
                 self.next_sequence
                     .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
+                seq
             } else {
-                wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
-            }
+                self.next_sequence.fetch_add(1, Ordering::Relaxed)
+            };
+
+            // Stamp the draft into a downstream event.
+            let mut wrapper = StampedSourceEvent::stamp(draft, sequence);
 
             // Keep per-source timestamps strictly increasing in sequence order
             // so the timestamp-keyed priority queue preserves that order.
@@ -1478,11 +1489,11 @@ impl SourceBase {
                 Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
             // Record sequence→source_position mapping for confirmed-position lookups.
-            if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
+            if let Some(ref pos) = wrapper.source_position {
                 self.sequence_position_map
                     .write()
                     .await
-                    .insert(seq, pos.clone());
+                    .insert(wrapper.sequence, pos.clone());
             }
 
             debug!("[{}] Dispatching event (batch): {:?}", self.id, &wrapper);
@@ -1550,12 +1561,12 @@ impl SourceBase {
 
     /// Broadcast SourceControl events
     pub async fn broadcast_control(&self, control: SourceControl) -> Result<()> {
-        let wrapper = SourceEventWrapper::new(
+        let draft = SourceEventDraft::new(
             self.id.clone(),
             SourceEvent::Control(control),
             chrono::Utc::now(),
         );
-        self.dispatch_event(wrapper).await
+        self.dispatch_event(draft).await
     }
 
     /// Create a test subscription to this source (async, fallible)
@@ -1572,7 +1583,7 @@ impl SourceBase {
     /// or an error if the receiver cannot be created.
     pub async fn try_test_subscribe(
         &self,
-    ) -> anyhow::Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
+    ) -> anyhow::Result<Box<dyn ChangeReceiver<StampedSourceEvent>>> {
         self.create_streaming_receiver().await
     }
 
@@ -1583,7 +1594,7 @@ impl SourceBase {
     ///
     /// # Panics
     /// Panics if the receiver cannot be created.
-    pub async fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+    pub async fn test_subscribe(&self) -> Box<dyn ChangeReceiver<StampedSourceEvent>> {
         self.try_test_subscribe()
             .await
             .expect("Failed to create test subscription receiver")
@@ -2198,7 +2209,7 @@ mod tests {
     // dispatch_events_batch tests
     // =========================================================================
 
-    fn make_event(source_id: &str, position: Option<&[u8]>) -> SourceEventWrapper {
+    fn make_event(source_id: &str, position: Option<&[u8]>) -> SourceEventDraft {
         let change = drasi_core::models::SourceChange::Insert {
             element: drasi_core::models::Element::Node {
                 metadata: drasi_core::models::ElementMetadata {
@@ -2209,13 +2220,13 @@ mod tests {
                 properties: drasi_core::models::ElementPropertyMap::new(),
             },
         };
-        let mut wrapper = SourceEventWrapper::new(
+        let mut draft = SourceEventDraft::new(
             source_id.to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
         );
-        wrapper.source_position = position.map(|p| bytes::Bytes::from(p.to_vec()));
-        wrapper
+        draft.source_position = position.map(|p| bytes::Bytes::from(p.to_vec()));
+        draft
     }
 
     #[tokio::test]
@@ -2245,9 +2256,9 @@ mod tests {
         let e2 = receiver.recv().await.unwrap();
         let e3 = receiver.recv().await.unwrap();
 
-        let s1 = e1.sequence.expect("event 1 must have sequence");
-        let s2 = e2.sequence.expect("event 2 must have sequence");
-        let s3 = e3.sequence.expect("event 3 must have sequence");
+        let s1 = e1.sequence;
+        let s2 = e2.sequence;
+        let s3 = e3.sequence;
 
         assert_eq!(s2, s1 + 1, "sequences must be monotonically increasing");
         assert_eq!(s3, s2 + 1, "sequences must be monotonically increasing");
@@ -2336,10 +2347,8 @@ mod tests {
             let mut dropped = 0usize;
             for _ in 0..EVENTS_PER_TRIAL {
                 let event = receiver.recv().await.unwrap();
-                let seq = event
-                    .sequence
-                    .expect("dispatched event must have a sequence");
-                if dedup.should_skip("concurrent-src", Some(seq)) {
+                let seq = event.sequence;
+                if dedup.should_skip("concurrent-src", seq) {
                     dropped += 1;
                     continue;
                 }
@@ -2405,7 +2414,7 @@ mod tests {
                             properties: drasi_core::models::ElementPropertyMap::new(),
                         },
                     };
-                    SourceEventWrapper::new(
+                    SourceEventDraft::new(
                         "concurrent-batch-src".to_string(),
                         SourceEvent::Change(change),
                         chrono::Utc::now(),
@@ -2438,10 +2447,8 @@ mod tests {
             let mut dropped = 0usize;
             for _ in 0..total {
                 let event = receiver.recv().await.unwrap();
-                let seq = event
-                    .sequence
-                    .expect("dispatched event must have a sequence");
-                if dedup.should_skip("concurrent-batch-src", Some(seq)) {
+                let seq = event.sequence;
+                if dedup.should_skip("concurrent-batch-src", seq) {
                     dropped += 1;
                     continue;
                 }
@@ -2512,7 +2519,6 @@ mod tests {
         base.dispatch_events_batch(events).await.unwrap();
 
         let received = rx.recv().await.unwrap();
-        assert!(received.sequence.is_some(), "event must still be stamped");
         assert_eq!(
             received.source_position.as_ref().map(|p| p.len()),
             Some(SourceBase::MAX_SOURCE_POSITION_BYTES + 1),
@@ -3469,7 +3475,7 @@ mod tests {
                 .await
                 .unwrap();
             let ev = rx.recv().await.unwrap();
-            let seq = ev.sequence.expect("SourceBase must fill in a sequence");
+            let seq = ev.sequence;
             assert!(
                 seq > checkpoint,
                 "filled-in sequence {seq} must exceed checkpoint {checkpoint}"

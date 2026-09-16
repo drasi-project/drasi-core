@@ -30,7 +30,7 @@ use std::sync::Arc;
 use drasi_core::models::{ElementMetadata, SourceChange};
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::{
-    BootstrapEvent, BootstrapEventSender, SourceEvent, SourceEventWrapper,
+    BootstrapEvent, BootstrapEventSender, SourceEvent, StampedSourceEvent,
 };
 use drasi_lib::channels::ChangeReceiver;
 use drasi_lib::component_graph::ComponentUpdateReceiver;
@@ -3013,16 +3013,16 @@ fn wrap_subscription_response(
     runtime_handle: tokio::runtime::Handle,
 ) -> *mut FfiSubscriptionResponse {
     use super::vtables::FfiChangePushCallbackFn;
-    use drasi_lib::channels::events::SourceEventWrapper;
+    use drasi_lib::channels::events::StampedSourceEvent;
 
-    // Wrap ChangeReceiver<SourceEventWrapper> → FfiChangeReceiver (push-based)
+    // Wrap ChangeReceiver<StampedSourceEvent> → FfiChangeReceiver (push-based)
     //
     // The DrasiLibChangeReceiver is wrapped in Arc so that both the FFI state
     // (owned by the host) and the forwarder task (running on the plugin runtime)
     // can safely reference it. The forwarder clones the Arc, so the inner data
     // survives until both the FFI drop and the forwarder task complete.
     struct DrasiLibChangeReceiver {
-        inner: tokio::sync::Mutex<Box<dyn ChangeReceiver<SourceEventWrapper>>>,
+        inner: tokio::sync::Mutex<Box<dyn ChangeReceiver<StampedSourceEvent>>>,
         runtime_handle: tokio::runtime::Handle,
         shutdown: Arc<tokio::sync::Notify>,
     }
@@ -3031,13 +3031,13 @@ fn wrap_subscription_response(
         receiver: Arc<DrasiLibChangeReceiver>,
     }
 
-    /// Serialize a `SourceEventWrapper` into a heap-allocated `FfiSourceEvent`.
+    /// Serialize a `StampedSourceEvent` into a heap-allocated `FfiSourceEvent`.
     ///
     /// The event crosses the cdylib boundary as a MessagePack-encoded
     /// `SourceEventPayload` (raw bytes), never as a reinterpreted `repr(Rust)`
     /// pointer. The plugin keeps ownership of its own `wrapper` (dropped here);
     /// the host deserializes a fresh, host-owned copy. Fixes #602.
-    fn wrap_source_event(wrapper: Arc<SourceEventWrapper>) -> *mut FfiSourceEvent {
+    fn wrap_source_event(wrapper: Arc<StampedSourceEvent>) -> *mut FfiSourceEvent {
         let op = match &wrapper.event {
             drasi_lib::channels::events::SourceEvent::Change(change) => match change {
                 SourceChange::Insert { .. } => FfiChangeOp::Insert,
@@ -3047,7 +3047,7 @@ fn wrap_subscription_response(
             },
             _ => FfiChangeOp::Update,
         };
-        let payload = SourceEventPayload::from_wrapper(&wrapper);
+        let payload = SourceEventPayload::from_stamped(&wrapper);
         let timestamp_us = payload.timestamp_us;
         let (payload_ptr, payload_len) = serialize_ffi_payload(&payload);
         Box::into_raw(Box::new(FfiSourceEvent {

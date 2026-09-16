@@ -255,7 +255,7 @@ impl Source for SourceProxy {
             Box::new(proxy)
                 as Box<
                     dyn drasi_lib::channels::ChangeReceiver<
-                        drasi_lib::channels::events::SourceEventWrapper,
+                        drasi_lib::channels::events::StampedSourceEvent,
                     >,
                 >
         };

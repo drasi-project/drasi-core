@@ -218,42 +218,45 @@ pub enum SourceEvent {
     Control(SourceControl),
 }
 
-/// Wrapper for source events with metadata
+/// Unstamped, source-authored event payload.
+///
+/// This is the **only** type a source author constructs. It deliberately has
+/// **no `sequence` field**: the framework assigns the monotonic sequence when
+/// the draft is dispatched via [`SourceBase::dispatch_event`] /
+/// [`SourceBase::dispatch_events_batch`], which is the sole bridge that turns a
+/// draft into a downstream [`StampedSourceEvent`]. Because "unstamped" and
+/// "stamped" are distinct types, it is a *compile-time* guarantee that no event
+/// reaches the query side without a framework-assigned sequence.
+///
+/// [`SourceBase::dispatch_event`]: crate::sources::base::SourceBase::dispatch_event
+/// [`SourceBase::dispatch_events_batch`]: crate::sources::base::SourceBase::dispatch_events_batch
 #[derive(Debug, Clone)]
-pub struct SourceEventWrapper {
+pub struct SourceEventDraft {
     pub source_id: String,
     pub event: SourceEvent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Optional profiling metadata for performance tracking
+    /// Optional profiling metadata for performance tracking.
     pub profiling: Option<ProfilingMetadata>,
-    /// Monotonic sequence number assigned by the framework.
-    /// Used for ordering, watermarks, gap detection, and dedup.
-    /// `None` for volatile sources that don't support replay.
-    pub sequence: Option<u64>,
     /// Opaque source position bytes for stream resumption on restart.
     /// Only the source can interpret these bytes — the framework persists
-    /// them alongside the sequence and returns them on restart via
-    /// subscribe(resume_from: ...).
-    /// `None` for volatile sources that don't support replay.
+    /// them alongside the assigned sequence and returns them on restart via
+    /// `subscribe(resume_from: ...)`. `None` for volatile sources that don't
+    /// support replay.
     pub source_position: Option<Bytes>,
+    /// Optional source-supplied sequence (the WAL fast-path).
+    ///
+    /// **Most sources leave this `None`** and let the framework assign the
+    /// sequence — that is the recommended path (the source owns the *position*;
+    /// the framework owns the *sequence*). A source with its own durable,
+    /// monotonic ordinal (e.g. a WAL append index) *may* supply it here; the
+    /// framework then uses that value and advances its counter past it to stay
+    /// monotonic. It is never possible to omit the sequence downstream: if this
+    /// is `None`, the framework still stamps one.
+    pub supplied_sequence: Option<u64>,
 }
 
-/// Decomposed parts of a [`SourceEventWrapper`], returned by [`SourceEventWrapper::into_parts()`].
-///
-/// Using a named struct instead of a tuple makes call sites resilient to
-/// field reordering and easier to evolve with new fields.
-#[derive(Debug)]
-pub struct SourceEventParts {
-    pub source_id: String,
-    pub event: SourceEvent,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub profiling: Option<ProfilingMetadata>,
-    pub sequence: Option<u64>,
-    pub source_position: Option<Bytes>,
-}
-
-impl SourceEventWrapper {
-    /// Create a new SourceEventWrapper without profiling
+impl SourceEventDraft {
+    /// Create a new unstamped draft without profiling.
     pub fn new(
         source_id: String,
         event: SourceEvent,
@@ -264,12 +267,12 @@ impl SourceEventWrapper {
             event,
             timestamp,
             profiling: None,
-            sequence: None,
             source_position: None,
+            supplied_sequence: None,
         }
     }
 
-    /// Create a new SourceEventWrapper with profiling metadata
+    /// Create a new unstamped draft with profiling metadata.
     pub fn with_profiling(
         source_id: String,
         event: SourceEvent,
@@ -281,37 +284,118 @@ impl SourceEventWrapper {
             event,
             timestamp,
             profiling: Some(profiling),
-            sequence: None,
             source_position: None,
+            supplied_sequence: None,
         }
     }
 
-    /// Create a new SourceEventWrapper with a sequence number (and optional profiling)
-    pub fn with_sequence(
+    /// Attach the opaque source position bytes for stream resumption.
+    #[must_use]
+    pub fn with_source_position(mut self, position: Bytes) -> Self {
+        self.source_position = Some(position);
+        self
+    }
+
+    /// Attach a source-supplied sequence (WAL fast-path). See
+    /// [`supplied_sequence`](Self::supplied_sequence).
+    #[must_use]
+    pub fn with_supplied_sequence(mut self, sequence: u64) -> Self {
+        self.supplied_sequence = Some(sequence);
+        self
+    }
+
+    /// Set the opaque source position bytes for stream resumption in place.
+    pub fn set_source_position(&mut self, position: Bytes) {
+        self.source_position = Some(position);
+    }
+}
+
+/// Stamped, framework-produced source event carrying a **mandatory** sequence.
+///
+/// Produced only by the framework — either by [`SourceBase::dispatch_event`] /
+/// [`SourceBase::dispatch_events_batch`] stamping a [`SourceEventDraft`], or by
+/// framework-internal replay/reconstruction paths. It is `#[non_exhaustive]`, so
+/// no other crate can build one with a struct literal, and the only public
+/// cross-crate constructor ([`from_ffi_parts`](Self::from_ffi_parts)) *requires*
+/// a `u64` sequence. Together with `sequence: u64` (not `Option`), this makes
+/// "an event with no sequence" unrepresentable past the source boundary.
+///
+/// [`SourceBase::dispatch_event`]: crate::sources::base::SourceBase::dispatch_event
+/// [`SourceBase::dispatch_events_batch`]: crate::sources::base::SourceBase::dispatch_events_batch
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct StampedSourceEvent {
+    pub source_id: String,
+    pub event: SourceEvent,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Optional profiling metadata for performance tracking.
+    pub profiling: Option<ProfilingMetadata>,
+    /// Monotonic sequence number assigned by the framework.
+    /// Used for ordering, watermarks, gap detection, and dedup.
+    pub sequence: u64,
+    /// Opaque source position bytes for stream resumption on restart.
+    /// `None` for volatile sources that don't support replay.
+    pub source_position: Option<Bytes>,
+}
+
+/// Decomposed parts of a [`StampedSourceEvent`], returned by
+/// [`StampedSourceEvent::into_parts()`].
+///
+/// Using a named struct instead of a tuple makes call sites resilient to
+/// field reordering and easier to evolve with new fields.
+#[derive(Debug)]
+pub struct SourceEventParts {
+    pub source_id: String,
+    pub event: SourceEvent,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub profiling: Option<ProfilingMetadata>,
+    pub sequence: u64,
+    pub source_position: Option<Bytes>,
+}
+
+impl StampedSourceEvent {
+    /// Stamp a [`SourceEventDraft`] with a framework-assigned `sequence`,
+    /// producing the downstream event. This is `pub(crate)` because only the
+    /// framework dispatch path may create a stamped event from a draft.
+    pub(crate) fn stamp(draft: SourceEventDraft, sequence: u64) -> Self {
+        Self {
+            source_id: draft.source_id,
+            event: draft.event,
+            timestamp: draft.timestamp,
+            profiling: draft.profiling,
+            sequence,
+            source_position: draft.source_position,
+        }
+    }
+
+    /// Reconstruct a stamped event from parts that already crossed the plugin
+    /// FFI boundary.
+    ///
+    /// This is the only public cross-crate constructor. It *requires* a `u64`
+    /// sequence — a value the producing plugin's own framework already assigned
+    /// — so it cannot be used to build an unsequenced event. It exists for the
+    /// host SDK to rebuild a host-owned event from a serialized payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_ffi_parts(
         source_id: String,
         event: SourceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
-        sequence: u64,
         profiling: Option<ProfilingMetadata>,
+        sequence: u64,
+        source_position: Option<Bytes>,
     ) -> Self {
         Self {
             source_id,
             event,
             timestamp,
             profiling,
-            sequence: Some(sequence),
-            source_position: None,
+            sequence,
+            source_position,
         }
     }
 
-    /// Set the opaque source position bytes for stream resumption.
-    /// Only called by source plugins to attach their native position token.
-    pub fn set_source_position(&mut self, position: Bytes) {
-        self.source_position = Some(position);
-    }
-
-    /// Consume this wrapper and return its components as a named struct.
-    /// This enables zero-copy extraction when the wrapper has sole ownership.
+    /// Consume this event and return its components as a named struct.
+    /// This enables zero-copy extraction when the event has sole ownership.
     pub fn into_parts(self) -> SourceEventParts {
         SourceEventParts {
             source_id: self.source_id,
@@ -323,26 +407,26 @@ impl SourceEventWrapper {
         }
     }
 
-    /// Try to extract components from an Arc<SourceEventWrapper>.
+    /// Try to extract components from an `Arc<StampedSourceEvent>`.
     /// Uses Arc::try_unwrap to avoid cloning when we have sole ownership.
     /// Returns Ok with owned components if sole owner, Err with Arc back if shared.
     ///
     /// This enables zero-copy in Channel dispatch mode (single consumer per event)
     /// while still working correctly in Broadcast mode (cloning required).
     pub fn try_unwrap_arc(arc_self: Arc<Self>) -> Result<SourceEventParts, Arc<Self>> {
-        Arc::try_unwrap(arc_self).map(|wrapper| wrapper.into_parts())
+        Arc::try_unwrap(arc_self).map(|event| event.into_parts())
     }
 }
 
-// Implement Timestamped for SourceEventWrapper for use in generic priority queue
-impl Timestamped for SourceEventWrapper {
+// Implement Timestamped for StampedSourceEvent for use in generic priority queue
+impl Timestamped for StampedSourceEvent {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
         self.timestamp
     }
 }
 
-/// Arc-wrapped SourceEventWrapper for zero-copy distribution
-pub type ArcSourceEvent = Arc<SourceEventWrapper>;
+/// Arc-wrapped StampedSourceEvent for zero-copy distribution
+pub type ArcSourceEvent = Arc<StampedSourceEvent>;
 
 /// Bootstrap event wrapper for dedicated bootstrap channels
 #[derive(Debug, Clone)]
@@ -367,7 +451,7 @@ pub struct SubscriptionRequest {
 pub struct SubscriptionResponse {
     pub query_id: String,
     pub source_id: String,
-    pub receiver: Box<dyn super::ChangeReceiver<SourceEventWrapper>>,
+    pub receiver: Box<dyn super::ChangeReceiver<StampedSourceEvent>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
     /// Shared handle for the query to report its last durably-processed sequence position.
     /// Created by replay-capable sources when `request_position_handle` is true.
@@ -628,34 +712,33 @@ mod tests {
         SourceChange::Insert { element }
     }
 
-    #[test]
-    fn test_source_event_wrapper_into_parts() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
+    fn stamped(source_id: &str, sequence: u64) -> StampedSourceEvent {
+        let draft = SourceEventDraft::new(
+            source_id.to_string(),
+            SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
         );
+        StampedSourceEvent::stamp(draft, sequence)
+    }
 
-        let parts = wrapper.into_parts();
+    #[test]
+    fn test_stamped_event_into_parts() {
+        let event = stamped("test-source", 7);
+
+        let parts = event.into_parts();
 
         assert_eq!(parts.source_id, "test-source");
         assert!(matches!(parts.event, SourceEvent::Change(_)));
         assert!(parts.profiling.is_none());
+        assert_eq!(parts.sequence, 7);
     }
 
     #[test]
     fn test_try_unwrap_arc_sole_owner() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-        );
-        let arc = Arc::new(wrapper);
+        let arc = Arc::new(stamped("test-source", 1));
 
         // With sole ownership, try_unwrap_arc should succeed
-        let result = SourceEventWrapper::try_unwrap_arc(arc);
+        let result = StampedSourceEvent::try_unwrap_arc(arc);
         assert!(result.is_ok());
 
         let parts = result.unwrap();
@@ -665,17 +748,11 @@ mod tests {
 
     #[test]
     fn test_try_unwrap_arc_shared() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-        );
-        let arc = Arc::new(wrapper);
+        let arc = Arc::new(stamped("test-source", 1));
         let _arc2 = arc.clone(); // Create another reference
 
         // With shared ownership, try_unwrap_arc should fail and return the Arc
-        let result = SourceEventWrapper::try_unwrap_arc(arc);
+        let result = StampedSourceEvent::try_unwrap_arc(arc);
         assert!(result.is_err());
 
         // The returned Arc should still be valid
@@ -686,16 +763,10 @@ mod tests {
     #[test]
     fn test_zero_copy_extraction_path() {
         // Simulate the zero-copy extraction path used in query processing
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-        );
-        let arc = Arc::new(wrapper);
+        let arc = Arc::new(stamped("test-source", 3));
 
         // This is the zero-copy path - when we have sole ownership
-        let parts = match SourceEventWrapper::try_unwrap_arc(arc) {
+        let parts = match StampedSourceEvent::try_unwrap_arc(arc) {
             Ok(parts) => parts,
             Err(arc) => {
                 // Fallback to cloning (would be needed in broadcast mode)
@@ -721,31 +792,29 @@ mod tests {
     }
 
     #[test]
-    fn test_source_event_wrapper_with_sequence() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::with_sequence(
+    fn test_stamp_assigns_sequence() {
+        let draft = SourceEventDraft::new(
             "test-source".to_string(),
-            SourceEvent::Change(change),
+            SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
-            42,
-            None,
         );
-        assert_eq!(wrapper.sequence, Some(42));
-        assert!(wrapper.profiling.is_none());
+        let event = StampedSourceEvent::stamp(draft, 42);
+        assert_eq!(event.sequence, 42);
+        assert!(event.profiling.is_none());
 
-        let parts = wrapper.into_parts();
-        assert_eq!(parts.sequence, Some(42));
+        let parts = event.into_parts();
+        assert_eq!(parts.sequence, 42);
     }
 
     #[test]
-    fn test_source_event_wrapper_new_has_no_sequence() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
+    fn test_draft_has_no_supplied_sequence_by_default() {
+        let draft = SourceEventDraft::new(
             "test-source".to_string(),
-            SourceEvent::Change(change),
+            SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
         );
-        assert!(wrapper.sequence.is_none());
+        assert!(draft.supplied_sequence.is_none());
+        assert!(draft.source_position.is_none());
     }
 
     #[test]

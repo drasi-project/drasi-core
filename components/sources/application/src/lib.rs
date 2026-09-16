@@ -480,7 +480,7 @@ impl ApplicationSource {
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let mut wrapper = SourceEventWrapper::with_profiling(
+                    let mut wrapper = SourceEventDraft::with_profiling(
                         source_name.clone(),
                         SourceEvent::Change(event.change),
                         chrono::Utc::now(),
@@ -489,7 +489,7 @@ impl ApplicationSource {
 
                     // Use pre-assigned WAL sequence from handle (WAL-before-ACK)
                     if let Some(seq) = event.wal_seq {
-                        wrapper.sequence = Some(seq);
+                        wrapper.supplied_sequence = Some(seq);
                         wrapper.source_position =
                             Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                     }

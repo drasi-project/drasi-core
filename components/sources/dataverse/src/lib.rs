@@ -85,7 +85,7 @@ use std::time::Duration;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use drasi_lib::channels::{ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft};
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
@@ -461,7 +461,7 @@ impl DataverseSource {
             let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-            let wrapper = SourceEventWrapper::with_profiling(
+            let wrapper = SourceEventDraft::with_profiling(
                 source_id.to_string(),
                 SourceEvent::Change(source_change),
                 chrono::Utc::now(),
@@ -1534,11 +1534,7 @@ mod tests {
                     .await
                     .expect("timed out waiting for event")
                     .expect("event stream closed unexpectedly");
-                sequences.push(
-                    event
-                        .sequence
-                        .expect("dispatched change must carry a framework sequence"),
-                );
+                sequences.push(event.sequence);
             }
 
             assert_eq!(

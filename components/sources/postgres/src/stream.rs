@@ -28,7 +28,7 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::{PostgresSourceConfig, ReplayState};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventDraft};
 use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::SourceBase;
 
@@ -757,7 +757,7 @@ impl ReplicationStream {
         let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-        let mut wrapper = SourceEventWrapper::with_profiling(
+        let mut wrapper = SourceEventDraft::with_profiling(
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),

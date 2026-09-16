@@ -328,7 +328,7 @@ async fn dispatch_change(
     let mut profiling = ProfilingMetadata::new();
     profiling.source_send_ns = Some(timestamp_ns());
 
-    let wrapper = SourceEventWrapper::with_profiling(
+    let wrapper = SourceEventDraft::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(change),
         Utc::now(),
@@ -807,11 +807,7 @@ mod tests {
                 .await
                 .expect("timed out waiting for event")
                 .expect("event stream closed unexpectedly");
-            sequences.push(
-                event
-                    .sequence
-                    .expect("dispatched change must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         assert_eq!(

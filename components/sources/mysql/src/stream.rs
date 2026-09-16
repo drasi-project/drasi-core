@@ -33,7 +33,7 @@ use mysql_common::uuid::Uuid;
 use tokio::sync::RwLock;
 
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{SourceEvent, SourceEventDraft};
 use drasi_lib::sources::base::SourceBase;
 use drasi_mysql_common::connect_with_ssl_mode;
 
@@ -402,7 +402,7 @@ impl ReplicationStream {
             return Ok(());
         }
 
-        let mut wrapper = SourceEventWrapper::new(
+        let mut wrapper = SourceEventDraft::new(
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
@@ -426,7 +426,7 @@ impl ReplicationStream {
         if let Some(changes) = self.pending_changes.take() {
             let position_bytes = self.position_bytes_with_timestamp(header.timestamp() as u64);
             for change in changes {
-                let mut wrapper = SourceEventWrapper::new(
+                let mut wrapper = SourceEventDraft::new(
                     self.source_id.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
@@ -649,8 +649,7 @@ mod tests {
                 .expect("timed out waiting for event")
                 .expect("event stream closed unexpectedly");
             assert_eq!(
-                event.sequence,
-                Some(expected_seq),
+                event.sequence, expected_seq,
                 "framework must stamp a monotonic sequence even for a native-cursor source"
             );
             assert!(
@@ -697,11 +696,7 @@ mod tests {
                 event.source_position.is_some(),
                 "commit source_position must be preserved"
             );
-            sequences.push(
-                event
-                    .sequence
-                    .expect("event must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         assert_eq!(

@@ -1221,7 +1221,7 @@ mod tests {
                     Vec<
                         Box<
                             dyn crate::channels::ChangeDispatcher<
-                                crate::channels::SourceEventWrapper,
+                                crate::channels::StampedSourceEvent,
                             >,
                         >,
                     >,
@@ -1298,7 +1298,7 @@ mod tests {
             ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
                 use crate::channels::ChannelChangeDispatcher;
                 let dispatcher =
-                    ChannelChangeDispatcher::<crate::channels::SourceEventWrapper>::new(100);
+                    ChannelChangeDispatcher::<crate::channels::StampedSourceEvent>::new(100);
                 let receiver = dispatcher.create_receiver().await?;
                 self.dispatchers.write().await.push(Box::new(dispatcher));
                 Ok(crate::channels::SubscriptionResponse {
@@ -1832,7 +1832,7 @@ mod tests {
                     Vec<
                         Box<
                             dyn crate::channels::ChangeDispatcher<
-                                crate::channels::SourceEventWrapper,
+                                crate::channels::StampedSourceEvent,
                             >,
                         >,
                     >,
@@ -1896,7 +1896,7 @@ mod tests {
             ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
                 use crate::channels::ChannelChangeDispatcher;
                 let dispatcher =
-                    ChannelChangeDispatcher::<crate::channels::SourceEventWrapper>::new(100);
+                    ChannelChangeDispatcher::<crate::channels::StampedSourceEvent>::new(100);
                 let receiver = dispatcher.create_receiver().await?;
                 self.dispatchers.write().await.push(Box::new(dispatcher));
                 Ok(crate::channels::SubscriptionResponse {

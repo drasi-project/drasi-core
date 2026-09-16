@@ -3,7 +3,7 @@
 ## FFI Boundary Warning
 
 Several types in this directory cross the dynamic plugin FFI boundary. Rich
-`repr(Rust)` event payloads (`SourceEventWrapper`, `BootstrapEvent`,
+`repr(Rust)` event payloads (`StampedSourceEvent`, `BootstrapEvent`,
 `QueryResult`) cross **by value as serialized MessagePack bytes** (issue #602) —
 they must keep their `serde` derives. Simple enums are mapped to `#[repr(C)]`
 mirrors.
@@ -18,7 +18,7 @@ mirrors.
 
 | Type | File | How it crosses | FFI wrapper |
 |------|------|---------------|-------------|
-| `SourceEventWrapper` | `events.rs` | Serialized `SourceEventPayload` bytes | `FfiSourceEvent.payload_ptr` |
+| `StampedSourceEvent` | `events.rs` | Serialized `SourceEventPayload` bytes | `FfiSourceEvent.payload_ptr` |
 | `BootstrapEvent` | `events.rs` | Serialized `BootstrapEventPayload` bytes | `FfiBootstrapEvent.payload_ptr` |
 | `QueryResult` | `events.rs` | Serialized `QueryResult` bytes | `FfiQueryResult.payload_ptr` |
 | `SubscriptionResponse` | `events.rs` | Converted field-by-field to `FfiSubscriptionResponse` | `FfiSubscriptionResponse` |
@@ -27,7 +27,7 @@ mirrors.
 
 ### What to update when changing these types
 
-#### Adding/removing fields on `SourceEventWrapper` or `BootstrapEvent`
+#### Adding/removing fields on `StampedSourceEvent` or `BootstrapEvent`
 
 These cross as opaque pointers, so field changes don't break the FFI envelope layout.
 However, you must still:
@@ -35,7 +35,7 @@ However, you must still:
 1. Bump `FFI_SDK_VERSION` in `components/plugin-sdk/src/ffi/metadata.rs` — the host and
    plugin must agree on the struct layout since they both cast the same `*mut c_void`.
 
-2. If metadata fields are extracted (e.g., `source_id` from `SourceEventWrapper`), update
+2. If metadata fields are extracted (e.g., `source_id` from `StampedSourceEvent`), update
    the extraction in `components/plugin-sdk/src/ffi/vtable_gen.rs`.
 
 #### Adding/removing fields on `QueryResult`

@@ -108,7 +108,7 @@ fn resume_settings(source_id: &str, resume_seq: u64) -> SourceSubscriptionSettin
 async fn subscribe_fresh(
     source: &dyn Source,
     source_id: &str,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
     let resp = source.subscribe(fresh_settings(source_id)).await.unwrap();
     resp.receiver
 }
@@ -222,7 +222,7 @@ async fn test_http_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event.sequence.unwrap(), 1);
+    assert_eq!(event.sequence, 1);
     assert!(event.source_position.is_some());
 
     let count = wal.event_count("http-persist").await.unwrap();
@@ -355,13 +355,13 @@ async fn test_http_crash_recovery_and_replay() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event4.sequence.unwrap(), 4);
+        assert_eq!(event4.sequence, 4);
 
         let event5 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event5.sequence.unwrap(), 5);
+        assert_eq!(event5.sequence, 5);
 
         // New event should be seq 6
         let client = Client::new();
@@ -370,7 +370,7 @@ async fn test_http_crash_recovery_and_replay() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event6.sequence.unwrap(), 6);
+        assert_eq!(event6.sequence, 6);
 
         source.stop().await.unwrap();
     }
@@ -463,8 +463,7 @@ async fn test_http_sequence_stamped_without_durability() {
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
         assert_eq!(
-            event.sequence,
-            Some(expected_seq),
+            event.sequence, expected_seq,
             "event {expected_seq} should carry a framework sequence with durability off"
         );
     }

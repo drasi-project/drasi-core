@@ -24,7 +24,7 @@ use crate::poller::GtfsRtPoller;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{
-    ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft, SubscriptionResponse,
 };
 use drasi_lib::sources::{Source, SourceBase, SourceBaseParams};
 use drasi_lib::state_store::StateStoreProvider;
@@ -209,7 +209,7 @@ async fn dispatch_changes(
     changes: Vec<drasi_core::models::SourceChange>,
 ) {
     for change in changes {
-        let wrapper = SourceEventWrapper::new(
+        let wrapper = SourceEventDraft::new(
             source_id.to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
@@ -498,11 +498,7 @@ mod tests {
                 .await
                 .expect("timed out waiting for event")
                 .expect("event stream closed unexpectedly");
-            sequences.push(
-                event
-                    .sequence
-                    .expect("dispatched change must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         assert_eq!(
