@@ -22,7 +22,6 @@ mod events_test;
 pub use dispatcher::{
     BroadcastChangeDispatcher, BroadcastChangeReceiver, ChangeDispatcher, ChangeReceiver,
     ChannelChangeDispatcher, ChannelChangeReceiver, DispatchMode, ReplayThenLiveReceiver,
-    UnboundedChangeDispatcher, UnboundedChangeReceiver,
 };
 pub use events::*;
 pub use priority_queue::{PriorityQueue, PriorityQueueMetrics};

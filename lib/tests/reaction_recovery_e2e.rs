@@ -841,10 +841,10 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     Ok(())
 }
 
-/// Test 7: Query Broadcast delivery is lossless, so a Strict trigger stays up
-/// across a flood that used to overflow a shared ring buffer.
+/// Test 7: Broadcast lag is recovered from the outbox, so Strict stays up
+/// when the ring overflows but retained history still covers the gap.
 #[tokio::test]
-async fn test_strict_trigger_survives_query_broadcast_flood() -> Result<()> {
+async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
 
     let query = Query::cypher("q1")
@@ -892,7 +892,7 @@ async fn test_strict_trigger_survives_query_broadcast_flood() -> Result<()> {
     assert_eq!(
         after.len(),
         1,
-        "Strict trigger must keep receiving live results; query Broadcast no longer drops on lag"
+        "Strict trigger recovers broadcast lag from the outbox and keeps receiving live results"
     );
     assert_eq!(
         core.get_reaction_status("rec").await?,

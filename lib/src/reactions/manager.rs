@@ -1135,37 +1135,15 @@ impl ReactionManager {
 
             let forwarder_task = tokio::spawn(
                 async move {
-                    // Pull results out of the dispatch channel while bootstrap
-                    // holds the gate closed. Leaving them in a small broadcast
-                    // ring drops live events and Strict then dies on the gap.
-                    let mut pending: std::collections::VecDeque<Arc<QueryResult>> =
-                        std::collections::VecDeque::new();
-                    loop {
-                        tokio::select! {
-                            biased;
-                            gate = gate_rx.wait_for(|v| *v) => {
-                                if gate.is_err() {
-                                    log::debug!(
-                                        "[{reaction_id_owned}] Gate sender dropped for query '{query_id_clone}' \
-                                         — exiting forwarder (bootstrap likely failed)"
-                                    );
-                                    return;
-                                }
-                                break;
-                            }
-                            item = receiver.recv() => {
-                                match item {
-                                    Ok(query_result) => pending.push_back(query_result),
-                                    Err(e) => {
-                                        log::debug!(
-                                            "[{reaction_id_owned}] Subscription ended for query \
-                                             '{query_id_clone}' while waiting for gate: {e}"
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-                        }
+                    // Wait for the bootstrap gate to open before processing.
+                    // Live results dropped from a bounded dispatch buffer while
+                    // the gate is closed are recovered from the outbox below.
+                    if gate_rx.wait_for(|v| *v).await.is_err() {
+                        log::debug!(
+                            "[{reaction_id_owned}] Gate sender dropped for query '{query_id_clone}' \
+                             — exiting forwarder (bootstrap likely failed)"
+                        );
+                        return;
                     }
 
                     // Read the initial checkpoint sequence so we can skip stale events
@@ -1178,22 +1156,70 @@ impl ReactionManager {
                     // Track the last forwarded sequence for gap detection.
                     let mut last_forwarded_seq = initial_seq;
 
+                    match query_clone.fetch_outbox(initial_seq).await {
+                        Ok(outbox) => {
+                            for entry in &outbox.results {
+                                let result = (*entry).as_ref().clone();
+                                match reaction.enqueue_query_result(result).await {
+                                    Ok(()) => last_forwarded_seq = entry.sequence,
+                                    Err(e) => {
+                                        warn!(
+                                            "[{reaction_id_owned}] Failed to catch up outbox for query \
+                                             '{query_id_clone}' seq={}: {e}",
+                                            entry.sequence
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(FetchError::OutboxGap(_)) => {
+                            let gap_ctx = BroadcastGapContext {
+                                reaction_id: &reaction_id_owned,
+                                query_id: &query_id_clone,
+                                reaction: &reaction,
+                                query: &query_clone,
+                                policy,
+                                state_store: &state_store_clone,
+                                checkpoints: &checkpoints,
+                                bootstrap_mutex: &bootstrap_mutex,
+                                metrics: &forwarder_metrics,
+                            };
+                            match Self::handle_broadcast_gap(&gap_ctx).await {
+                                Ok(()) => {
+                                    last_forwarded_seq = checkpoints
+                                        .read()
+                                        .await
+                                        .get(&query_id_clone)
+                                        .map(|cp| cp.sequence)
+                                        .unwrap_or(last_forwarded_seq);
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "[{reaction_id_owned}] Recovery failed for outbox gap \
+                                         on query '{query_id_clone}' after gate open: {e}"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "[{reaction_id_owned}] No outbox catchup for query '{query_id_clone}': {e}"
+                            );
+                        }
+                    }
+
                     log::debug!(
                         "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}' \
-                         (initial_seq={initial_seq}, pending={})",
-                        pending.len()
+                         (initial_seq={initial_seq}, last_forwarded={last_forwarded_seq})"
                     );
 
                     loop {
-                        let recv_result = if let Some(query_result) = pending.pop_front() {
-                            Ok(query_result)
-                        } else {
-                            receiver.recv().await
-                        };
-                        match recv_result {
+                        match receiver.recv().await {
                             Ok(query_result) => {
-                                // Skip events already covered by the bootstrap snapshot/outbox catchup.
-                                if query_result.sequence <= initial_seq {
+                                // Skip events already covered by snapshot or outbox catchup.
+                                if query_result.sequence <= last_forwarded_seq {
                                     forwarder_metrics.record_dedup_skip();
                                     log::debug!(
                                         "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
@@ -1208,6 +1234,35 @@ impl ReactionManager {
                                 if last_forwarded_seq > 0
                                     && query_result.sequence > last_forwarded_seq.saturating_add(1)
                                 {
+                                    match query_clone.fetch_outbox(last_forwarded_seq).await {
+                                        Ok(outbox) => {
+                                            for entry in &outbox.results {
+                                                let result = (*entry).as_ref().clone();
+                                                match reaction.enqueue_query_result(result).await {
+                                                    Ok(()) => last_forwarded_seq = entry.sequence,
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "[{reaction_id_owned}] Failed to catch up outbox for query \
+                                                             '{query_id_clone}' seq={}: {e}",
+                                                            entry.sequence
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if query_result.sequence <= last_forwarded_seq {
+                                                continue;
+                                            }
+                                        }
+                                        Err(FetchError::OutboxGap(_)) => {}
+                                        Err(e) => {
+                                            log::debug!(
+                                                "[{reaction_id_owned}] Outbox catchup after sequence gap \
+                                                 on query '{query_id_clone}' failed: {e}"
+                                            );
+                                        }
+                                    }
+
                                     forwarder_metrics.record_gap_detection();
                                     forwarder_metrics.record_recovery_trigger(to_policy_kind(&policy));
                                     log::warn!(

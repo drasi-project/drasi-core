@@ -49,8 +49,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::{
-    ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher, ComponentStatus, DispatchMode,
-    QueryResult, QuerySubscriptionResponse,
+    BroadcastChangeDispatcher, ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher,
+    ComponentStatus, DispatchMode, QueryResult, QuerySubscriptionResponse,
 };
 use crate::component_graph::ComponentStatusHandle;
 use crate::config::QueryConfig;
@@ -75,9 +75,14 @@ pub struct QueryBase {
 impl QueryBase {
     /// Create a new QueryBase with the given configuration
     pub fn new(config: QueryConfig) -> Result<Self> {
-        // Per-subscriber queues are created on subscribe. Broadcast uses
-        // unbounded queues so a closed bootstrap gate cannot drop live results.
-        let dispatchers: Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>> = Vec::new();
+        let dispatch_mode = config.dispatch_mode.unwrap_or_default();
+        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>> = Vec::new();
+        if dispatch_mode == DispatchMode::Broadcast {
+            let capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
+            dispatchers.push(Box::new(BroadcastChangeDispatcher::<QueryResult>::new(
+                capacity,
+            )));
+        }
 
         let status_handle = ComponentStatusHandle::new(&config.id);
 
@@ -129,11 +134,12 @@ impl QueryBase {
 
         let receiver: Box<dyn ChangeReceiver<QueryResult>> = match dispatch_mode {
             DispatchMode::Broadcast => {
-                let dispatcher = crate::channels::UnboundedChangeDispatcher::<QueryResult>::new();
-                let receiver = dispatcher.create_receiver().await?;
-                let mut dispatchers = self.dispatchers.write().await;
-                dispatchers.push(Box::new(dispatcher));
-                receiver
+                let dispatchers = self.dispatchers.read().await;
+                if let Some(dispatcher) = dispatchers.first() {
+                    dispatcher.create_receiver().await?
+                } else {
+                    return Err(anyhow::anyhow!("No broadcast dispatcher available"));
+                }
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
@@ -175,24 +181,9 @@ impl QueryBase {
         // Fan out to all dispatchers concurrently so one slow reaction
         // cannot block delivery to the others.
         let dispatchers = self.dispatchers.read().await;
-        if dispatchers.len() <= 1 {
-            // Fast path: single or no dispatcher, no need to spawn tasks
-            for dispatcher in dispatchers.iter() {
-                if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
-                    debug!("[{}] Failed to dispatch result: {}", self.config.id, e);
-                }
-            }
-        } else {
-            // Multiple dispatchers: fan out concurrently via join_all.
-            let futures: Vec<_> = dispatchers
-                .iter()
-                .map(|d| d.dispatch_change(arc_result.clone()))
-                .collect();
-            let query_id = &self.config.id;
-            for result in futures::future::join_all(futures).await {
-                if let Err(e) = result {
-                    debug!("[{query_id}] Failed to dispatch result: {e}");
-                }
+        for dispatcher in dispatchers.iter() {
+            if let Err(e) = dispatcher.try_dispatch_change(arc_result.clone()) {
+                debug!("[{}] Failed to dispatch result: {}", self.config.id, e);
             }
         }
 
@@ -306,12 +297,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_broadcast_mode_starts_with_no_dispatchers() {
+    async fn test_new_broadcast_mode_starts_with_one_dispatcher() {
         let base = QueryBase::new(test_config("q1", Some(DispatchMode::Broadcast))).unwrap();
         let dispatchers = base.dispatchers.read().await;
-        assert!(
-            dispatchers.is_empty(),
-            "Broadcast query dispatchers are created per subscriber"
+        assert_eq!(
+            dispatchers.len(),
+            1,
+            "Broadcast mode should start with one dispatcher"
         );
     }
 
@@ -403,7 +395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscribe_broadcast_mode_creates_dispatcher_per_subscription() {
+    async fn test_subscribe_broadcast_mode_reuses_single_dispatcher() {
         let base = QueryBase::new(test_config("q1", Some(DispatchMode::Broadcast))).unwrap();
         let _s1 = base.subscribe("r1", 0).await.unwrap();
         let _s2 = base.subscribe("r2", 0).await.unwrap();
@@ -411,8 +403,8 @@ mod tests {
         let dispatchers = base.dispatchers.read().await;
         assert_eq!(
             dispatchers.len(),
-            2,
-            "Broadcast query subscriptions use per-subscriber unbounded queues"
+            1,
+            "Broadcast mode should reuse the single dispatcher"
         );
     }
 
