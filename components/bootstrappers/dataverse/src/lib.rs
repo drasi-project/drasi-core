@@ -989,6 +989,41 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn aborts_when_event_channel_closes() {
+            let server = MockServer::start().await;
+
+            Mock::given(method("GET"))
+                .and(path("/api/data/v9.2/accounts"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": [
+                        { "accountid": "id-1", "name": "One" },
+                        { "accountid": "id-2", "name": "Two" }
+                    ]
+                })))
+                .mount(&server)
+                .await;
+
+            let provider = DataverseBootstrapProvider::builder()
+                .with_environment_url(server.uri())
+                .with_entities(vec!["account".to_string()])
+                .with_identity_provider(StaticToken)
+                .build()
+                .expect("provider should build");
+
+            let (tx, rx) = mpsc::channel(8);
+            drop(rx);
+            let ctx =
+                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
+            let request = make_request("q-1", Vec::new());
+
+            let result = provider.bootstrap(request, &ctx, tx, None).await;
+            assert!(
+                result.is_err(),
+                "closed bootstrap channel should fail the fetch instead of buffering remaining records"
+            );
+        }
+
+        #[tokio::test]
         async fn filters_entities_by_requested_labels() {
             let server = MockServer::start().await;
 

@@ -245,7 +245,11 @@ impl OracleBootstrapHandler {
 }
 
 fn is_ora_01466(error: &oracle::Error) -> bool {
-    error.to_string().contains("ORA-01466")
+    is_ora_01466_message(&error.to_string())
+}
+
+fn is_ora_01466_message(message: &str) -> bool {
+    message.contains("ORA-01466")
 }
 
 /// Read a table snapshot, retrying flashback when Oracle has not yet made the
@@ -275,4 +279,27 @@ fn query_table_rows<'conn>(
     }
 
     Ok(conn.query(current_query, &[])?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_ora_01466_message;
+
+    #[test]
+    fn ora_01466_matches_flashback_not_ready() {
+        assert!(is_ora_01466_message(
+            "OCI Error: ORA-01466: unable to read data - table definition has changed"
+        ));
+    }
+
+    #[test]
+    fn ora_01466_ignores_near_miss_codes() {
+        assert!(!is_ora_01466_message(
+            "OCI Error: ORA-01465: invalid hex number"
+        ));
+        assert!(!is_ora_01466_message(
+            "OCI Error: ORA-00942: table or view does not exist"
+        ));
+        assert!(!is_ora_01466_message("connection reset by peer"));
+    }
 }

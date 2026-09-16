@@ -248,12 +248,10 @@ impl BootstrapProvider for Open511BootstrapProvider {
                 }
             }
 
-            if page_count < page_size {
-                break;
+            match next_open511_offset(offset, page_size, page_count)? {
+                Some(next) => offset = next,
+                None => break,
             }
-            offset = offset
-                .checked_add(page_size)
-                .ok_or_else(|| anyhow::anyhow!("Open511 pagination offset overflow"))?;
         }
 
         Ok(BootstrapResult {
@@ -261,6 +259,20 @@ impl BootstrapProvider for Open511BootstrapProvider {
             ..Default::default()
         })
     }
+}
+
+fn next_open511_offset(
+    offset: usize,
+    page_size: usize,
+    page_count: usize,
+) -> Result<Option<usize>> {
+    if page_count < page_size {
+        return Ok(None);
+    }
+    offset
+        .checked_add(page_size)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("Open511 pagination offset overflow"))
 }
 
 fn should_send_change(
@@ -317,6 +329,24 @@ mod tests {
     fn builder_requires_base_url() {
         let result = Open511BootstrapProvider::builder().build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn next_offset_stops_on_short_page() {
+        assert_eq!(next_open511_offset(0, 500, 12).unwrap(), None);
+        assert_eq!(next_open511_offset(500, 500, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn next_offset_advances_on_full_page() {
+        assert_eq!(next_open511_offset(0, 500, 500).unwrap(), Some(500));
+        assert_eq!(next_open511_offset(500, 500, 500).unwrap(), Some(1000));
+    }
+
+    #[test]
+    fn next_offset_rejects_overflow() {
+        let err = next_open511_offset(usize::MAX, 1, 1).unwrap_err();
+        assert!(format!("{err}").contains("overflow"));
     }
 
     #[test]
