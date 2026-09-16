@@ -51,6 +51,15 @@ struct GarnetQueryConfig {
     element_index: Mutex<Option<Arc<dyn ElementIndex>>>,
 }
 
+shared_tests::variable_length_match_tests!(
+    variable_length_match,
+    super::GarnetQueryConfig::new(false).await
+);
+shared_tests::variable_length_match_tests!(
+    variable_length_match_cached,
+    super::GarnetQueryConfig::new(true).await
+);
+
 #[allow(clippy::unwrap_used)]
 impl GarnetQueryConfig {
     pub async fn new(use_cache: bool) -> Self {

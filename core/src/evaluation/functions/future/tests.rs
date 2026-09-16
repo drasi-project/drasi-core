@@ -118,6 +118,7 @@ async fn test_true_now_or_later_condition_true() {
             before_anchor_element: None,
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
+            future_group_signature: None,
         },
         &part,
     );
@@ -172,6 +173,7 @@ async fn test_true_now_or_later_due_time_passed() {
             before_anchor_element: None,
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
+            future_group_signature: None,
         },
         &part,
     );
@@ -240,6 +242,7 @@ async fn test_true_now_or_later_schedule_future() {
             before_anchor_element: None,
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
+            future_group_signature: None,
         },
         &part,
     );
@@ -312,6 +315,7 @@ async fn test_true_now_or_later_with_date() {
             before_anchor_element: None,
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
+            future_group_signature: None,
         },
         &part,
     );
@@ -360,6 +364,7 @@ async fn test_true_now_or_later_invalid_condition_type() {
             before_anchor_element: None,
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
+            future_group_signature: None,
         },
         &part,
     );
@@ -418,6 +423,7 @@ async fn test_true_now_or_later_null_arguments() {
             before_anchor_element: None,
             after_anchor_element: Some(Arc::new(anchor)),
             is_future_reprocess: false,
+            future_group_signature: None,
         },
         &part,
     );

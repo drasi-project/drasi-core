@@ -52,6 +52,30 @@ pub enum EvaluationError {
     FormatError { expected: String },
 }
 
+/// Execution failures carried through `EvaluationError::IndexError`.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum QueryExecutionError {
+    #[error("variable-length MATCH exceeded {resource} limit {limit}")]
+    MatchResourceLimit { resource: &'static str, limit: u64 },
+    #[error("Variable-length MATCH: {0}")]
+    InvalidVariableLengthMatch(String),
+}
+
+impl From<QueryExecutionError> for EvaluationError {
+    fn from(error: QueryExecutionError) -> Self {
+        Self::IndexError(IndexError::other(error))
+    }
+}
+
+impl EvaluationError {
+    pub fn execution_error(&self) -> Option<&QueryExecutionError> {
+        match self {
+            Self::IndexError(IndexError::Other(error)) => error.downcast_ref(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FunctionError {
     pub function_name: String,

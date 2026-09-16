@@ -44,6 +44,7 @@ pub mod remap;
 pub mod sensor_heartbeat;
 pub mod source_update_upsert;
 pub mod unwind;
+pub mod variable_length_match;
 
 pub mod before;
 pub mod crosses_above_a_threshold;

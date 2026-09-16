@@ -76,6 +76,9 @@ The main query evaluation logic is in `core/src/evaluation/` which processes con
 - Production: Persistent storage via RocksDB or Redis/Garnet backends
 - Index management in `core/src/in_memory_index/` and separate storage crates
 
+### Future functions and MATCH identity
+`FutureQueue` already stores reminders. The result index already stores query state. If two matches share a graph node and their timers collide, that is a **keying** bug: stamp the match (`FutureElementRef.group_signature`) on the ticket and ignore wakes that are not this input. Do not add a `TemporalIndex`, a temporal runtime, `FunctionEffect` / `TemporalFunction` name catalogs, a `settle` trait, or `Function::Temporal`. Those were built for this collision and ripped out. A plugin-loaded function must keep working without being listed in an engine enum.
+
 ## Plugin Publishing and Signing
 
 - The `publish-plugins` xtask command supports `--sign` for cosign keyless signing of published plugins
