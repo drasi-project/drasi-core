@@ -1389,6 +1389,16 @@ mod tests {
         assert!(!keys
             .iter()
             .any(|(package, _)| package == "drasi-reaction-eventgrid"));
+
+        let mssql = jobs
+            .iter()
+            .find(|job| job.package == "drasi-source-mssql" && job.test == "integration_test")
+            .expect("mssql integration test should be discovered");
+        assert!(
+            mssql.extra.contains("plugins"),
+            "mssql FFI tests need cdylib plugins, extra={}",
+            mssql.extra
+        );
     }
 
     fn package(name: &str, publishable: bool, dependencies: Vec<Dependency>) -> Package {

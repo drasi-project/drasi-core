@@ -120,10 +120,14 @@ jobs:
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
       - name: Install Oracle Instant Client
-        if: matrix.extra == 'oracle'
+        if: contains(matrix.extra, 'oracle')
         run: |
           sudo apt-get install -y unzip
           sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
+          # Ubuntu 24.04 ships libaio.so.1t64; Instant Client still dlopens libaio.so.1.
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libaio.so.1 ] && [ -e /usr/lib/x86_64-linux-gnu/libaio.so.1t64 ]; then
+            sudo ln -s libaio.so.1t64 /usr/lib/x86_64-linux-gnu/libaio.so.1
+          fi
           curl -fsSL -o /tmp/instantclient.zip \
             https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip
           sudo mkdir -p /opt/oracle
@@ -165,6 +169,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-integration-${{ matrix.package }}-
             ${{ runner.os }}-cargo-build-
+
+      - name: Build FFI test plugins
+        if: contains(matrix.extra, 'plugins')
+        run: |
+          set -euo pipefail
+          mkdir -p target/debug/plugins
+          pkg="${{ matrix.package }}"
+          packages="$pkg"
+          case "$pkg" in
+            drasi-source-*)
+              packages="$packages drasi-bootstrap-${pkg#drasi-source-}"
+              ;;
+          esac
+          for build_pkg in $packages; do
+            cargo build --lib -p "$build_pkg" --features "$build_pkg/dynamic-plugin"
+          done
+          for src in target/debug/libdrasi_*.so target/debug/drasi_*.so; do
+            [ -f "$src" ] || continue
+            cp "$src" target/debug/plugins/
+          done
+          ls -la target/debug/plugins
 
       - name: Run ignored integration tests
         run: |

@@ -63,17 +63,30 @@ pub fn discover_jobs(
                 continue;
             }
 
-            let extra = if package.contains("oracle") {
-                "oracle"
+            let needs_oracle = package.contains("oracle");
+            let needs_plugins = files.iter().any(|path| {
+                fs::read_to_string(path)
+                    .map(|src| needs_cdylib_plugins(&src))
+                    .unwrap_or(false)
+            });
+            let mut extras = Vec::new();
+            if needs_oracle {
+                extras.push("oracle");
+            }
+            if needs_plugins {
+                extras.push("plugins");
+            }
+            let extra = if extras.is_empty() {
+                "none".to_string()
             } else {
-                "none"
+                extras.join(",")
             };
-            let timeout = if extra == "oracle" { 90 } else { 60 };
+            let timeout = if needs_oracle { 90 } else { 60 };
             jobs.push(IntegrationTestJob {
                 name: format!("{package} / {test}"),
                 package: package.clone(),
                 test,
-                extra: extra.to_string(),
+                extra,
                 timeout,
             });
         }
@@ -173,6 +186,10 @@ fn uses_containers(src: &str) -> bool {
         || src.contains("testcontainers_modules")
         || src.contains("redis_helpers")
         || src.contains("k3s_helpers")
+}
+
+fn needs_cdylib_plugins(src: &str) -> bool {
+    src.contains("load_plugin_from_path") || src.contains("ffi_plugin_exists")
 }
 
 #[cfg(test)]
@@ -283,5 +300,24 @@ async fn oracle() {}
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(jobs[0].extra, "oracle");
         assert_eq!(jobs[0].timeout, 90);
+    }
+
+    #[test]
+    fn marks_jobs_that_load_cdylib_plugins() {
+        let dir = write_pkg(&[(
+            "tests/integration_test.rs",
+            r#"
+use testcontainers::runners::AsyncRunner;
+fn ffi_plugin_exists(crate_name: &str) -> bool { false }
+#[tokio::test]
+#[ignore]
+async fn ffi() {
+    let _ = load_plugin_from_path;
+}
+"#,
+        )]);
+        let jobs = discover_jobs([("drasi-source-mssql".to_string(), dir.clone())]);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(jobs[0].extra, "plugins");
     }
 }
