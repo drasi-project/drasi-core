@@ -272,6 +272,20 @@ impl CheckpointStore for FailingCheckpointStore {
     async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         self.inner.read_result_sequence(query_id).await
     }
+
+    async fn write_output_generation(
+        &self,
+        query_id: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        self.inner
+            .write_output_generation(query_id, generation)
+            .await
+    }
+
+    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        self.inner.read_output_generation(query_id).await
+    }
 }
 
 struct FailingOutboxWriter {
