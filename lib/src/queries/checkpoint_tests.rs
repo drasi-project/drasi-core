@@ -2392,6 +2392,7 @@ mod tests {
         // and fail startup rather than proceeding with stale checkpoint data
         let config =
             create_persistent_query_config("clear-fail-query", vec!["clear-fail-src".to_string()]);
+        let current_hash = crate::queries::compute_config_hash(&config);
         add_query(&query_manager, &graph, config).await.unwrap();
         let result = query_manager
             .start_query("clear-fail-query".to_string())
@@ -2401,13 +2402,19 @@ mod tests {
             "start_query should fail when clear_checkpoints fails on config hash mismatch"
         );
 
-        // The old hash should still be in place (new hash was NOT written
-        // because clear_checkpoints failed and startup was aborted)
+        // The in-progress marker is written before clear_checkpoints so a
+        // later start finishes the wipe. The new config hash must not be
+        // committed as complete.
         let stored_hash = store.read_config_hash().await.unwrap();
         assert_eq!(
             stored_hash,
-            Some(99999),
-            "Old config hash should remain when clear_checkpoints fails on mismatch"
+            Some(!current_hash),
+            "In-progress marker should remain when clear_checkpoints fails on mismatch"
+        );
+        assert_ne!(
+            stored_hash,
+            Some(current_hash),
+            "New config hash must not be committed when rebuild is incomplete"
         );
     }
 }

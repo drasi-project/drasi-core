@@ -45,6 +45,7 @@ const SOURCE_SEQUENCE_PREFIX: &str = "source_sequence:";
 const SOURCE_POSITION_PREFIX: &str = "source_position:";
 const CONFIG_HASH_KEY: &str = "config_hash";
 const RESULT_SEQUENCE_PREFIX: &str = "result_sequence:";
+const OUTPUT_GENERATION_PREFIX: &str = "output_generation:";
 
 /// Returns the column family descriptor for the stream_state CF.
 pub(crate) fn stream_state_cf_descriptor(
@@ -374,6 +375,55 @@ impl CheckpointStore for RocksDbCheckpointStore {
     async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         let db = self.db.clone();
         let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+            let data = db.get_cf(&cf, &key).map_err(IndexError::other)?;
+            match data {
+                Some(v) => {
+                    let bytes: [u8; 8] = v
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| IndexError::CorruptedData)?;
+                    Ok(Some(u64::from_be_bytes(bytes)))
+                }
+                None => Ok(None),
+            }
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
+    }
+
+    async fn write_output_generation(
+        &self,
+        query_id: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        let db = self.db.clone();
+        let key = format!("{OUTPUT_GENERATION_PREFIX}{query_id}");
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+            db.put_cf(&cf, &key, generation.to_be_bytes())
+                .map_err(IndexError::other)
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
+    }
+
+    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        let db = self.db.clone();
+        let key = format!("{OUTPUT_GENERATION_PREFIX}{query_id}");
 
         let task = task::spawn_blocking(move || {
             let cf = db
