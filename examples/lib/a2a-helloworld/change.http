@@ -1,0 +1,57 @@
+### A2A Hello World example — HTTP source on port 9000
+### POST /sources/invoices/events
+
+### Health
+GET http://127.0.0.1:9000/health
+
+###
+
+### Insert invoice inv-1001 (ADD → SendMessage to Hello World)
+POST http://127.0.0.1:9000/sources/invoices/events
+Content-Type: application/json
+
+{
+  "operation": "insert",
+  "element": {
+    "type": "node",
+    "id": "inv-1001",
+    "labels": ["Invoice"],
+    "properties": {
+      "invoiceId": "inv-1001",
+      "customer": "Acme",
+      "amount": 1250.5
+    }
+  }
+}
+
+###
+
+### Update amount (Hello World already completed → new SendMessage)
+POST http://127.0.0.1:9000/sources/invoices/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "inv-1001",
+    "labels": ["Invoice"],
+    "properties": {
+      "invoiceId": "inv-1001",
+      "customer": "Acme",
+      "amount": 1800.0
+    }
+  }
+}
+
+###
+
+### Delete (terminal task → Drop, not CancelTask)
+POST http://127.0.0.1:9000/sources/invoices/events
+Content-Type: application/json
+
+{
+  "operation": "delete",
+  "id": "inv-1001",
+  "labels": ["Invoice"]
+}

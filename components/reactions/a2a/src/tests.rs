@@ -1,0 +1,580 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use drasi_lib::channels::ResultDiff;
+use drasi_lib::Reaction;
+use drasi_plugin_sdk::ReactionPluginDescriptor;
+use serde_json::json;
+
+use crate::activation::{
+    length_prefixed, next_action, Action, Activation, ActivationState, MessageId, Operation,
+    TerminalUpdatePolicy,
+};
+use crate::client::{
+    build_cancel_task_rpc, build_get_task_rpc, build_send_message_rpc, parse_send_message_result,
+    sanitize_log_field, CancelTaskRequest, JsonRpcFailure, OutboundPart, SendMessageRequest,
+    SendMessageResult,
+};
+use crate::descriptor::{A2AReactionConfigDto, A2AReactionDescriptor, RecoveryPolicyDto};
+use crate::process::{extract_result_key, DiffPayload};
+use crate::{A2AReaction, A2AReactionBuilder};
+
+#[test]
+fn next_action_table_cells_are_covered() {
+    let active = ActivationState::Present(Activation::ActiveTask {
+        task_id: "task-1".to_string(),
+        context_id: "ctx-1".to_string(),
+        state: "WORKING".to_string(),
+        sequence: 1,
+    });
+    let one_shot = ActivationState::Present(Activation::OneShot {
+        message_id: MessageId("msg-1".to_string()),
+        sequence: 1,
+    });
+    let terminal = ActivationState::Present(Activation::TerminalTask {
+        task_id: "task-9".to_string(),
+        context_id: "ctx-9".to_string(),
+        state: "COMPLETED".to_string(),
+        sequence: 1,
+    });
+
+    assert!(matches!(
+        next_action(
+            Operation::Add,
+            &ActivationState::Absent,
+            TerminalUpdatePolicy::Replace,
+            1
+        ),
+        Action::SendCreate
+    ));
+    assert!(matches!(
+        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 2),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(Operation::Add, &one_shot, TerminalUpdatePolicy::Replace, 2),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Replace, 2),
+        Action::SendCreate
+    ));
+    assert!(matches!(
+        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Ignore, 2),
+        Action::Drop { .. }
+    ));
+
+    assert!(matches!(
+        next_action(
+            Operation::Update,
+            &ActivationState::Absent,
+            TerminalUpdatePolicy::Replace,
+            1
+        ),
+        Action::SendCreate
+    ));
+    assert!(matches!(
+        next_action(Operation::Update, &active, TerminalUpdatePolicy::Replace, 2),
+        Action::SendFollowUp { .. }
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Update,
+            &one_shot,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
+        Action::SendCreate
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Ignore,
+            2
+        ),
+        Action::Drop { .. }
+    ));
+
+    assert!(matches!(
+        next_action(Operation::Delete, &active, TerminalUpdatePolicy::Replace, 2),
+        Action::Cancel { .. }
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Delete,
+            &ActivationState::Absent,
+            TerminalUpdatePolicy::Replace,
+            1
+        ),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Delete,
+            &one_shot,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Delete,
+            &terminal,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
+        Action::Drop { .. }
+    ));
+}
+
+#[test]
+fn result_key_extraction_reports_missing_field() {
+    let payload = DiffPayload {
+        operation: Operation::Add,
+        before: None,
+        after: Some(json!({"invoiceId":"INV-1"})),
+        data: None,
+    };
+    let result = extract_result_key(&payload, &["invoiceId".to_string(), "tenantId".to_string()]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn send_message_parser_distinguishes_task_and_message() {
+    let task = parse_send_message_result(&json!({
+        "id": "task-1",
+        "contextId": "ctx-1",
+        "status": { "state": "WORKING" }
+    }))
+    .expect("task parse");
+    assert!(matches!(
+        task,
+        SendMessageResult::Task {
+            terminal: false,
+            ..
+        }
+    ));
+
+    let wrapped = parse_send_message_result(&json!({
+        "task": {
+            "id": "task-9f2",
+            "contextId": "ctx-4417",
+            "status": { "state": "TASK_STATE_WORKING" }
+        }
+    }))
+    .expect("wrapped task parse");
+    assert_eq!(
+        wrapped,
+        SendMessageResult::Task {
+            task_id: "task-9f2".to_string(),
+            context_id: "ctx-4417".to_string(),
+            state: "WORKING".to_string(),
+            terminal: false,
+        }
+    );
+
+    let terminal = parse_send_message_result(&json!({
+        "task": {
+            "id": "task-9",
+            "contextId": "ctx-9",
+            "status": { "state": "completed" }
+        }
+    }))
+    .expect("terminal task parse");
+    assert!(matches!(
+        terminal,
+        SendMessageResult::Task { terminal: true, .. }
+    ));
+
+    let message = parse_send_message_result(&json!({
+        "message": {
+            "role": "ROLE_AGENT",
+            "parts":[{"text":"done"}]
+        }
+    }))
+    .expect("message parse");
+    assert_eq!(message, SendMessageResult::Message);
+
+    let get_task = parse_send_message_result(&json!({
+        "id": "task-1",
+        "contextId": "ctx-1",
+        "status": { "state": "TASK_STATE_COMPLETED" }
+    }))
+    .expect("GetTask bare task parse");
+    assert!(matches!(
+        get_task,
+        SendMessageResult::Task {
+            terminal: true,
+            state,
+            ..
+        } if state == "COMPLETED"
+    ));
+
+    let lowercase_prefix = parse_send_message_result(&json!({
+        "id": "task-1",
+        "status": { "state": "task_state_completed" }
+    }))
+    .expect("lowercase prefix parse");
+    assert!(matches!(
+        lowercase_prefix,
+        SendMessageResult::Task {
+            terminal: true,
+            state,
+            ..
+        } if state == "COMPLETED"
+    ));
+
+    let cancelled = parse_send_message_result(&json!({
+        "id": "task-1",
+        "status": { "state": "CANCELLED" }
+    }))
+    .expect("british cancelled parse");
+    assert!(matches!(
+        cancelled,
+        SendMessageResult::Task {
+            terminal: true,
+            state,
+            ..
+        } if state == "CANCELED"
+    ));
+
+    let hyphenated = parse_send_message_result(&json!({
+        "id": "task-1",
+        "status": { "state": "input-required" }
+    }))
+    .expect("hyphenated state parse");
+    assert!(matches!(
+        hyphenated,
+        SendMessageResult::Task {
+            terminal: false,
+            state,
+            ..
+        } if state == "INPUT_REQUIRED"
+    ));
+
+    let invalid = parse_send_message_result(&json!({"id":"not-a-task"}));
+    assert!(invalid.is_err());
+
+    let malformed_parts = parse_send_message_result(&json!({"parts": null}));
+    assert!(malformed_parts.is_err());
+    let missing_role = parse_send_message_result(&json!({"parts":[{"text":"x"}]}));
+    assert!(missing_role.is_err());
+}
+
+#[test]
+fn get_task_rpc_shape_matches_contract() {
+    let rpc = build_get_task_rpc("msg-1", "task-1");
+    assert_eq!(rpc["jsonrpc"], json!("2.0"));
+    assert_eq!(rpc["method"], json!("GetTask"));
+    assert_eq!(rpc["id"], json!("msg-1"));
+    assert_eq!(rpc["params"]["id"], json!("task-1"));
+}
+
+#[test]
+fn cancel_task_rpc_shape_matches_contract() {
+    let rpc = build_cancel_task_rpc(&CancelTaskRequest {
+        message_id: "msg-1".to_string(),
+        task_id: "task-1".to_string(),
+    });
+    assert_eq!(rpc["jsonrpc"], json!("2.0"));
+    assert_eq!(rpc["method"], json!("CancelTask"));
+    assert_eq!(rpc["params"]["id"], json!("task-1"));
+}
+
+#[test]
+fn send_message_rpc_shape_sets_role_and_parts() {
+    let rpc = build_send_message_rpc(&SendMessageRequest {
+        message_id: "msg-1".to_string(),
+        activation_id: length_prefixed(&["query", "key"]),
+        task_id: None,
+        parts: vec![
+            OutboundPart::Text("Investigate".to_string()),
+            OutboundPart::Data {
+                media_type: "application/vnd.drasi.change+json".to_string(),
+                data: json!({"queryId":"q1","operation":"ADD"}),
+            },
+        ],
+        return_immediately: true,
+    });
+    assert_eq!(rpc["method"], json!("SendMessage"));
+    assert_eq!(rpc["id"], json!("msg-1"));
+    assert_eq!(rpc["params"]["message"]["role"], json!("ROLE_USER"));
+    assert_eq!(rpc["params"]["message"]["messageId"], json!("msg-1"));
+    assert!(rpc["params"]["message"].get("taskId").is_none());
+    assert_eq!(
+        rpc["params"]["configuration"]["returnImmediately"],
+        json!(true)
+    );
+    assert_eq!(
+        rpc["params"]["message"]["metadata"]["activationId"],
+        json!(length_prefixed(&["query", "key"]))
+    );
+    let parts = &rpc["params"]["message"]["parts"];
+    assert!(parts[0].get("kind").is_none());
+    assert_eq!(parts[0]["text"], json!("Investigate"));
+    assert_eq!(
+        parts[1]["mediaType"],
+        json!("application/vnd.drasi.change+json")
+    );
+    assert_eq!(parts[1]["data"]["queryId"], json!("q1"));
+}
+
+#[test]
+fn terminal_policy_replace_vs_ignore() {
+    let terminal = ActivationState::Present(Activation::TerminalTask {
+        task_id: "task-9".to_string(),
+        context_id: "ctx-9".to_string(),
+        state: "COMPLETED".to_string(),
+        sequence: 1,
+    });
+
+    assert!(matches!(
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Replace,
+            2
+        ),
+        Action::SendCreate
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Update,
+            &terminal,
+            TerminalUpdatePolicy::Ignore,
+            2
+        ),
+        Action::Drop { .. }
+    ));
+}
+
+#[test]
+fn replayed_sequence_is_dropped() {
+    let active = ActivationState::Present(Activation::ActiveTask {
+        task_id: "task-1".to_string(),
+        context_id: "ctx-1".to_string(),
+        state: "WORKING".to_string(),
+        sequence: 4,
+    });
+    assert!(matches!(
+        next_action(Operation::Update, &active, TerminalUpdatePolicy::Replace, 4),
+        Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 3),
+        Action::Drop { .. }
+    ));
+}
+
+#[test]
+fn length_prefixed_ids_do_not_collide() {
+    let left = length_prefixed(&["q", "a:b"]);
+    let right = length_prefixed(&["q:a", "b"]);
+    assert_ne!(left, right);
+    assert_eq!(left, "1:q:3:a:b");
+    assert_eq!(right, "3:q:a:1:b");
+}
+
+#[test]
+fn builder_enforces_result_key_fields_and_durable_hooks() {
+    let missing = A2AReactionBuilder::new("a2a")
+        .with_query("q1")
+        .with_endpoint("http://localhost:8080")
+        .build();
+    assert!(missing.is_err());
+
+    let reaction: A2AReaction = A2AReaction::builder("a2a")
+        .with_query("q1")
+        .with_endpoint("http://localhost:8080")
+        .with_result_key_fields(["invoiceId"])
+        .build()
+        .expect("reaction build");
+    assert!(reaction.is_durable());
+    assert!(!reaction.needs_snapshot_on_fresh_start());
+}
+
+#[test]
+fn descriptor_recovery_policy_allows_strict_and_auto_skip_gap_only() {
+    let strict: A2AReactionConfigDto = serde_json::from_value(json!({
+        "endpoint": "http://localhost:8080",
+        "resultKeyFields": ["invoiceId"],
+        "recoveryPolicy": "strict"
+    }))
+    .expect("strict parse");
+    assert_eq!(strict.recovery_policy, Some(RecoveryPolicyDto::Strict));
+
+    let skip: A2AReactionConfigDto = serde_json::from_value(json!({
+        "endpoint": "http://localhost:8080",
+        "resultKeyFields": ["invoiceId"],
+        "recoveryPolicy": "auto_skip_gap"
+    }))
+    .expect("auto_skip_gap parse");
+    assert_eq!(skip.recovery_policy, Some(RecoveryPolicyDto::AutoSkipGap));
+
+    let reset = serde_json::from_value::<A2AReactionConfigDto>(json!({
+        "endpoint": "http://localhost:8080",
+        "resultKeyFields": ["invoiceId"],
+        "recoveryPolicy": "auto_reset"
+    }));
+    assert!(reset.is_err());
+}
+
+#[test]
+fn json_rpc_failure_classifies_stale_and_gone_tasks() {
+    let gone = JsonRpcFailure {
+        method: "GetTask".into(),
+        code: -32001,
+        message: "Task aa35 is not found".into(),
+    };
+    assert!(gone.is_task_gone());
+    assert!(gone.is_stale_task());
+    assert!(!gone.is_terminal_task());
+
+    let gone_by_message = JsonRpcFailure {
+        method: "CancelTask".into(),
+        code: -32602,
+        message: "Task not found".into(),
+    };
+    assert!(gone_by_message.is_task_gone());
+    assert!(gone_by_message.is_stale_task());
+
+    let terminal = JsonRpcFailure {
+        method: "SendMessage".into(),
+        code: -32602,
+        message: "Task x is in Terminal State: 3".into(),
+    };
+    assert!(terminal.is_terminal_task());
+    assert!(terminal.is_stale_task());
+    assert!(!terminal.is_task_gone());
+}
+
+#[test]
+fn sanitize_log_field_strips_controls_and_truncates() {
+    assert_eq!(sanitize_log_field("ok\nline\t!"), "ok line !");
+    let long = "a".repeat(513);
+    let out = sanitize_log_field(&long);
+    assert!(out.ends_with('…'));
+    assert_eq!(out.chars().count(), 513);
+}
+
+#[test]
+fn aggregation_diff_maps_to_update_and_noop_is_skipped() {
+    let with_before = DiffPayload::from_result_diff(&ResultDiff::Aggregation {
+        before: Some(json!({"invoiceId":"INV-1","amount":1})),
+        after: json!({"invoiceId":"INV-1","amount":2}),
+        row_signature: 0,
+    })
+    .expect("aggregation with before");
+    assert_eq!(with_before.operation, Operation::Update);
+    assert_eq!(
+        extract_result_key(&with_before, &["invoiceId".to_string()]).unwrap(),
+        crate::activation::ResultKey("INV-1".to_string())
+    );
+
+    let first = DiffPayload::from_result_diff(&ResultDiff::Aggregation {
+        before: None,
+        after: json!({"invoiceId":"INV-1","amount":1}),
+        row_signature: 0,
+    })
+    .expect("aggregation without before");
+    assert_eq!(first.operation, Operation::Update);
+    assert!(first.before.is_none());
+    assert_eq!(first.after, Some(json!({"invoiceId":"INV-1","amount":1})));
+
+    assert!(DiffPayload::from_result_diff(&ResultDiff::Noop).is_none());
+}
+
+#[test]
+fn descriptor_kind_and_schema() {
+    let d = A2AReactionDescriptor;
+    assert_eq!(d.kind(), "a2a");
+    assert_eq!(d.config_version(), "1.0.0");
+    assert_eq!(d.config_schema_name(), "reaction.a2a.A2AReactionConfig");
+    assert_eq!(d.display_name(), "A2A");
+    assert!(!d.display_description().is_empty());
+    assert_eq!(d.display_icon(), "link");
+    let schema = d.config_schema_json();
+    assert!(schema.contains("A2AReactionConfig"));
+    assert!(schema.contains("endpoint"));
+    assert!(schema.contains("resultKeyFields"));
+}
+
+#[tokio::test]
+async fn descriptor_creates_reaction_from_json() {
+    let d = A2AReactionDescriptor;
+    let cfg = json!({
+        "endpoint": "http://localhost:8080",
+        "resultKeyFields": ["invoiceId"],
+        "timeoutMs": 3000,
+        "terminalUpdatePolicy": "ignore"
+    });
+    let r = d
+        .create_reaction("a2a-r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .expect("create reaction");
+    assert_eq!(r.id(), "a2a-r");
+    assert_eq!(r.type_name(), "a2a");
+    let p = r.properties();
+    assert_eq!(p.get("endpoint"), Some(&json!("http://localhost:8080")));
+    assert_eq!(p.get("timeoutMs"), Some(&json!(3000)));
+}
+
+#[tokio::test]
+async fn descriptor_rejects_unknown_fields_and_missing_keys() {
+    let d = A2AReactionDescriptor;
+    let unknown = d
+        .create_reaction(
+            "a2a-r",
+            vec!["q1".to_string()],
+            &json!({
+                "endpoint": "http://localhost:8080",
+                "resultKeyFields": ["invoiceId"],
+                "notAField": true
+            }),
+            true,
+        )
+        .await
+        .err()
+        .expect("unknown field");
+    assert!(
+        unknown.to_string().contains("unknown field"),
+        "error should reject unknown fields: {unknown}"
+    );
+
+    let missing_keys = d
+        .create_reaction(
+            "a2a-r",
+            vec!["q1".to_string()],
+            &json!({ "endpoint": "http://localhost:8080" }),
+            true,
+        )
+        .await
+        .err()
+        .expect("missing result key fields");
+    assert!(
+        missing_keys.to_string().contains("resultKeyFields"),
+        "error should require resultKeyFields: {missing_keys}"
+    );
+}
