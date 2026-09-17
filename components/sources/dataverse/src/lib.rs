@@ -85,7 +85,7 @@ use std::time::Duration;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use drasi_lib::channels::{ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft};
+use drasi_lib::channels::{ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper};
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
@@ -447,7 +447,7 @@ impl DataverseSource {
     }
 
     /// Convert and dispatch a batch of Dataverse changes through the owned
-    /// `SourceBase` so the framework stamps a monotonic `sequence` on each event
+    /// `SourceBase` to allocate a monotonic `sequence` for each event
     /// (issue #828).
     async fn dispatch_changes(
         source_id: &str,
@@ -461,11 +461,12 @@ impl DataverseSource {
             let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-            let wrapper = SourceEventDraft::with_profiling(
+            let wrapper = SourceEventWrapper::with_profiling(
                 source_id.to_string(),
                 SourceEvent::Change(source_change),
                 chrono::Utc::now(),
                 profiling,
+                base.next_sequence(),
             );
 
             if let Err(e) = base.dispatch_event(wrapper).await {

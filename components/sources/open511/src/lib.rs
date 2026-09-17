@@ -328,11 +328,12 @@ async fn dispatch_change(
     let mut profiling = ProfilingMetadata::new();
     profiling.source_send_ns = Some(timestamp_ns());
 
-    let wrapper = SourceEventDraft::with_profiling(
+    let wrapper = SourceEventWrapper::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(change),
         Utc::now(),
         profiling,
+        base.next_sequence(),
     );
 
     base.dispatch_event(wrapper).await

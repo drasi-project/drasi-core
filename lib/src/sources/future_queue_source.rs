@@ -22,7 +22,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::channels::{
     ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher, SourceControl, SourceEvent,
-    SourceEventDraft, StampedSourceEvent,
+    SourceEventWrapper,
 };
 use tracing::Instrument;
 
@@ -50,7 +50,7 @@ pub struct FutureQueueSource {
     /// Query ID for logging
     query_id: String,
     /// Dispatcher for sending events to subscribers
-    dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<StampedSourceEvent>>>>>,
+    dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
     /// Monotonic sequence counter for the control events this source emits.
     /// `FuturesDue` signals bypass `SourceBase`, so this source stamps them
     /// itself to satisfy the mandatory-sequence contract.
@@ -74,9 +74,9 @@ impl FutureQueueSource {
     /// Creates a channel dispatcher and returns its receiver.
     pub async fn subscribe(
         &self,
-    ) -> Result<Box<dyn ChangeReceiver<StampedSourceEvent>>, Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>, Box<dyn std::error::Error + Send + Sync>>
     {
-        let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(1000);
+        let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
         let receiver = dispatcher.create_receiver().await.map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
                 Box::new(std::io::Error::new(
@@ -172,13 +172,12 @@ impl FutureQueueSource {
                     // Item is due — dispatch FuturesDue signal. This source
                     // bypasses SourceBase, so it stamps a monotonic sequence
                     // itself to honor the mandatory-sequence contract.
-                    let draft = SourceEventDraft::new(
+                    let event_wrapper = SourceEventWrapper::new(
                         FUTURE_QUEUE_SOURCE_ID.to_string(),
                         SourceEvent::Control(SourceControl::FuturesDue),
                         timestamp,
+                        next_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     );
-                    let seq = next_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let event_wrapper = StampedSourceEvent::stamp(draft, seq);
 
                     let dispatcher_guard = dispatcher_clone.read().await;
                     if let Some(dispatcher) = dispatcher_guard.as_ref() {

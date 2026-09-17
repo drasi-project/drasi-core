@@ -22,7 +22,7 @@ use anyhow::{anyhow, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use drasi_lib::channels::{SourceEvent, SourceEventDraft};
+use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::profiling;
 use drasi_lib::sources::base::SourceBase;
 use drasi_oracle_common::{
@@ -177,17 +177,18 @@ async fn dispatch_batch(
     }
 
     let position_bytes = encode_scn_position(commit_scn);
-    let events: Vec<SourceEventDraft> = batch
+    let events: Vec<SourceEventWrapper> = batch
         .into_iter()
         .map(|change| {
             let mut profiling = profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(profiling::timestamp_ns());
 
-            let mut wrapper = SourceEventDraft::with_profiling(
+            let mut wrapper = SourceEventWrapper::with_profiling(
                 base.id.clone(),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
                 profiling,
+                base.next_sequence(),
             );
             wrapper.source_position = Some(position_bytes.clone());
             wrapper

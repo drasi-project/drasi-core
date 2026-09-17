@@ -104,7 +104,7 @@ fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSu
 async fn subscribe_fresh(
     source: &ApplicationSource,
     source_id: &str,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source
         .subscribe(fresh_settings(source_id, "test-query"))
         .await
@@ -117,7 +117,7 @@ async fn subscribe_with_resume(
     source: &ApplicationSource,
     source_id: &str,
     resume_seq: u64,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source
         .subscribe(resume_settings(source_id, "test-query-resume", resume_seq))
         .await

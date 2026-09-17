@@ -22,11 +22,8 @@ use drasi_kubernetes_common::mapping::{
     object_created_at_millis,
 };
 use drasi_kubernetes_common::{build_client, parse_api_version};
-use drasi_lib::channels::{
-    ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft, SubscriptionResponse,
-};
+use drasi_lib::channels::{ComponentStatus, DispatchMode, SubscriptionResponse};
 use drasi_lib::context::SourceRuntimeContext;
-use drasi_lib::profiling;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{BootstrapProvider, Source};
@@ -536,20 +533,12 @@ async fn process_apply_object(
 }
 
 pub(crate) async fn dispatch_changes(
-    source_id: &str,
+    _source_id: &str,
     base: &SourceBase,
     changes: Vec<drasi_core::models::SourceChange>,
 ) -> Result<()> {
     for change in changes {
-        let mut profile = profiling::ProfilingMetadata::new();
-        profile.source_send_ns = Some(profiling::timestamp_ns());
-        let wrapper = SourceEventDraft::with_profiling(
-            source_id.to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-            profile,
-        );
-        base.dispatch_event(wrapper).await?;
+        base.dispatch_source_change(change).await?;
     }
     Ok(())
 }

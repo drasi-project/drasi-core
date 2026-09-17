@@ -108,7 +108,7 @@ fn resume_settings(source_id: &str, resume_seq: u64) -> SourceSubscriptionSettin
 async fn subscribe_fresh(
     source: &dyn Source,
     source_id: &str,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source.subscribe(fresh_settings(source_id)).await.unwrap();
     resp.receiver
 }

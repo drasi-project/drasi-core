@@ -22,7 +22,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{
-    ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft, SubscriptionResponse,
+    ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
@@ -134,11 +134,12 @@ impl MockSource {
                 let mut profiling = ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                let wrapper = SourceEventDraft::with_profiling(
+                let wrapper = SourceEventWrapper::with_profiling(
                     source_name.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
                     profiling,
+                    base.next_sequence(),
                 );
 
                 let _ = base.dispatch_event(wrapper).await;

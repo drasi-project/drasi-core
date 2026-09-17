@@ -44,7 +44,7 @@ impl SequenceDedup {
     /// Returns `true` iff this event has already been processed for its source
     /// (i.e., its sequence is `<=` the stored checkpoint).
     ///
-    /// Every event past the source boundary carries a framework-assigned
+    /// Every event past the source boundary carries a required source-local
     /// sequence, so this always has a concrete value to compare.
     pub fn should_skip(&self, source_id: &str, sequence: u64) -> bool {
         self.checkpoints

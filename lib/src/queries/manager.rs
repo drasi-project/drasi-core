@@ -2185,7 +2185,7 @@ impl Query for DrasiQuery {
                         arc_event = priority_queue.dequeue() => {
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
                             let parts =
-                                match StampedSourceEvent::try_unwrap_arc(arc_event) {
+                                match SourceEventWrapper::try_unwrap_arc(arc_event) {
                                     Ok(parts) => parts,
                                     Err(arc) => {
                                         crate::channels::events::SourceEventParts {

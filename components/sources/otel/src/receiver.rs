@@ -33,7 +33,7 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::{SourceEvent, SourceEventDraft};
+use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::wal::{WalError, WalProvider};
 
@@ -216,13 +216,13 @@ impl OtelRuntime {
         change: SourceChange,
         wal_seq: Option<u64>,
     ) -> anyhow::Result<()> {
-        let mut wrapper = SourceEventDraft::new(
+        let mut wrapper = SourceEventWrapper::new(
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            wal_seq.unwrap_or_else(|| self.base.next_sequence()),
         );
         if let Some(seq) = wal_seq {
-            wrapper.supplied_sequence = Some(seq);
             wrapper.set_source_position(bytes::Bytes::copy_from_slice(&seq.to_be_bytes()));
         }
         self.base

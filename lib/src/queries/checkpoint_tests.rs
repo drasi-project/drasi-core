@@ -79,10 +79,11 @@ mod tests {
             change: drasi_core::models::SourceChange,
             position: Option<Bytes>,
         ) -> anyhow::Result<()> {
-            let mut draft = SourceEventDraft::new(
+            let mut draft = SourceEventWrapper::new(
                 self.base.get_id().to_string(),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
+                self.base.next_sequence(),
             );
             if let Some(pos) = position {
                 draft.set_source_position(pos);

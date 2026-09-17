@@ -24,7 +24,7 @@ use crate::poller::GtfsRtPoller;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{
-    ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft, SubscriptionResponse,
+    ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
 use drasi_lib::sources::{Source, SourceBase, SourceBaseParams};
 use drasi_lib::state_store::StateStoreProvider;
@@ -202,17 +202,18 @@ impl Source for GtfsRtSource {
 }
 
 /// Dispatch a poll cycle's changes through the owned `SourceBase` so the
-/// framework stamps a monotonic `sequence` on each event (issue #828).
+/// framework allocator supplies a monotonic `sequence` for each event (issue #828).
 async fn dispatch_changes(
     base: &SourceBase,
     source_id: &str,
     changes: Vec<drasi_core::models::SourceChange>,
 ) {
     for change in changes {
-        let wrapper = SourceEventDraft::new(
+        let wrapper = SourceEventWrapper::new(
             source_id.to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            base.next_sequence(),
         );
 
         if let Err(err) = base.dispatch_event(wrapper).await {

@@ -987,16 +987,16 @@ impl HttpSource {
                 let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                let mut wrapper = SourceEventDraft::with_profiling(
+                let mut wrapper = SourceEventWrapper::with_profiling(
                     event.source_id.clone(),
                     SourceEvent::Change(event.change),
                     event.timestamp,
                     profiling,
+                    event.sequence.unwrap_or_else(|| base.next_sequence()),
                 );
 
                 // Carry WAL-assigned sequence through to the wrapper
                 if let Some(seq) = event.sequence {
-                    wrapper.supplied_sequence = Some(seq);
                     wrapper.source_position = Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                 }
 
