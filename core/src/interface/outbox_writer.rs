@@ -90,18 +90,13 @@ pub trait OutboxWriter: Send + Sync {
     /// deletes are staged in that session so they commit atomically with a
     /// preceding [`append`](Self::append).
     ///
-    /// The default implementation keeps `[retain_from, latest]` by calling
+    /// The default implementation keeps entries with sequence `>= retain_from`
+    /// by counting them via [`read_from`](Self::read_from) and calling
     /// [`trim_to_capacity`](Self::trim_to_capacity). It is not session-atomic.
     /// Backends that join an outer transaction must override this.
     async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
-        let Some(latest) = self.read_latest_sequence(query_id).await? else {
-            return Ok(0);
-        };
-        if latest < retain_from {
-            return self.trim_to_capacity(query_id, 0).await;
-        }
-        let keep = usize::try_from(latest.saturating_sub(retain_from).saturating_add(1))
-            .unwrap_or(usize::MAX);
+        let after = retain_from.saturating_sub(1);
+        let keep = self.read_from(query_id, after).await?.len();
         self.trim_to_capacity(query_id, keep).await
     }
 

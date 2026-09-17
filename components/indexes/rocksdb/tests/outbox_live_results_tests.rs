@@ -663,6 +663,43 @@ async fn battle_trim_to_capacity_sees_uncommitted_appends() {
 }
 
 #[tokio::test]
+async fn battle_append_and_trim_rolls_back_with_session() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+    let session_control: Arc<dyn SessionControl> =
+        Arc::new(RocksDbSessionControl::new(session_state.clone()));
+    let outbox = RocksDbOutboxWriter::new(db, session_state);
+
+    for seq in 1..=3 {
+        outbox.append("q1", seq, b"old").await.unwrap();
+    }
+
+    {
+        let guard = SessionGuard::begin(session_control.clone())
+            .await
+            .expect("begin");
+        outbox.append_and_trim("q1", 4, b"four", 3).await.unwrap();
+        drop(guard);
+    }
+    assert_eq!(
+        outbox_sequences(&outbox.read_from("q1", 0).await.unwrap()),
+        vec![1, 2, 3],
+        "rolled-back append_and_trim must not evict committed keys"
+    );
+
+    {
+        let guard = SessionGuard::begin(session_control).await.expect("begin");
+        outbox.append_and_trim("q1", 4, b"four", 3).await.unwrap();
+        guard.commit().await.expect("commit");
+    }
+    assert_eq!(
+        outbox_sequences(&outbox.read_from("q1", 0).await.unwrap()),
+        vec![3, 4]
+    );
+}
+
+#[tokio::test]
 async fn battle_trim_before_zero_is_noop() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
