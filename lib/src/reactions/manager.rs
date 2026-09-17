@@ -1135,9 +1135,9 @@ impl ReactionManager {
 
             let forwarder_task = tokio::spawn(
                 async move {
-                    // Wait for the bootstrap gate to open before processing.
-                    // Live results dropped from a bounded dispatch buffer while
-                    // the gate is closed are recovered from the outbox below.
+                    // Wait for the bootstrap gate to open, then drain the live
+                    // buffer. Restart catchup from an existing checkpoint still
+                    // uses fetch_outbox before this forwarder is started.
                     if gate_rx.wait_for(|v| *v).await.is_err() {
                         log::debug!(
                             "[{reaction_id_owned}] Gate sender dropped for query '{query_id_clone}' \
@@ -1156,63 +1156,9 @@ impl ReactionManager {
                     // Track the last forwarded sequence for gap detection.
                     let mut last_forwarded_seq = initial_seq;
 
-                    match query_clone.fetch_outbox(initial_seq).await {
-                        Ok(outbox) => {
-                            for entry in &outbox.results {
-                                let result = (*entry).as_ref().clone();
-                                match reaction.enqueue_query_result(result).await {
-                                    Ok(()) => last_forwarded_seq = entry.sequence,
-                                    Err(e) => {
-                                        warn!(
-                                            "[{reaction_id_owned}] Failed to catch up outbox for query \
-                                             '{query_id_clone}' seq={}: {e}",
-                                            entry.sequence
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(FetchError::OutboxGap(_)) => {
-                            let gap_ctx = BroadcastGapContext {
-                                reaction_id: &reaction_id_owned,
-                                query_id: &query_id_clone,
-                                reaction: &reaction,
-                                query: &query_clone,
-                                policy,
-                                state_store: &state_store_clone,
-                                checkpoints: &checkpoints,
-                                bootstrap_mutex: &bootstrap_mutex,
-                                metrics: &forwarder_metrics,
-                            };
-                            match Self::handle_broadcast_gap(&gap_ctx).await {
-                                Ok(()) => {
-                                    last_forwarded_seq = checkpoints
-                                        .read()
-                                        .await
-                                        .get(&query_id_clone)
-                                        .map(|cp| cp.sequence)
-                                        .unwrap_or(last_forwarded_seq);
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "[{reaction_id_owned}] Recovery failed for outbox gap \
-                                         on query '{query_id_clone}' after gate open: {e}"
-                                    );
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::debug!(
-                                "[{reaction_id_owned}] No outbox catchup for query '{query_id_clone}': {e}"
-                            );
-                        }
-                    }
-
                     log::debug!(
                         "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}' \
-                         (initial_seq={initial_seq}, last_forwarded={last_forwarded_seq})"
+                         (initial_seq={initial_seq})"
                     );
 
                     loop {

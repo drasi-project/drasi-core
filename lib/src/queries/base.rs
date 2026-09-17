@@ -181,9 +181,22 @@ impl QueryBase {
         // Fan out to all dispatchers concurrently so one slow reaction
         // cannot block delivery to the others.
         let dispatchers = self.dispatchers.read().await;
-        for dispatcher in dispatchers.iter() {
-            if let Err(e) = dispatcher.try_dispatch_change(arc_result.clone()) {
-                debug!("[{}] Failed to dispatch result: {}", self.config.id, e);
+        if dispatchers.len() <= 1 {
+            for dispatcher in dispatchers.iter() {
+                if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+                    debug!("[{}] Failed to dispatch result: {}", self.config.id, e);
+                }
+            }
+        } else {
+            let futures: Vec<_> = dispatchers
+                .iter()
+                .map(|d| d.dispatch_change(arc_result.clone()))
+                .collect();
+            let query_id = &self.config.id;
+            for result in futures::future::join_all(futures).await {
+                if let Err(e) = result {
+                    debug!("[{query_id}] Failed to dispatch result: {e}");
+                }
             }
         }
 

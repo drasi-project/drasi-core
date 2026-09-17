@@ -609,23 +609,25 @@ async fn dispatch_query_results(
         let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
         output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
 
-        // Snapshot subscribers under the same lock as the sequence assign so a
-        // concurrent subscribe cannot attach after this result is published.
-        // Use try_dispatch so a full Channel cannot hold this lock.
         debug!(
             "Query '{query_id}' sending {} results to reactions (seq={})",
             result.results.len(),
             result.sequence
         );
-        let dispatchers = dispatchers.read().await;
-        for dispatcher in dispatchers.iter() {
-            if let Err(e) = dispatcher.try_dispatch_change(result.clone()) {
-                debug!("Failed to dispatch result for query '{query_id}': {e}");
-            }
-        }
 
         result
     };
+
+    // Publish after releasing output_state so a full Channel backpressures
+    // the query instead of deadlocking snapshot/outbox fetches or dropping
+    // the tail. Subscribe still samples the head and attaches under that lock.
+    let dispatcher_list = dispatchers.read().await;
+    for dispatcher in dispatcher_list.iter() {
+        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+            debug!("Failed to dispatch result for query '{query_id}': {e}");
+        }
+    }
+    drop(dispatcher_list);
 
     if let Some(writer) = outbox_writer {
         if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
