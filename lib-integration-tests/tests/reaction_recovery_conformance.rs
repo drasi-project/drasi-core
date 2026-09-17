@@ -1225,6 +1225,24 @@ const OVERFLOW_CHECKPOINT: u64 = 1;
 const OVERFLOW_EARLIEST: u64 = 5;
 const OVERFLOW_HWM: u64 = 6;
 
+fn overflow_people() -> Vec<PersonRow> {
+    vec![
+        person("p1", "Alice", true),
+        person("p2", "Bob", false),
+        person("p3", "Carol", true),
+        person("p4", "Dave", false),
+        person("p5", "Eve", true),
+        person("p6", "Frank", false),
+    ]
+}
+
+fn overflow_snapshot() -> SnapshotObservation {
+    SnapshotObservation {
+        sequence: OVERFLOW_HWM,
+        people: overflow_people(),
+    }
+}
+
 fn overflow_fixture_opts(
     reaction_policy: ReactionRecoveryPolicy,
     snapshot_on_fresh: bool,
@@ -1327,7 +1345,12 @@ async fn seed_overflow_phase(paths: &FixturePaths) -> Result<()> {
     insert_person(&fixture.source, "p4", "Dave", false).await?;
     insert_person(&fixture.source, "p5", "Eve", true).await?;
     insert_person(&fixture.source, "p6", "Frank", false).await?;
-    wait_for_query_sequence(&fixture.core, OVERFLOW_HWM).await?;
+    let seeded = wait_for_query_sequence(&fixture.core, OVERFLOW_HWM).await?;
+    assert_eq!(
+        seeded,
+        overflow_snapshot(),
+        "seed snapshot must retain all six people before the process exits"
+    );
 
     assert_outbox_gap(
         &fixture.core,
@@ -1370,7 +1393,12 @@ async fn seed_overflow_phase(paths: &FixturePaths) -> Result<()> {
 
 async fn assert_overflow_ring_after_hydrate(core: &DrasiLib) -> Result<()> {
     wait_for_status(core, QUERY_ID, ComponentStatus::Running).await?;
-    wait_for_query_sequence(core, OVERFLOW_HWM).await?;
+    let snapshot = wait_for_query_sequence(core, OVERFLOW_HWM).await?;
+    assert_eq!(
+        snapshot,
+        overflow_snapshot(),
+        "hydrate must restore all six people, not a truncated live set"
+    );
     assert_outbox_gap(core, OVERFLOW_CHECKPOINT, OVERFLOW_EARLIEST, OVERFLOW_HWM).await?;
     let query = query_instance(core).await?;
     let retained = query.fetch_outbox(OVERFLOW_EARLIEST - 1).await?;
@@ -1436,7 +1464,7 @@ async fn recover_overflow_autoreset_phase(paths: &FixturePaths) -> Result<()> {
     assert_ne!(checkpoint.config_hash, 0);
 
     let snapshot = observe_snapshot(&fixture.core).await?;
-    assert_eq!(snapshot.sequence, OVERFLOW_HWM);
+    assert_eq!(snapshot, overflow_snapshot());
 
     let records = read_journal(&paths.journal)?;
     assert_eq!(
@@ -1445,7 +1473,24 @@ async fn recover_overflow_autoreset_phase(paths: &FixturePaths) -> Result<()> {
         "AutoReset must not replay C+1..E-1 as live side effects; got {:?}",
         journal_sequences(&records)
     );
-    let snapshots: Vec<u64> = records
+    let applied: Vec<&JournalRecord> = records
+        .iter()
+        .filter(|record| matches!(record, JournalRecord::Snapshot { sequence, .. } if *sequence == OVERFLOW_HWM))
+        .collect();
+    anyhow::ensure!(
+        !applied.is_empty(),
+        "AutoReset must apply a snapshot at HWM"
+    );
+    for record in applied {
+        if let JournalRecord::Snapshot { rows, .. } = record {
+            assert_eq!(
+                sorted_people(rows)?,
+                overflow_people(),
+                "AutoReset snapshot side effect must include all six people"
+            );
+        }
+    }
+    let snapshot_seqs: Vec<u64> = records
         .iter()
         .filter_map(|record| match record {
             JournalRecord::Snapshot { sequence, .. } => Some(*sequence),
@@ -1453,14 +1498,10 @@ async fn recover_overflow_autoreset_phase(paths: &FixturePaths) -> Result<()> {
         })
         .collect();
     anyhow::ensure!(
-        snapshots.contains(&OVERFLOW_HWM),
-        "AutoReset must apply a snapshot at HWM, got {snapshots:?}"
-    );
-    anyhow::ensure!(
-        !snapshots
+        !snapshot_seqs
             .iter()
             .any(|sequence| (OVERFLOW_CHECKPOINT + 1..OVERFLOW_EARLIEST).contains(sequence)),
-        "AutoReset must not snapshot-apply the missing range, got {snapshots:?}"
+        "AutoReset must not snapshot-apply the missing range, got {snapshot_seqs:?}"
     );
 
     fixture.core.shutdown().await?;
