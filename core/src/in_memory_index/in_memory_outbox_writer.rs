@@ -266,6 +266,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_trim_before_on_gapped_outbox_keeps_sequence_window() {
+        let writer = LegacyOutbox(InMemoryOutboxWriter::new());
+        writer.append("q1", 1, b"a").await.unwrap();
+        writer.append("q1", 2, b"b").await.unwrap();
+        writer.append("q1", 3, b"c").await.unwrap();
+        writer.append("q1", 5, b"e").await.unwrap();
+        writer.trim_before("q1", 4).await.unwrap();
+        let seqs: Vec<u64> = writer
+            .read_from("q1", 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+        assert_eq!(
+            seqs,
+            vec![5],
+            "default trim_before must keep sequences >= retain_from, not the newest N by count"
+        );
+    }
+
+    #[tokio::test]
     async fn test_default_trim_before_uses_trim_to_capacity() {
         let writer = LegacyOutbox(InMemoryOutboxWriter::new());
         for i in 1..=10 {
