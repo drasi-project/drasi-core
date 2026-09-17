@@ -212,13 +212,33 @@ impl ReactionManager {
         // --- §3 Startup validation ---
         self.validate_startup_config(&reaction).await?;
 
-        crate::managers::lifecycle_helpers::start_component(
-            &self.graph,
-            &id,
-            "reaction",
-            &reaction,
-        )
-        .await?;
+        // A no-op Starting -> Starting graph update must not restart the runtime
+        // and discard the active result queue. Claim the generation atomically.
+        {
+            let mut graph = self.graph.write().await;
+            if graph
+                .get_component(&id)
+                .is_some_and(|node| node.status == ComponentStatus::Starting)
+            {
+                return Err(anyhow::anyhow!("Component '{id}' is already starting"));
+            }
+            graph.validate_and_transition(
+                &id,
+                ComponentStatus::Starting,
+                Some("Starting reaction".to_string()),
+            )?;
+        }
+        self.abort_subscription_tasks(&id).await;
+
+        if let Err(e) = reaction.start().await {
+            let mut graph = self.graph.write().await;
+            let _ = graph.validate_and_transition(
+                &id,
+                ComponentStatus::Error,
+                Some(format!("Start failed: {e}")),
+            );
+            return Err(e);
+        }
 
         // Create the bootstrap gate — forwarders wait on this before processing.
         // Using a watch channel (not Notify) so late subscribers see the current value
@@ -1701,6 +1721,55 @@ mod tests {
     // ========================================================================
     // Test helpers
     // ========================================================================
+
+    #[tokio::test]
+    async fn test_only_a_new_start_cancels_the_previous_subscription_generation() {
+        let (mut graph, _updates) = ComponentGraph::new("test");
+        let update_tx = graph.update_sender();
+        graph.register_reaction("r1", HashMap::new(), &[]).unwrap();
+        graph
+            .validate_and_transition("r1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("r1", ComponentStatus::Error, None)
+            .unwrap();
+        let graph = Arc::new(RwLock::new(graph));
+        let manager = ReactionManager::new(
+            "test",
+            crate::managers::get_or_init_global_registry(),
+            graph,
+            update_tx,
+        );
+        manager
+            .provision_reaction(MockReaction::new("r1", vec![]))
+            .await
+            .unwrap();
+        let stale = tokio::spawn(std::future::pending::<()>());
+        manager
+            .subscription_tasks
+            .write()
+            .await
+            .insert("r1".to_string(), vec![stale.abort_handle()]);
+        manager.start_reaction("r1".to_string()).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), stale)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .is_cancelled()
+        );
+
+        let active = tokio::spawn(std::future::pending::<()>());
+        manager
+            .subscription_tasks
+            .write()
+            .await
+            .insert("r1".to_string(), vec![active.abort_handle()]);
+        assert!(manager.start_reaction("r1".to_string()).await.is_err());
+        assert!(!active.is_finished());
+        active.abort();
+        assert!(active.await.unwrap_err().is_cancelled());
+    }
 
     /// Build a DrasiLib with a source and one query (auto_start=false).
     async fn build_core() -> crate::DrasiLib {

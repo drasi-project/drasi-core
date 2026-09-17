@@ -83,6 +83,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_source_timestamps_remain_authoritative_with_stable_ties() {
+        let pq = PriorityQueue::new(10);
+        let timestamp = Utc::now();
+        let events = [
+            create_test_event("source1", timestamp + chrono::Duration::seconds(30)),
+            create_test_event("source2", timestamp + chrono::Duration::seconds(20)),
+            create_test_event("source1", timestamp + chrono::Duration::seconds(10)),
+            create_test_event("source3", timestamp + chrono::Duration::seconds(20)),
+        ];
+        for event in &events {
+            pq.enqueue_wait(event.clone()).await;
+        }
+        // Source queues still merge by the actual timestamp, even when a single
+        // source's clock goes backwards; only reaction queues clamp their keys.
+        for index in [2, 1, 3, 0] {
+            assert!(Arc::ptr_eq(&pq.dequeue().await, &events[index]));
+        }
+    }
+
+    #[tokio::test]
     async fn test_priority_queue_capacity() {
         let pq = PriorityQueue::new(2);
 

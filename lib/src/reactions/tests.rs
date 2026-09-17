@@ -16,10 +16,12 @@
 pub(crate) mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::reactions::common::base::{ReactionBase, ReactionBaseParams};
     use crate::test_helpers::wait_for_component_status;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
@@ -132,6 +134,82 @@ pub(crate) mod manager_tests {
         async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
             Ok(())
         }
+    }
+
+    struct QueuedReaction {
+        base: Arc<ReactionBase>,
+        fail_start: AtomicBool,
+        start_gate: Option<Arc<StartGate>>,
+    }
+
+    #[derive(Default)]
+    struct StartGate {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::reactions::Reaction for QueuedReaction {
+        fn id(&self) -> &str {
+            &self.base.id
+        }
+        fn type_name(&self) -> &str {
+            "queued-test"
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        fn query_ids(&self) -> Vec<String> {
+            self.base.queries.clone()
+        }
+        fn auto_start(&self) -> bool {
+            false
+        }
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.base.initialize(context).await;
+        }
+        async fn start(&self) -> Result<()> {
+            if let Some(gate) = &self.start_gate {
+                let previous = gate.calls.fetch_add(1, Ordering::SeqCst);
+                gate.entered.notify_one();
+                if previous == 0 {
+                    gate.release.notified().await;
+                }
+            }
+            let shutdown = self.base.create_shutdown_channel().await;
+            self.base
+                .set_processing_task(tokio::spawn(async move {
+                    let _ = shutdown.await;
+                }))
+                .await;
+            if self.fail_start.swap(false, Ordering::SeqCst) {
+                return Err(anyhow::anyhow!(
+                    "injected failure after spawning the consumer"
+                ));
+            }
+            self.base.set_status(ComponentStatus::Running, None).await;
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            self.base.stop_common().await
+        }
+        async fn status(&self) -> ComponentStatus {
+            self.base.get_status().await
+        }
+        async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+            self.base.enqueue_query_result(result).await
+        }
+    }
+
+    fn queued_result(sequence: u64, timestamp: i64) -> QueryResult {
+        QueryResult::new(
+            "q1".to_string(),
+            sequence,
+            chrono::DateTime::from_timestamp_millis(timestamp).unwrap(),
+            vec![],
+            Default::default(),
+        )
     }
 
     /// Helper to create a TestMockReaction instance
@@ -335,6 +413,180 @@ pub(crate) mod manager_tests {
         let status = manager.get_reaction_status("nonexistent".to_string()).await;
         assert!(status.is_err());
         assert!(status.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_start_invokes_the_start_hook_only_once() {
+        let (manager, graph) = create_test_manager().await;
+        let base = Arc::new(ReactionBase::new(ReactionBaseParams::new(
+            "gated-start",
+            vec![],
+        )));
+        let gate = Arc::new(StartGate::default());
+        add_reaction(
+            &manager,
+            &graph,
+            QueuedReaction {
+                base,
+                fail_start: AtomicBool::new(false),
+                start_gate: Some(gate.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let mut events = graph.read().await.subscribe();
+        let first_manager = manager.clone();
+        let first = tokio::spawn(async move {
+            first_manager
+                .start_reaction("gated-start".to_string())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            manager
+                .get_reaction_status("gated-start".to_string())
+                .await
+                .unwrap(),
+            ComponentStatus::Starting
+        );
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.start_reaction("gated-start".to_string()),
+        )
+        .await
+        .expect("a duplicate start must reject without waiting for the first hook");
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(second.unwrap_err().to_string().contains("already starting"));
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        wait_for_component_status(
+            &mut events,
+            "gated-start",
+            ComponentStatus::Running,
+            Duration::from_secs(2),
+        )
+        .await;
+        manager
+            .stop_reaction("gated-start".to_string())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_or_illegal_start_preserves_pending_results() {
+        for status in
+            [ComponentStatus::Starting, ComponentStatus::Running, ComponentStatus::Stopping]
+        {
+            let (manager, graph) = create_test_manager().await;
+            let base = Arc::new(ReactionBase::new(ReactionBaseParams::new("queued", vec![])));
+            add_reaction(
+                &manager,
+                &graph,
+                QueuedReaction {
+                    base: base.clone(),
+                    fail_start: AtomicBool::new(false),
+                    start_gate: None,
+                },
+            )
+            .await
+            .unwrap();
+            // Keep an existing consumer alive and a pending result queued.
+            let shutdown = base.create_shutdown_channel().await;
+            let task = tokio::spawn(async move {
+                let _ = shutdown.await;
+            });
+            let old_consumer = task.abort_handle();
+            base.set_processing_task(task).await;
+            base.enqueue_query_result(queued_result(6, 30))
+                .await
+                .unwrap();
+            {
+                let mut graph = graph.write().await;
+                graph
+                    .validate_and_transition("queued", ComponentStatus::Starting, None)
+                    .unwrap();
+                if status != ComponentStatus::Starting {
+                    graph
+                        .validate_and_transition("queued", ComponentStatus::Running, None)
+                        .unwrap();
+                }
+                if status == ComponentStatus::Stopping {
+                    graph
+                        .validate_and_transition("queued", ComponentStatus::Stopping, None)
+                        .unwrap();
+                }
+            }
+            let result = manager.start_reaction("queued".to_string()).await;
+            assert!(
+                result.is_err(),
+                "start from {status:?} must not start another generation"
+            );
+            assert!(!old_consumer.is_finished());
+            assert_eq!(base.priority_queue.depth().await, 1);
+            base.enqueue_query_result(queued_result(7, 10))
+                .await
+                .unwrap();
+            assert_eq!(base.priority_queue.dequeue().await.sequence, 6);
+            assert_eq!(base.priority_queue.dequeue().await.sequence, 7);
+            base.stop_common().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_after_failed_start_discards_the_old_queue_generation() {
+        let (manager, graph) = create_test_manager().await;
+        let base = Arc::new(ReactionBase::new(ReactionBaseParams::new("retry", vec![])));
+        add_reaction(
+            &manager,
+            &graph,
+            QueuedReaction {
+                base: base.clone(),
+                fail_start: AtomicBool::new(true),
+                start_gate: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(manager.start_reaction("retry".to_string()).await.is_err());
+        let old_consumer = base
+            .processing_task
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        base.enqueue_query_result(queued_result(100, 100))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager
+                .get_reaction_status("retry".to_string())
+                .await
+                .unwrap(),
+            ComponentStatus::Error
+        );
+        let mut events = graph.read().await.subscribe();
+        manager.start_reaction("retry".to_string()).await.unwrap();
+        wait_for_component_status(
+            &mut events,
+            "retry",
+            ComponentStatus::Running,
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(old_consumer.is_finished());
+        assert!(base.priority_queue.is_empty().await);
+        base.enqueue_query_result(queued_result(1, 10))
+            .await
+            .unwrap();
+        assert_eq!(base.priority_queue.dequeue().await.sequence, 1);
+        manager.stop_reaction("retry".to_string()).await.unwrap();
     }
 
     /// Test that concurrent add_reaction calls with the same ID are handled atomically.
