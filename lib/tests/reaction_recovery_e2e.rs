@@ -25,6 +25,7 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{
     DispatchMode, DrasiLib, IndexBackendPlugin, MemoryStateStoreProvider, Query, Reaction,
@@ -32,6 +33,7 @@ use drasi_lib::{
 };
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -152,11 +154,15 @@ struct RecordingReaction {
     recovery_policy: ReactionRecoveryPolicy,
     durable: bool,
     snapshot_on_fresh: bool,
+    bootstrap_count: Arc<AtomicUsize>,
+    bootstrap_as_of: Arc<AtomicU64>,
 }
 
 /// Receiver side of the recording reaction.
 struct RecordingReceiver {
     rx: mpsc::UnboundedReceiver<QueryResult>,
+    bootstrap_count: Arc<AtomicUsize>,
+    bootstrap_as_of: Arc<AtomicU64>,
 }
 
 impl RecordingReceiver {
@@ -181,6 +187,17 @@ impl RecordingReceiver {
             results.push(r);
         }
         results
+    }
+
+    fn bootstrap_count(&self) -> usize {
+        self.bootstrap_count.load(Ordering::SeqCst)
+    }
+
+    fn bootstrap_as_of(&self) -> Option<u64> {
+        match self.bootstrap_as_of.load(Ordering::SeqCst) {
+            u64::MAX => None,
+            sequence => Some(sequence),
+        }
     }
 }
 
@@ -207,6 +224,8 @@ fn recording_reaction_with_auto_start(
         .with_recovery_policy(policy)
         .with_auto_start(auto_start);
     let base = ReactionBase::new(params);
+    let bootstrap_count = Arc::new(AtomicUsize::new(0));
+    let bootstrap_as_of = Arc::new(AtomicU64::new(u64::MAX));
     (
         RecordingReaction {
             base,
@@ -214,8 +233,14 @@ fn recording_reaction_with_auto_start(
             recovery_policy: policy,
             durable,
             snapshot_on_fresh,
+            bootstrap_count: bootstrap_count.clone(),
+            bootstrap_as_of: bootstrap_as_of.clone(),
         },
-        RecordingReceiver { rx },
+        RecordingReceiver {
+            rx,
+            bootstrap_count,
+            bootstrap_as_of,
+        },
     )
 }
 
@@ -311,6 +336,17 @@ impl Reaction for RecordingReaction {
 
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
         self.recovery_policy
+    }
+
+    async fn bootstrap(&self, context: BootstrapContext) -> Result<()> {
+        let snapshot = context
+            .fetch_snapshot()
+            .await
+            .map_err(|error| anyhow::anyhow!("fetch reaction bootstrap snapshot: {error}"))?;
+        self.bootstrap_count.fetch_add(1, Ordering::SeqCst);
+        self.bootstrap_as_of
+            .store(snapshot.as_of_sequence, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -805,9 +841,10 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     Ok(())
 }
 
-/// Test 7: Runtime gap with Strict policy — reaction should stop on gap.
+/// Test 7: Broadcast lag is recovered from the outbox, so Strict stays up
+/// when the ring overflows but retained history still covers the gap.
 #[tokio::test]
-async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
+async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
 
     let query = Query::cypher("q1")
@@ -840,48 +877,195 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
             .await?,
     );
 
-    let mut event_rx = core.subscribe_all_component_events();
-
     core.start().await?;
 
-    // Confirm initial delivery works.
     insert_person(&handle, "p1", "Alice", 30).await?;
     let initial = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(initial.len(), 1);
 
-    // Flood to cause broadcast lag — Strict policy should stop the forwarder.
     for i in 0..20 {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
-    // Wait deterministically for the reaction to transition to Error state
-    // (the supervisor fires this after the forwarder breaks on Strict gap).
-    let error_event = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match event_rx.recv().await {
-                Ok(event)
-                    if event.component_id == "rec" && event.status == ComponentStatus::Error =>
-                {
-                    return event;
-                }
-                Ok(_) => continue,
-                Err(_) => panic!("Event channel closed while waiting for Error status"),
-            }
-        }
-    })
-    .await
-    .expect("Timed out waiting for reaction to reach Error status");
-    assert_eq!(error_event.status, ComponentStatus::Error);
-
-    // After strict gap failure, new events should NOT be delivered.
     insert_person(&handle, "p-after", "After", 99).await?;
-    let after = receiver
-        .wait_for_count(1, Duration::from_millis(1000))
-        .await;
+    let after = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(
         after.len(),
-        0,
-        "Strict policy: no events should be delivered after gap"
+        1,
+        "Strict trigger recovers broadcast lag from the outbox and keeps receiving live results"
+    );
+    assert_eq!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// A trigger reaction added to a running query starts at the current head.
+#[tokio::test]
+async fn test_fresh_trigger_does_not_replay_retained_history() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("fresh-trigger-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    wait_for_query_result_count(&core, "q1", 2).await?;
+
+    let (reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+    for _ in 0..50 {
+        if core.get_reaction_status("rec").await? == ComponentStatus::Running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    insert_person(&handle, "p3", "Charlie", 35).await?;
+    let mut received = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    received.extend(receiver.wait_for_count(1, Duration::from_secs(1)).await);
+    let sequences: Vec<_> = received.iter().map(|result| result.sequence).collect();
+    assert_eq!(
+        sequences,
+        vec![3],
+        "Fresh trigger should receive only the live result, got {sequences:?}"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// State-sync fresh start bootstraps from snapshot and dedupes live duplicates.
+#[tokio::test]
+async fn test_fresh_state_sync_bootstraps_snapshot_and_dedupes_live() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("fresh-state-sync-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    wait_for_query_result_count(&core, "q1", 2).await?;
+
+    let (reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        false,
+        true,
+    );
+    core.add_reaction(reaction).await?;
+    wait_for_reaction_status(&core, "rec", ComponentStatus::Running).await?;
+
+    assert_eq!(
+        receiver.bootstrap_count(),
+        1,
+        "State-sync fresh start must apply bootstrap/snapshot"
+    );
+    assert_eq!(
+        receiver.bootstrap_as_of(),
+        Some(2),
+        "Checkpoint / snapshot as_of_sequence should be the current query head"
+    );
+
+    let historical = receiver.wait_for_count(1, Duration::from_millis(500)).await;
+    assert!(
+        historical.is_empty(),
+        "Live duplicates of snapshot rows must be deduped, got sequences {:?}",
+        historical
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
+    );
+
+    insert_person(&handle, "p3", "Charlie", 35).await?;
+    let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(
+        live.len(),
+        1,
+        "State-sync should receive the next live result"
+    );
+    assert_eq!(live[0].sequence, 3);
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Trigger reactions cannot use AutoReset (existing startup validation).
+#[tokio::test]
+async fn test_trigger_autoreset_is_rejected() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("trigger-autoreset-invalid")
+            .with_source(mock_source)
+            .with_query(query)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::AutoReset,
+        false,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Trigger + AutoReset should be rejected at startup"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("AutoReset") || msg.contains("incompatible"),
+        "Error should mention AutoReset incompatibility: {msg}"
     );
 
     core.stop().await?;
