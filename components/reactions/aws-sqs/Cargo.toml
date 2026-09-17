@@ -37,14 +37,15 @@ utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 # Pin AWS SDK crates below the 1.91 MSRV bump (introduced late Feb 2026) so cargo publish verification works on the 1.88 toolchain.
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+# aws-smithy-types 1.7 broke aws-smithy-json 0.61–0.63 (pulled by aws-config 1.8 / aws-sdk-sqs).
+aws-config = { version = "=1.8.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
-aws-sdk-sqs = { version = "1", default-features = false, features = [
+aws-sdk-sqs = { version = "=1.90.0", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
-# aws-smithy-json 0.63 does not compile against aws-smithy-types 1.7. CI has no
-# Cargo.lock, so pin types until the SDK crates pull smithy-json 0.64+.
+aws-runtime = "=1.9.1"
+aws-smithy-runtime = "=1.12.1"
 aws-smithy-types = "=1.6.3"
 chrono = "0.4"
 handlebars = "5.1"

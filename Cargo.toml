@@ -63,6 +63,7 @@ members = [
   "components/sources/neo4j",
   "components/sources/kafka",
   "components/sources/otel",
+  "components/sources/websocket",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -168,6 +169,8 @@ roaring = ">=0.11.2, <0.11.4"
 utoipa = { version = "4", features = ["chrono"] }
 drasi-index-rocksdb = { version = "0.6.2", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.3.5", path = "components/indexes/garnet" }
+drasi-state-store-redb = { version = "0.2.6", path = "components/state_stores/redb" }
+drasi-wal-redb = { version = "0.2.8", path = "components/wals/redb" }
 
 # Component plugins
 drasi-source-mssql = { version = "0.2.10", path = "components/sources/mssql" }
@@ -203,6 +206,7 @@ drasi-oracle-common = { version = "0.1.7", path = "components/oracle-common" }
 drasi-postgres-common = { version = "0.1.0", path = "components/postgres-common" }
 drasi-source-mapping = { version = "0.1.5", path = "components/sources/mapping" }
 drasi-source-kafka = { version = "0.1.7", path = "components/sources/kafka" }
+drasi-source-websocket = { version = "0.1.0", path = "components/sources/websocket" }
 drasi-source-otel = { version = "0.1.1", path = "components/sources/otel", default-features = false }
 drasi-bootstrap-kafka = { version = "0.1.7", path = "components/bootstrappers/kafka" }
 drasi-source-gtfs-rt = { version = "0.1.8", path = "components/sources/gtfs-rt" }

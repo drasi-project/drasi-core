@@ -25,7 +25,9 @@ use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::{
+    DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction, ReactionCheckpoint,
+};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -186,8 +188,21 @@ fn recording_reaction(
     durable: bool,
     snapshot_on_fresh: bool,
 ) -> (RecordingReaction, RecordingReceiver) {
+    recording_reaction_with_auto_start(id, queries, policy, durable, snapshot_on_fresh, true)
+}
+
+fn recording_reaction_with_auto_start(
+    id: &str,
+    queries: Vec<String>,
+    policy: ReactionRecoveryPolicy,
+    durable: bool,
+    snapshot_on_fresh: bool,
+    auto_start: bool,
+) -> (RecordingReaction, RecordingReceiver) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let params = ReactionBaseParams::new(id, queries).with_recovery_policy(policy);
+    let params = ReactionBaseParams::new(id, queries)
+        .with_recovery_policy(policy)
+        .with_auto_start(auto_start);
     let base = ReactionBase::new(params);
     (
         RecordingReaction {
@@ -260,7 +275,26 @@ impl Reaction for RecordingReaction {
     }
 
     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-        let _ = self.tx.send(result);
+        let query_id = result.query_id.clone();
+        let sequence = result.sequence;
+
+        self.tx
+            .send(result)
+            .map_err(|_| anyhow::anyhow!("Recording reaction receiver closed"))?;
+
+        // Advance only after the host has seeded a checkpoint. Writing
+        // config_hash=0 here would clobber the real hash persisted at startup.
+        if let Some(previous) = self.base.read_checkpoint(&query_id).await? {
+            self.base
+                .write_checkpoint(
+                    &query_id,
+                    &ReactionCheckpoint {
+                        sequence,
+                        config_hash: previous.config_hash,
+                    },
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -303,6 +337,34 @@ async fn stop_reaction_and_wait(core: &DrasiLib, id: &str) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!("Reaction {id} did not reach Stopped state within timeout");
+}
+
+async fn wait_for_query_result_count(
+    core: &DrasiLib,
+    query_id: &str,
+    expected: usize,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut last_count = None;
+    loop {
+        match core.get_query_results(query_id).await {
+            Ok(results) if results.len() == expected => return Ok(()),
+            Ok(results) if results.len() > expected => {
+                anyhow::bail!(
+                    "Query {query_id} produced {} results, expected {expected}",
+                    results.len()
+                );
+            }
+            Ok(results) => last_count = Some(results.len()),
+            Err(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Query {query_id} did not reach {expected} results within timeout (last count: {last_count:?})"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 // ============================================================================
@@ -366,17 +428,24 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
 
     // Wait for the 3 missed events to arrive
     let replayed = receiver.wait_for_count(3, Duration::from_secs(5)).await;
-    assert!(
-        replayed.len() >= 3,
-        "Should receive at least 3 replayed events, got {}",
-        replayed.len()
-    );
+    assert_eq!(replayed.len(), 3, "Should receive exactly 3 missed events");
 
     // Verify no duplicates of the first 2 events — drain anything extra
     let extra = receiver.drain_available();
     let all_after_restart: Vec<_> = replayed.into_iter().chain(extra).collect();
 
-    // Each result should be from query q1
+    assert_eq!(
+        all_after_restart.len(),
+        3,
+        "Previously checkpointed events must not be replayed"
+    );
+    assert_eq!(
+        all_after_restart
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
     for r in &all_after_restart {
         assert_eq!(r.query_id, "q1");
     }
@@ -439,7 +508,14 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
     let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(live.len(), 1, "Should receive 1 live event after restart");
 
-    eprintln!("Spurious replays after clean restart: {}", spurious.len());
+    assert!(
+        spurious.is_empty(),
+        "Clean restart replayed checkpointed sequences: {:?}",
+        spurious
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
+    );
 
     core.stop().await?;
     Ok(())
@@ -507,9 +583,13 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
     // Drain any replayed events (should be minimal — gap was skipped)
     tokio::time::sleep(Duration::from_millis(500)).await;
     let after_restart = receiver.drain_available();
-    eprintln!(
-        "Events after AutoSkipGap restart: {} (gap events were skipped)",
-        after_restart.len()
+    assert!(
+        after_restart.is_empty(),
+        "AutoSkipGap replayed unavailable sequences: {:?}",
+        after_restart
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
     );
 
     // Verify live delivery works after skip
