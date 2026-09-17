@@ -68,6 +68,17 @@ fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
     }
 }
 
+/// Decode the `resume_sequence` FFI parameter into `Option<u64>`.
+///
+/// `0` is the sentinel for "no checkpointed sequence" (real framework sequences
+/// start at 1), so it maps to `None`; any non-zero value is the checkpointed
+/// sequence and maps to `Some(n)`. Shared by both source vtable builders so the
+/// sentinel convention is defined in exactly one place.
+#[inline]
+fn decode_resume_sequence(resume_sequence: u64) -> Option<u64> {
+    (resume_sequence != 0).then_some(resume_sequence)
+}
+
 /// Serialize an FFI event payload (`SourceEventPayload` / `BootstrapEventPayload`)
 /// to a heap-allocated MessagePack byte buffer for cross-cdylib transfer.
 ///
@@ -773,6 +784,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_ptr: *const u8,
         resume_from_len: u32,
         request_position_handle: bool,
+        resume_sequence: u64,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -797,6 +809,12 @@ pub fn build_source_vtable<T: Source + 'static>(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
+        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
+        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
+        // and a floor derived from 0 would be 1 (the default) anyway, so treating
+        // it as absent is a no-op — the sentinel is safe either way.
+        let resume_sequence = decode_resume_sequence(resume_sequence);
+
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
             enable_bootstrap,
@@ -804,6 +822,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             nodes,
             relations,
             resume_from,
+            resume_sequence,
             request_position_handle,
         };
 
@@ -1163,6 +1182,7 @@ pub fn build_source_vtable_from_boxed(
         resume_from_ptr: *const u8,
         resume_from_len: u32,
         request_position_handle: bool,
+        resume_sequence: u64,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -1187,6 +1207,12 @@ pub fn build_source_vtable_from_boxed(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
+        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
+        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
+        // and a floor derived from 0 would be 1 (the default) anyway, so treating
+        // it as absent is a no-op — the sentinel is safe either way.
+        let resume_sequence = decode_resume_sequence(resume_sequence);
+
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
             enable_bootstrap,
@@ -1194,6 +1220,7 @@ pub fn build_source_vtable_from_boxed(
             nodes,
             relations,
             resume_from,
+            resume_sequence,
             request_position_handle,
         };
 
@@ -3880,5 +3907,14 @@ mod snapshot_stream_tests {
         );
         assert_eq!(rows[0].0, 0, "bare row gets the unknown signature 0");
         assert_eq!(rows[0].1, serde_json::json!({"id": 1}));
+    }
+
+    #[test]
+    fn decode_resume_sequence_maps_zero_sentinel_to_none() {
+        // 0 is the "absent" sentinel; every non-zero value decodes to Some(n).
+        assert_eq!(decode_resume_sequence(0), None);
+        assert_eq!(decode_resume_sequence(1), Some(1));
+        assert_eq!(decode_resume_sequence(42), Some(42));
+        assert_eq!(decode_resume_sequence(u64::MAX), Some(u64::MAX));
     }
 }

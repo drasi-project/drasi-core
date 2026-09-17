@@ -412,8 +412,7 @@ impl ReplicationStream {
         wrapper
             .set_source_position(self.position_bytes_with_timestamp(self.current_event_timestamp));
 
-        SourceBase::dispatch_from_task(self.base.dispatchers.clone(), wrapper, &self.source_id)
-            .await
+        self.base.dispatch_event(wrapper).await
     }
 
     async fn flush_transaction(&mut self, header: &BinlogEventHeader) -> Result<()> {
@@ -433,12 +432,7 @@ impl ReplicationStream {
                     chrono::Utc::now(),
                 );
                 wrapper.set_source_position(position_bytes.clone());
-                SourceBase::dispatch_from_task(
-                    self.base.dispatchers.clone(),
-                    wrapper,
-                    &self.source_id,
-                )
-                .await?;
+                self.base.dispatch_event(wrapper).await?;
             }
         }
 
@@ -581,4 +575,139 @@ fn parse_gtid_set(gtid: &str) -> Result<Vec<Sid<'static>>> {
     }
 
     Ok(sids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
+    use drasi_lib::sources::base::SourceBaseParams;
+    use mysql_common::binlog::consts::{EventFlags, EventType};
+    use std::sync::Arc as TestArc;
+
+    fn insert_change(source_id: &str, id: &str) -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source_id, id),
+                    labels: TestArc::from(vec![TestArc::from("Row")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::new(),
+            },
+        }
+    }
+
+    fn test_stream(source_id: &str) -> ReplicationStream {
+        // ReplicationStream::new does not open a DB connection — only run() does —
+        // so we can exercise the dispatch helpers directly without MySQL.
+        let config = MySqlSourceConfig {
+            host: "localhost".to_string(),
+            port: 3306,
+            database: "test_db".to_string(),
+            user: "test_user".to_string(),
+            password: "test_password".to_string(),
+            tables: vec![],
+            ssl_mode: crate::config::SslMode::IfAvailable,
+            table_keys: vec![],
+            start_position: StartPosition::FromEnd,
+            server_id: 1,
+            heartbeat_interval_seconds: 30,
+        };
+        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        ReplicationStream::new(
+            config,
+            source_id.to_string(),
+            base,
+            StdArc::new(AtomicBool::new(false)),
+            StdArc::new(RwLock::new(HashMap::new())),
+        )
+    }
+
+    /// mysql is a native-cursor source: it sets `source_position` from the binlog
+    /// cursor but leaves `sequence` unset, relying on the framework to stamp it.
+    /// This verifies `push_change` (the immediate, unbuffered dispatch path)
+    /// stamps a strictly increasing framework `sequence` on every event while
+    /// preserving the binlog `source_position` (issue #828 / #817).
+    #[tokio::test]
+    async fn push_change_stamps_sequence_and_preserves_position() {
+        let source_id = "mysql-seq-source";
+        let mut stream = test_stream(source_id);
+        let mut rx = stream.base.test_subscribe().await;
+
+        let count = 3u64;
+        for i in 1..=count {
+            stream
+                .push_change(insert_change(source_id, &format!("row-{i}")))
+                .await
+                .expect("push_change should succeed");
+        }
+
+        for expected_seq in 1..=count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            assert_eq!(
+                event.sequence,
+                Some(expected_seq),
+                "framework must stamp a monotonic sequence even for a native-cursor source"
+            );
+            assert!(
+                event.source_position.is_some(),
+                "binlog source_position must be preserved through dispatch_event"
+            );
+        }
+    }
+
+    /// The transaction-buffered path (`flush_transaction`) must likewise stamp a
+    /// unique, increasing sequence on each buffered row while carrying the shared
+    /// commit `source_position`.
+    #[tokio::test]
+    async fn flush_transaction_stamps_unique_sequences() {
+        let source_id = "mysql-txn-source";
+        let mut stream = test_stream(source_id);
+        let mut rx = stream.base.test_subscribe().await;
+
+        // Buffer several changes as a transaction, then flush them together.
+        stream.ensure_transaction_buffer();
+        let count = 4u64;
+        for i in 1..=count {
+            stream
+                .push_change(insert_change(source_id, &format!("txn-row-{i}")))
+                .await
+                .expect("buffered push_change should succeed");
+        }
+
+        // log_pos = 0 makes flush_transaction keep the current binlog position.
+        let header =
+            BinlogEventHeader::new(0, EventType::UNKNOWN_EVENT, 0, 0, 0, EventFlags::empty());
+        stream
+            .flush_transaction(&header)
+            .await
+            .expect("flush_transaction should succeed");
+
+        let mut sequences = Vec::new();
+        for _ in 0..count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            assert!(
+                event.source_position.is_some(),
+                "commit source_position must be preserved"
+            );
+            sequences.push(
+                event
+                    .sequence
+                    .expect("event must carry a framework sequence"),
+            );
+        }
+
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3, 4],
+            "buffered transaction rows must get unique, strictly increasing sequences"
+        );
+    }
 }

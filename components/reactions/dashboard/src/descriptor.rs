@@ -89,6 +89,8 @@ pub enum WidgetTypeDto {
     Text,
     /// Map — geographic map visualization.
     Map,
+    /// Graph — node-link diagram from relationship rows.
+    Graph,
 }
 
 /// Aggregation mode for KPI and Gauge widgets.

@@ -22,14 +22,14 @@
 //!
 //! - **Memory**: In-memory storage (volatile, fast, no persistence). Fully self-contained.
 //! - **Plugin** (`kind: rocksdb`, `kind: redis`, ...): Persistent storage provided by an
-//!   index backend plugin. The backend is selected by `kind` and carries its own
-//!   plugin-specific config (e.g. `path`, `connectionString`).
+//!   index backend plugin. The declaration identifies the provider kind; backend-specific
+//!   settings are applied when constructing the provider.
 //!
 //! ## Configuration
 //!
-//! Storage backends can be declared globally and referenced by id, or configured inline
-//! on a single query. Both use a `kind` discriminator and camelCase fields, consistent
-//! with every other DrasiLib component DTO.
+//! In-memory backends can be declared globally and referenced by id, or configured inline
+//! on a single query. Persistent backends may be declared globally by id and kind, but
+//! require a configured provider injected under the same id.
 //!
 //! ### Named Backends (Global Declaration)
 //!
@@ -37,9 +37,6 @@
 //! storage_backends:
 //!   - id: rocks_persistent
 //!     kind: rocksdb
-//!     path: /data/drasi
-//!     enableArchive: true
-//!     directIo: false
 //!
 //! queries:
 //!   - id: my_query
@@ -72,7 +69,8 @@
 //! use drasi_lib::{DrasiLib, Query, StorageBackendRef};
 //! use std::sync::Arc;
 //!
-//! let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+//! let provider = RocksDbIndexProvider::new("/data/drasi", true, false)
+//!     .with_memory_budget_bytes(512 << 20)?;
 //! let query = Query::cypher("my_query")
 //!     .query("MATCH (n) RETURN n")
 //!     .from_source("my_source")
@@ -86,7 +84,8 @@
 //! ```
 //!
 //! Only in-memory backends can be instantiated purely from configuration in embedded
-//! mode; a plugin backend always requires a matching injected provider.
+//! mode. A plugin backend always requires a matching injected provider, and its settings
+//! must be applied when constructing that provider.
 //!
 //! ## Performance Characteristics
 //!

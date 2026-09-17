@@ -1,0 +1,30 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  otlp/drasi:
+    endpoint: host.docker.internal:14317
+    tls:
+      insecure: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/drasi]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlp/drasi]
+    logs:
+      receivers: [otlp]
+      exporters: [otlp/drasi]

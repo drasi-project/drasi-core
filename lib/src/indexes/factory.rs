@@ -157,7 +157,7 @@ impl IndexFactory {
                 StorageBackendSpec::Memory { enable_archive } => {
                     memory_backends.insert(b.id, enable_archive);
                 }
-                StorageBackendSpec::Plugin { kind, .. } => {
+                StorageBackendSpec::Plugin { kind } => {
                     plugin_backends.insert(b.id, kind);
                 }
             }
@@ -173,6 +173,16 @@ impl IndexFactory {
     /// The default backend applied to queries with no `storage_backend`, if any.
     pub fn default_backend(&self) -> Option<&StorageBackendRef> {
         self.default_backend.as_ref()
+    }
+
+    /// Whether a query using `query_backend` (or the factory default) is volatile.
+    ///
+    /// `None` with no default backend is treated as volatile (native in-memory).
+    pub fn is_volatile_for_query(&self, query_backend: Option<&StorageBackendRef>) -> bool {
+        match query_backend.or_else(|| self.default_backend()) {
+            Some(backend_ref) => self.is_volatile(backend_ref),
+            None => true,
+        }
     }
 
     /// Build a CreatedIndexes for a query using the specified storage backend
@@ -210,7 +220,7 @@ impl IndexFactory {
             StorageBackendRef::Inline(StorageBackendSpec::Memory { enable_archive }) => {
                 self.build_memory_indexes(*enable_archive)
             }
-            StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind, .. }) => {
+            StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind }) => {
                 Err(IndexError::InitializationFailed(format!(
                     "Inline plugin storage backend (kind '{kind}') is not supported in embedded mode. \
                      Declare a named storage backend and inject a provider via \
@@ -356,7 +366,6 @@ mod tests {
                 id: "rocks_test".to_string(),
                 spec: StorageBackendSpec::Plugin {
                     kind: "rocksdb".to_string(),
-                    config: serde_json::json!({ "path": "/tmp/test" }),
                 },
             },
         ];
@@ -420,7 +429,6 @@ mod tests {
             id: "rocks".to_string(),
             spec: StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({ "path": "/data/test" }),
             },
         }];
         let factory = IndexFactory::new(backends, HashMap::new());
@@ -453,7 +461,6 @@ mod tests {
         let factory = IndexFactory::new(vec![], providers_with("rocks", false));
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/test" }),
         });
         let result = factory.build(&backend_ref, "test_query").await;
 
@@ -497,7 +504,6 @@ mod tests {
             id: "rocks".to_string(),
             spec: StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({ "path": "/data/test" }),
             },
         }];
         let factory = IndexFactory::new(backends, HashMap::new());
@@ -516,7 +522,6 @@ mod tests {
 
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/test" }),
         });
         assert!(!factory.is_volatile(&backend_ref));
     }
@@ -527,6 +532,21 @@ mod tests {
         let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
         assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_is_volatile_for_query_none_is_volatile() {
+        let factory = IndexFactory::new(vec![], HashMap::new());
+        assert!(factory.is_volatile_for_query(None));
+
+        let persistent = StorageBackendRef::Named("rocks".to_string());
+        let factory = IndexFactory::new_with_default(
+            vec![],
+            providers_with("rocks", false),
+            Some(persistent.clone()),
+        );
+        assert!(!factory.is_volatile_for_query(None));
+        assert!(!factory.is_volatile_for_query(Some(&persistent)));
     }
 
     #[test]

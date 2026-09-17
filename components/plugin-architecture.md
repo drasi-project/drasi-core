@@ -1,7 +1,6 @@
 # Drasi Plugin Architecture
 
-This document describes the plugin system architecture for Drasi Server, covering both
-the static (builtin) and dynamic (cdylib) plugin loading approaches.
+This document describes the plugin system architecture for Drasi Server, covering both the static (builtin) and dynamic (cdylib) plugin loading approaches.
 
 ## Overview
 
@@ -12,8 +11,7 @@ Drasi Server supports two build modes for plugins:
 | **Static** (default) | `builtin-plugins` | Plugins are statically linked into the server binary |
 | **Dynamic** | `dynamic-plugins` | Plugins are self-contained `.so`/`.dylib`/`.dll` files loaded at runtime |
 
-Both modes use the same plugin source code — the `export_plugin!` macro generates FFI
-entry points only when the `dynamic-plugin` feature is enabled on a plugin crate.
+Both modes use the same plugin source code — the `export_plugin!` macro generates FFI entry points only when the `dynamic-plugin` feature is enabled on a plugin crate.
 
 ## Architecture Diagram
 
@@ -45,7 +43,7 @@ entry points only when the `dynamic-plugin` feature is enabled on a plugin crate
 │  └──────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────┘
                 ↕ stable C ABI (#[repr(C)] vtables)
-                ↕ opaque pointers for rich Rust types
+                ↕ serialized payloads inside #[repr(C)] envelopes
 ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
 │ libdrasi_source  │ │ libdrasi_react   │ │ libdrasi_boot    │
 │ _mock.so (cdylib)│ │ _log.so (cdylib) │ │ _pg.so (cdylib)  │
@@ -66,8 +64,8 @@ entry points only when the `dynamic-plugin` feature is enabled on a plugin crate
 | `drasi-plugin-sdk` | `drasi-core/components/plugin-sdk` | Plugin-side SDK: FFI types, vtables, `export_plugin!` macro, vtable generation, FfiLogger, FfiStateStoreProxy |
 | `drasi-host-sdk` | `drasi-core/components/host-sdk` | Host-side SDK: `PluginLoader`, proxy types (impl Source/Reaction/SourcePlugin), callback wiring, schema merging |
 | `drasi-server` | `drasi-server/` | Application: REST API, config persistence, OpenAPI spec, server lifecycle — uses `drasi-host-sdk` for dynamic loading |
-| `drasi-lib` | `drasi-core/lib/` | Core processing: query engine, routers, channels — no FFI awareness |
-| `drasi-core` | `drasi-core/core/` | Core types: Element, SourceChange, QueryResult — crosses FFI as opaque pointers |
+| `drasi-lib` | `drasi-core/lib/` | Core processing: hosts the query engine and defines the channel event types that are the FFI wire payloads — no FFI code itself |
+| `drasi-core` | `drasi-core/core/` | Engine and core data model — its types cross FFI only inside serialized payloads |
 
 ## Plugin Types
 
@@ -76,20 +74,17 @@ Drasi supports three types of plugins:
 ### Source Plugins
 Ingest data from external systems (PostgreSQL, HTTP, gRPC, etc.) and emit `SourceChange` events.
 
-**Trait**: `drasi_lib::sources::Source`
-**Descriptor**: `drasi_plugin_sdk::descriptor::SourcePluginDescriptor`
+**Trait**: `drasi_lib::sources::Source` **Descriptor**: `drasi_plugin_sdk::descriptor::SourcePluginDescriptor`
 
 ### Reaction Plugins
 Consume query results and take actions (webhooks, SSE, logging, etc.).
 
-**Trait**: `drasi_lib::reactions::Reaction`
-**Descriptor**: `drasi_plugin_sdk::descriptor::ReactionPluginDescriptor`
+**Trait**: `drasi_lib::reactions::Reaction` **Descriptor**: `drasi_plugin_sdk::descriptor::ReactionPluginDescriptor`
 
 ### Bootstrap Plugins
 Provide initial data snapshots to populate queries when sources are connected.
 
-**Trait**: `drasi_lib::bootstrap::BootstrapProvider`
-**Descriptor**: `drasi_plugin_sdk::descriptor::BootstrapPluginDescriptor`
+**Trait**: `drasi_lib::bootstrap::BootstrapProvider` **Descriptor**: `drasi_plugin_sdk::descriptor::BootstrapPluginDescriptor`
 
 ## How Dynamic Plugin Loading Works
 
@@ -141,29 +136,29 @@ pub extern "C" fn drasi_plugin_init() -> *mut FfiPluginRegistration
 
 ## FFI Boundary Design
 
-### Opaque Pointer Pattern
+### Serialized Payload Pattern
 
-Rich Rust types cross the FFI boundary as opaque `*mut c_void` pointers inside
-`#[repr(C)]` envelope structs. Both the plugin and host statically link `drasi-core`,
-so the memory layout of types like `SourceChange`, `Element`, and `QueryResult` is
-identical (validated via version metadata).
+Rich event payloads cross the FFI boundary as serialized MessagePack bytes carried inside `#[repr(C)]` envelope structs. The envelope has a stable layout; the payload is self-describing, so neither side reinterprets the other's `repr(Rust)` memory.
 
 ```rust
 // Plugin creates a SourceChange (rich Rust type)
 let change = SourceChange::new(/* ... */);
 
-// SDK wraps it in an FFI envelope
+// SDK serializes it and wraps the bytes in an FFI envelope
 #[repr(C)]
 struct FfiSourceEvent {
-    opaque: *mut c_void,       // Box<SourceChange>
-    source_id: FfiStr,         // borrows from opaque
-    op: FfiChangeOp,           // Insert/Update/Delete
-    drop_fn: extern "C" fn(*mut c_void),
+    payload_ptr: *const u8,    // MessagePack-encoded SourceEventPayload
+    payload_len: usize,
+    payload_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
+    op: FfiChangeOp,           // routing hint mirrored from the payload
+    timestamp_us: i64,         // routing hint mirrored from the payload
 }
 
-// Host reads the opaque pointer as &SourceChange (zero-copy)
-let source_change = unsafe { &*(ffi_event.opaque as *const SourceChange) };
+// Host deserializes into its own owned value, then frees the producer's buffer
+// through payload_drop_fn.
 ```
+
+> Earlier versions passed these types as opaque `Box::into_raw` pointers that the other > side reclaimed with `Box::from_raw`. That is undefined behaviour: `repr(Rust)` has no > stable layout across independently compiled cdylibs, and `bytes::Bytes` carries a > `&'static` vtable pointer valid only in the producing module. It caused > non-deterministic heap corruption. See issue #602, the module docs in > `drasi-core/components/plugin-sdk/src/ffi/payload.rs`, and the `0.10.0` entry in > `metadata.rs`. Do not reintroduce that pattern for payloads.
 
 ### Vtable Pattern
 
@@ -198,29 +193,13 @@ impl Source for SourceProxy {
 
 ### Cross-cdylib Ownership Contract (Shared System Allocator)
 
-Many rich Rust types are transferred across the cdylib boundary as owned `Box`es:
-the producing side calls `Box::into_raw`, and the consuming side reclaims and frees
-them with `Box::from_raw`. This happens in **both directions** — plugin-allocated types
-freed by the host, and host-allocated types freed by the plugin — and covers event
-envelopes (`FfiSourceEvent`), subscription response structures, the vtables themselves,
-and the plugin registration structs.
+A number of `#[repr(C)]` structures are transferred across the cdylib boundary as owned `Box`es: the producing side calls `Box::into_raw`, and the consuming side reclaims and frees them with `Box::from_raw`. This happens in **both directions** and covers the event envelopes (`FfiSourceEvent`), subscription response structures, the vtables themselves, and the plugin registration structs. Event payloads are excluded: they cross as serialized bytes per the payload rule above, and only their `#[repr(C)]` envelope is boxed.
 
-For this to be sound, the allocator that produced a pointer on one side must be
-ABI-compatible with the `dealloc` performed on the other side. This holds **only**
-because no crate in the workspace sets `#[global_allocator]`: every allocation routes
-through the default **System** allocator, which is process-global `libc`
-`malloc`/`free` on all supported targets.
+For this to be sound, the allocator that produced a pointer on one side must be ABI-compatible with the `dealloc` performed on the other side. This holds **only** because no crate in the workspace sets `#[global_allocator]`: every allocation routes through the default **System** allocator, which is process-global `libc` `malloc`/`free` on all supported targets.
 
-> **Requirement:** Plugins and the host **must** share the default System allocator.
-> A plugin (or the host) that installs a custom global allocator — `jemalloc`,
-> `mimalloc`, `tcmalloc`, `snmalloc`, etc., via `#[global_allocator]` — turns every
-> cross-boundary `Box::from_raw` into **silent heap corruption**. The failure mode is
-> arbitrary corruption, not a clean crash.
+> **Requirement:** Plugins and the host **must** share the default System allocator. > A plugin (or the host) that installs a custom global allocator — `jemalloc`, > `mimalloc`, `tcmalloc`, `snmalloc`, etc., via `#[global_allocator]` — turns every > cross-boundary `Box::from_raw` into **silent heap corruption**. The failure mode is > arbitrary corruption, not a clean crash.
 
-This constraint is enforced at build time by a `cargo-deny` `[bans]` rule (see the
-workspace `deny.toml` and `.github/workflows/cargo-deny.yml`) that rejects any crate
-pulling in a known custom-allocator crate transitively. See issue
-[#378](https://github.com/drasi-project/drasi-core/issues/378) for background.
+This constraint is enforced at build time by a `cargo-deny` `[bans]` rule (see the workspace `deny.toml` and `.github/workflows/cargo-deny.yml`) that rejects any crate pulling in a known custom-allocator crate transitively. See issue [#378](https://github.com/drasi-project/drasi-core/issues/378) for background.
 
 ### Reverse Vtables (Host → Plugin)
 
@@ -229,15 +208,13 @@ Some services flow from host to plugin:
 - **StateStoreProvider**: Host owns the state store, plugins access it via `StateStoreVtable`
 - **BootstrapProvider**: Bootstrap plugin A → host → source plugin B (mediated via `BootstrapProviderVtable`)
 
-The host builds a vtable from its own trait implementation and passes it to the plugin,
-which wraps it in a local proxy (`FfiStateStoreProxy`, `FfiBootstrapProviderProxy`).
+The host builds a vtable from its own trait implementation and passes it to the plugin, which wraps it in a local proxy (`FfiStateStoreProxy`, `FfiBootstrapProviderProxy`).
 
 ## Runtime Model
 
 ### Multiple Tokio Runtimes
 
-Each cdylib plugin runs its own tokio runtime, initialized during `drasi_plugin_init()`.
-The host also has its own runtime. This means:
+Each cdylib plugin runs its own tokio runtime, initialized during `drasi_plugin_init()`. The host also has its own runtime. This means:
 
 - No tokio version coupling between host and plugins
 - No shared thread pools
@@ -246,8 +223,7 @@ The host also has its own runtime. This means:
 
 ### Async → Sync Bridge
 
-DrasiLib traits have async methods, but FFI vtable functions must be `extern "C"` (sync).
-The SDK bridges this with `std::thread::spawn` + `block_on`:
+DrasiLib traits have async methods, but FFI vtable functions must be `extern "C"` (sync). The SDK bridges this with `std::thread::spawn` + `block_on`:
 
 ```
 Host calls vtable.start_fn(state)
@@ -258,15 +234,13 @@ Host calls vtable.start_fn(state)
   → Host receives result
 ```
 
-This avoids nesting tokio runtimes (which would panic) by running `block_on` on a fresh
-OS thread.
+This avoids nesting tokio runtimes (which would panic) by running `block_on` on a fresh OS thread.
 
 ## Logging and Tracing
 
 ### Plugin → Host Log Bridge
 
-Plugins use standard `log::info!()` / `log::error!()` macros. The `export_plugin!` macro
-installs an `FfiLogger` that forwards all log records to the host via a callback:
+Plugins use standard `log::info!()` / `log::error!()` macros. The `export_plugin!` macro installs an `FfiLogger` that forwards all log records to the host via a callback:
 
 ```
 Plugin: log::info!("connected")
@@ -276,8 +250,7 @@ Plugin: log::info!("connected")
   → Host: log::log!(level, "[plugin:{}] {}", id, message)
 ```
 
-The `tracing` crate's `log` feature causes tracing events to fall back to `log` records
-when no tracing subscriber is set in the plugin's cdylib, so both logging frameworks work.
+The `tracing` crate's `log` feature causes tracing events to fall back to `log` records when no tracing subscriber is set in the plugin's cdylib, so both logging frameworks work.
 
 ## Plugin Development Guide
 
@@ -404,8 +377,7 @@ impl ReactionPluginDescriptor for MyReactionDescriptor {
 
 ## OpenAPI Schema Flow
 
-Plugin DTOs serve double duty: serde deserialization AND OpenAPI schema generation.
-The schema crosses the FFI boundary as a JSON string.
+Plugin DTOs serve double duty: serde deserialization AND OpenAPI schema generation. The schema crosses the FFI boundary as a JSON string.
 
 ```
 Plugin                              Host
@@ -442,8 +414,7 @@ make build-dynamic-server      # server only
 make build-dynamic-plugins     # plugins only
 ```
 
-Plugins are built individually (not in batch) to avoid feature unification issues
-where adaptive plugins inherit cdylib entry points from their base dependencies.
+Plugins are built individually (not in batch) to avoid feature unification issues where adaptive plugins inherit cdylib entry points from their base dependencies.
 
 ### Testing
 
@@ -472,20 +443,15 @@ The original `dylib` approach required:
 - Single-invocation build (to prevent symbol hash mismatches)
 - `libstd-*.so` copying alongside plugins
 
-The `cdylib` approach eliminates all of these constraints. Each plugin is fully
-self-contained with a stable C ABI boundary.
+The `cdylib` approach eliminates all of these constraints. Each plugin is fully self-contained with a stable C ABI boundary.
 
 ### Can plugins use different tokio versions?
 
-Yes. Each cdylib plugin statically links its own tokio. The host and plugins can
-use different tokio versions as long as the DrasiLib trait types (which cross as
-opaque pointers) remain layout-compatible (validated via version metadata).
+Yes. Each cdylib plugin statically links its own tokio. Nothing that crosses the boundary depends on tokio's layout: payloads are serialized, and the `#[repr(C)]` envelopes and vtables have a stable layout whose compatibility is checked at load time via `FFI_SDK_VERSION` (a plugin that does not export metadata skips the check with only a warning; see `loader.rs`).
 
 ### What happens if a plugin panics?
 
-All FFI entry points are wrapped in `std::panic::catch_unwind` by the `export_plugin!`
-macro. A panic in a plugin is caught and converted to an `FfiResult::Err` — the host
-receives an error message instead of undefined behavior.
+All FFI entry points are wrapped in `std::panic::catch_unwind` by the `export_plugin!` macro. A panic in a plugin is caught and converted to an `FfiResult::Err` — the host receives an error message instead of undefined behavior.
 
 ### Can I debug plugins?
 
@@ -497,8 +463,7 @@ Yes. Since cdylib plugins are standard shared libraries, you can:
 
 ### How do I test a plugin in isolation?
 
-Plugins implement the same DrasiLib traits for both static and dynamic builds.
-Write unit tests against the trait implementation directly (no FFI needed):
+Plugins implement the same DrasiLib traits for both static and dynamic builds. Write unit tests against the trait implementation directly (no FFI needed):
 
 ```rust
 #[tokio::test]
@@ -509,5 +474,4 @@ async fn test_my_source() {
 }
 ```
 
-For integration testing of the FFI layer, see the host-sdk integration tests at
-`drasi-core/components/host-sdk/tests/integration_test.rs`.
+For integration testing of the FFI layer, see the host-sdk integration tests at `drasi-core/components/host-sdk/tests/integration_test.rs`.

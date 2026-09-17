@@ -185,6 +185,32 @@ mod properties {
             .properties
             .iter()
             .any(|property| property.name == "humidity"));
+        assert!(
+            schema.relations.is_empty(),
+            "mesh-off SensorReading should not advertise relations"
+        );
+    }
+
+    #[test]
+    fn test_describe_schema_includes_connected_to_when_mesh() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::sensor_reading_mesh(5))
+            .build()
+            .unwrap();
+
+        let schema = source
+            .describe_schema()
+            .expect("mock source should expose schema");
+
+        assert_eq!(schema.relations.len(), 1);
+        let relation = &schema.relations[0];
+        assert_eq!(relation.label, "CONNECTED_TO");
+        assert_eq!(relation.from.as_deref(), Some("SensorReading"));
+        assert_eq!(relation.to.as_deref(), Some("SensorReading"));
+        assert!(relation
+            .properties
+            .iter()
+            .any(|property| property.name == "strength"));
     }
 
     #[test]
@@ -509,6 +535,47 @@ mod event_generation {
         assert_eq!(values[2], 3);
     }
 
+    /// Every event emitted by the mock source's background generator task must
+    /// carry a framework-assigned, strictly increasing `sequence` (issue #828).
+    /// The mock source has no durability, so before migrating from the unstamped
+    /// `dispatch_from_task` helper to `dispatch_event`, these events had
+    /// `sequence = None`. This guards the background-task dispatch path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_generated_events_have_monotonic_sequence() {
+        let config = MockSourceConfig {
+            data_type: DataType::Counter,
+            interval_ms: 20,
+        };
+
+        let source = MockSource::new("test-counter-monotonic-seq", config).unwrap();
+        let mut rx = source.test_subscribe().await;
+
+        source.start().await.unwrap();
+
+        // Collect a handful of consecutively generated events.
+        let mut sequences = Vec::new();
+        for _ in 0..5 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+                .await
+                .expect("Timeout")
+                .expect("No event");
+            sequences.push(
+                event
+                    .sequence
+                    .expect("mock source event must carry a framework sequence"),
+            );
+        }
+
+        source.stop().await.unwrap();
+
+        // The framework stamps 1, 2, 3, ... on a fresh source.
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3, 4, 5],
+            "generated events must have unique, strictly increasing sequences"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_counter_always_generates_insert_events() {
         let config = MockSourceConfig {
@@ -760,6 +827,106 @@ mod event_generation {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_sensor_mesh_emits_connected_to_relations() {
+        let config = MockSourceConfig {
+            data_type: DataType::sensor_reading_mesh(3),
+            interval_ms: 20,
+        };
+
+        let source = MockSource::new("test-sensor-mesh", config).unwrap();
+        let mut rx = source.test_subscribe().await;
+        source.start().await.unwrap();
+
+        let mut relation_inserts = 0usize;
+        let mut node_inserts = 0usize;
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let event = rx.recv().await.expect("channel closed");
+                if let SourceEvent::Change(SourceChange::Insert { element }) = &event.event {
+                    match element {
+                        Element::Node { metadata, .. } => {
+                            if metadata
+                                .labels
+                                .iter()
+                                .any(|l| l.as_ref() == "SensorReading")
+                            {
+                                node_inserts += 1;
+                            }
+                        }
+                        Element::Relation {
+                            metadata,
+                            in_node,
+                            out_node,
+                            properties,
+                        } => {
+                            assert_eq!(metadata.labels[0].as_ref(), "CONNECTED_TO");
+                            assert!(
+                                metadata.reference.element_id.starts_with("mesh_"),
+                                "relation id should start with mesh_, got {}",
+                                metadata.reference.element_id
+                            );
+                            assert!(in_node.element_id.starts_with("sensor_"));
+                            assert!(out_node.element_id.starts_with("sensor_"));
+                            assert!(properties.get("strength").is_some());
+                            relation_inserts += 1;
+                        }
+                    }
+                }
+                if relation_inserts >= 3 && node_inserts >= 3 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for mesh relations");
+
+        source.stop().await.unwrap();
+        assert!(node_inserts >= 3);
+        assert!(relation_inserts >= 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_sensor_without_mesh_emits_no_relations() {
+        let config = MockSourceConfig {
+            data_type: DataType::sensor_reading(3),
+            interval_ms: 15,
+        };
+
+        let source = MockSource::new("test-sensor-no-mesh", config).unwrap();
+        let mut rx = source.test_subscribe().await;
+        source.start().await.unwrap();
+
+        let mut saw_relation = false;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for _ in 0..12 {
+                if let Ok(event) = rx.recv().await {
+                    if let SourceEvent::Change(change) = &event.event {
+                        let element = match change {
+                            SourceChange::Insert { element } | SourceChange::Update { element } => {
+                                element
+                            }
+                            _ => continue,
+                        };
+                        if matches!(element, Element::Relation { .. }) {
+                            saw_relation = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .ok();
+
+        source.stop().await.unwrap();
+        assert!(
+            !saw_relation,
+            "mesh-off SensorReading should emit nodes only"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_generic_data_generation() {
         let config = MockSourceConfig {
             data_type: DataType::Generic,
@@ -974,6 +1141,22 @@ mod config {
         assert_eq!(DataType::Counter.sensor_count(), None);
         assert_eq!(DataType::Generic.sensor_count(), None);
         assert_eq!(DataType::sensor_reading(10).sensor_count(), Some(10));
+        assert!(!DataType::sensor_reading(10).mesh());
+        assert!(DataType::sensor_reading_mesh(10).mesh());
+    }
+
+    #[test]
+    fn test_config_sensor_reading_mesh_defaults_off() {
+        let json = r#"{"data_type": {"type": "sensor_reading", "sensor_count": 8}}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.data_type.mesh());
+    }
+
+    #[test]
+    fn test_config_sensor_reading_mesh_enabled() {
+        let json = r#"{"data_type": {"type": "sensor_reading", "sensor_count": 8, "mesh": true}}"#;
+        let config: MockSourceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.data_type, DataType::sensor_reading_mesh(8));
     }
 }
 
@@ -1482,6 +1665,7 @@ mod source_trait {
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
 

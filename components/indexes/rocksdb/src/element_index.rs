@@ -28,14 +28,14 @@ use drasi_core::{
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::{bytes::BytesMut, Message};
-use rocksdb::{Options, SliceTransform, Transaction};
+use rocksdb::{Cache, Options, SliceTransform, Transaction};
 use tokio::task;
 
 use crate::storage_models::{
     StoredElement, StoredElementContainer, StoredElementMetadata, StoredElementReference,
     StoredRelation, StoredValue, StoredValueMap,
 };
-use crate::RocksDbSessionState;
+use crate::{RocksDbSessionState, RocksIndexOptions};
 
 mod archive_index;
 
@@ -58,21 +58,11 @@ pub struct Context {
     session_state: Arc<RocksDbSessionState>,
 }
 
-#[derive(Clone, Copy)]
-pub struct RocksIndexOptions {
-    pub archive_enabled: bool,
-    pub direct_io: bool,
-}
-
 const ELEMENTS_CF: &str = "elements";
 const SLOT_CF: &str = "slots";
 const INBOUND_CF: &str = "inbound";
 const OUTBOUND_CF: &str = "outbound";
 const PARTIAL_CF: &str = "partial";
-/// Block cache capacity for `elements` and `slots`. Each column family gets
-/// its own cache of this size, not a shared one.
-const ELEMENT_BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024;
-
 impl RocksDbElementIndex {
     /// Create a new RocksDbElementIndex from a shared database handle.
     ///
@@ -310,7 +300,10 @@ impl ElementIndex for RocksDbElementIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let context = self.context.clone();
+
         let task = task::spawn_blocking(move || {
+            let options = &context.options;
+            let block_cache = options.memory_budget().block_cache();
             if let Err(err) = context.db.drop_cf(ELEMENTS_CF) {
                 return Err(IndexError::other(err));
             }
@@ -327,32 +320,42 @@ impl ElementIndex for RocksDbElementIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(ELEMENTS_CF, &get_elements_cf_options())
-            {
+            if let Err(err) = context.db.create_cf(
+                ELEMENTS_CF,
+                &crate::sizing::sized(ELEMENTS_CF, get_elements_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context.db.create_cf(SLOT_CF, &get_elements_cf_options()) {
+            if let Err(err) = context.db.create_cf(
+                SLOT_CF,
+                &crate::sizing::sized(SLOT_CF, get_elements_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(INBOUND_CF, &get_inout_index_cf_options())
-            {
+            if let Err(err) = context.db.create_cf(
+                INBOUND_CF,
+                &crate::sizing::sized(INBOUND_CF, get_inout_index_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(OUTBOUND_CF, &get_inout_index_cf_options())
-            {
+            if let Err(err) = context.db.create_cf(
+                OUTBOUND_CF,
+                &crate::sizing::sized(
+                    OUTBOUND_CF,
+                    get_inout_index_cf_options(block_cache),
+                    options,
+                ),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context.db.create_cf(PARTIAL_CF, &get_partial_cf_options()) {
+            if let Err(err) = context.db.create_cf(
+                PARTIAL_CF,
+                &crate::sizing::sized(PARTIAL_CF, get_partial_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -373,42 +376,44 @@ impl ElementIndex for RocksDbElementIndex {
     }
 }
 
-pub(crate) fn get_partial_cf_options() -> Options {
-    let mut partial_opts = Options::default();
-    crate::bound_write_buffer_history(&mut partial_opts);
+pub(crate) fn get_partial_cf_options(block_cache: &Cache) -> Options {
+    let mut partial_opts = crate::cf_options::base_cf_options(block_cache);
     partial_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     partial_opts
 }
 
-pub(crate) fn get_inout_index_cf_options() -> Options {
-    let mut inout_bound_opts = Options::default();
-    crate::bound_write_buffer_history(&mut inout_bound_opts);
+pub(crate) fn get_inout_index_cf_options(block_cache: &Cache) -> Options {
+    let mut inout_bound_opts = crate::cf_options::base_cf_options(block_cache);
     inout_bound_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(18));
     inout_bound_opts
 }
 
-pub(crate) fn get_elements_cf_options() -> Options {
-    let mut elements_opts = crate::point_lookup::point_lookup_cf_options(ELEMENT_BLOCK_CACHE_BYTES);
-    crate::bound_write_buffer_history(&mut elements_opts);
-    elements_opts
+pub(crate) fn get_elements_cf_options(block_cache: &Cache) -> Options {
+    crate::point_lookup::point_lookup_cf_options(block_cache)
 }
 
 /// Collect all column family descriptors needed by the element index.
 pub(crate) fn element_cf_descriptors(
     options: &RocksIndexOptions,
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    let block_cache = options.memory_budget().block_cache();
     let mut cfs = vec![
-        rocksdb::ColumnFamilyDescriptor::new(ELEMENTS_CF, get_elements_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(SLOT_CF, get_elements_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(INBOUND_CF, get_inout_index_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(OUTBOUND_CF, get_inout_index_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(PARTIAL_CF, get_partial_cf_options()),
+        crate::sizing::descriptor(ELEMENTS_CF, get_elements_cf_options(block_cache), options),
+        crate::sizing::descriptor(SLOT_CF, get_elements_cf_options(block_cache), options),
+        crate::sizing::descriptor(INBOUND_CF, get_inout_index_cf_options(block_cache), options),
+        crate::sizing::descriptor(
+            OUTBOUND_CF,
+            get_inout_index_cf_options(block_cache),
+            options,
+        ),
+        crate::sizing::descriptor(PARTIAL_CF, get_partial_cf_options(block_cache), options),
     ];
 
-    if options.archive_enabled {
-        cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+    if options.archive_enabled() {
+        cfs.push(crate::sizing::descriptor(
             archive_index::ARCHIVE_CF,
-            archive_index::get_archive_cf_options(),
+            archive_index::get_archive_cf_options(block_cache),
+            options,
         ));
     }
 
@@ -643,7 +648,7 @@ fn set_element_internal(
 
     update_source_joins(context.clone(), txn, &element)?;
 
-    if context.options.archive_enabled {
+    if context.options.archive_enabled() {
         archive_index::insert_archive(
             context.clone(),
             txn,

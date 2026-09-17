@@ -202,8 +202,8 @@ let core = DrasiLib::builder()
     .with_query(query_config)                    // Add a query (see Query Builder)
     .with_priority_queue_capacity(50_000)         // Event queue depth (default: 10,000)
     .with_dispatch_buffer_capacity(5_000)         // Channel buffer size (default: 1,000)
-    .add_storage_backend(backend_config)          // Named storage backend (RocksDB, Redis)
-    .with_index_provider(index_plugin)            // Plugin for persistent indexes
+    .add_storage_backend(backend_config)          // Optional named backend declaration
+    .with_index_provider("rocks", Arc::new(index_provider)) // Configured persistent provider
     .with_state_store_provider(state_store)       // Plugin state persistence
     .build()
     .await?;
@@ -221,8 +221,9 @@ Sources and reactions are **owned by DrasiLib** after calling `with_source()` / 
 | `with_query(QueryConfig)` | Query config from `Query` builder | — |
 | `with_priority_queue_capacity(usize)` | Default event queue capacity | `10,000` |
 | `with_dispatch_buffer_capacity(usize)` | Default channel buffer size | `1,000` |
-| `add_storage_backend(StorageBackendConfig)` | Named storage backend definition | — |
-| `with_index_provider(Arc<dyn IndexBackendPlugin>)` | Persistent index plugin | In-memory |
+| `add_storage_backend(StorageBackendConfig)` | Optional named memory or plugin declaration | — |
+| `with_index_provider(name, Arc<dyn IndexBackendPlugin>)` | Register a named persistent provider | — |
+| `with_default_index_provider(name, Arc<dyn IndexBackendPlugin>)` | Register a provider as the default | In-memory |
 | `with_state_store_provider(Arc<dyn StateStoreProvider>)` | Plugin state persistence | In-memory |
 | `build() -> Result<DrasiLib>` | Validate and construct | — |
 
@@ -537,28 +538,32 @@ Query::cypher("my-query")
 
 By default, query indexes are held in memory. For persistent state that survives restarts, configure a storage backend:
 
+Persistent backends are **named bindings to injected providers**: you construct the
+provider (e.g. `RocksDbIndexProvider` from the `drasi-index-rocksdb` crate), register
+it under a name with `with_index_provider`, and reference that name from queries.
+A separate backend declaration is optional. When present, its id, the provider
+registration name, and the `StorageBackendRef::Named` value must match (such as
+`rocks` below); none needs to match the provider kind (`rocksdb`). Only in-memory
+backends can be configured inline.
+
 ```rust
-use drasi_lib::{StorageBackendConfig, StorageBackendSpec, StorageBackendRef};
+use drasi_index_rocksdb::RocksDbIndexProvider;
+use drasi_lib::{DrasiLib, Query, StorageBackendRef};
+use std::sync::Arc;
+
+let provider = RocksDbIndexProvider::new("/data/drasi-indexes", false, false)
+    .with_memory_budget_bytes(512 << 20)?;
 
 let core = DrasiLib::builder()
     .with_id("my-app")
-    // 1. Define a named backend
-    .add_storage_backend(StorageBackendConfig {
-        id: "rocks".to_string(),
-        spec: StorageBackendSpec::RocksDb {
-            path: "/data/drasi-indexes".to_string(),
-            enable_archive: false,     // Enable drasi.past() time-travel queries
-            direct_io: false,          // Bypass OS page cache
-        },
-    })
-    // 2. Provide the plugin that implements the backend
-    .with_index_provider(Arc::new(my_rocksdb_plugin))
+    // 1. Register the provider under a name
+    .with_index_provider("rocks", Arc::new(provider))
     .with_source(source)
     .with_query(
         Query::cypher("my-query")
             .query("MATCH (n:Sensor) RETURN n")
             .from_source("sensors")
-            // 3. Assign the backend to a specific query
+            // 2. Assign the backend to a specific query by name
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
             .build()
     )
@@ -570,9 +575,13 @@ let core = DrasiLib::builder()
 
 | Variant | Fields | Notes |
 |---------|--------|-------|
-| `Memory` | `enable_archive: bool` | Default. Volatile — data lost on restart. |
-| `RocksDb` | `path: String`, `enable_archive: bool`, `direct_io: bool` | Path must be absolute. |
-| `Redis` | `connection_string: String`, `cache_size: Option<usize>` | URL must start with `redis://` or `rediss://`. |
+| `Memory` | `enable_archive: bool` | Default. Volatile — data lost on restart. Usable inline or named. |
+| `Plugin` | `kind: String` | Declares a named persistent backend (`rocksdb`, `redis`) by kind. The declaration is optional when the provider is registered directly. When present, its id must match the provider registration name and query reference, not `kind`. Plugin backends cannot be configured inline. |
+
+The provider crates define their own construction options (for RocksDB:
+data path, archive on/off, direct I/O, and a shared memory budget). Apply those
+settings when constructing the provider; `StorageBackendSpec::Plugin` does not
+configure an injected provider.
 
 ---
 

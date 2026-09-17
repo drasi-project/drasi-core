@@ -21,15 +21,22 @@
 mod mock_source;
 
 use anyhow::Result;
+use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::{
+    DispatchMode, DrasiLib, IndexBackendPlugin, MemoryStateStoreProvider, Query, Reaction,
+    ReactionCheckpoint, StorageBackendRef,
+};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -147,11 +154,15 @@ struct RecordingReaction {
     recovery_policy: ReactionRecoveryPolicy,
     durable: bool,
     snapshot_on_fresh: bool,
+    bootstrap_count: Arc<AtomicUsize>,
+    bootstrap_as_of: Arc<AtomicU64>,
 }
 
 /// Receiver side of the recording reaction.
 struct RecordingReceiver {
     rx: mpsc::UnboundedReceiver<QueryResult>,
+    bootstrap_count: Arc<AtomicUsize>,
+    bootstrap_as_of: Arc<AtomicU64>,
 }
 
 impl RecordingReceiver {
@@ -177,6 +188,17 @@ impl RecordingReceiver {
         }
         results
     }
+
+    fn bootstrap_count(&self) -> usize {
+        self.bootstrap_count.load(Ordering::SeqCst)
+    }
+
+    fn bootstrap_as_of(&self) -> Option<u64> {
+        match self.bootstrap_as_of.load(Ordering::SeqCst) {
+            u64::MAX => None,
+            sequence => Some(sequence),
+        }
+    }
 }
 
 fn recording_reaction(
@@ -186,9 +208,24 @@ fn recording_reaction(
     durable: bool,
     snapshot_on_fresh: bool,
 ) -> (RecordingReaction, RecordingReceiver) {
+    recording_reaction_with_auto_start(id, queries, policy, durable, snapshot_on_fresh, true)
+}
+
+fn recording_reaction_with_auto_start(
+    id: &str,
+    queries: Vec<String>,
+    policy: ReactionRecoveryPolicy,
+    durable: bool,
+    snapshot_on_fresh: bool,
+    auto_start: bool,
+) -> (RecordingReaction, RecordingReceiver) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let params = ReactionBaseParams::new(id, queries).with_recovery_policy(policy);
+    let params = ReactionBaseParams::new(id, queries)
+        .with_recovery_policy(policy)
+        .with_auto_start(auto_start);
     let base = ReactionBase::new(params);
+    let bootstrap_count = Arc::new(AtomicUsize::new(0));
+    let bootstrap_as_of = Arc::new(AtomicU64::new(u64::MAX));
     (
         RecordingReaction {
             base,
@@ -196,8 +233,14 @@ fn recording_reaction(
             recovery_policy: policy,
             durable,
             snapshot_on_fresh,
+            bootstrap_count: bootstrap_count.clone(),
+            bootstrap_as_of: bootstrap_as_of.clone(),
         },
-        RecordingReceiver { rx },
+        RecordingReceiver {
+            rx,
+            bootstrap_count,
+            bootstrap_as_of,
+        },
     )
 }
 
@@ -260,7 +303,26 @@ impl Reaction for RecordingReaction {
     }
 
     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
-        let _ = self.tx.send(result);
+        let query_id = result.query_id.clone();
+        let sequence = result.sequence;
+
+        self.tx
+            .send(result)
+            .map_err(|_| anyhow::anyhow!("Recording reaction receiver closed"))?;
+
+        // Advance only after the host has seeded a checkpoint. Writing
+        // config_hash=0 here would clobber the real hash persisted at startup.
+        if let Some(previous) = self.base.read_checkpoint(&query_id).await? {
+            self.base
+                .write_checkpoint(
+                    &query_id,
+                    &ReactionCheckpoint {
+                        sequence,
+                        config_hash: previous.config_hash,
+                    },
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -274,6 +336,17 @@ impl Reaction for RecordingReaction {
 
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
         self.recovery_policy
+    }
+
+    async fn bootstrap(&self, context: BootstrapContext) -> Result<()> {
+        let snapshot = context
+            .fetch_snapshot()
+            .await
+            .map_err(|error| anyhow::anyhow!("fetch reaction bootstrap snapshot: {error}"))?;
+        self.bootstrap_count.fetch_add(1, Ordering::SeqCst);
+        self.bootstrap_as_of
+            .store(snapshot.as_of_sequence, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -305,6 +378,34 @@ async fn stop_reaction_and_wait(core: &DrasiLib, id: &str) -> Result<()> {
     anyhow::bail!("Reaction {id} did not reach Stopped state within timeout");
 }
 
+async fn wait_for_query_result_count(
+    core: &DrasiLib,
+    query_id: &str,
+    expected: usize,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut last_count = None;
+    loop {
+        match core.get_query_results(query_id).await {
+            Ok(results) if results.len() == expected => return Ok(()),
+            Ok(results) if results.len() > expected => {
+                anyhow::bail!(
+                    "Query {query_id} produced {} results, expected {expected}",
+                    results.len()
+                );
+            }
+            Ok(results) => last_count = Some(results.len()),
+            Err(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Query {query_id} did not reach {expected} results within timeout (last count: {last_count:?})"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -327,7 +428,7 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::Strict,
-        true,
+        false,
         false,
     );
 
@@ -366,17 +467,24 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
 
     // Wait for the 3 missed events to arrive
     let replayed = receiver.wait_for_count(3, Duration::from_secs(5)).await;
-    assert!(
-        replayed.len() >= 3,
-        "Should receive at least 3 replayed events, got {}",
-        replayed.len()
-    );
+    assert_eq!(replayed.len(), 3, "Should receive exactly 3 missed events");
 
     // Verify no duplicates of the first 2 events — drain anything extra
     let extra = receiver.drain_available();
     let all_after_restart: Vec<_> = replayed.into_iter().chain(extra).collect();
 
-    // Each result should be from query q1
+    assert_eq!(
+        all_after_restart.len(),
+        3,
+        "Previously checkpointed events must not be replayed"
+    );
+    assert_eq!(
+        all_after_restart
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
     for r in &all_after_restart {
         assert_eq!(r.query_id, "q1");
     }
@@ -403,7 +511,7 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::Strict,
-        true,
+        false,
         false,
     );
 
@@ -439,7 +547,14 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
     let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(live.len(), 1, "Should receive 1 live event after restart");
 
-    eprintln!("Spurious replays after clean restart: {}", spurious.len());
+    assert!(
+        spurious.is_empty(),
+        "Clean restart replayed checkpointed sequences: {:?}",
+        spurious
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
+    );
 
     core.stop().await?;
     Ok(())
@@ -464,7 +579,7 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::AutoSkipGap,
-        true,
+        false,
         false,
     );
 
@@ -507,9 +622,13 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
     // Drain any replayed events (should be minimal — gap was skipped)
     tokio::time::sleep(Duration::from_millis(500)).await;
     let after_restart = receiver.drain_available();
-    eprintln!(
-        "Events after AutoSkipGap restart: {} (gap events were skipped)",
-        after_restart.len()
+    assert!(
+        after_restart.is_empty(),
+        "AutoSkipGap replayed unavailable sequences: {:?}",
+        after_restart
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
     );
 
     // Verify live delivery works after skip
@@ -539,7 +658,7 @@ async fn test_reaction_outbox_gap_auto_reset() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::AutoReset,
-        true,
+        false,
         true, // needs snapshot on fresh start
     );
 
@@ -607,7 +726,7 @@ async fn test_reaction_live_delivery_after_restart() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::Strict,
-        true,
+        false,
         false,
     );
 
@@ -679,7 +798,7 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::AutoSkipGap,
-        true,
+        false,
         false,
     );
 
@@ -722,9 +841,10 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     Ok(())
 }
 
-/// Test 7: Runtime gap with Strict policy — reaction should stop on gap.
+/// Test 7: Broadcast lag is recovered from the outbox, so Strict stays up
+/// when the ring overflows but retained history still covers the gap.
 #[tokio::test]
-async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
+async fn test_runtime_gap_strict_policy_recovers_from_outbox() -> Result<()> {
     let (mock_source, handle) = MockSource::new("test-source")?;
 
     let query = Query::cypher("q1")
@@ -742,7 +862,7 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::Strict,
-        true,
+        false,
         false,
     );
 
@@ -757,48 +877,639 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
             .await?,
     );
 
-    let mut event_rx = core.subscribe_all_component_events();
-
     core.start().await?;
 
-    // Confirm initial delivery works.
     insert_person(&handle, "p1", "Alice", 30).await?;
     let initial = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(initial.len(), 1);
 
-    // Flood to cause broadcast lag — Strict policy should stop the forwarder.
     for i in 0..20 {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
-    // Wait deterministically for the reaction to transition to Error state
-    // (the supervisor fires this after the forwarder breaks on Strict gap).
-    let error_event = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match event_rx.recv().await {
-                Ok(event)
-                    if event.component_id == "rec" && event.status == ComponentStatus::Error =>
-                {
-                    return event;
-                }
-                Ok(_) => continue,
-                Err(_) => panic!("Event channel closed while waiting for Error status"),
-            }
-        }
-    })
-    .await
-    .expect("Timed out waiting for reaction to reach Error status");
-    assert_eq!(error_event.status, ComponentStatus::Error);
-
-    // After strict gap failure, new events should NOT be delivered.
     insert_person(&handle, "p-after", "After", 99).await?;
-    let after = receiver
-        .wait_for_count(1, Duration::from_millis(1000))
-        .await;
+    let after = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(
         after.len(),
-        0,
-        "Strict policy: no events should be delivered after gap"
+        1,
+        "Strict trigger recovers broadcast lag from the outbox and keeps receiving live results"
+    );
+    assert_eq!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// A trigger reaction added to a running query starts at the current head.
+#[tokio::test]
+async fn test_fresh_trigger_does_not_replay_retained_history() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("fresh-trigger-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    wait_for_query_result_count(&core, "q1", 2).await?;
+
+    let (reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+    for _ in 0..50 {
+        if core.get_reaction_status("rec").await? == ComponentStatus::Running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    insert_person(&handle, "p3", "Charlie", 35).await?;
+    let mut received = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    received.extend(receiver.wait_for_count(1, Duration::from_secs(1)).await);
+    let sequences: Vec<_> = received.iter().map(|result| result.sequence).collect();
+    assert_eq!(
+        sequences,
+        vec![3],
+        "Fresh trigger should receive only the live result, got {sequences:?}"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// State-sync fresh start bootstraps from snapshot and dedupes live duplicates.
+#[tokio::test]
+async fn test_fresh_state_sync_bootstraps_snapshot_and_dedupes_live() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("fresh-state-sync-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    wait_for_query_result_count(&core, "q1", 2).await?;
+
+    let (reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        false,
+        true,
+    );
+    core.add_reaction(reaction).await?;
+    wait_for_reaction_status(&core, "rec", ComponentStatus::Running).await?;
+
+    assert_eq!(
+        receiver.bootstrap_count(),
+        1,
+        "State-sync fresh start must apply bootstrap/snapshot"
+    );
+    assert_eq!(
+        receiver.bootstrap_as_of(),
+        Some(2),
+        "Checkpoint / snapshot as_of_sequence should be the current query head"
+    );
+
+    let historical = receiver.wait_for_count(1, Duration::from_millis(500)).await;
+    assert!(
+        historical.is_empty(),
+        "Live duplicates of snapshot rows must be deduped, got sequences {:?}",
+        historical
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
+    );
+
+    insert_person(&handle, "p3", "Charlie", 35).await?;
+    let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(
+        live.len(),
+        1,
+        "State-sync should receive the next live result"
+    );
+    assert_eq!(live[0].sequence, 3);
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Trigger reactions cannot use AutoReset (existing startup validation).
+#[tokio::test]
+async fn test_trigger_autoreset_is_rejected() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("trigger-autoreset-invalid")
+            .with_source(mock_source)
+            .with_query(query)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::AutoReset,
+        false,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Trigger + AutoReset should be rejected at startup"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("AutoReset") || msg.contains("incompatible"),
+        "Error should mention AutoReset incompatibility: {msg}"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// A durable reaction cannot recover if its query output is volatile
+/// (the query does not retain results, so history cannot be replayed).
+#[tokio::test]
+async fn test_durable_reaction_rejects_volatile_query() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-volatile-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Durable reaction unexpectedly started with a volatile query"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("rec"),
+        "Error should name the reaction id: {msg}"
+    );
+    assert!(
+        msg.contains("volatile") || msg.contains("non-durable"),
+        "Error should say the query is volatile / non-durable: {msg}"
+    );
+    assert_ne!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+    let lifecycle = core.get_lifecycle_metrics().await?;
+    assert!(
+        lifecycle.startup_rejection_durable_on_volatile_query >= 1,
+        "Expected durable-on-volatile-query rejection metric, got {}",
+        lifecycle.startup_rejection_durable_on_volatile_query
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+fn volatile_person_query(id: &str) -> drasi_lib::config::QueryConfig {
+    Query::cypher(id)
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .auto_start(true)
+        .build()
+}
+
+fn persistent_person_query(id: &str) -> drasi_lib::config::QueryConfig {
+    Query::cypher(id)
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .auto_start(true)
+        .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+        .build()
+}
+
+async fn wait_for_reaction_status(
+    core: &DrasiLib,
+    id: &str,
+    expected: ComponentStatus,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if core.get_reaction_status(id).await? == expected {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("Reaction {id} did not reach {expected:?} within timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Durable reaction + persistent query + durable store — start succeeds.
+#[tokio::test]
+async fn test_durable_reaction_starts_with_persistent_query() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let rocks: Arc<dyn IndexBackendPlugin> =
+        Arc::new(RocksDbIndexProvider::new(tmp.path(), false, false));
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-persistent-ok")
+            .with_source(mock_source)
+            .with_query(persistent_person_query("q1"))
+            .with_index_provider("rocks", rocks)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+    core.start_reaction("rec").await?;
+    wait_for_reaction_status(&core, "rec", ComponentStatus::Running).await?;
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Durable reaction + persistent query + volatile/missing store — still rejected.
+#[tokio::test]
+async fn test_durable_reaction_rejects_volatile_store_with_persistent_query() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let rocks: Arc<dyn IndexBackendPlugin> =
+        Arc::new(RocksDbIndexProvider::new(tmp.path(), false, false));
+    let state_store = Arc::new(MemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-volatile-store")
+            .with_source(mock_source)
+            .with_query(persistent_person_query("q1"))
+            .with_index_provider("rocks", rocks)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Durable reaction unexpectedly started with a volatile store"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("rec"),
+        "Error should name the reaction id: {msg}"
+    );
+    assert!(
+        msg.contains("durable") && msg.contains("volatile"),
+        "Error should mention durable reaction vs volatile store: {msg}"
+    );
+    assert_ne!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Volatile reaction + volatile query remains allowed (at-most-once).
+#[tokio::test]
+async fn test_volatile_reaction_allows_volatile_query() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("volatile-volatile-ok")
+            .with_source(mock_source)
+            .with_query(volatile_person_query("q1"))
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        false,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+    core.start_reaction("rec").await?;
+    wait_for_reaction_status(&core, "rec", ComponentStatus::Running).await?;
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Durable reaction subscribed to any volatile query is rejected as a whole.
+#[tokio::test]
+async fn test_durable_reaction_rejects_if_any_subscribed_query_is_volatile() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let rocks: Arc<dyn IndexBackendPlugin> =
+        Arc::new(RocksDbIndexProvider::new(tmp.path(), false, false));
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-mixed-queries")
+            .with_source(mock_source)
+            .with_query(persistent_person_query("q-persistent"))
+            .with_query(volatile_person_query("q-volatile"))
+            .with_index_provider("rocks", rocks)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q-persistent".into(), "q-volatile".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Durable reaction unexpectedly started with a mixed persistent/volatile subscription"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("rec"),
+        "Error should name the reaction id: {msg}"
+    );
+    assert!(
+        msg.contains("q-volatile"),
+        "Error should name the volatile query: {msg}"
+    );
+    assert!(
+        msg.contains("volatile") || msg.contains("non-durable"),
+        "Error should say the query is volatile / non-durable: {msg}"
+    );
+    assert_ne!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// `add_reaction` with auto-start also rejects durable-on-volatile-query.
+#[tokio::test]
+async fn test_add_reaction_auto_start_rejects_durable_on_volatile_query() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-volatile-autostart")
+            .with_source(mock_source)
+            .with_query(volatile_person_query("q1"))
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        true,
+    );
+    let result = core.add_reaction(reaction).await;
+    assert!(
+        result.is_err(),
+        "add_reaction+auto-start unexpectedly succeeded for durable+volatile"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("rec"),
+        "Error should name the reaction id: {msg}"
+    );
+    assert!(
+        msg.contains("volatile") || msg.contains("non-durable"),
+        "Error should say the query is volatile / non-durable: {msg}"
+    );
+    assert_ne!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Backend change across restart: RocksDB query later recreated as memory-backed.
+#[tokio::test]
+async fn test_durable_reaction_rejects_after_query_backend_becomes_volatile() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let rocks: Arc<dyn IndexBackendPlugin> =
+        Arc::new(RocksDbIndexProvider::new(tmp.path(), false, false));
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-backend-change")
+            .with_source(mock_source)
+            .with_query(persistent_person_query("q1"))
+            .with_index_provider("rocks", rocks)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+    core.start_reaction("rec").await?;
+    wait_for_reaction_status(&core, "rec", ComponentStatus::Running).await?;
+
+    stop_reaction_and_wait(&core, "rec").await?;
+    core.update_query("q1", volatile_person_query("q1")).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Durable reaction unexpectedly started after query was recreated as memory-backed"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("rec"),
+        "Error should name the reaction id: {msg}"
+    );
+    assert!(
+        msg.contains("q1"),
+        "Error should name the volatile query: {msg}"
+    );
+    assert!(
+        msg.contains("volatile") || msg.contains("non-durable"),
+        "Error should say the query is volatile / non-durable: {msg}"
+    );
+    assert_ne!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Rule 1 (volatile store) fires before Rule 2 (volatile query) when both apply.
+#[tokio::test]
+async fn test_durable_reaction_rejects_volatile_store_before_volatile_query() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let state_store = Arc::new(MemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-both-volatile")
+            .with_source(mock_source)
+            .with_query(volatile_person_query("q1"))
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Durable reaction unexpectedly started with volatile store and volatile query"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("rec"),
+        "Error should name the reaction id: {msg}"
+    );
+    assert!(
+        msg.contains("state store") && msg.contains("volatile"),
+        "Rule 1 (volatile store) must fire before Rule 2 (volatile query): {msg}"
+    );
+    assert!(
+        !msg.contains("subscribed query"),
+        "Rule 2 query check must not run when Rule 1 already rejected: {msg}"
+    );
+    assert_ne!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+    let lifecycle = core.get_lifecycle_metrics().await?;
+    assert!(
+        lifecycle.startup_rejection_durable_on_volatile >= 1,
+        "Expected durable-on-volatile-store rejection, got {}",
+        lifecycle.startup_rejection_durable_on_volatile
+    );
+    assert_eq!(
+        lifecycle.startup_rejection_durable_on_volatile_query, 0,
+        "Query rejection must not be recorded when store check already failed"
     );
 
     core.stop().await?;

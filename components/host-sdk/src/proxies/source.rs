@@ -212,6 +212,14 @@ impl Source for SourceProxy {
             None => (std::ptr::null(), 0u32),
         };
 
+        // Pass resume_sequence across FFI. 0 is the sentinel for None; real
+        // sequences start at 1 (the framework counter starts at 1), so 0 never
+        // collides with a genuine checkpoint — and a floor derived from 0 would
+        // be 1 (the default) anyway, making the sentinel a no-op either way.
+        // Lets out-of-process sources raise their sequence counter for restart
+        // monotonicity.
+        let resume_sequence = settings.resume_sequence.unwrap_or(0);
+
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
@@ -222,6 +230,7 @@ impl Source for SourceProxy {
             resume_from_ptr,
             resume_from_len,
             settings.request_position_handle,
+            resume_sequence,
         );
 
         if resp_ptr.is_null() {

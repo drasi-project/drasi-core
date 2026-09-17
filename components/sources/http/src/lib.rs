@@ -949,15 +949,7 @@ impl HttpSource {
 
     async fn run_adaptive_batcher(
         batch_rx: mpsc::Receiver<SourceChangeEvent>,
-        dispatchers: Arc<
-            tokio::sync::RwLock<
-                Vec<
-                    Box<
-                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
-                    >,
-                >,
-            >,
-        >,
+        base: SourceBase,
         adaptive_config: AdaptiveBatchConfig,
         source_id: String,
     ) {
@@ -1008,10 +1000,7 @@ impl HttpSource {
                     wrapper.source_position = Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                 }
 
-                if let Err(e) =
-                    SourceBase::dispatch_from_task(dispatchers.clone(), wrapper.clone(), &source_id)
-                        .await
-                {
+                if let Err(e) = base.dispatch_event(wrapper).await {
                     error!(
                         "[{}] Batch #{}, failed to dispatch event {}/{} (no subscribers): {}",
                         source_id,
@@ -1156,7 +1145,7 @@ impl Source for HttpSource {
         // Start adaptive batcher task
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
 
         // Get instance_id from context for log routing isolation
         let instance_id = self
@@ -1176,13 +1165,7 @@ impl Source for HttpSource {
         );
         tokio::spawn(
             async move {
-                Self::run_adaptive_batcher(
-                    batch_rx,
-                    dispatchers,
-                    adaptive_config,
-                    source_id.clone(),
-                )
-                .await
+                Self::run_adaptive_batcher(batch_rx, base, adaptive_config, source_id.clone()).await
             }
             .instrument(span),
         );

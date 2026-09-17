@@ -36,6 +36,15 @@ pub trait Publisher: Send + Sync {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
+/// Resource or attribute key that marks the origin of telemetry Drasi emitted.
+pub const SOURCE_ORIGIN_ATTRIBUTE: &str = "drasi.source.origin";
+
+/// Value of [`SOURCE_ORIGIN_ATTRIBUTE`] for Drasi-derived telemetry.
+///
+/// Sources that ingest telemetry SHOULD drop records with this marker so a
+/// reaction that exports OTLP cannot feed back into the same graph.
+pub const SOURCE_ORIGIN_DERIVED: &str = "derived";
+
 // Re-export the Source trait and error types
 pub use traits::Source;
 pub use traits::SourceError;
