@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - agentofreality/core-909-base
       - feature/*
       - feature-lib
       - release/*

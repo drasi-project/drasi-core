@@ -75,7 +75,7 @@ identity-valued empty rows under existing semantics. A separate test explicitly
 distinguishes this from the projected aggregate's removal; this work does not
 claim to resolve #384/#409 or rebootstrap double-counting issues.
 
-## Controlled failure proof
+## Original identity failure proof
 
 The control used #810 at `76dc78055887eaceb9fc84e94578d73ed5f1c298` plus the new
 tests. Only the three final identity assignments in `project_solution` were
@@ -97,7 +97,8 @@ With those original faulty stamps, both commands exit 101:
 - The floor-comfort live update changes its signature when a different room
   contributes to the unchanged floor group.
 
-The three assignments were restored byte-for-byte to the original #810 runtime
+In that original experiment, the three assignments were restored byte-for-byte
+to the original #810 runtime
 file (SHA-256
 `03d59c1256e33982871b0fd0f81ba9b1574eadac3186dbc84a5b36cb2ae95911`).
 `git diff --exit-code HEAD -- core/src/query/continuous_query.rs` confirmed that
@@ -113,11 +114,69 @@ Each restored run passes all seven new regressions: three engine tests, two
 public API tests, and two persistent-output tests. Broader suite and CI results
 are recorded on #810 separately from this focused failure proof.
 
+## Linked codec dependency and combined validation
+
+The upper #810 branch now includes a normal merge of the existing
+[#909](https://github.com/drasi-project/drasi-core/pull/909) at
+`6455dd3e4e1f8b969b9957aa042c22061cdb8a0b`, preserving both PR histories. That lower
+commit includes current main `ead4279cc4ad847c875dc3ebebb1a54fe3b13de4` and the
+named-field outbox writer correction for #908. Its staging, hydration, atomicity,
+reader, and nine codec/reopen regression cases are inherited, not copied or
+reimplemented in the upper layer.
+
+Because #909 is fork-based, this is a **linked dependent-PR chain, not a native
+GitHub stack**. #810 targets the upstream auxiliary branch
+`agentofreality/core-909-base`, which must equal the exact lower PR head above.
+If #909 changes, its owner/coordinator must explicitly synchronize the mirror,
+then reconcile and revalidate #810. Retarget #810 to `main` only after an eventual
+user-authorized lower merge and a fresh ancestry/check preflight. Neither PR is
+merged or published by this integration.
+
+The prior [required CI failure](https://github.com/drasi-project/drasi-core/actions/runs/35390267902)
+on the old #810 head was real: main's hydration exposed unreadable compact
+`Update { grouping_keys: None, ... }` outbox records before either aggregate
+snapshot assertion. An ordinary non-aggregate update also reproduced that
+failure independently on unchanged main. It is distinct from #680's incorrect
+group identity.
+
+On the actual combined upper branch, the formerly failing two persistent
+aggregate tests and the lower ordinary-update reopen test pass. Temporarily
+reversing only the inherited named writer to `rmp_serde::to_vec` makes all three
+fail at durable outbox sequence 2; restoring the lower writer byte-for-byte makes
+the identical command pass:
+
+```sh
+cargo test -p drasi-lib --lib -- aggregate_snapshot_tests \
+  test_e2e_outbox_persistent_reopen::case_2_named_update
+```
+
+The combined selectors exercise all seven aggregate regressions and all nine
+lower codec cases (plus two existing persisted-state tests) under both solvers:
+
+```sh
+cargo test -p drasi-core -p drasi-lib -- \
+  aggregate_snapshot persisted_ test_e2e_outbox_persistent_reopen
+cargo test -p drasi-core -p drasi-lib --features drasi-core/parallel_solver -- \
+  aggregate_snapshot persisted_ test_e2e_outbox_persistent_reopen
+```
+
+The lower cases cover the production writer/reader, absent/present/empty grouping
+keys, other result variants, metadata/profiling, valid compact and new named
+records together, fresh reopen, sequence continuation, and visible Strict failure
+without deleting malformed legacy records. No assertions or recovery policies
+are relaxed. Full local and exact-head remote results are recorded on #810.
+
+The existing test, lint, FFI, audit, deny, and coverage workflows explicitly
+include this one mirror base, preserving their other filters and gates. A
+post-retarget push must run fresh checks; old `main`-base checks do not establish
+the upper layer's CI. Coverage keeps its existing draft-PR skip condition.
+
 ## Persisted-state migration boundary
 
-This changes **key meaning for projected aggregates**, not the result-diff,
-serialization, or index schema. It is not an automatic migration of retained
-output produced by a faulty engine.
+The identity correction changes **key meaning for projected aggregates**, not the
+result-diff or index schema. Separately, the inherited #909 changes the encoding
+of new persisted `QueryResult` records. Neither is an automatic migration of
+retained state produced by an older engine.
 
 The legacy-key regression constructs actual `MATCH` contributor signatures,
 seeds intermediate/current rows under those keys in RocksDB, reopens through
@@ -136,17 +195,27 @@ only the output rows while retaining incompatible checkpoints/accumulators, and
 do not assume stop/start or removing/re-adding the same ID clears every durable
 store on an older host.
 
-This branch's `fetch_snapshot` can fall back to persistent live results when its
-in-memory output is empty. The focused reopen tests do not establish complete
-multi-group hydration after the first resumed event, result-sequence/outbox
-continuity, or same-ID reset completeness. Those are separate recovery concerns,
-including the work tracked in #826/#830/#835; no such implementation is imported
-or changed here.
+The original #810 extension at `540999d2` used a persistent-snapshot fallback.
+The combined branch instead inherits main's hydration, atomic output, reset,
+and transactional trimming from #826/#830/#835/#927 through #909. These remain
+separate implementations with their existing tests; the aggregate correction
+does not replace their guarantees.
 
-## Consumption and remaining server validation
+There are **two different legacy-state limits**. Old contributor-keyed rows need
+the complete authoritative reconstruction described above. Malformed positional
+outbox records with omitted fields remain unreadable even after switching future
+writes to named fields: Strict recovery must report the error and preserve the
+records. Valid historical compact records with intact positional fields and new
+named records remain readable together. See
+[Persisted Outbox Compatibility](../lib/README.md#persisted-outbox-compatibility)
+for the inherited codec boundary. Do not silently discard records, downgrade
+Strict, or clear only the outbox/output to manufacture a passing migration.
 
-This branch has `drasi-core 0.5.8` and `drasi-lib 0.9.1` manifests; the correction
-is unreleased source, so a crate version alone does not identify it. The recorded
+## Consumption and isolated server evidence
+
+The combined branch inherits `drasi-core 0.5.9` and `drasi-lib 0.9.2` manifests
+from main; the corrections are unreleased source, so a crate version alone does
+not identify them. The recorded
 server baseline is `drasi-server 0.2.1` at
 `a2b648062a4c55e036d68b6f26bf73b4e773bcf1`, locked to `drasi-lib 0.8.9`,
 `drasi-core 0.5.8`, and SDK crate `0.10.0`, with signed plugins using FFI ABI
@@ -154,26 +223,28 @@ server baseline is `drasi-server 0.2.1` at
 `FFI_SDK_VERSION` is `0.14.0`. A wholesale workspace/SDK upgrade is **not**
 compatible with those existing plugin binaries.
 
-For a separately authorized isolated server trial, the ablation identifies the
-three final identity assignments in `core/src/query/continuous_query.rs` as the
-#680 identity correction. Apply/pin a core-only source override based on the
-locked `0.5.8` source while
-keeping the server, `drasi-lib 0.8.9`, SDK/host SDK, dependency lock, and signed ABI
-`0.11.0` plugins otherwise unchanged. To retain this PR's complete deletion,
-migration, and whole-element grouping behavior (#792/#897), carry all its core
-runtime hunks, including `core/src/evaluation/parts/mod.rs` and
-`core/src/evaluation/variable_value/mod.rs`, not only those three assignments.
-None of these identity changes require a `ResultDiff`, FFI layout, or consumer API
-change. Verify the resolved dependency graph and the exact built revision in that
-trial; neither the reduced-hunk variant on the locked server nor an arbitrary
-workspace upgrade is established by the Rust tests here.
+The separately authorized P1 diagnostic used locked core `0.5.8` plus the full
+three-file runtime diff **`e759606..540999d`**, not this newer combined workspace:
+`core/src/query/continuous_query.rs`, `core/src/evaluation/parts/mod.rs`, and
+`core/src/evaluation/variable_value/mod.rs`. Lib `0.8.9`, SDK/host SDK `0.10.0`,
+all five signed ABI `0.11.0` plugins, and the exact non-core lock graph remained
+unchanged. Those identity hunks do not change `ResultDiff` or an FFI layout.
+Do not substitute the combined branch's full diff against the old base: it also
+inherits newer main APIs, including the result-aware pre-commit hook.
 
-No server dependency, plugin, query, React consumer, release, or publication is
-changed by this validation. The owner of
+The P1 owner/coordinator reported **exit 0** with the existing real Trading
+harness, scenarios, and assertions unchanged: initial value 2000/cost 1800, live
+2050, reload 2050, and offline/reconnect 2150, with exactly one current row in
+every recorded summary REST response. Reported SHA-256 values:
+
+- Candidate binary: `503d78df44764cf8f797a1d6a91ec21d1cdc5e3e49e585b44f2563df8cf176e1`.
+- Patched core source tree: `b411434609a70a755099528c5d76526a0bc0c5bf0ca3cc934d39ed33d1636136`.
+
+That pass verifies only the **fresh-state core-only overlay**, not latest-main
+persistence, a released crate/plugin combination, or the default
 [drasi-project/drasi-server#201](https://github.com/drasi-project/drasi-server/pull/201)
-must rerun its actual live-server gate with fresh isolated state and preserve the
-singleton aggregate, 2000 -> 2050 -> 2150 totals, SQL/CDC, reload, and offline-update
-reconnect assertions. REST snapshots, real SSE, and the UI must agree without
-filtering old rows, selecting a convenient row, recomputing totals, or forcing a
-refresh. The server foundation and React stack remain blocked until that gate
-passes.
+runtime. This upper integration changes no server dependency, plugin, query,
+React consumer, release, or publication. The default server foundation and React
+stack are not declared unblocked; any authorized default-runtime adoption still
+needs its own exact-build SQL/CDC + REST/SSE/UI gate with singleton and
+2000 -> 2050 -> 2150 assertions unchanged.
