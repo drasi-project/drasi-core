@@ -20,7 +20,7 @@ use serde_json::json;
 use crate::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
-        functions::{Count, Function, FunctionRegistry},
+        functions::{Count, Function, FunctionRegistry, Sum},
         variable_value::VariableValue,
     },
     in_memory_index::{
@@ -40,6 +40,7 @@ impl MaterializedQuery {
     async fn new(query_text: &str) -> Self {
         let functions = Arc::new(FunctionRegistry::new());
         functions.register_function("count", Function::Aggregating(Arc::new(Count {})));
+        functions.register_function("sum", Function::Aggregating(Arc::new(Sum {})));
         let parser = Arc::new(CypherParser::new(functions.clone()));
         let element_index = Arc::new(InMemoryElementIndex::new());
         let query = QueryBuilder::new(query_text, parser)
@@ -390,4 +391,278 @@ async fn scalar_group_migration_updates_populated_source_and_destination() {
     assert!(subject.rows.values().any(|row| value(row, "isOpen")
         == &VariableValue::from(json!(false))
         && value(row, "itemCount") == &VariableValue::from(json!(2))));
+}
+
+// Minimize Trading's joined positions to their value/cost contributions, retaining
+// the WITH aggregation followed by an ordinary RETURN that exposes #680.
+const PORTFOLIO_SUMMARY: &str = "
+    MATCH (p:Position)
+    WITH sum(p.value) AS totalValue, sum(p.cost) AS totalCost, count(p) AS positionCount
+    RETURN totalValue, totalCost, positionCount
+";
+
+fn position_change(
+    update: bool,
+    id: &str,
+    effective_from: u64,
+    account: &str,
+    value: i64,
+    cost: i64,
+) -> SourceChange {
+    let element = Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("test", id),
+            labels: Arc::new([Arc::from("Position")]),
+            effective_from,
+        },
+        properties: ElementPropertyMap::from(json!({
+            "account": account,
+            "value": value,
+            "cost": cost,
+        })),
+    };
+    if update {
+        SourceChange::Update { element }
+    } else {
+        SourceChange::Insert { element }
+    }
+}
+
+fn delete_position(id: &str, effective_from: u64) -> SourceChange {
+    SourceChange::Delete {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("test", id),
+            labels: Arc::new([Arc::from("Position")]),
+            effective_from,
+        },
+    }
+}
+
+fn summary(total_value: f64, total_cost: f64, position_count: i64) -> QueryVariables {
+    QueryVariables::from([
+        ("totalValue".into(), VariableValue::from(json!(total_value))),
+        ("totalCost".into(), VariableValue::from(json!(total_cost))),
+        (
+            "positionCount".into(),
+            VariableValue::from(json!(position_count)),
+        ),
+    ])
+}
+
+fn assert_summary_delta(
+    changes: &[QueryPartEvaluationContext],
+    signature: u64,
+    before: Option<QueryVariables>,
+    after: Option<QueryVariables>,
+) {
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].row_signature(), signature);
+    let expected = match (before, after) {
+        (None, Some(after)) => QueryPartEvaluationContext::Adding {
+            after,
+            row_signature: signature,
+        },
+        (Some(before), Some(after)) => QueryPartEvaluationContext::Updating {
+            before,
+            after,
+            row_signature: signature,
+        },
+        (Some(before), None) => QueryPartEvaluationContext::Removing {
+            before,
+            row_signature: signature,
+        },
+        (None, None) => panic!("a summary delta must have a before or after row"),
+    };
+    assert_eq!(changes, &[expected]);
+}
+
+#[tokio::test]
+async fn aggregate_snapshot_global_sum_tracks_bootstrap_updates_and_deletes() {
+    let mut subject = MaterializedQuery::new(PORTFOLIO_SUMMARY).await;
+    assert!(subject.rows.is_empty());
+
+    let first = subject
+        .process(position_change(false, "aapl", 1, "portfolio", 1100, 800))
+        .await;
+    assert_eq!(first.len(), 1);
+    let signature = first[0].row_signature();
+    assert_summary_delta(&first, signature, None, Some(summary(1100.0, 800.0, 1)));
+    assert_eq!(
+        subject.rows,
+        HashMap::from([(signature, summary(1100.0, 800.0, 1))])
+    );
+
+    let second = subject
+        .process(position_change(false, "msft", 2, "portfolio", 900, 1000))
+        .await;
+    assert_eq!(
+        subject.rows,
+        HashMap::from([(signature, summary(2000.0, 1800.0, 2))]),
+        "bootstrap must replace the intermediate 1100 row, not retain it"
+    );
+    assert_summary_delta(
+        &second,
+        signature,
+        Some(summary(1100.0, 800.0, 1)),
+        Some(summary(2000.0, 1800.0, 2)),
+    );
+
+    for (time, id, value, cost, before, after) in [
+        (3, "aapl", 1150, 800, 2000.0, 2050.0),
+        (4, "aapl", 1250, 800, 2050.0, 2150.0),
+        (5, "msft", 950, 1000, 2150.0, 2200.0),
+        (6, "msft", 900, 1000, 2200.0, 2150.0),
+    ] {
+        let changes = subject
+            .process(position_change(true, id, time, "portfolio", value, cost))
+            .await;
+        assert_eq!(
+            subject.rows,
+            HashMap::from([(signature, summary(after, 1800.0, 2))]),
+            "the current snapshot must contain no historical aggregate rows"
+        );
+        assert_summary_delta(
+            &changes,
+            signature,
+            Some(summary(before, 1800.0, 2)),
+            Some(summary(after, 1800.0, 2)),
+        );
+    }
+
+    let deletion = subject.process(delete_position("msft", 7)).await;
+    assert_summary_delta(
+        &deletion,
+        signature,
+        Some(summary(2150.0, 1800.0, 2)),
+        Some(summary(1250.0, 800.0, 1)),
+    );
+    assert_eq!(
+        subject.rows,
+        HashMap::from([(signature, summary(1250.0, 800.0, 1))])
+    );
+
+    let last_deletion = subject.process(delete_position("aapl", 8)).await;
+    assert_summary_delta(
+        &last_deletion,
+        signature,
+        Some(summary(1250.0, 800.0, 1)),
+        None,
+    );
+    assert!(subject.rows.is_empty());
+
+    let reinsert = subject
+        .process(position_change(false, "aapl", 9, "portfolio", 1100, 800))
+        .await;
+    assert_summary_delta(&reinsert, signature, None, Some(summary(1100.0, 800.0, 1)));
+    subject
+        .process(position_change(false, "msft", 10, "portfolio", 900, 1000))
+        .await;
+    assert_eq!(
+        subject.rows,
+        HashMap::from([(signature, summary(2000.0, 1800.0, 2))])
+    );
+
+    let mut fresh = MaterializedQuery::new(PORTFOLIO_SUMMARY).await;
+    fresh
+        .process(position_change(false, "msft", 10, "portfolio", 900, 1000))
+        .await;
+    fresh
+        .process(position_change(false, "aapl", 9, "portfolio", 1100, 800))
+        .await;
+    assert_eq!(subject.rows, fresh.rows);
+}
+
+#[tokio::test]
+async fn aggregate_snapshot_equal_valued_groups_keep_distinct_identities() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position)
+         WITH p.account AS account, sum(p.value) AS totalValue,
+              sum(p.cost) AS totalCost, count(p) AS positionCount
+         RETURN totalValue, totalCost, positionCount",
+    )
+    .await;
+
+    let first = subject
+        .process(position_change(false, "a", 1, "account-a", 100, 80))
+        .await;
+    let a_signature = first[0].row_signature();
+    let second = subject
+        .process(position_change(false, "b", 2, "account-b", 100, 80))
+        .await;
+    let b_signature = second[0].row_signature();
+    assert_ne!(a_signature, b_signature);
+    assert_eq!(
+        subject.rows,
+        HashMap::from([
+            (a_signature, summary(100.0, 80.0, 1)),
+            (b_signature, summary(100.0, 80.0, 1)),
+        ]),
+        "equal projected values do not make two independent groups the same row"
+    );
+
+    let update = subject
+        .process(position_change(true, "b", 3, "account-b", 150, 80))
+        .await;
+    assert_summary_delta(
+        &update,
+        b_signature,
+        Some(summary(100.0, 80.0, 1)),
+        Some(summary(150.0, 80.0, 1)),
+    );
+    assert_eq!(
+        subject.rows,
+        HashMap::from([
+            (a_signature, summary(100.0, 80.0, 1)),
+            (b_signature, summary(150.0, 80.0, 1)),
+        ])
+    );
+
+    let migration = subject
+        .process(position_change(true, "b", 4, "account-a", 100, 80))
+        .await;
+    assert_eq!(migration.len(), 2);
+    assert!(migration.iter().any(|change| matches!(
+        change,
+        QueryPartEvaluationContext::Removing { before, row_signature }
+            if *row_signature == b_signature && before == &summary(150.0, 80.0, 1)
+    )));
+    assert!(migration.iter().any(|change| matches!(
+        change,
+        QueryPartEvaluationContext::Updating { before, after, row_signature }
+            if *row_signature == a_signature
+                && before == &summary(100.0, 80.0, 1)
+                && after == &summary(200.0, 160.0, 2)
+    )));
+    assert_eq!(
+        subject.rows,
+        HashMap::from([(a_signature, summary(200.0, 160.0, 2))])
+    );
+}
+
+#[tokio::test]
+async fn aggregate_snapshot_terminal_aggregation_keeps_existing_empty_group_semantics() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position)
+         RETURN sum(p.value) AS totalValue, sum(p.cost) AS totalCost,
+                count(p) AS positionCount",
+    )
+    .await;
+    let first = subject
+        .process(position_change(false, "aapl", 1, "portfolio", 1100, 800))
+        .await;
+    let signature = first[0].row_signature();
+    let deletion = subject.process(delete_position("aapl", 2)).await;
+
+    // Unlike aggregation followed by projection, terminal aggregations retain
+    // identity-valued rows today. Changing that requires #384/#409, not #680.
+    assert_eq!(deletion.len(), 1);
+    assert!(matches!(
+        &deletion[0],
+        QueryPartEvaluationContext::Aggregation { after, default_after: true, row_signature, .. }
+            if *row_signature == signature && after == &summary(0.0, 0.0, 0)
+    ));
+    assert_eq!(
+        subject.rows,
+        HashMap::from([(signature, summary(0.0, 0.0, 0))])
+    );
 }
