@@ -238,6 +238,11 @@ pub struct SourceBase {
     /// Sources can await `wait_for_subscribers()` before starting their polling
     /// loop to avoid dispatching events before any subscriber exists.
     subscriber_notify: Arc<Notify>,
+    /// Whether a receiver has registered during the current source lifecycle.
+    ///
+    /// This cannot be inferred from `dispatchers`: broadcast mode creates its
+    /// dispatcher during construction, before any receiver exists.
+    subscriber_ready: Arc<AtomicBool>,
     /// Per-subscriber resume positions for replay filtering.
     ///
     /// Keyed by dispatcher index in the `dispatchers` Vec. When an event's
@@ -370,6 +375,7 @@ impl SourceBase {
             dispatch_order: Arc::new(Mutex::new(chrono::DateTime::<chrono::Utc>::MIN_UTC)),
             raw_config: None,
             subscriber_notify: Arc::new(Notify::new()),
+            subscriber_ready: Arc::new(AtomicBool::new(false)),
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
             position_comparator: Arc::new(RwLock::new(None)),
             sequence_position_map: Arc::new(RwLock::new(BTreeMap::new())),
@@ -717,6 +723,7 @@ impl SourceBase {
             dispatch_order: self.dispatch_order.clone(),
             raw_config: self.raw_config.clone(),
             subscriber_notify: self.subscriber_notify.clone(),
+            subscriber_ready: self.subscriber_ready.clone(),
             subscriber_resume_positions: self.subscriber_resume_positions.clone(),
             position_comparator: self.position_comparator.clone(),
             sequence_position_map: self.sequence_position_map.clone(),
@@ -770,7 +777,9 @@ impl SourceBase {
                 // For broadcast mode, use the single dispatcher
                 let dispatchers = self.dispatchers.read().await;
                 if let Some(dispatcher) = dispatchers.first() {
-                    dispatcher.create_receiver().await?
+                    let receiver = dispatcher.create_receiver().await?;
+                    self.mark_subscriber_ready();
+                    receiver
                 } else {
                     return Err(anyhow::anyhow!("No broadcast dispatcher available"));
                 }
@@ -785,17 +794,20 @@ impl SourceBase {
                 // Add the new dispatcher to our list
                 let mut dispatchers = self.dispatchers.write().await;
                 dispatchers.push(Box::new(dispatcher));
+                self.mark_subscriber_ready();
 
                 receiver
             }
         };
 
-        // Wake any task blocked in wait_for_subscribers().
-        // Use notify_one() which stores a permit even if no one is waiting yet,
-        // avoiding a race between the dispatchers check and the await.
-        self.subscriber_notify.notify_one();
-
         Ok(receiver)
+    }
+
+    fn mark_subscriber_ready(&self) {
+        self.subscriber_ready.store(true, Ordering::Release);
+        // notify_one stores a permit if the waiter has not reached notified()
+        // yet, closing the check-then-wait race.
+        self.subscriber_notify.notify_one();
     }
 
     /// Wait until at least one subscriber has registered.
@@ -806,15 +818,13 @@ impl SourceBase {
     /// be silently dropped, advancing the checkpoint past changes that no
     /// subscriber ever received.
     ///
-    /// Returns immediately if at least one dispatcher already exists (fresh
-    /// start with bootstrap, or broadcast mode which always has one).
+    /// Returns immediately if a receiver has registered during the current
+    /// source lifecycle.
     pub async fn wait_for_subscribers(&self) {
         loop {
-            let dispatchers = self.dispatchers.read().await;
-            if !dispatchers.is_empty() {
+            if self.subscriber_ready.load(Ordering::Acquire) {
                 return;
             }
-            drop(dispatchers);
             self.subscriber_notify.notified().await;
         }
     }
@@ -1053,9 +1063,8 @@ impl SourceBase {
 
         // Add dispatcher to live list — after lock release, live events flow to it
         dispatchers.push(Box::new(dispatcher));
+        self.mark_subscriber_ready();
         drop(dispatchers);
-
-        self.subscriber_notify.notify_one();
 
         // Read WAL events (after releasing lock — I/O can be slow).
         // Filter to only include events up to the captured head to avoid
@@ -1623,12 +1632,9 @@ impl SourceBase {
         // new subscribe() call creates fresh dispatchers, silently dropping
         // events while still advancing the checkpoint LSN.
         //
-        // Broadcast mode keeps a single persistent dispatcher that hands
-        // out receivers; channel mode creates one dispatcher per subscriber.
-        if self.dispatch_mode == DispatchMode::Channel {
-            let mut dispatchers = self.dispatchers.write().await;
-            dispatchers.clear();
-        }
+        // Broadcast mode keeps its dispatcher, but both modes must require a
+        // fresh receiver before the next lifecycle starts producing events.
+        self.clear_dispatchers().await;
 
         self.set_status(
             ComponentStatus::Stopped,
@@ -1661,9 +1667,16 @@ impl SourceBase {
     /// suppressed). The filter state is rebuilt cleanly from each subscriber's
     /// `resume_from` when it re-subscribes.
     pub async fn clear_dispatchers(&self) {
+        // Synchronize lifecycle reset with receiver creation in both modes.
+        // Receiver creation marks readiness while holding this lock.
+        let mut dispatchers = self.dispatchers.write().await;
         if self.dispatch_mode == DispatchMode::Channel {
-            let mut dispatchers = self.dispatchers.write().await;
             dispatchers.clear();
+        }
+        self.subscriber_ready.store(false, Ordering::Release);
+        drop(dispatchers);
+
+        if self.dispatch_mode == DispatchMode::Channel {
             self.subscriber_resume_positions.write().await.clear();
         }
     }
@@ -2216,6 +2229,80 @@ mod tests {
         );
         wrapper.source_position = position.map(|p| bytes::Bytes::from(p.to_vec()));
         wrapper
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_waits_for_receiver_before_dispatching_startup_batch() {
+        let params =
+            SourceBaseParams::new("broadcast-ready").with_dispatch_mode(DispatchMode::Broadcast);
+        let base = SourceBase::new(params).unwrap();
+
+        let mut ready = Box::pin(base.wait_for_subscribers());
+        assert!(matches!(
+            futures::poll!(ready.as_mut()),
+            std::task::Poll::Pending
+        ));
+
+        let mut receiver = base.create_streaming_receiver().await.unwrap();
+        assert!(matches!(
+            futures::poll!(ready.as_mut()),
+            std::task::Poll::Ready(())
+        ));
+
+        base.dispatch_events_batch(vec![
+            make_event("broadcast-ready", Some(b"\x01")),
+            make_event("broadcast-ready", Some(b"\x02")),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(receiver.recv().await.unwrap().sequence, Some(1));
+        assert_eq!(receiver.recv().await.unwrap().sequence, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_late_broadcast_subscriber_does_not_receive_history() {
+        let params =
+            SourceBaseParams::new("broadcast-live").with_dispatch_mode(DispatchMode::Broadcast);
+        let base = SourceBase::new(params).unwrap();
+
+        base.dispatch_event(make_event("broadcast-live", Some(b"\x01")))
+            .await
+            .unwrap();
+
+        let mut receiver = base.create_streaming_receiver().await.unwrap();
+        base.dispatch_event(make_event("broadcast-live", Some(b"\x02")))
+            .await
+            .unwrap();
+
+        let received = receiver.recv().await.unwrap();
+        assert_eq!(received.sequence, Some(2));
+        assert_eq!(
+            received.source_position.as_deref(),
+            Some(b"\x02".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_dispatchers_resets_broadcast_readiness() {
+        let params =
+            SourceBaseParams::new("broadcast-restart").with_dispatch_mode(DispatchMode::Broadcast);
+        let base = SourceBase::new(params).unwrap();
+
+        let receiver = base.create_streaming_receiver().await.unwrap();
+        base.wait_for_subscribers().await;
+        drop(receiver);
+        base.clear_dispatchers().await;
+
+        let mut ready = Box::pin(base.wait_for_subscribers());
+        assert!(matches!(
+            futures::poll!(ready.as_mut()),
+            std::task::Poll::Pending
+        ));
+        drop(ready);
+
+        let _receiver = base.create_streaming_receiver().await.unwrap();
+        base.wait_for_subscribers().await;
     }
 
     #[tokio::test]
@@ -3422,6 +3509,12 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let mut ready = Box::pin(base.wait_for_subscribers());
+        assert!(matches!(
+            futures::poll!(ready.as_mut()),
+            std::task::Poll::Ready(())
+        ));
 
         base.dispatch_event(make_event("replay-floor", Some(&[0xCD])))
             .await
