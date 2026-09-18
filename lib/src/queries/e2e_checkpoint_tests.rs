@@ -326,9 +326,211 @@ async fn wait_for_status(core: &DrasiLib, component_id: &str, expected: Componen
     .unwrap_or_else(|e| panic!("wait_for_status({component_id}, {expected:?}) failed: {e}"));
 }
 
+async fn wait_for_outbox_sequence(
+    core: &DrasiLib,
+    query_id: &str,
+    sequence: u64,
+) -> super::OutboxResponse {
+    let query = core
+        .query_manager()
+        .get_query_instance(query_id)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let outbox = query.fetch_outbox(0).await.unwrap();
+            if outbox.latest_sequence >= sequence {
+                return outbox;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("query must commit the expected output sequence")
+}
+
 // ============================================================================
 // E2E Tests
 // ============================================================================
+
+#[rstest::rstest]
+#[case::insert_only(1, false)]
+#[case::named_update(2, false)]
+#[case::malformed_legacy_update(2, true)]
+#[tokio::test]
+#[serial]
+async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy_compact: bool) {
+    use crate::channels::{QueryResult, ResultDiff, SourceEvent};
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+    use serde_json::json;
+
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("outbox-reopen", &tmp_dir, Some(RecoveryPolicy::Strict))
+        .await
+        .unwrap();
+    let source = E2eTestSource::new("outbox-src", true).unwrap();
+    let event_tx = source.event_sender();
+    core.add_source(source).await.unwrap();
+    core.add_query(make_persistent_query("outbox-q", "outbox-src", None))
+        .await
+        .unwrap();
+    core.start().await.unwrap();
+    core.start_source("outbox-src").await.unwrap();
+    core.start_query("outbox-q").await.unwrap();
+    send_event(&event_tx, "outbox-src", 1, b"pos-1").await;
+    if sequence == 2 {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("id", ElementValue::String("node-1".into()));
+        properties.insert("value", ElementValue::Integer(2));
+        let mut event = SourceEventWrapper::new(
+            "outbox-src".to_string(),
+            SourceEvent::Change(SourceChange::Update {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("outbox-src", "node-1"),
+                        labels: Arc::from(vec![Arc::from("Node")]),
+                        effective_from: 1,
+                    },
+                    properties,
+                },
+            }),
+            chrono::Utc::now(),
+        );
+        event.sequence = Some(2);
+        event.source_position = Some(Bytes::from_static(b"pos-2"));
+        event_tx
+            .read()
+            .await
+            .as_ref()
+            .expect("subscribed source")
+            .send(Arc::new(event))
+            .await
+            .unwrap();
+    }
+    let before = wait_for_outbox_sequence(&core, "outbox-q", sequence).await;
+    assert_eq!(before.latest_sequence, sequence);
+    assert_eq!(before.results.len(), sequence as usize);
+    let signature = match &before.results[0].results[0] {
+        ResultDiff::Add {
+            data,
+            row_signature,
+        } => {
+            assert_eq!(*data, json!({"id": "node-1", "value": 1}));
+            *row_signature
+        }
+        other => panic!("expected initial insert, got {other:?}"),
+    };
+    if sequence == 2 {
+        assert_eq!(
+            before.results[1].results,
+            vec![ResultDiff::Update {
+                data: json!({"id": "node-1", "value": 2}),
+                before: json!({"id": "node-1", "value": 1}),
+                after: json!({"id": "node-1", "value": 2}),
+                grouping_keys: None,
+                row_signature: signature,
+            }]
+        );
+    }
+    core.shutdown().await.unwrap();
+    drop(core);
+
+    let legacy_entries = if legacy_compact {
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+        let indexes = provider.create_indexes("outbox-q").await.unwrap();
+        let writer = indexes.outbox_writer.as_ref().unwrap();
+        let mut entries = writer.read_from("outbox-q", 0).await.unwrap();
+        for (sequence, bytes) in &mut entries {
+            let result: QueryResult = rmp_serde::from_slice(bytes).unwrap();
+            *bytes = rmp_serde::to_vec(&result).unwrap();
+            writer.append("outbox-q", *sequence, bytes).await.unwrap();
+        }
+        Some(entries)
+    } else {
+        None
+    };
+
+    let reopened = build_e2e_lib("outbox-reopen", &tmp_dir, Some(RecoveryPolicy::Strict))
+        .await
+        .unwrap();
+    let source = E2eTestSource::new("outbox-src", true).unwrap();
+    let resume_sequence = source.last_resume_sequence();
+    let event_tx = source.event_sender();
+    reopened.add_source(source).await.unwrap();
+    reopened
+        .add_query(make_persistent_query("outbox-q", "outbox-src", None))
+        .await
+        .unwrap();
+    reopened.start().await.unwrap();
+    reopened.start_source("outbox-src").await.unwrap();
+    let started = reopened.start_query("outbox-q").await;
+    if let Some(legacy_entries) = legacy_entries {
+        let error = started.expect_err("malformed legacy output must fail Strict recovery");
+        let message = format!("{error:#}");
+        assert!(message.contains("sequence 2"), "{message}");
+        assert!(message.contains("expected a sequence"), "{message}");
+        assert!(message.contains("Strict recovery policy"), "{message}");
+        wait_for_status(&reopened, "outbox-q", ComponentStatus::Error).await;
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+        let indexes = provider.create_indexes("outbox-q").await.unwrap();
+        assert_eq!(
+            indexes
+                .outbox_writer
+                .as_ref()
+                .unwrap()
+                .read_from("outbox-q", 0)
+                .await
+                .unwrap(),
+            legacy_entries,
+            "Strict recovery must preserve the malformed records"
+        );
+        return;
+    }
+    started.expect("fresh persistent reopen must hydrate ordinary query updates");
+    assert_eq!(*resume_sequence.read().await, Some(sequence));
+    let query = reopened
+        .query_manager()
+        .get_query_instance("outbox-q")
+        .await
+        .unwrap();
+    let snapshot = query.fetch_snapshot().await.unwrap();
+    assert_eq!(snapshot.as_of_sequence, sequence);
+    assert_eq!(
+        snapshot.to_vec(),
+        vec![json!({"id": "node-1", "value": sequence})]
+    );
+    let restored = query.fetch_outbox(0).await.unwrap();
+    assert_eq!(restored.latest_sequence, sequence);
+    assert_eq!(restored.config_hash, before.config_hash);
+    assert_eq!(restored.output_generation, before.output_generation);
+    assert_eq!(restored.results.len(), before.results.len());
+    for (index, (restored, original)) in restored.results.iter().zip(&before.results).enumerate() {
+        assert_eq!(restored.sequence, index as u64 + 1);
+        assert_eq!(restored.query_id, original.query_id);
+        assert_eq!(restored.timestamp, original.timestamp);
+        assert_eq!(restored.results, original.results);
+        assert_eq!(restored.metadata, original.metadata);
+        assert!(restored.profiling.is_some());
+    }
+    assert_eq!(
+        query
+            .fetch_outbox(sequence - 1)
+            .await
+            .unwrap()
+            .results
+            .len(),
+        1
+    );
+    send_event(&event_tx, "outbox-src", sequence + 1, b"pos-next").await;
+    let continued = wait_for_outbox_sequence(&reopened, "outbox-q", sequence + 1).await;
+    assert_eq!(continued.latest_sequence, sequence + 1);
+    assert_eq!(continued.results.last().unwrap().sequence, sequence + 1);
+    reopened.shutdown().await.unwrap();
+}
 
 /// Full lifecycle: build → start → feed events → stop → restart → verify resume_from.
 #[tokio::test]
