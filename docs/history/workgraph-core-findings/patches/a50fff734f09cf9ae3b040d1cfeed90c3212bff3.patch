@@ -1,0 +1,14 @@
+diff --git a/middleware/README.md b/middleware/README.md
+index 065d9f92a8d8d5f441811fc67a2ebc75b67b836b..b6773be4bda1be81cf91427137d55a658959dca2 100644
+--- a/middleware/README.md
++++ b/middleware/README.md
+@@ -111,8 +111,7 @@ middleware:
+       mappings:
+         Comment:
+           insert: &event_mappings
+-            - op: Insert
+-              elementType: Node
++            - elementType: Node
+               label: '"Event"'
+               id: .id
+               query: 'if .event then .event else empty end'
