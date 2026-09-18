@@ -24,6 +24,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::queries::{FetchError, OutboxGap};
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
     CapacityPolicy, DrasiLib, DurabilityConfig, IndexBackendPlugin, Reaction, ReactionBase,
@@ -348,6 +349,8 @@ struct FixtureOpts {
     query_policy: RecoveryPolicy,
     include_reaction: bool,
     snapshot_on_fresh: bool,
+    reaction_policy: ReactionRecoveryPolicy,
+    outbox_capacity: usize,
 }
 
 impl Default for FixtureOpts {
@@ -356,6 +359,8 @@ impl Default for FixtureOpts {
             query_policy: RecoveryPolicy::Strict,
             include_reaction: true,
             snapshot_on_fresh: true,
+            reaction_policy: ReactionRecoveryPolicy::Strict,
+            outbox_capacity: 32,
         }
     }
 }
@@ -396,7 +401,7 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
                 .from_source(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(false)
-                .with_outbox_capacity(32)
+                .with_outbox_capacity(opts.outbox_capacity)
                 .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
                 .with_recovery_policy(opts.query_policy)
                 .build(),
@@ -406,11 +411,11 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
         .with_wal_provider(wal);
 
     if opts.include_reaction {
-        let reaction = if opts.snapshot_on_fresh {
-            DurableRecordingReaction::new(paths.journal.clone(), ReactionRecoveryPolicy::Strict)
-        } else {
-            DurableRecordingReaction::trigger(paths.journal.clone(), ReactionRecoveryPolicy::Strict)
-        };
+        let reaction = DurableRecordingReaction::with_snapshot(
+            paths.journal.clone(),
+            opts.reaction_policy,
+            opts.snapshot_on_fresh,
+        );
         builder = builder.with_reaction(reaction);
     }
 
@@ -1215,6 +1220,332 @@ async fn overwrite_outbox_with_garbage(paths: &FixturePaths, sequence: u64) -> R
     Ok(())
 }
 
+const OVERFLOW_OUTBOX_CAPACITY: usize = 2;
+const OVERFLOW_CHECKPOINT: u64 = 1;
+const OVERFLOW_EARLIEST: u64 = 5;
+const OVERFLOW_HWM: u64 = 6;
+
+fn overflow_people() -> Vec<PersonRow> {
+    vec![
+        person("p1", "Alice", true),
+        person("p2", "Bob", false),
+        person("p3", "Carol", true),
+        person("p4", "Dave", false),
+        person("p5", "Eve", true),
+        person("p6", "Frank", false),
+    ]
+}
+
+fn overflow_snapshot() -> SnapshotObservation {
+    SnapshotObservation {
+        sequence: OVERFLOW_HWM,
+        people: overflow_people(),
+    }
+}
+
+fn overflow_fixture_opts(
+    reaction_policy: ReactionRecoveryPolicy,
+    snapshot_on_fresh: bool,
+) -> FixtureOpts {
+    FixtureOpts {
+        reaction_policy,
+        snapshot_on_fresh,
+        outbox_capacity: OVERFLOW_OUTBOX_CAPACITY,
+        ..Default::default()
+    }
+}
+
+async fn durable_outbox_sequences(paths: &FixturePaths) -> Result<Vec<u64>> {
+    let provider = RocksDbIndexProvider::new(&paths.rocks, false, false);
+    let created = provider.create_indexes(QUERY_ID).await?;
+    let writer = created
+        .outbox_writer
+        .as_ref()
+        .context("RocksDB outbox writer missing")?;
+    let entries = writer
+        .read_from(QUERY_ID, 0)
+        .await
+        .context("read durable outbox after restart")?;
+    Ok(entries.into_iter().map(|(sequence, _)| sequence).collect())
+}
+
+async fn wait_for_query_sequence(core: &DrasiLib, expected: u64) -> Result<SnapshotObservation> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let observation = observe_snapshot(core).await?;
+        if observation.sequence >= expected {
+            return Ok(observation);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for query sequence {expected}, last={observation:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn assert_outbox_gap(
+    core: &DrasiLib,
+    requested: u64,
+    earliest_available: u64,
+    latest_sequence: u64,
+) -> Result<()> {
+    let query = query_instance(core).await?;
+    match query.fetch_outbox(requested).await {
+        Err(FetchError::OutboxGap(OutboxGap {
+            requested: got_requested,
+            earliest_available: got_earliest,
+            latest_sequence: got_latest,
+            ..
+        })) => {
+            anyhow::ensure!(
+                got_requested == requested
+                    && got_earliest == earliest_available
+                    && got_latest == latest_sequence,
+                "OutboxGap mismatch: expected requested={requested} earliest={earliest_available} latest={latest_sequence}, got requested={got_requested} earliest={got_earliest} latest={got_latest}"
+            );
+            Ok(())
+        }
+        Ok(response) => anyhow::bail!(
+            "expected OutboxGap after {requested}, got sequences {:?}",
+            response
+                .results
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>()
+        ),
+        Err(error) => Err(anyhow::anyhow!("fetch_outbox({requested}) failed: {error}")),
+    }
+}
+
+async fn seed_overflow_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture_opts(
+        paths,
+        overflow_fixture_opts(ReactionRecoveryPolicy::Strict, false),
+    )
+    .await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, SOURCE_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+
+    insert_person(&fixture.source, "p1", "Alice", true).await?;
+    let initial_records = wait_for_journal_sequences(&paths.journal, 1).await?;
+    assert_eq!(
+        journal_emissions(&initial_records)?,
+        vec![add_emission(1, "p1", "Alice", true)]
+    );
+    let checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 1).await?;
+    assert_eq!(checkpoint.sequence, OVERFLOW_CHECKPOINT);
+
+    fixture.core.stop_reaction(REACTION_ID).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Stopped).await?;
+
+    insert_person(&fixture.source, "p2", "Bob", false).await?;
+    insert_person(&fixture.source, "p3", "Carol", true).await?;
+    insert_person(&fixture.source, "p4", "Dave", false).await?;
+    insert_person(&fixture.source, "p5", "Eve", true).await?;
+    insert_person(&fixture.source, "p6", "Frank", false).await?;
+    let seeded = wait_for_query_sequence(&fixture.core, OVERFLOW_HWM).await?;
+    assert_eq!(
+        seeded,
+        overflow_snapshot(),
+        "seed snapshot must retain all six people before the process exits"
+    );
+
+    assert_outbox_gap(
+        &fixture.core,
+        OVERFLOW_CHECKPOINT,
+        OVERFLOW_EARLIEST,
+        OVERFLOW_HWM,
+    )
+    .await?;
+
+    let query = query_instance(&fixture.core).await?;
+    let retained = query.fetch_outbox(OVERFLOW_EARLIEST - 1).await?;
+    assert_eq!(
+        retained
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![OVERFLOW_EARLIEST, OVERFLOW_HWM]
+    );
+    assert_eq!(retained.latest_sequence, OVERFLOW_HWM);
+    assert_eq!(retained.results.len(), OVERFLOW_OUTBOX_CAPACITY);
+
+    let stopped_records = read_journal(&paths.journal)?;
+    assert_eq!(
+        journal_sequences(&stopped_records),
+        vec![1],
+        "the stopped reaction must not observe overflow results before reconstruction"
+    );
+
+    fixture.state_store.sync().await?;
+    let readiness = SeedReadiness {
+        query_sequence: OVERFLOW_HWM,
+        reaction_checkpoint: OVERFLOW_CHECKPOINT,
+        outbox_sequences: vec![OVERFLOW_EARLIEST, OVERFLOW_HWM],
+        journal_sequences: journal_sequences(&stopped_records),
+    };
+    write_synced_file(&paths.ready, &serde_json::to_vec(&readiness)?)?;
+    std::process::exit(0);
+}
+
+async fn assert_overflow_ring_after_hydrate(core: &DrasiLib) -> Result<()> {
+    wait_for_status(core, QUERY_ID, ComponentStatus::Running).await?;
+    let snapshot = wait_for_query_sequence(core, OVERFLOW_HWM).await?;
+    assert_eq!(
+        snapshot,
+        overflow_snapshot(),
+        "hydrate must restore all six people, not a truncated live set"
+    );
+    assert_outbox_gap(core, OVERFLOW_CHECKPOINT, OVERFLOW_EARLIEST, OVERFLOW_HWM).await?;
+    let query = query_instance(core).await?;
+    let retained = query.fetch_outbox(OVERFLOW_EARLIEST - 1).await?;
+    assert_eq!(
+        retained
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![OVERFLOW_EARLIEST, OVERFLOW_HWM]
+    );
+    assert_eq!(retained.latest_sequence, OVERFLOW_HWM);
+    Ok(())
+}
+
+async fn assert_durable_overflow_ring(paths: &FixturePaths) -> Result<()> {
+    let sequences = durable_outbox_sequences(paths).await?;
+    anyhow::ensure!(
+        sequences.len() <= OVERFLOW_OUTBOX_CAPACITY,
+        "durable outbox exceeded capacity after restart: {sequences:?}"
+    );
+    anyhow::ensure!(
+        sequences == vec![OVERFLOW_EARLIEST, OVERFLOW_HWM],
+        "durable outbox must match the in-memory ring after restart, got {sequences:?}"
+    );
+    Ok(())
+}
+
+async fn recover_overflow_strict_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture_opts(
+        paths,
+        overflow_fixture_opts(ReactionRecoveryPolicy::Strict, false),
+    )
+    .await?;
+    let _ = fixture.core.start().await;
+    assert_overflow_ring_after_hydrate(&fixture.core).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Error).await?;
+
+    let historical = read_journal(&paths.journal)?;
+    assert_eq!(
+        journal_sequences(&historical),
+        vec![1],
+        "Strict must not replay the missing overflow range"
+    );
+
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
+async fn recover_overflow_autoreset_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture_opts(
+        paths,
+        overflow_fixture_opts(ReactionRecoveryPolicy::AutoReset, true),
+    )
+    .await?;
+    fixture.core.start().await?;
+    assert_overflow_ring_after_hydrate(&fixture.core).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+
+    let checkpoint =
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), OVERFLOW_HWM).await?;
+    assert_eq!(checkpoint.sequence, OVERFLOW_HWM);
+    assert_ne!(checkpoint.config_hash, 0);
+
+    let snapshot = observe_snapshot(&fixture.core).await?;
+    assert_eq!(snapshot, overflow_snapshot());
+
+    let records = read_journal(&paths.journal)?;
+    assert_eq!(
+        journal_sequences(&records),
+        vec![1],
+        "AutoReset must not replay C+1..E-1 as live side effects; got {:?}",
+        journal_sequences(&records)
+    );
+    let applied: Vec<&JournalRecord> = records
+        .iter()
+        .filter(|record| matches!(record, JournalRecord::Snapshot { sequence, .. } if *sequence == OVERFLOW_HWM))
+        .collect();
+    anyhow::ensure!(
+        !applied.is_empty(),
+        "AutoReset must apply a snapshot at HWM"
+    );
+    for record in applied {
+        if let JournalRecord::Snapshot { rows, .. } = record {
+            assert_eq!(
+                sorted_people(rows)?,
+                overflow_people(),
+                "AutoReset snapshot side effect must include all six people"
+            );
+        }
+    }
+    let snapshot_seqs: Vec<u64> = records
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::Snapshot { sequence, .. } => Some(*sequence),
+            JournalRecord::Result { .. } => None,
+        })
+        .collect();
+    anyhow::ensure!(
+        !snapshot_seqs
+            .iter()
+            .any(|sequence| (OVERFLOW_CHECKPOINT + 1..OVERFLOW_EARLIEST).contains(sequence)),
+        "AutoReset must not snapshot-apply the missing range, got {snapshot_seqs:?}"
+    );
+
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
+async fn recover_overflow_autoskip_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture_opts(
+        paths,
+        overflow_fixture_opts(ReactionRecoveryPolicy::AutoSkipGap, false),
+    )
+    .await?;
+    fixture.core.start().await?;
+    assert_overflow_ring_after_hydrate(&fixture.core).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+
+    let checkpoint =
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), OVERFLOW_HWM).await?;
+    assert_eq!(checkpoint.sequence, OVERFLOW_HWM);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let historical = read_journal(&paths.journal)?;
+    assert_eq!(
+        journal_sequences(&historical),
+        vec![1],
+        "AutoSkipGap must not replay the missing overflow range; got {:?}",
+        journal_sequences(&historical)
+    );
+    let snapshots: Vec<u64> = historical
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::Snapshot { sequence, .. } => Some(*sequence),
+            JournalRecord::Result { .. } => None,
+        })
+        .collect();
+    anyhow::ensure!(
+        !snapshots.contains(&OVERFLOW_HWM),
+        "AutoSkipGap must not snapshot-apply at HWM, got {snapshots:?}"
+    );
+
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
 fn write_synced_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut file =
         File::create(path).with_context(|| format!("create synced file {}", path.display()))?;
@@ -1987,6 +2318,62 @@ async fn rocksdb_redb_corrupt_outbox_payload_autoreset_wipes() -> Result<()> {
     Ok(())
 }
 
+async fn run_overflow_reconstruction(recover_phase: &str) -> Result<()> {
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed_overflow", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed_overflow", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    if let Err(error) = assert_durable_overflow_ring(&paths).await {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+
+    let recover = run_phase(recover_phase, &paths)?;
+    let recover_error = (!recover.status.success()).then(|| child_failure(recover_phase, &recover));
+    let ring_error = assert_durable_overflow_ring(&paths).await.err();
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = recover_error {
+        anyhow::bail!(message);
+    }
+    if let Some(error) = ring_error {
+        return Err(error);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_overflow_gap_strict() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+    run_overflow_reconstruction("recover_overflow_strict").await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_overflow_gap_autoreset() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+    run_overflow_reconstruction("recover_overflow_autoreset").await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_overflow_gap_autoskip() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+    run_overflow_reconstruction("recover_overflow_autoskip").await
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn reaction_recovery_conformance_phase() -> Result<()> {
     match std::env::var(PHASE_ENV) {
@@ -2026,6 +2413,18 @@ async fn reaction_recovery_conformance_phase() -> Result<()> {
         }
         Ok(phase) if phase == "recover_fail_effect_again" => {
             recover_fail_effect_again_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "seed_overflow" => {
+            seed_overflow_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "recover_overflow_strict" => {
+            recover_overflow_strict_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "recover_overflow_autoreset" => {
+            recover_overflow_autoreset_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "recover_overflow_autoskip" => {
+            recover_overflow_autoskip_phase(&FixturePaths::from_env()?).await
         }
         Ok(other) => anyhow::bail!("unknown conformance phase '{other}'"),
         Err(std::env::VarError::NotPresent) => Ok(()),

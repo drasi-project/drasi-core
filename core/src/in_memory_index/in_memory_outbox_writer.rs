@@ -89,6 +89,20 @@ impl OutboxWriter for InMemoryOutboxWriter {
         Ok(())
     }
 
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        let mut store = self.data.write().await;
+        let map = match store.get_mut(query_id) {
+            Some(map) => map,
+            None => return Ok(0),
+        };
+        let keys_to_remove: Vec<u64> = map.range(..retain_from).map(|(key, _)| *key).collect();
+        let removed = keys_to_remove.len();
+        for key in keys_to_remove {
+            map.remove(&key);
+        }
+        Ok(removed)
+    }
+
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let mut store = self.data.write().await;
         let map = match store.get_mut(query_id) {
@@ -172,6 +186,120 @@ mod tests {
         writer.append("q1", 1, b"data").await.unwrap();
         let removed = writer.trim_to_capacity("q1", 5).await.unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_trim_before() {
+        let writer = InMemoryOutboxWriter::new();
+        for i in 1..=5 {
+            writer.append("q1", i, b"data").await.unwrap();
+        }
+        let removed = writer.trim_before("q1", 4).await.unwrap();
+        assert_eq!(removed, 3);
+
+        let entries = writer.read_from("q1", 0).await.unwrap();
+        assert_eq!(
+            entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trim_before_no_op() {
+        let writer = InMemoryOutboxWriter::new();
+        writer.append("q1", 5, b"data").await.unwrap();
+        let removed = writer.trim_before("q1", 5).await.unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(writer.read_from("q1", 0).await.unwrap().len(), 1);
+    }
+
+    struct LegacyOutbox(InMemoryOutboxWriter);
+
+    #[async_trait]
+    impl OutboxWriter for LegacyOutbox {
+        async fn append(
+            &self,
+            query_id: &str,
+            sequence: u64,
+            data: &[u8],
+        ) -> Result<(), IndexError> {
+            self.0.append(query_id, sequence, data).await
+        }
+
+        async fn read_from(
+            &self,
+            query_id: &str,
+            after_sequence: u64,
+        ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+            self.0.read_from(query_id, after_sequence).await
+        }
+
+        async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+            self.0.read_latest_sequence(query_id).await
+        }
+
+        async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+            self.0.clear(query_id).await
+        }
+
+        async fn trim_to_capacity(
+            &self,
+            query_id: &str,
+            capacity: usize,
+        ) -> Result<usize, IndexError> {
+            self.0.trim_to_capacity(query_id, capacity).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_append_and_trim_keeps_tail() {
+        let writer = InMemoryOutboxWriter::new();
+        writer.append("q1", 1, b"a").await.unwrap();
+        writer.append("q1", 2, b"b").await.unwrap();
+        let removed = writer.append_and_trim("q1", 3, b"c", 2).await.unwrap();
+        assert_eq!(removed, 1);
+        let entries = writer.read_from("q1", 0).await.unwrap();
+        assert_eq!(
+            entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_trim_before_on_gapped_outbox_keeps_sequence_window() {
+        let writer = LegacyOutbox(InMemoryOutboxWriter::new());
+        writer.append("q1", 1, b"a").await.unwrap();
+        writer.append("q1", 2, b"b").await.unwrap();
+        writer.append("q1", 3, b"c").await.unwrap();
+        writer.append("q1", 5, b"e").await.unwrap();
+        writer.trim_before("q1", 4).await.unwrap();
+        let seqs: Vec<u64> = writer
+            .read_from("q1", 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+        assert_eq!(
+            seqs,
+            vec![5],
+            "default trim_before must keep sequences >= retain_from, not the newest N by count"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_trim_before_uses_trim_to_capacity() {
+        let writer = LegacyOutbox(InMemoryOutboxWriter::new());
+        for i in 1..=10 {
+            writer.append("q1", i, b"data").await.unwrap();
+        }
+        let removed = writer.trim_before("q1", 8).await.unwrap();
+        assert_eq!(removed, 7);
+        let entries = writer.read_from("q1", 0).await.unwrap();
+        assert_eq!(
+            entries.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![8, 9, 10]
+        );
     }
 
     #[tokio::test]
