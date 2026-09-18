@@ -412,6 +412,13 @@ let config: QueryConfig = core.get_query_config("my-query").await?;
 let config: DrasiLibConfig = core.get_current_config().await?;
 ```
 
+Aggregate snapshots use the engine's grouping identity even when an ordinary
+`RETURN` follows an aggregating `WITH`. Queries with output persisted by an older,
+contributor-keyed engine need an explicit reconstruction; upgrading does not
+automatically rekey historical rows. See
+[aggregate result identity and migration boundaries](../docs/aggregate-result-identity.md)
+for regression coverage, empty-group semantics, and compatibility limits.
+
 ### `ComponentStatus` Values
 
 | Status | Meaning |

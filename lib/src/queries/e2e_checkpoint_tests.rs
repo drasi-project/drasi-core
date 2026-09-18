@@ -982,3 +982,393 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
 
     core.stop_query("cfg-q").await.unwrap();
 }
+
+mod aggregate_snapshot_tests {
+    use super::*;
+    use crate::channels::{QuerySubscriptionResponse, ResultDiff};
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+    use serde_json::{json, Value};
+    use std::time::Duration;
+    use tokio::time::timeout;
+    use tokio_stream::StreamExt;
+
+    const SOURCE: &str = "aggregate-src";
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    struct PersistentAggregate {
+        core: Arc<DrasiLib>,
+        query: Arc<dyn crate::queries::Query>,
+        event_tx: Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
+        subscription: QuerySubscriptionResponse,
+    }
+
+    impl PersistentAggregate {
+        async fn open(tmp: &tempfile::TempDir, query_id: &str) -> Self {
+            let core = build_e2e_lib("aggregate-persistence", tmp, None)
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+            let source = E2eTestSource::new(SOURCE, true).unwrap();
+            let event_tx = source.event_sender();
+            core.add_source(source).await.unwrap();
+            core.start_source(SOURCE).await.unwrap();
+            wait_for_status(&core, SOURCE, ComponentStatus::Running).await;
+
+            let config = Query::cypher(query_id)
+                .query(
+                    "MATCH (n:Node)
+                     WITH sum(n.value) AS totalValue, sum(n.cost) AS totalCost,
+                          count(n) AS positionCount
+                     RETURN totalValue, totalCost, positionCount",
+                )
+                .from_source(SOURCE)
+                .auto_start(false)
+                .enable_bootstrap(false)
+                .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+                .build();
+            core.add_query(config).await.unwrap();
+            core.start_query(query_id).await.unwrap();
+            wait_for_status(&core, query_id, ComponentStatus::Running).await;
+            let query = core
+                .query_manager()
+                .get_query_instance(query_id)
+                .await
+                .unwrap();
+            let subscription = query
+                .subscribe("persistence-regression".into())
+                .await
+                .unwrap();
+            Self {
+                core,
+                query,
+                event_tx,
+                subscription,
+            }
+        }
+
+        async fn send(&mut self, change: SourceChange, sequence: u64) -> Vec<ResultDiff> {
+            let mut event = SourceEventWrapper::new(
+                SOURCE.to_string(),
+                crate::channels::SourceEvent::Change(change),
+                chrono::Utc::now(),
+            );
+            event.sequence = Some(sequence);
+            event.source_position = Some(Bytes::copy_from_slice(&sequence.to_be_bytes()));
+            let sender = self.event_tx.read().await.as_ref().unwrap().clone();
+            sender.send(Arc::new(event)).await.unwrap();
+            timeout(TIMEOUT, self.subscription.receiver.recv())
+                .await
+                .expect("the source change must produce a live delta")
+                .unwrap()
+                .results
+                .clone()
+        }
+
+        async fn assert_snapshot(&self, expected: HashMap<u64, Value>) {
+            let snapshot = timeout(TIMEOUT, self.query.fetch_snapshot())
+                .await
+                .unwrap()
+                .unwrap();
+            let keyed: HashMap<_, _> = snapshot.stream_keyed().collect().await;
+            assert_eq!(keyed, expected);
+            let mut actual = self
+                .core
+                .get_query_results(&self.query.get_config().id)
+                .await
+                .unwrap();
+            let mut expected: Vec<_> = expected.into_values().collect();
+            actual.sort_by_key(Value::to_string);
+            expected.sort_by_key(Value::to_string);
+            assert_eq!(actual, expected);
+        }
+
+        async fn shutdown(self) {
+            self.core.shutdown().await.unwrap();
+        }
+    }
+
+    fn position(id: &str, value: i64, cost: i64, time: u64) -> Element {
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(SOURCE, id),
+                labels: Arc::from([Arc::from("Node")]),
+                effective_from: time,
+            },
+            properties: ElementPropertyMap::from(json!({"value": value, "cost": cost})),
+        }
+    }
+
+    fn summary(value: f64, cost: f64, count: i64) -> Value {
+        json!({"totalValue": value, "totalCost": cost, "positionCount": count})
+    }
+
+    fn update(signature: u64, before: Value, after: Value) -> Vec<ResultDiff> {
+        vec![ResultDiff::Update {
+            data: after.clone(),
+            before,
+            after,
+            grouping_keys: None,
+            row_signature: signature,
+        }]
+    }
+
+    async fn seed(subject: &mut PersistentAggregate, aapl_value: i64) -> u64 {
+        let first = subject
+            .send(
+                SourceChange::Insert {
+                    element: position("aapl", aapl_value, 800, 1),
+                },
+                1,
+            )
+            .await;
+        let signature = match first.as_slice() {
+            [ResultDiff::Add {
+                data,
+                row_signature,
+            }] => {
+                assert_eq!(data, &summary(aapl_value as f64, 800.0, 1));
+                *row_signature
+            }
+            _ => panic!("expected one initial aggregate Add, got {first:?}"),
+        };
+        subject
+            .assert_snapshot(HashMap::from([(
+                signature,
+                summary(aapl_value as f64, 800.0, 1),
+            )]))
+            .await;
+        let second = subject
+            .send(
+                SourceChange::Insert {
+                    element: position("msft", 900, 1000, 2),
+                },
+                2,
+            )
+            .await;
+        assert_eq!(
+            second,
+            update(
+                signature,
+                summary(aapl_value as f64, 800.0, 1),
+                summary((aapl_value + 900) as f64, 1800.0, 2),
+            )
+        );
+        subject
+            .assert_snapshot(HashMap::from([(
+                signature,
+                summary((aapl_value + 900) as f64, 1800.0, 2),
+            )]))
+            .await;
+        signature
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn aggregate_snapshot_persistent_reopen_keeps_group_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut subject = PersistentAggregate::open(&tmp, "persistent-summary").await;
+        let signature = seed(&mut subject, 1100).await;
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Update {
+                        element: position("aapl", 1150, 800, 3),
+                    },
+                    3,
+                )
+                .await,
+            update(
+                signature,
+                summary(2000.0, 1800.0, 2),
+                summary(2050.0, 1800.0, 2)
+            )
+        );
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(2050.0, 1800.0, 2))]))
+            .await;
+        subject.shutdown().await;
+
+        let mut subject = PersistentAggregate::open(&tmp, "persistent-summary").await;
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(2050.0, 1800.0, 2))]))
+            .await;
+        // A different contributor updates the same persisted group after reopen.
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Update {
+                        element: position("msft", 1000, 1000, 4),
+                    },
+                    4,
+                )
+                .await,
+            update(
+                signature,
+                summary(2050.0, 1800.0, 2),
+                summary(2150.0, 1800.0, 2)
+            )
+        );
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(2150.0, 1800.0, 2))]))
+            .await;
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Delete {
+                        metadata: position("msft", 1000, 1000, 5).get_metadata().clone(),
+                    },
+                    5,
+                )
+                .await,
+            update(
+                signature,
+                summary(2150.0, 1800.0, 2),
+                summary(1150.0, 800.0, 1)
+            )
+        );
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(1150.0, 800.0, 1))]))
+            .await;
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Delete {
+                        metadata: position("aapl", 1150, 800, 6).get_metadata().clone(),
+                    },
+                    6,
+                )
+                .await,
+            vec![ResultDiff::Delete {
+                data: summary(1150.0, 800.0, 1),
+                row_signature: signature,
+            }]
+        );
+        subject.assert_snapshot(HashMap::new()).await;
+        subject.shutdown().await;
+
+        let subject = PersistentAggregate::open(&tmp, "persistent-summary").await;
+        subject.assert_snapshot(HashMap::new()).await;
+        subject.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn aggregate_snapshot_legacy_contributor_keys_require_explicit_rebuild() {
+        use drasi_core::{
+            evaluation::functions::FunctionRegistry, interface::RowMutation, query::QueryBuilder,
+        };
+        use drasi_query_cypher::CypherParser;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut subject = PersistentAggregate::open(&tmp, "legacy-summary").await;
+        let signature = seed(&mut subject, 1100).await;
+        subject.shutdown().await;
+
+        let ordinary = QueryBuilder::new(
+            "MATCH (n:Node) RETURN n.value",
+            Arc::new(CypherParser::new(Arc::new(FunctionRegistry::new()))),
+        )
+        .build()
+        .await;
+        let mut contributor_signatures = Vec::new();
+        for element in [position("aapl", 1100, 800, 1), position("msft", 900, 1000, 2)] {
+            let diffs = ordinary
+                .process_source_change(SourceChange::Insert { element })
+                .await
+                .unwrap();
+            assert_eq!(diffs.len(), 1);
+            contributor_signatures.push(diffs[0].row_signature());
+        }
+        let aapl = contributor_signatures[0];
+        let msft = contributor_signatures[1];
+        assert_ne!(aapl, msft);
+        assert_ne!(signature, aapl);
+        assert_ne!(signature, msft);
+
+        // Model a pre-fix live-results table without changing the accumulator or
+        // checkpoint format: intermediate and current rows use MATCH identities.
+        let stale = rmp_serde::to_vec(&summary(1100.0, 800.0, 1)).unwrap();
+        let current = rmp_serde::to_vec(&summary(2000.0, 1800.0, 2)).unwrap();
+        {
+            let indexes = RocksDbIndexProvider::new(tmp.path(), false, false)
+                .create_indexes("legacy-summary")
+                .await
+                .unwrap();
+            indexes
+                .live_results_writer
+                .as_ref()
+                .unwrap()
+                .apply_mutations(
+                    "legacy-summary",
+                    &[
+                        RowMutation {
+                            row_signature: signature,
+                            data: None,
+                        },
+                        RowMutation {
+                            row_signature: aapl,
+                            data: Some(&stale),
+                        },
+                        RowMutation {
+                            row_signature: msft,
+                            data: Some(&current),
+                        },
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut legacy =
+            HashMap::from([(aapl, summary(1100.0, 800.0, 1)), (msft, summary(2000.0, 1800.0, 2))]);
+        let mut subject = PersistentAggregate::open(&tmp, "legacy-summary").await;
+        subject.assert_snapshot(legacy.clone()).await;
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Update {
+                        element: position("aapl", 1150, 800, 3),
+                    },
+                    3
+                )
+                .await,
+            update(
+                signature,
+                summary(2000.0, 1800.0, 2),
+                summary(2050.0, 1800.0, 2)
+            )
+        );
+        subject.shutdown().await;
+
+        // A corrected upsert cannot identify or remove old contributor keys.
+        // Reopening reads all of them; this is a migration limit, not recovery.
+        legacy.insert(signature, summary(2050.0, 1800.0, 2));
+        let subject = PersistentAggregate::open(&tmp, "legacy-summary").await;
+        subject.assert_snapshot(legacy).await;
+        subject.shutdown().await;
+
+        // A new query namespace and complete input reconstruction are an explicit
+        // rebuild, leaving the old namespace intact rather than guessing by value.
+        let mut rebuilt = PersistentAggregate::open(&tmp, "rebuilt-summary").await;
+        rebuilt.assert_snapshot(HashMap::new()).await;
+        assert_eq!(seed(&mut rebuilt, 1150).await, signature);
+        rebuilt.shutdown().await;
+        let indexes = RocksDbIndexProvider::new(tmp.path(), false, false)
+            .create_indexes("legacy-summary")
+            .await
+            .unwrap();
+        assert_eq!(
+            indexes
+                .live_results_writer
+                .as_ref()
+                .unwrap()
+                .read_snapshot("legacy-summary")
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+}
