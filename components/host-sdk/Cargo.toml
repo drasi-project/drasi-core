@@ -63,3 +63,4 @@ serial_test = "3"
 im = "15"
 tokio-stream = "0.1"
 async-stream = "0.3"
+drasi-state-store-redb = { path = "../state_stores/redb" }
