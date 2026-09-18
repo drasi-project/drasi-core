@@ -47,6 +47,12 @@ pub struct ExpressionEvaluator {
     result_index: Arc<dyn ResultIndex>,
 }
 
+#[derive(Clone, Copy)]
+enum LogicalOperator {
+    And,
+    Or,
+}
+
 impl ExpressionEvaluator {
     pub fn new(
         functions: Arc<FunctionRegistry>,
@@ -477,6 +483,42 @@ impl ExpressionEvaluator {
         Ok(result)
     }
 
+    async fn evaluate_logical_expression(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+        left: &ast::Expression,
+        right: &ast::Expression,
+        operator: LogicalOperator,
+    ) -> Result<VariableValue, EvaluationError> {
+        let mut result = matches!(operator, LogicalOperator::And);
+        let mut operands = vec![right, left];
+
+        while let Some(operand) = operands.pop() {
+            match (operator, operand) {
+                (
+                    LogicalOperator::And,
+                    ast::Expression::BinaryExpression(ast::BinaryExpression::And(left, right)),
+                )
+                | (
+                    LogicalOperator::Or,
+                    ast::Expression::BinaryExpression(ast::BinaryExpression::Or(left, right)),
+                ) => {
+                    operands.push(right);
+                    operands.push(left);
+                }
+                _ => {
+                    let value = self.evaluate_predicate(context, operand).await?;
+                    match operator {
+                        LogicalOperator::And => result &= value,
+                        LogicalOperator::Or => result |= value,
+                    }
+                }
+            }
+        }
+
+        Ok(VariableValue::Bool(result))
+    }
+
     #[async_recursion]
     async fn evaluate_binary_expression(
         &self,
@@ -484,14 +526,14 @@ impl ExpressionEvaluator {
         expression: &ast::BinaryExpression,
     ) -> Result<VariableValue, EvaluationError> {
         let result = match expression {
-            ast::BinaryExpression::And(c1, c2) => VariableValue::Bool(
-                self.evaluate_predicate(context, c1).await?
-                    & self.evaluate_predicate(context, c2).await?,
-            ),
-            ast::BinaryExpression::Or(c1, c2) => VariableValue::Bool(
-                self.evaluate_predicate(context, c1).await?
-                    | self.evaluate_predicate(context, c2).await?,
-            ),
+            ast::BinaryExpression::And(c1, c2) => {
+                self.evaluate_logical_expression(context, c1, c2, LogicalOperator::And)
+                    .await?
+            }
+            ast::BinaryExpression::Or(c1, c2) => {
+                self.evaluate_logical_expression(context, c1, c2, LogicalOperator::Or)
+                    .await?
+            }
             ast::BinaryExpression::Eq(e1, e2) => match (
                 self.evaluate_expression(context, e1).await?,
                 self.evaluate_expression(context, e2).await?,
