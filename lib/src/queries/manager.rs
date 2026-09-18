@@ -2206,16 +2206,6 @@ impl Query for DrasiQuery {
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
 
-                            // Dedup: skip events already processed for this source
-                            if dedup.should_skip(&source_id, sequence) {
-                                debug!(
-                                    "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
-                                    seq = sequence,
-                                    cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
-                                );
-                                continue;
-                            }
-
                             match event {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
                                     // Drain all due futures atomically within sessions
@@ -2250,6 +2240,15 @@ impl Query for DrasiQuery {
                                     continue;
                                 }
                                 SourceEvent::Change(source_change) => {
+                                    if dedup.should_skip(&source_id, sequence) {
+                                        debug!(
+                                            "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
+                                            seq = sequence,
+                                            cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
+                                        );
+                                        continue;
+                                    }
+
                                     let mut profiling =
                                         profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
                                     profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
