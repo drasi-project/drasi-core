@@ -7,6 +7,7 @@ on:
       - feature/*
       - feature-lib
       - release/*
+      - agentofreality/core-0.5.8-base
 
 permissions:
   contents: read
