@@ -28,14 +28,18 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     event: Arc<T>,
+    enqueue_order: u64,
 }
 
 impl<T> PriorityQueueEvent<T>
 where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
-    fn new(event: Arc<T>) -> Self {
-        Self { event }
+    fn new(event: Arc<T>, enqueue_order: u64) -> Self {
+        Self {
+            event,
+            enqueue_order,
+        }
     }
 }
 
@@ -46,6 +50,7 @@ where
 {
     fn eq(&self, other: &Self) -> bool {
         self.event.timestamp() == other.event.timestamp()
+            && self.enqueue_order == other.enqueue_order
     }
 }
 
@@ -66,7 +71,11 @@ where
 {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap behavior (oldest first)
-        other.event.timestamp().cmp(&self.event.timestamp())
+        other
+            .event
+            .timestamp()
+            .cmp(&self.event.timestamp())
+            .then_with(|| other.enqueue_order.cmp(&self.enqueue_order))
     }
 }
 
@@ -123,6 +132,9 @@ impl Default for PriorityQueueMetrics {
 
 /// Thread-safe generic priority queue for ordering events by timestamp
 ///
+/// Equal timestamps retain enqueue order. The tie-breaker is shared by clones
+/// and independent of metric resets.
+///
 /// # Backpressure and Dispatch Modes
 ///
 /// This priority queue supports two enqueue strategies:
@@ -158,6 +170,7 @@ where
 {
     /// Internal heap storing events (min-heap by timestamp)
     heap: Arc<Mutex<BinaryHeap<PriorityQueueEvent<T>>>>,
+    next_enqueue_order: Arc<AtomicU64>,
     /// Notification mechanism for waiting on new events
     notify: Arc<Notify>,
     /// Maximum queue capacity (for backpressure)
@@ -174,10 +187,19 @@ where
     pub fn new(max_capacity: usize) -> Self {
         Self {
             heap: Arc::new(Mutex::new(BinaryHeap::new())),
+            next_enqueue_order: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(Notify::new()),
             max_capacity,
             metrics: Arc::new(PriorityQueueMetrics::default()),
         }
+    }
+
+    fn allocate_enqueue_order(&self) -> u64 {
+        self.next_enqueue_order
+            .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("priority queue enqueue order exhausted")
     }
 
     /// Enqueue an event into the priority queue
@@ -210,7 +232,10 @@ where
         }
 
         // Enqueue event
-        heap.push(PriorityQueueEvent::new(event));
+        heap.push(PriorityQueueEvent::new(
+            event,
+            self.allocate_enqueue_order(),
+        ));
 
         // Update metrics using atomic operations (lock-free)
         self.metrics
@@ -261,7 +286,10 @@ where
             // Check if there's capacity
             if heap.len() < self.max_capacity {
                 // Space available - enqueue the event
-                heap.push(PriorityQueueEvent::new(event));
+                heap.push(PriorityQueueEvent::new(
+                    event,
+                    self.allocate_enqueue_order(),
+                ));
 
                 // Update metrics using atomic operations (lock-free)
                 self.metrics
@@ -431,6 +459,7 @@ where
     fn clone(&self) -> Self {
         Self {
             heap: Arc::clone(&self.heap),
+            next_enqueue_order: Arc::clone(&self.next_enqueue_order),
             notify: Arc::clone(&self.notify),
             max_capacity: self.max_capacity,
             metrics: Arc::clone(&self.metrics),

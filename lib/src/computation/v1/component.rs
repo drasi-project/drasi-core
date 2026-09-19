@@ -63,6 +63,18 @@ pub struct OutputEnvelope {
 #[async_trait]
 pub trait ComputationComponent: Send + Sync {
     fn descriptor(&self) -> &ComponentDescriptor;
+    /// Supplies a generation-bound sender. This is optional for components that
+    /// do not originate control notifications.
+    fn bind_control(&mut self, _control: super::ComponentControl) {}
+    /// The shared handler is polled independently of mutable data operations.
+    fn control_handler(&self) -> Option<std::sync::Arc<dyn super::ControlHandler>> {
+        None
+    }
+    /// Nested/legacy hosts may finish their start hook before their underlying
+    /// component is ready. Such hosts explicitly report `control.ready()`.
+    fn requires_readiness_confirmation(&self) -> bool {
+        false
+    }
     async fn start(&mut self) -> anyhow::Result<()>;
     async fn stop(&mut self) -> anyhow::Result<()>;
     /// Called only at a processing boundary when the registered factory explicitly

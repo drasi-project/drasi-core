@@ -100,6 +100,37 @@ impl fmt::Debug for IndexFactory {
 }
 
 impl IndexFactory {
+    /// Distinct configured instances, using their lexically first name as the
+    /// canonical graph binding when several names share the same provider.
+    #[cfg(feature = "computation")]
+    pub(crate) fn configured_providers(&self) -> Vec<(String, Arc<dyn IndexBackendPlugin>)> {
+        let mut providers: Vec<_> = self.providers.iter().collect();
+        providers.sort_by_key(|(name, _)| *name);
+        let mut distinct: Vec<(String, Arc<dyn IndexBackendPlugin>)> = Vec::new();
+        for (name, provider) in providers {
+            if !distinct
+                .iter()
+                .any(|(_, existing)| Arc::ptr_eq(existing, provider))
+            {
+                distinct.push((name.clone(), provider.clone()));
+            }
+        }
+        distinct
+    }
+
+    #[cfg(feature = "computation")]
+    pub(crate) fn configured_provider(
+        &self,
+        requested: Option<&StorageBackendRef>,
+    ) -> Option<(String, Arc<dyn IndexBackendPlugin>)> {
+        let StorageBackendRef::Named(name) = requested.or(self.default_backend.as_ref())? else {
+            return None;
+        };
+        let selected = self.providers.get(name)?;
+        self.configured_providers()
+            .into_iter()
+            .find(|(_, provider)| Arc::ptr_eq(provider, selected))
+    }
     /// Create a new IndexFactory from declared backends and injected providers.
     ///
     /// # Arguments

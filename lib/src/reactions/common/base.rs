@@ -32,13 +32,13 @@
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
+use crate::channels::ComponentStatusHandle;
 use crate::channels::{ComponentStatus, QueryResult};
-use crate::component_graph::ComponentStatusHandle;
-use crate::context::ReactionRuntimeContext;
+use crate::context::{ComponentResource, ReactionRuntimeContext};
 use crate::identity::IdentityProvider;
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::recovery::ReactionRecoveryPolicy;
@@ -119,6 +119,8 @@ pub struct ReactionBase {
     status_handle: ComponentStatusHandle,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
+    /// Serializes inventory snapshots so concurrent setters cannot publish stale state.
+    resource_report_lock: Arc<Mutex<()>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
@@ -152,6 +154,7 @@ impl ReactionBase {
             recovery_policy: params.recovery_policy,
             status_handle: ComponentStatusHandle::new(&params.id),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
+            resource_report_lock: Arc::new(Mutex::new(())),
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
@@ -170,6 +173,7 @@ impl ReactionBase {
     /// - `reaction_id`: The reaction's unique identifier
     /// - `state_store`: Optional persistent state storage
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
+    /// - `resource_observer`: Optional reporting of the actual selected providers
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -187,6 +191,35 @@ impl ReactionBase {
             if guard.is_none() {
                 *guard = Some(ip.clone());
             }
+        }
+
+        self.report_resources().await;
+    }
+
+    async fn report_resources(&self) {
+        let _report_guard = self.resource_report_lock.lock().await;
+        let Some(context) = self.context().await else {
+            return;
+        };
+        let Some(observer) = context.resource_observer else {
+            return;
+        };
+
+        let mut resources = Vec::new();
+        if let Some(provider) = self.identity_provider().await {
+            resources.push(ComponentResource::Identity(provider));
+        }
+        if let Some(provider) = self.state_store().await {
+            resources.push(ComponentResource::StateStore(provider));
+        }
+
+        if let Err(error) = observer.observe(resources).await {
+            let message = format!(
+                "Reaction '{}' failed to report component resources: {error:#}",
+                self.id
+            );
+            error!("{message}");
+            self.set_status(ComponentStatus::Error, Some(message)).await;
         }
     }
 
@@ -218,8 +251,10 @@ impl ReactionBase {
     /// This is typically called during reaction construction when the provider
     /// is available from configuration (e.g., `with_identity_provider()` builder).
     /// Providers set this way take precedence over context-injected providers.
+    /// An initialized computation context is notified of the updated inventory.
     pub async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
         *self.identity_provider.write().await = Some(provider);
+        self.report_resources().await;
     }
 
     /// Get whether this reaction should auto-start
@@ -270,6 +305,7 @@ impl ReactionBase {
             recovery_policy: self.recovery_policy,
             status_handle: self.status_handle.clone(),
             context: self.context.clone(),
+            resource_report_lock: self.resource_report_lock.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),

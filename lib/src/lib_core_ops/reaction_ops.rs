@@ -36,6 +36,10 @@ impl DrasiLib {
     /// If the server is running and the reaction has `auto_start=true`, the reaction
     /// will be started immediately after being added.
     ///
+    /// In computation mode, success confirms node declaration, not initialization
+    /// or activation. Later failures remain visible on the node; use
+    /// `add_reaction_with_handle` to await readiness explicitly.
+    ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
@@ -51,6 +55,46 @@ impl DrasiLib {
             .await
     }
 
+    /// Declare a reaction and return its generation-bound computation handle.
+    ///
+    /// This requires [`crate::ExecutionMode::ComputationGraph`]. Dependency and
+    /// constructor validation happen after declaration. Await `wait_created()` or
+    /// `wait_started()` on the handle for initialization or activation outcomes.
+    /// `wait_started()` requires the reaction to report `Running`, not merely to
+    /// return successfully from its start hook.
+    /// Auto-start is requested only when the instance is running.
+    /// Use the handle's `control()` and `set_control_handler()` methods for
+    /// out-of-band notifications without changing the legacy reaction contract.
+    /// Ownership-bearing native rejections retain their `GraphError` through
+    /// `DrasiError::Internal`, including the rejected addition's recovery handle.
+    #[cfg(feature = "computation")]
+    pub async fn add_reaction_with_handle(
+        &self,
+        reaction: impl Reaction + 'static,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.add_reaction_with_metadata_and_handle(reaction, HashMap::new())
+            .await
+    }
+
+    #[cfg(feature = "computation")]
+    async fn add_reaction_with_metadata_and_handle(
+        &self,
+        reaction: impl Reaction + 'static,
+        metadata: HashMap<String, String>,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
+            DrasiError::invalid_state("Reaction handles require ComputationGraph execution mode")
+        })?;
+        let id = reaction.id().to_owned();
+        runtime
+            .add_reaction(Box::new(reaction), metadata, self.is_running().await)
+            .await
+            .map_err(|error| {
+                crate::computation::compatibility::map_addition_error("reaction", &id, error)
+            })
+    }
+
     /// Add a reaction to a running server with additional metadata.
     ///
     /// Same as [`add_reaction`](Self::add_reaction) but merges `extra_metadata`
@@ -62,14 +106,11 @@ impl DrasiLib {
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
         #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.computation_runtime {
-            let id = reaction.id().to_owned();
-            return runtime
-                .add_reaction(Box::new(reaction), extra_metadata, self.is_running().await)
+        if self.computation_runtime.is_some() {
+            return self
+                .add_reaction_with_metadata_and_handle(reaction, extra_metadata)
                 .await
-                .map_err(|error| {
-                    DrasiError::operation_failed("reaction", id, "add", error.to_string())
-                });
+                .map(|_| ());
         }
 
         // Capture auto_start and id before transferring ownership
@@ -98,7 +139,12 @@ impl DrasiLib {
         }
 
         // Step 2: Provision runtime (initialize + store)
-        if let Err(e) = self.reaction_manager.provision_reaction(reaction).await {
+        if let Err(e) = self
+            .legacy()
+            .reaction_manager
+            .provision_reaction(reaction)
+            .await
+        {
             // Compensating rollback: remove from graph on runtime failure
             let mut graph = self.component_graph.write().await;
             let _ = graph.deregister(&reaction_id);
@@ -112,7 +158,8 @@ impl DrasiLib {
 
         // Step 3: Auto-start if needed
         if self.is_running().await && should_auto_start {
-            self.reaction_manager
+            self.legacy()
+                .reaction_manager
                 .start_reaction(reaction_id.clone())
                 .await
                 .map_err(|e| {
@@ -161,7 +208,8 @@ impl DrasiLib {
         }
 
         // Step 2: Teardown runtime (stop, deprovision, remove from runtime map)
-        self.reaction_manager
+        self.legacy()
+            .reaction_manager
             .teardown_reaction(id.to_string(), cleanup)
             .await
             .map_err(|e| {
@@ -249,7 +297,8 @@ impl DrasiLib {
 
         // Delegate to ReactionManager which uses the Reconfiguring transition,
         // preserving the graph node, edges, and event history.
-        self.reaction_manager
+        self.legacy()
+            .reaction_manager
             .update_reaction(id.to_string(), new_reaction)
             .await
             .map_err(|e| DrasiError::operation_failed("reaction", id, "update", e.to_string()))
@@ -282,7 +331,10 @@ impl DrasiLib {
 
         // Start the reaction (QueryProvider was injected when reaction was added)
         map_component_error(
-            self.reaction_manager.start_reaction(id.to_string()).await,
+            self.legacy()
+                .reaction_manager
+                .start_reaction(id.to_string())
+                .await,
             "reaction",
             id,
             "start",
@@ -313,7 +365,10 @@ impl DrasiLib {
 
         // Stop the reaction (subscriptions managed by reaction itself)
         map_component_error(
-            self.reaction_manager.stop_reaction(id.to_string()).await,
+            self.legacy()
+                .reaction_manager
+                .stop_reaction(id.to_string())
+                .await,
             "reaction",
             id,
             "stop",
@@ -644,10 +699,33 @@ mod tests {
         let result = core.add_reaction(r2).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
-            "expected OperationFailed, got: {err:?}"
-        );
+        match core.execution_mode() {
+            crate::ExecutionMode::ComponentGraph => assert!(
+                matches!(err, DrasiError::OperationFailed { .. }),
+                "expected OperationFailed, got: {err:?}"
+            ),
+            #[cfg(feature = "computation")]
+            crate::ExecutionMode::ComputationGraph => {
+                use crate::computation::v1::GraphError;
+
+                let DrasiError::Internal(error) = err else {
+                    panic!("native rejection must retain its ownership-bearing cause: {err:?}");
+                };
+                let GraphError::AdditionRejected { cause, addition } = error
+                    .downcast_ref::<GraphError>()
+                    .expect("native graph error")
+                else {
+                    panic!("expected a rejected addition: {error:?}");
+                };
+                assert!(
+                    matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component r-dup"),
+                    "unexpected rejection cause: {cause:?}"
+                );
+                let rejected = addition.take().await.expect("retained rejected reaction");
+                assert_eq!(rejected.definition.descriptor.id().as_str(), "r-dup");
+            }
+        }
     }
 
     // ========================================================================

@@ -535,8 +535,15 @@ impl DrasiLibBuilder {
             queries: self.query_configs.clone(),
         };
 
-        // Validate the configuration
-        config
+        #[cfg(feature = "computation")]
+        let node_first = self.execution_mode == crate::ExecutionMode::ComputationGraph;
+        #[cfg(not(feature = "computation"))]
+        let node_first = false;
+        let mut validation_config = config.clone();
+        if node_first {
+            validation_config.queries.clear();
+        }
+        validation_config
             .validate()
             .map_err(|e| DrasiError::validation(e.to_string()))?;
 
@@ -577,7 +584,7 @@ impl DrasiLibBuilder {
                 }
             }
 
-            for query in &config.queries {
+            for query in config.queries.iter().filter(|_| !node_first) {
                 match &query.storage_backend {
                     Some(StorageBackendRef::Named(name)) => {
                         if self.index_providers.contains_key(name)
@@ -654,10 +661,14 @@ impl DrasiLibBuilder {
 
         // Inject state store before provisioning sources (they need it for initialization)
         let state_store = core.config.state_store_provider.clone();
-        core.source_manager
+        core.legacy()
+            .source_manager
             .inject_state_store(state_store.clone())
             .await;
-        core.reaction_manager.inject_state_store(state_store).await;
+        core.legacy()
+            .reaction_manager
+            .inject_state_store(state_store)
+            .await;
 
         // Inject WAL provider into SourceManager (if configured)
         // This allows transient sources to persist events for crash recovery
@@ -671,7 +682,10 @@ impl DrasiLibBuilder {
                     .map_err(|_| DrasiError::invalid_state("computation WAL binding poisoned"))? =
                     Some(wal_provider.clone());
             }
-            core.source_manager.inject_wal_provider(wal_provider).await;
+            core.legacy()
+                .source_manager
+                .inject_wal_provider(wal_provider)
+                .await;
         }
 
         // Register the component graph source BEFORE initialize (which loads query config).
@@ -711,7 +725,12 @@ impl DrasiLibBuilder {
                     )
                 })?;
             }
-            if let Err(e) = core.source_manager.provision_source(graph_source).await {
+            if let Err(e) = core
+                .legacy()
+                .source_manager
+                .provision_source(graph_source)
+                .await
+            {
                 let mut graph = core.component_graph.write().await;
                 let _ = graph.deregister(&source_id);
                 return Err(DrasiError::operation_failed(
@@ -745,7 +764,7 @@ impl DrasiLibBuilder {
                     )
                 })?;
             }
-            if let Err(e) = core.source_manager.provision_source(source).await {
+            if let Err(e) = core.legacy().source_manager.provision_source(source).await {
                 let mut graph = core.component_graph.write().await;
                 let _ = graph.deregister(&source_id);
                 return Err(DrasiError::operation_failed(
@@ -805,7 +824,12 @@ impl DrasiLibBuilder {
                         )
                     })?;
             }
-            if let Err(e) = core.reaction_manager.provision_reaction(reaction).await {
+            if let Err(e) = core
+                .legacy()
+                .reaction_manager
+                .provision_reaction(reaction)
+                .await
+            {
                 let mut graph = core.component_graph.write().await;
                 let _ = graph.deregister(&reaction_id);
                 return Err(DrasiError::operation_failed(
@@ -1350,13 +1374,59 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .with_storage_backend(StorageBackendRef::Named("nope".to_string()))
             .build();
-        let err = DrasiLibBuilder::new()
-            .with_query(query)
-            .build()
-            .await
-            .map(|_| ())
-            .expect_err("unknown named backend should fail");
-        assert!(err.to_string().contains("unknown storage backend"));
+        let result = DrasiLibBuilder::new().with_query(query).build().await;
+        match crate::test_helpers::execution_mode() {
+            crate::ExecutionMode::ComponentGraph => {
+                let err = result
+                    .map(|_| ())
+                    .expect_err("unknown named backend should fail");
+                assert!(err.to_string().contains("unknown storage backend"));
+            }
+            #[cfg(feature = "computation")]
+            crate::ExecutionMode::ComputationGraph => {
+                use crate::computation::v1::{GraphError, RealizationState};
+                use crate::indexes::IndexError;
+
+                let core = result.expect("native builder should admit the query node");
+                let handle = core.computation_component("q").expect("declared query");
+                let err =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
+                        .await
+                        .expect("query creation should settle")
+                        .expect_err("unknown named backend should fail query creation");
+                let GraphError::Reported { cause } = err else {
+                    panic!("expected a recorded creation failure: {err:?}");
+                };
+                let GraphError::Creation {
+                    component, source, ..
+                } = cause.as_ref()
+                else {
+                    panic!("unexpected creation failure: {cause:?}");
+                };
+                assert_eq!(component.as_str(), "q");
+                assert!(
+                    matches!(source.downcast_ref::<IndexError>(),
+                        Some(IndexError::UnknownStore(name)) if name == "nope"),
+                    "unexpected backend failure: {source:?}"
+                );
+                assert_eq!(
+                    handle.observed().expect("retained query node").realization,
+                    RealizationState::CreationFailed
+                );
+                assert_eq!(
+                    serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
+                    serde_json::to_value(&core.get_config().queries[0]).unwrap()
+                );
+                assert!(core
+                    .computation_control()
+                    .unwrap()
+                    .desired_snapshot()
+                    .nodes
+                    .iter()
+                    .any(|node| node.descriptor.id().as_str() == "q"));
+                core.shutdown().await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]
@@ -1395,14 +1465,63 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
             .build();
-        let err = DrasiLibBuilder::new()
+        let result = DrasiLibBuilder::new()
             .add_storage_backend(backend)
             .with_query(query)
             .build()
-            .await
-            .map(|_| ())
-            .expect_err("declared plugin without provider should fail");
-        assert!(err.to_string().contains("no injected provider"));
+            .await;
+        match crate::test_helpers::execution_mode() {
+            crate::ExecutionMode::ComponentGraph => {
+                let err = result
+                    .map(|_| ())
+                    .expect_err("declared plugin without provider should fail");
+                assert!(err.to_string().contains("no injected provider"));
+            }
+            #[cfg(feature = "computation")]
+            crate::ExecutionMode::ComputationGraph => {
+                use crate::computation::v1::{GraphError, RealizationState};
+                use crate::indexes::IndexError;
+
+                let core = result.expect("native builder should admit the query node");
+                let handle = core.computation_component("q").expect("declared query");
+                let err =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
+                        .await
+                        .expect("query creation should settle")
+                        .expect_err("declared plugin without provider should fail query creation");
+                let GraphError::Reported { cause } = err else {
+                    panic!("expected a recorded creation failure: {err:?}");
+                };
+                let GraphError::Creation {
+                    component, source, ..
+                } = cause.as_ref()
+                else {
+                    panic!("unexpected creation failure: {cause:?}");
+                };
+                assert_eq!(component.as_str(), "q");
+                assert!(
+                    matches!(source.downcast_ref::<IndexError>(),
+                        Some(IndexError::UnknownStore(name)) if name == "rocks"),
+                    "unexpected backend failure: {source:?}"
+                );
+                assert_eq!(
+                    handle.observed().expect("retained query node").realization,
+                    RealizationState::CreationFailed
+                );
+                assert_eq!(
+                    serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
+                    serde_json::to_value(&core.get_config().queries[0]).unwrap()
+                );
+                assert!(core
+                    .computation_control()
+                    .unwrap()
+                    .desired_snapshot()
+                    .nodes
+                    .iter()
+                    .any(|node| node.descriptor.id().as_str() == "q"));
+                core.shutdown().await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]
@@ -1415,13 +1534,61 @@ mod tests {
                 kind: "rocksdb".to_string(),
             }))
             .build();
-        let err = DrasiLibBuilder::new()
-            .with_query(query)
-            .build()
-            .await
-            .map(|_| ())
-            .expect_err("inline plugin backend should fail in embedded mode");
-        assert!(err.to_string().contains("not supported in embedded mode"));
+        let result = DrasiLibBuilder::new().with_query(query).build().await;
+        match crate::test_helpers::execution_mode() {
+            crate::ExecutionMode::ComponentGraph => {
+                let err = result
+                    .map(|_| ())
+                    .expect_err("inline plugin backend should fail in embedded mode");
+                assert!(err.to_string().contains("not supported in embedded mode"));
+            }
+            #[cfg(feature = "computation")]
+            crate::ExecutionMode::ComputationGraph => {
+                use crate::computation::v1::{GraphError, RealizationState};
+                use crate::indexes::IndexError;
+
+                let core = result.expect("native builder should admit the query node");
+                let handle = core.computation_component("q").expect("declared query");
+                let err =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
+                        .await
+                        .expect("query creation should settle")
+                        .expect_err("inline plugin backend should fail query creation");
+                let GraphError::Reported { cause } = err else {
+                    panic!("expected a recorded creation failure: {err:?}");
+                };
+                let GraphError::Creation {
+                    component, source, ..
+                } = cause.as_ref()
+                else {
+                    panic!("unexpected creation failure: {cause:?}");
+                };
+                assert_eq!(component.as_str(), "q");
+                assert!(
+                    matches!(
+                        source.downcast_ref::<IndexError>(),
+                        Some(IndexError::NotSupported)
+                    ),
+                    "unexpected backend failure: {source:?}"
+                );
+                assert_eq!(
+                    handle.observed().expect("retained query node").realization,
+                    RealizationState::CreationFailed
+                );
+                assert_eq!(
+                    serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
+                    serde_json::to_value(&core.get_config().queries[0]).unwrap()
+                );
+                assert!(core
+                    .computation_control()
+                    .unwrap()
+                    .desired_snapshot()
+                    .nodes
+                    .iter()
+                    .any(|node| node.descriptor.id().as_str() == "q"));
+                core.shutdown().await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]

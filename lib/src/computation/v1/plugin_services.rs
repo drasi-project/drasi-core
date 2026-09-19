@@ -39,6 +39,7 @@ pub(crate) struct PluginObservations {
         Option<tokio::sync::mpsc::Receiver<crate::component_graph::ComponentUpdate>>,
     >,
     status: tokio::sync::watch::Sender<(crate::ComponentStatus, Option<String>)>,
+    running: tokio::sync::watch::Sender<bool>,
 }
 impl PluginObservations {
     pub(crate) fn new(id: &str) -> Self {
@@ -46,6 +47,7 @@ impl PluginObservations {
             id: id.to_owned(),
             updates: tokio::sync::Mutex::new(None),
             status: tokio::sync::watch::channel((crate::ComponentStatus::Stopped, None)).0,
+            running: tokio::sync::watch::channel(false).0,
         }
     }
     pub(crate) async fn channel(&self) -> crate::component_graph::ComponentUpdateSender {
@@ -54,6 +56,7 @@ impl PluginObservations {
         sender
     }
     pub(crate) async fn reset(&self) {
+        self.running.send_replace(false);
         self.status
             .send_replace((crate::ComponentStatus::Stopped, None));
         if let Some(receiver) = self.updates.lock().await.as_mut() {
@@ -72,15 +75,27 @@ impl PluginObservations {
             return std::future::pending().await;
         }
         match updates.as_mut().expect("status receiver").recv().await {
-            Some(crate::component_graph::ComponentUpdate::Status {
+            Some(update) => self.apply_update(update)?,
+            None => {
+                *updates = None;
+            }
+        }
+        Ok(())
+    }
+    fn apply_update(&self, update: crate::component_graph::ComponentUpdate) -> anyhow::Result<()> {
+        match update {
+            crate::component_graph::ComponentUpdate::Status {
                 component_id,
                 status,
                 message,
-            }) => {
+            } => {
                 if component_id != self.id {
                     anyhow::bail!("plugin reported another component's status");
                 }
                 self.status.send_replace((status, message.clone()));
+                if status == crate::ComponentStatus::Running {
+                    self.running.send_replace(true);
+                }
                 if status == crate::ComponentStatus::Error {
                     anyhow::bail!(
                         "plugin {} failed: {}",
@@ -89,8 +104,14 @@ impl PluginObservations {
                     );
                 }
             }
-            None => {
-                *updates = None;
+        }
+        Ok(())
+    }
+    async fn drain(&self) -> anyhow::Result<()> {
+        let mut updates = self.updates.lock().await;
+        if let Some(receiver) = updates.as_mut() {
+            while let Ok(update) = receiver.try_recv() {
+                self.apply_update(update)?;
             }
         }
         Ok(())
@@ -106,6 +127,14 @@ impl PluginObservations {
             status.1.as_deref().unwrap_or("unspecified failure")
         );
     }
+    pub(crate) async fn wait_running(&self) -> anyhow::Result<()> {
+        let mut running = self.running.subscribe();
+        tokio::select! {
+            biased;
+            result = running.wait_for(|running| *running) => { result?; Ok(()) },
+            failure = self.failure() => failure,
+        }
+    }
     pub(crate) async fn drive<T>(
         &self,
         future: impl std::future::Future<Output = anyhow::Result<T>>,
@@ -114,16 +143,27 @@ impl PluginObservations {
         tokio::pin!(future);
         let mut observation = None;
         loop {
-            tokio::select! {
-                result = &mut future => return match (result, observation) {
-                    (Ok(_), Some(error)) => Err(error),
-                    (Err(error), Some(observation)) => Err(error.context(format!("plugin status also failed: {observation:#}"))),
-                    (result, None) => result,
-                },
-                update = self.read() => if let Err(error) = update {
-                    if !cleanup { return Err(error); }
+            let completed = tokio::select! {
+                result = &mut future => Some(result),
+                update = self.read() => {
+                    if let Err(error) = update {
+                        if !cleanup { return Err(error); }
+                        observation = Some(error);
+                    }
+                    None
+                }
+            };
+            if let Some(result) = completed {
+                if let Err(error) = self.drain().await {
                     observation = Some(error);
                 }
+                return match (result, observation) {
+                    (Ok(_), Some(error)) => Err(error),
+                    (Err(error), Some(observation)) => {
+                        Err(error.context(format!("plugin status also failed: {observation:#}")))
+                    }
+                    (result, None) => result,
+                };
             }
         }
     }
@@ -197,7 +237,7 @@ impl LegacyPluginServices {
         })
         .collect()
     }
-    pub(super) fn requirements() -> BTreeMap<Arc<str>, ResourceRequirement> {
+    pub(crate) fn requirements() -> BTreeMap<Arc<str>, ResourceRequirement> {
         [
             (
                 "state",
@@ -232,7 +272,7 @@ impl LegacyPluginServices {
         })
         .collect()
     }
-    pub(super) fn validate_bindings(
+    pub(crate) fn validate_bindings(
         &self,
         spec: &ComponentSpecification,
         resources: &BTreeMap<ResourceId, ResourceHandle>,
@@ -292,7 +332,8 @@ impl LegacyPluginServices {
                 ResourceHandle::new(
                     ResourceRole::StateStore,
                     Arc::new(LegacyStateStoreResource(store.clone())),
-                ),
+                )
+                .with_shared_identity(store.clone()),
             ));
         }
         if let Some(identity) = &self.identity {
@@ -302,14 +343,16 @@ impl LegacyPluginServices {
                 ResourceHandle::new(
                     ResourceRole::Identity,
                     Arc::new(LegacyIdentityResource(identity.clone())),
-                ),
+                )
+                .with_shared_identity(identity.clone()),
             ));
         }
         if let Some(wal) = &self.wal {
             resources.push((
                 "instance.wal",
                 ResourceRole::Wal,
-                ResourceHandle::new(ResourceRole::Wal, Arc::new(LegacyWalResource(wal.clone()))),
+                ResourceHandle::new(ResourceRole::Wal, Arc::new(LegacyWalResource(wal.clone())))
+                    .with_shared_identity(wal.clone()),
             ));
         }
         if let Some(secrets) = &self.secrets {
@@ -319,7 +362,8 @@ impl LegacyPluginServices {
                 ResourceHandle::new(
                     ResourceRole::SecretStore,
                     Arc::new(LegacySecretStoreResource(secrets.clone())),
-                ),
+                )
+                .with_shared_identity(secrets.clone()),
             ));
         }
         for (id, role, handle) in resources {
@@ -337,7 +381,7 @@ impl LegacyPluginServices {
     }
 }
 
-pub(super) fn validate_service<T: Any + Send + Sync, S: ?Sized>(
+pub(crate) fn validate_service<T: Any + Send + Sync, S: ?Sized>(
     spec: &ComponentSpecification,
     resources: &BTreeMap<ResourceId, ResourceHandle>,
     name: &str,

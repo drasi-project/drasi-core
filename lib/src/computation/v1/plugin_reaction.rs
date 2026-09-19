@@ -287,6 +287,7 @@ pub struct ReactionPluginHost {
     observations: PluginObservations,
     deferred_validation: bool,
     runtime_metrics: Option<RuntimeReactionMetrics>,
+    resource_observer: Mutex<Option<Arc<dyn crate::context::ComponentResourceObserver>>>,
 }
 
 pub(crate) struct RuntimeReactionMetrics {
@@ -408,6 +409,7 @@ impl ReactionPluginHost {
             life: tokio::sync::Mutex::new(ReactionLife::default()),
             deferred_validation,
             runtime_metrics: None,
+            resource_observer: Mutex::new(None),
         }))
     }
     pub fn id(&self) -> &str {
@@ -819,6 +821,23 @@ impl ReactionPluginHost {
         self.initialize_locked(&mut life).await?;
         Ok(())
     }
+    pub(crate) async fn wait_running(&self) -> anyhow::Result<()> {
+        if self.reaction()?.status().await == ComponentStatus::Running {
+            return Ok(());
+        }
+        self.observations.wait_running().await
+    }
+    pub(crate) fn set_resource_observer(
+        &self,
+        observer: Arc<dyn crate::context::ComponentResourceObserver>,
+    ) -> anyhow::Result<()> {
+        *self
+            .resource_observer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reaction resource observer binding poisoned"))? =
+            Some(observer);
+        Ok(())
+    }
     async fn initialize_locked(
         &self,
         life: &mut ReactionLife,
@@ -837,6 +856,11 @@ impl ReactionPluginHost {
                 self.observations.channel().await,
                 self.services.identity.clone(),
             );
+            context.resource_observer = self
+                .resource_observer
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reaction resource observer binding poisoned"))?
+                .clone();
             context.snapshot_fetcher = Some(Arc::new(Fetcher {
                 catalog: self.catalog.clone(),
                 queries: self.query_ids.iter().cloned().collect(),

@@ -2959,6 +2959,7 @@ fn build_source_runtime_context(
         state_store,
         identity_provider,
         wal_provider,
+        resource_observer: None,
     };
     (ctx, status_rx)
 }
@@ -3002,6 +3003,7 @@ fn build_reaction_runtime_context(
         state_store,
         identity_provider,
         snapshot_fetcher,
+        resource_observer: None,
     };
     (ctx, status_rx)
 }
@@ -3090,7 +3092,7 @@ fn wrap_subscription_response(
             }
 
             rt_handle.spawn(async move {
-                let _sentinel_guard = SourceSentinelOnDrop { ctx_raw, callback };
+                let sentinel_guard = Arc::new(SourceSentinelOnDrop { ctx_raw, callback });
                 let mut rx = receiver.inner.lock().await;
                 // Pin the Notified future so it persists across loop iterations.
                 // Recreating it each iteration is cancel-unsafe: if select! picks
@@ -3106,12 +3108,28 @@ fn wrap_subscription_response(
                         result = rx.recv() => {
                             match result {
                                 Ok(wrapper) => {
-                                    let ffi_event = wrap_source_event(wrapper);
-                                    let accepted = std::panic::catch_unwind(
-                                        std::panic::AssertUnwindSafe(|| {
-                                            callback(ctx_raw as *mut c_void, ffi_event)
-                                        })
-                                    ).unwrap_or(false);
+                                    // A full host queue can block the callback. Keep it off
+                                    // async workers, and retain its context until it returns.
+                                    let callback_guard = sentinel_guard.clone();
+                                    let accepted = tokio::task::spawn_blocking(move || {
+                                        let ffi_event = wrap_source_event(wrapper);
+                                        let accepted = std::panic::catch_unwind(
+                                            std::panic::AssertUnwindSafe(|| {
+                                                (callback_guard.callback)(
+                                                    callback_guard.ctx_raw as *mut c_void,
+                                                    ffi_event,
+                                                )
+                                            }),
+                                        )
+                                        .unwrap_or(false);
+                                        drop(callback_guard);
+                                        accepted
+                                    })
+                                    .await
+                                    .unwrap_or_else(|error| {
+                                        log::error!("Source push callback worker failed: {error}");
+                                        false
+                                    });
                                     if !accepted {
                                         break;
                                     }
@@ -3215,7 +3233,8 @@ fn wrap_subscription_response(
                 }
 
                 rt_handle.spawn(async move {
-                    let _sentinel_guard = BootstrapSentinelOnDrop { ctx_raw, callback };
+                    let sentinel_guard =
+                        Arc::new(BootstrapSentinelOnDrop { ctx_raw, callback });
                     let mut rx = receiver.inner.lock().await;
                     // Pin the Notified future for cancel-safe shutdown
                     // (same rationale as change receiver forwarder).
@@ -3229,12 +3248,28 @@ fn wrap_subscription_response(
                             result = rx.recv() => {
                                 match result {
                                     Some(record) => {
-                                        let ffi_event = wrap_bootstrap_event(record);
-                                        let accepted = std::panic::catch_unwind(
-                                            std::panic::AssertUnwindSafe(|| {
-                                                callback(ctx_raw as *mut c_void, ffi_event)
-                                            })
-                                        ).unwrap_or(false);
+                                        let callback_guard = sentinel_guard.clone();
+                                        let accepted = tokio::task::spawn_blocking(move || {
+                                            let ffi_event = wrap_bootstrap_event(record);
+                                            let accepted = std::panic::catch_unwind(
+                                                std::panic::AssertUnwindSafe(|| {
+                                                    (callback_guard.callback)(
+                                                        callback_guard.ctx_raw as *mut c_void,
+                                                        ffi_event,
+                                                    )
+                                                }),
+                                            )
+                                            .unwrap_or(false);
+                                            drop(callback_guard);
+                                            accepted
+                                        })
+                                        .await
+                                        .unwrap_or_else(|error| {
+                                            log::error!(
+                                                "Bootstrap push callback worker failed: {error}"
+                                            );
+                                            false
+                                        });
                                         if !accepted {
                                             break;
                                         }
@@ -3841,6 +3876,10 @@ pub fn build_secret_store_plugin_vtable<T: SecretStorePluginDescriptor + 'static
         drop_fn: drop_fn::<T>,
     }
 }
+
+#[cfg(test)]
+#[path = "subscription_push_tests.rs"]
+mod subscription_push_tests;
 
 #[cfg(test)]
 mod snapshot_stream_tests {

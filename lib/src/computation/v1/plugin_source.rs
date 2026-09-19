@@ -147,6 +147,7 @@ impl SourcePluginHost {
                     ResourceRole::Bootstrap,
                     Arc::new(LegacyBootstrapResource(provider.clone())),
                 )
+                .with_shared_identity(provider.clone())
             }))
     }
     pub fn resource(self: &Arc<Self>) -> ResourceHandle {

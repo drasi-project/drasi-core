@@ -265,6 +265,7 @@ mod tests {
                 state_store: None,
                 identity_provider: None,
                 wal_provider: None,
+                resource_observer: None,
             })
             .await;
         source.start().await.unwrap();
@@ -332,6 +333,7 @@ mod tests {
                 state_store: None,
                 identity_provider: None,
                 wal_provider: None,
+                resource_observer: None,
             })
             .await;
         source.start().await.unwrap();
@@ -849,6 +851,7 @@ mod tests {
                 state_store: None,
                 identity_provider: None,
                 wal_provider: None,
+                resource_observer: None,
             })
             .await;
         source.start().await.unwrap();

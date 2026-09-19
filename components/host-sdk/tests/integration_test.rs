@@ -1923,6 +1923,7 @@ async fn test_source_with_null_identity_provider() {
         state_store: None,
         identity_provider: None,
         wal_provider: None,
+        resource_observer: None,
     };
 
     // This should not crash — identity_provider is None
@@ -1971,6 +1972,7 @@ async fn test_source_with_identity_provider_injection() {
         state_store: None,
         identity_provider: Some(provider),
         wal_provider: None,
+        resource_observer: None,
     };
 
     // This should not crash — identity_provider is passed through FFI
@@ -2108,6 +2110,7 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
         state_store: None,
         identity_provider: Some(provider),
         wal_provider: None,
+        resource_observer: None,
     };
 
     // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries.
@@ -2244,6 +2247,7 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
         state_store: None,
         identity_provider: Some(provider),
         snapshot_fetcher: None,
+        resource_observer: None,
     };
 
     // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries
@@ -2305,6 +2309,7 @@ async fn test_reaction_enqueue_query_result() {
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
+        resource_observer: None,
     };
     reaction.initialize(context).await;
 
@@ -2368,6 +2373,7 @@ async fn test_reaction_enqueue_multiple_query_results() {
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
+        resource_observer: None,
     };
     reaction.initialize(context).await;
     reaction.start().await.expect("Reaction should start");
@@ -2426,6 +2432,7 @@ async fn test_reaction_enqueue_query_result_with_data() {
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
+        resource_observer: None,
     };
     reaction.initialize(context).await;
     reaction.start().await.expect("Reaction should start");
@@ -2508,6 +2515,7 @@ async fn test_reaction_start_stop_stress() {
             state_store: None,
             identity_provider: None,
             snapshot_fetcher: None,
+            resource_observer: None,
         };
         reaction.initialize(context).await;
         reaction.start().await.expect("reaction start");

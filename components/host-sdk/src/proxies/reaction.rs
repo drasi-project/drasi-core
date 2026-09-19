@@ -16,10 +16,13 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use drasi_lib::component_graph::ComponentStatusHandle;
+use drasi_lib::context::{ComponentResource, PluginOrigin};
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
@@ -33,6 +36,7 @@ use drasi_plugin_sdk::ffi::{
 };
 use libloading::Library;
 
+use super::source::{known_plugin_origin, observe_resources_and_plugin, read_plugin_version};
 use crate::snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
 use crate::state_store_bridge::StateStoreVtableBuilder;
 
@@ -64,6 +68,8 @@ pub struct ReactionProxy {
     /// [`ReactionRuntimeContext::identity_provider`] during
     /// [`Reaction::initialize`].
     identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
+    resource_report_failed: AtomicBool,
+    plugin_origin: Option<PluginOrigin>,
 }
 
 /// Context for the push-based result callback.
@@ -179,6 +185,46 @@ impl ReactionProxy {
             result_tx: std::sync::Mutex::new(None),
             _push_ctx: std::sync::Mutex::new(None),
             identity_provider: std::sync::Mutex::new(None),
+            resource_report_failed: AtomicBool::new(false),
+            plugin_origin: None,
+        }
+    }
+
+    fn with_plugin_origin(mut self, origin: Option<PluginOrigin>) -> Self {
+        self.plugin_origin = origin;
+        self
+    }
+
+    async fn report_resources(
+        context: &ReactionRuntimeContext,
+        identity_provider: Option<&Arc<dyn IdentityProvider>>,
+        failed: &AtomicBool,
+        origin: Option<&PluginOrigin>,
+    ) {
+        failed.store(false, Ordering::Release);
+        let Some(observer) = context.resource_observer.as_ref() else {
+            return;
+        };
+
+        let mut resources = Vec::new();
+        if let Some(provider) = identity_provider {
+            resources.push(ComponentResource::Identity(provider.clone()));
+        }
+        if let Some(provider) = context.state_store.as_ref() {
+            resources.push(ComponentResource::StateStore(provider.clone()));
+        }
+
+        if let Err(error) = observe_resources_and_plugin(observer.as_ref(), resources, origin).await
+        {
+            failed.store(true, Ordering::Release);
+            let message = format!(
+                "Reaction '{}' failed to report component resources: {error:#}",
+                context.reaction_id
+            );
+            log::error!("{message}");
+            ComponentStatusHandle::new_wired(&context.reaction_id, context.update_tx.clone())
+                .set_status(ComponentStatus::Error, Some(message))
+                .await;
         }
     }
 }
@@ -219,6 +265,19 @@ impl Reaction for ReactionProxy {
     }
 
     async fn initialize(&self, context: ReactionRuntimeContext) {
+        let identity_provider = crate::proxies::identity_resolution::resolve_identity_provider(
+            &self.identity_provider,
+            context.identity_provider.clone(),
+            &format!("Reaction '{}'", self.cached_id),
+        );
+        Self::report_resources(
+            &context,
+            identity_provider.as_ref(),
+            &self.resource_report_failed,
+            self.plugin_origin.as_ref(),
+        )
+        .await;
+
         let state_store_vtable = context
             .state_store
             .as_ref()
@@ -254,12 +313,8 @@ impl Reaction for ReactionProxy {
             *guard = Some(per_instance_ctx);
         }
 
-        let identity_vtable = crate::proxies::identity_resolution::resolve_identity_provider(
-            &self.identity_provider,
-            context.identity_provider.clone(),
-            &format!("Reaction '{}'", self.cached_id),
-        )
-        .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
+        let identity_vtable =
+            identity_provider.map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
         let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)))
@@ -360,6 +415,9 @@ impl Reaction for ReactionProxy {
     }
 
     async fn status(&self) -> ComponentStatus {
+        if self.resource_report_failed.load(Ordering::Acquire) {
+            return ComponentStatus::Error;
+        }
         let s = (self.vtable.status_fn)(self.vtable.state as *const c_void);
         match s {
             FfiComponentStatus::Starting => ComponentStatus::Starting,
@@ -934,6 +992,7 @@ pub struct ReactionPluginProxy {
     cached_config_version: String,
     cached_config_schema_name: String,
     plugin_id: String,
+    plugin_version: Option<String>,
 }
 
 unsafe impl Send for ReactionPluginProxy {}
@@ -946,6 +1005,7 @@ impl ReactionPluginProxy {
             unsafe { (vtable.config_version_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_schema_name =
             unsafe { (vtable.config_schema_name_fn)(vtable.state as *const c_void).to_string() };
+        let plugin_version = read_plugin_version(&library);
         Self {
             vtable,
             library,
@@ -953,6 +1013,7 @@ impl ReactionPluginProxy {
             cached_config_version,
             cached_config_schema_name,
             plugin_id: String::new(),
+            plugin_version,
         }
     }
 
@@ -1017,7 +1078,11 @@ impl ReactionPluginDescriptor for ReactionPluginProxy {
         }
 
         let vtable = unsafe { *Box::from_raw(vtable_ptr) };
-        Ok(Box::new(ReactionProxy::new(vtable, self.library.clone())))
+        Ok(Box::new(
+            ReactionProxy::new(vtable, self.library.clone()).with_plugin_origin(
+                known_plugin_origin(&self.plugin_id, self.plugin_version.as_deref()),
+            ),
+        ))
     }
 }
 
@@ -1026,5 +1091,289 @@ impl Drop for ReactionPluginProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         super::drop_worker::execute_drop_fn(drop_fn, state);
+    }
+}
+
+#[cfg(test)]
+mod resource_observer_tests {
+    use super::*;
+    use crate::proxies::source::resource_observer_tests::{
+        metadata_version, test_executor, test_library, test_runtime,
+    };
+    use tokio::sync::{mpsc, Mutex};
+
+    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::context::ComponentResourceObserver;
+    use drasi_lib::identity::PasswordIdentityProvider;
+    use drasi_lib::state_store::{MemoryStateStoreProvider, StateStoreProvider};
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        reports: Mutex<Vec<Vec<ComponentResource>>>,
+        origins: Mutex<Vec<PluginOrigin>>,
+        fail: AtomicBool,
+        fail_plugin: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ComponentResourceObserver for RecordingObserver {
+        async fn observe(&self, resources: Vec<ComponentResource>) -> anyhow::Result<()> {
+            self.reports.lock().await.push(resources);
+            anyhow::ensure!(!self.fail.load(Ordering::Acquire), "inventory rejected");
+            Ok(())
+        }
+
+        async fn observe_plugin(&self, origin: PluginOrigin) -> anyhow::Result<()> {
+            self.origins.lock().await.push(origin);
+            anyhow::ensure!(!self.fail_plugin.load(Ordering::Acquire), "origin rejected");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_the_same_resolved_identity_and_state_store_passed_to_ffi() {
+        for has_override in [false, true] {
+            let default_identity: Arc<dyn IdentityProvider> =
+                Arc::new(PasswordIdentityProvider::new("default", "test"));
+            let override_identity: Arc<dyn IdentityProvider> =
+                Arc::new(PasswordIdentityProvider::new("override", "test"));
+            let per_instance =
+                std::sync::Mutex::new(has_override.then(|| override_identity.clone()));
+            let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+            let observer = Arc::new(RecordingObserver::default());
+            let (update_tx, mut rx) = mpsc::channel(8);
+            let mut context = ReactionRuntimeContext::new(
+                "instance",
+                "reaction",
+                Some(store.clone()),
+                update_tx,
+                Some(default_identity.clone()),
+            );
+            context.resource_observer = Some(observer.clone());
+            let resolved = crate::proxies::identity_resolution::resolve_identity_provider(
+                &per_instance,
+                context.identity_provider.clone(),
+                "Reaction 'reaction'",
+            );
+            let failed = AtomicBool::new(false);
+            ReactionProxy::report_resources(&context, resolved.as_ref(), &failed, None).await;
+
+            let reports = observer.reports.lock().await;
+            assert_eq!(reports.len(), 1);
+            let [ComponentResource::Identity(identity), ComponentResource::StateStore(state)] =
+                &reports[0][..]
+            else {
+                panic!("expected identity and state store");
+            };
+            assert!(Arc::ptr_eq(
+                identity,
+                if has_override {
+                    &override_identity
+                } else {
+                    &default_identity
+                },
+            ));
+            assert!(Arc::ptr_eq(state, &store));
+            assert!(!failed.load(Ordering::Acquire));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_contexts_are_noops_and_empty_observed_inventories_are_reported() {
+        let observer = Arc::new(RecordingObserver::default());
+        let (update_tx, mut rx) = mpsc::channel(8);
+        let mut context =
+            ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+        let failed = AtomicBool::new(false);
+        ReactionProxy::report_resources(&context, None, &failed, None).await;
+        assert!(observer.reports.lock().await.is_empty());
+
+        context.resource_observer = Some(observer.clone());
+        ReactionProxy::report_resources(&context, None, &failed, None).await;
+        let reports = observer.reports.lock().await;
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].is_empty());
+        assert!(!failed.load(Ordering::Acquire));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_reports_signal_error_status() {
+        let observer = Arc::new(RecordingObserver::default());
+        observer.fail.store(true, Ordering::Release);
+        let (update_tx, mut rx) = mpsc::channel(8);
+        let mut context =
+            ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+        context.resource_observer = Some(observer);
+        let failed = AtomicBool::new(false);
+        ReactionProxy::report_resources(&context, None, &failed, None).await;
+        assert!(failed.load(Ordering::Acquire));
+        let ComponentUpdate::Status {
+            component_id,
+            status,
+            message,
+        } = rx.try_recv().unwrap();
+        assert_eq!(component_id, "reaction");
+        assert_eq!(status, ComponentStatus::Error);
+        assert!(message.unwrap().contains("inventory rejected"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    struct OriginReaction(String);
+
+    #[async_trait]
+    impl Reaction for OriginReaction {
+        fn id(&self) -> &str {
+            &self.0
+        }
+        fn type_name(&self) -> &str {
+            "unrelated-reaction-type"
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        fn query_ids(&self) -> Vec<String> {
+            vec![]
+        }
+        async fn initialize(&self, context: ReactionRuntimeContext) {
+            assert!(context.resource_observer.is_none());
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Stopped
+        }
+    }
+
+    struct OriginReactionDescriptor;
+
+    #[async_trait]
+    impl ReactionPluginDescriptor for OriginReactionDescriptor {
+        fn kind(&self) -> &str {
+            "unrelated-reaction-kind"
+        }
+        fn config_version(&self) -> &str {
+            "99.0.0"
+        }
+        fn config_schema_json(&self) -> String {
+            "{}".into()
+        }
+        fn config_schema_name(&self) -> &str {
+            "OriginReactionConfig"
+        }
+        async fn create_reaction(
+            &self,
+            id: &str,
+            _query_ids: Vec<String>,
+            _config: &serde_json::Value,
+            _auto_start: bool,
+        ) -> anyhow::Result<Box<dyn Reaction>> {
+            Ok(Box::new(OriginReaction(id.into())))
+        }
+    }
+
+    fn origin_factory(id: &str, version: Option<&str>) -> ReactionPluginProxy {
+        let vtable = drasi_plugin_sdk::ffi::build_reaction_plugin_vtable(
+            OriginReactionDescriptor,
+            test_executor,
+            |_, _, _| {},
+            test_runtime,
+        );
+        let mut factory = ReactionPluginProxy::new(vtable, test_library());
+        factory.plugin_version = metadata_version(version);
+        factory.set_plugin_id(id.into());
+        factory
+    }
+
+    #[tokio::test]
+    async fn factory_propagates_only_explicit_id_and_metadata_version() {
+        for (id, version) in [
+            ("explicit-reaction-plugin", Some("1.2.3")),
+            ("", Some("1.2.3")),
+            ("explicit-reaction-plugin", None),
+            ("explicit-reaction-plugin", Some("")),
+        ] {
+            for observed in [false, true] {
+                let factory = origin_factory(id, version);
+                assert_eq!(factory.config_version(), "99.0.0");
+                let reaction = factory
+                    .create_reaction("reaction", vec![], &serde_json::json!({}), false)
+                    .await
+                    .unwrap();
+                let observer = Arc::new(RecordingObserver::default());
+                let (update_tx, mut rx) = mpsc::channel(8);
+                let mut context =
+                    ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+                if observed {
+                    context.resource_observer = Some(observer.clone());
+                }
+                reaction.initialize(context).await;
+                let expected = if observed && !id.is_empty() && version == Some("1.2.3") {
+                    vec![PluginOrigin {
+                        id: id.into(),
+                        version: "1.2.3".into(),
+                    }]
+                } else {
+                    vec![]
+                };
+                assert_eq!(*observer.origins.lock().await, expected);
+                assert_eq!(observer.reports.lock().await.len(), usize::from(observed));
+                assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn directly_constructed_reaction_has_no_inferred_origin() {
+        let vtable = drasi_plugin_sdk::ffi::build_reaction_vtable(
+            OriginReaction("reaction".into()),
+            test_executor,
+            |_, _, _| {},
+            test_runtime,
+        );
+        let reaction = ReactionProxy::new(vtable, test_library());
+        assert!(reaction.plugin_origin.is_none());
+        let observer = Arc::new(RecordingObserver::default());
+        let (update_tx, _rx) = mpsc::channel(8);
+        let mut context =
+            ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+        context.resource_observer = Some(observer.clone());
+        reaction.initialize(context).await;
+        assert!(observer.origins.lock().await.is_empty());
+        assert_eq!(observer.reports.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn origin_failure_preserves_provider_reporting_and_error_status() {
+        for reject_inventory in [false, true] {
+            let reaction = origin_factory("explicit-reaction-plugin", Some("1.2.3"))
+                .create_reaction("reaction", vec![], &serde_json::json!({}), false)
+                .await
+                .unwrap();
+            let observer = Arc::new(RecordingObserver::default());
+            observer.fail_plugin.store(true, Ordering::Release);
+            observer.fail.store(reject_inventory, Ordering::Release);
+            let (update_tx, mut rx) = mpsc::channel(8);
+            let mut context =
+                ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
+            context.resource_observer = Some(observer.clone());
+            reaction.initialize(context).await;
+            assert_eq!(observer.origins.lock().await.len(), 1);
+            assert_eq!(observer.reports.lock().await.len(), 1);
+            assert_eq!(reaction.status().await, ComponentStatus::Error);
+            let ComponentUpdate::Status {
+                status, message, ..
+            } = rx.try_recv().unwrap();
+            assert_eq!(status, ComponentStatus::Error);
+            let message = message.unwrap();
+            assert!(message.contains("origin rejected"));
+            assert_eq!(message.contains("inventory rejected"), reject_inventory);
+        }
     }
 }

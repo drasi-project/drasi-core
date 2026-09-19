@@ -1763,8 +1763,7 @@ mod tests {
     /// Inject events into a DrasiLib's source via downcast.
     async fn inject_events(core: &crate::DrasiLib, count: usize) {
         let source_arc = core
-            .source_manager
-            .get_source_instance("src1")
+            .source_instance("src1")
             .await
             .expect("Source 'src1' not found");
         let mock_source = source_arc
@@ -2000,7 +1999,7 @@ mod tests {
         inject_events(&core, 3).await;
 
         // Get the correct config hash for this query.
-        let query_arc = core.query_manager.get_query_instance("q1").await.unwrap();
+        let query_arc = core.query_manager().get_query_instance("q1").await.unwrap();
         let config_hash = crate::queries::compute_config_hash(query_arc.get_config());
 
         // Pre-write a checkpoint with the CORRECT hash but seq=0 (behind the outbox).

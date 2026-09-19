@@ -60,11 +60,15 @@
 
 use std::sync::Arc;
 
-use crate::component_graph::ComponentUpdateSender;
+use crate::channels::ComponentUpdateSender;
 use crate::identity::IdentityProvider;
 use crate::reactions::SnapshotFetcher;
 use crate::state_store::StateStoreProvider;
 use crate::wal::WalProvider;
+
+pub mod resource_observer;
+
+pub use resource_observer::{ComponentResource, ComponentResourceObserver, PluginOrigin};
 
 /// Context provided to Source plugins during initialization.
 ///
@@ -77,6 +81,7 @@ use crate::wal::WalProvider;
 /// - `source_id`: The unique identifier for this source instance
 /// - `state_store`: Optional persistent state storage (if configured)
 /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
+/// - `resource_observer`: Optional observation of the source's selected provider instances
 ///
 /// # Clone
 ///
@@ -115,6 +120,12 @@ pub struct SourceRuntimeContext {
     /// (HTTP, gRPC, Application) use this to persist incoming events before ACKing
     /// the caller, enabling crash recovery and replay for persistent queries.
     pub wal_provider: Option<Arc<dyn WalProvider>>,
+
+    /// Optional host-local observer for providers selected by this source.
+    ///
+    /// The computation runtime supplies an observer scoped to one component
+    /// generation. Legacy contexts and plugin-side FFI contexts leave this unset.
+    pub resource_observer: Option<Arc<dyn ComponentResourceObserver>>,
 }
 
 impl SourceRuntimeContext {
@@ -144,6 +155,7 @@ impl SourceRuntimeContext {
             update_tx,
             identity_provider,
             wal_provider: None,
+            resource_observer: None,
         }
     }
 
@@ -187,6 +199,13 @@ impl std::fmt::Debug for SourceRuntimeContext {
                 "wal_provider",
                 &self.wal_provider.as_ref().map(|_| "<WalProvider>"),
             )
+            .field(
+                "resource_observer",
+                &self
+                    .resource_observer
+                    .as_ref()
+                    .map(|_| "<ComponentResourceObserver>"),
+            )
             .finish()
     }
 }
@@ -203,6 +222,7 @@ impl std::fmt::Debug for SourceRuntimeContext {
 /// - `state_store`: Optional persistent state storage (if configured)
 /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
 /// - `identity_provider`: Optional identity provider for credential injection
+/// - `resource_observer`: Optional observation of the reaction's selected provider instances
 ///
 /// # Clone
 ///
@@ -244,6 +264,12 @@ pub struct ReactionRuntimeContext {
     /// The fetcher is scoped to the reaction's configured query IDs — attempting to
     /// fetch a snapshot for an unsubscribed query will return an error.
     pub snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
+
+    /// Optional host-local observer for providers selected by this reaction.
+    ///
+    /// The computation runtime supplies an observer scoped to one component
+    /// generation. Legacy contexts and plugin-side FFI contexts leave this unset.
+    pub resource_observer: Option<Arc<dyn ComponentResourceObserver>>,
 }
 
 impl ReactionRuntimeContext {
@@ -273,6 +299,7 @@ impl ReactionRuntimeContext {
             update_tx,
             identity_provider,
             snapshot_fetcher: None,
+            resource_observer: None,
         }
     }
 
@@ -312,6 +339,13 @@ impl std::fmt::Debug for ReactionRuntimeContext {
             .field(
                 "snapshot_fetcher",
                 &self.snapshot_fetcher.as_ref().map(|_| "<SnapshotFetcher>"),
+            )
+            .field(
+                "resource_observer",
+                &self
+                    .resource_observer
+                    .as_ref()
+                    .map(|_| "<ComponentResourceObserver>"),
             )
             .finish()
     }

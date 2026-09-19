@@ -326,7 +326,12 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
 
     // Wait for delivery
     let results = receiver.wait_for_count(3, Duration::from_secs(5)).await;
-    assert_eq!(results.len(), 3, "Should receive 3 events");
+    assert_eq!(
+        results.len(),
+        3,
+        "Should receive 3 events; actual={results:?}; metrics={:?}",
+        core.get_query_output_metrics("q1").await?,
+    );
 
     // Metrics should now be updated
     let metrics = core.get_query_output_metrics("q1").await?;

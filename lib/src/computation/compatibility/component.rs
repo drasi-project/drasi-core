@@ -18,7 +18,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
 };
 use tracing::Instrument;
@@ -27,10 +27,17 @@ use tracing::Instrument;
 pub(super) trait RuntimeComponent: Send + Sync {
     fn id(&self) -> &str;
     fn kind(&self) -> &'static str;
+    fn bind_control(&self, _control: ComponentControl) {}
+    fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
+        None
+    }
     async fn initialize(&self, generation: ComponentGeneration) -> anyhow::Result<()>;
     async fn start(&self) -> anyhow::Result<()>;
     async fn stop(&self) -> anyhow::Result<()>;
     async fn run(&self) -> anyhow::Result<()>;
+    async fn wait_ready(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn shutdown(&self) -> anyhow::Result<()>;
     async fn deprovision(&self) -> anyhow::Result<()>;
     async fn status(&self) -> crate::ComponentStatus;
@@ -40,11 +47,13 @@ pub(super) struct RuntimeInstance {
     pub component: Arc<dyn RuntimeComponent>,
     pub token: u64,
     pub installed: AtomicBool,
+    pub rejection_owned: AtomicBool,
     remove_data: AtomicBool,
     cleanup_started: AtomicBool,
     shutdown_complete: AtomicBool,
     deprovision_complete: AtomicBool,
     span: tracing::Span,
+    record: OnceLock<super::RecordData>,
 }
 impl RuntimeInstance {
     pub(super) fn new(component: Arc<dyn RuntimeComponent>, token: u64, instance: &str) -> Self {
@@ -58,15 +67,28 @@ impl RuntimeInstance {
             component,
             token,
             installed: AtomicBool::new(false),
+            rejection_owned: AtomicBool::new(false),
             remove_data: AtomicBool::new(false),
             cleanup_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             deprovision_complete: AtomicBool::new(false),
             span,
+            record: OnceLock::new(),
         }
     }
     pub(super) fn remove_data(&self) {
         self.remove_data.store(true, Ordering::Release);
+    }
+    pub(super) fn bind_record(&self, record: super::RecordData) -> anyhow::Result<()> {
+        self.record
+            .set(record)
+            .map_err(|_| anyhow::anyhow!("component already has a graph record"))
+    }
+    pub(super) fn record(self: &Arc<Self>) -> anyhow::Result<super::Record> {
+        self.record
+            .get()
+            .map(|record| record.record(self.clone()))
+            .ok_or_else(|| anyhow::anyhow!("component instance has no graph record"))
     }
     pub(super) fn cancel_unstarted_removal(&self) {
         if !self.cleanup_started.load(Ordering::Acquire) {
@@ -101,11 +123,22 @@ impl ResourceCleanup for RuntimeInstance {
 struct Service {
     descriptor: ComponentDescriptor,
     instance: Arc<RuntimeInstance>,
+    control: Option<ComponentControl>,
 }
 #[async_trait]
 impl ComputationComponent for Service {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+    fn bind_control(&mut self, control: ComponentControl) {
+        self.instance.component.bind_control(control.clone());
+        self.control = Some(control);
+    }
+    fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
+        self.instance.component.control_handler()
+    }
+    fn requires_readiness_confirmation(&self) -> bool {
+        true
     }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.instance
@@ -125,19 +158,42 @@ impl ComputationComponent for Service {
 #[async_trait]
 impl ComputationService for Service {
     async fn run(&mut self) -> anyhow::Result<()> {
-        self.instance
+        let run = self
+            .instance
             .component
             .run()
-            .instrument(self.instance.span.clone())
-            .await
+            .instrument(self.instance.span.clone());
+        let ready = self
+            .instance
+            .component
+            .wait_ready()
+            .instrument(self.instance.span.clone());
+        tokio::pin!(run, ready);
+        tokio::select! {
+            biased;
+            result = &mut ready => {
+                result?;
+                self.control.as_ref().ok_or_else(|| anyhow::anyhow!("component control is not bound"))?.ready()?;
+                run.await
+            }
+            result = &mut run => {
+                result?;
+                anyhow::bail!("component processing completed before readiness was confirmed")
+            }
+        }
     }
 }
 
 pub(super) struct RuntimeFactory {
     descriptor: FactoryDescriptor,
+    services: LegacyPluginServices,
+    indexes: Arc<crate::indexes::IndexFactory>,
 }
-impl Default for RuntimeFactory {
-    fn default() -> Self {
+impl RuntimeFactory {
+    pub(super) fn new(
+        services: LegacyPluginServices,
+        indexes: Arc<crate::indexes::IndexFactory>,
+    ) -> Self {
         Self {
             descriptor: FactoryDescriptor {
                 implementation: ImplementationIdentity::try_new("drasi/lib-runtime-component", "1")
@@ -160,11 +216,25 @@ impl Default for RuntimeFactory {
                         .collect(),
                     allow_additional: true,
                 },
-                dependencies: BTreeMap::from([(
+                dependencies: [(
                     Arc::from("instance"),
                     ResourceRequirement::exactly_one::<RuntimeInstance>(ResourceRole::Component),
-                )]),
+                )]
+                .into_iter()
+                .chain(LegacyPluginServices::requirements())
+                .chain([(
+                    Arc::from("indexes"),
+                    ResourceRequirement {
+                        minimum: 0,
+                        ..ResourceRequirement::exactly_one::<
+                            Arc<dyn drasi_core::interface::IndexBackendPlugin>,
+                        >(ResourceRole::IndexBackend)
+                    },
+                )])
+                .collect(),
             },
+            services,
+            indexes,
         }
     }
 }
@@ -186,6 +256,7 @@ impl ComponentFactory for RuntimeFactory {
         resources: &BTreeMap<ResourceId, ResourceHandle>,
     ) -> anyhow::Result<()> {
         self.validate(spec)?;
+        self.services.validate_bindings(spec, resources)?;
         if let Some(id) = spec
             .dependencies
             .get("instance")
@@ -196,6 +267,45 @@ impl ComponentFactory for RuntimeFactory {
             }
             if let Some(resource) = resources.get(id) {
                 let value = resource.get::<RuntimeInstance>()?;
+                let record = value.record()?;
+                if matches!(
+                    &record.value,
+                    super::Value::Source(_) | super::Value::Reaction(_)
+                ) {
+                    if let (Some(id), Some(version)) = (
+                        record.metadata.get("pluginId"),
+                        record.metadata.get("pluginVersion"),
+                    ) {
+                        let identity = PluginIdentity {
+                            id: id.as_str().into(),
+                            version: version.as_str().into(),
+                        };
+                        spec.descriptor
+                            .clone()
+                            .with_plugin_identity(identity.clone())?;
+                        if spec.descriptor.plugin_identity() != Some(&identity) {
+                            anyhow::bail!(
+                                "runtime plugin provenance does not match its supplied metadata"
+                            );
+                        }
+                    }
+                }
+                let selected = match &record.value {
+                    super::Value::Query(query) => self
+                        .indexes
+                        .configured_provider(query.config.storage_backend.as_ref()),
+                    _ => None,
+                };
+                crate::computation::v1::plugin_services::validate_service(
+                    spec,
+                    resources,
+                    "indexes",
+                    selected.as_ref().map(|(_, provider)| provider),
+                    |provider: &Arc<dyn drasi_core::interface::IndexBackendPlugin>| provider,
+                )?;
+                if spec.descriptor.id().as_str() != value.component.id() {
+                    anyhow::bail!("runtime node ID does not match its component ID");
+                }
                 for (key, expected) in
                     [("id", value.component.id()), ("kind", value.component.kind())]
                 {
@@ -237,6 +347,7 @@ impl ComponentFactory for RuntimeFactory {
         Ok(ConstructedComponent::service(Box::new(Service {
             descriptor: context.specification.descriptor.clone(),
             instance,
+            control: None,
         })))
     }
 }

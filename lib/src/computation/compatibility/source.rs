@@ -15,12 +15,13 @@
 use super::component::RuntimeComponent;
 use crate::{
     computation::v1::{
-        plugin_services::PluginObservations, ComponentGeneration, LegacyPluginServices,
-        SourcePluginHost,
+        plugin_services::PluginObservations, ComponentGeneration, ComponentId, GraphControl,
+        GraphResourceObserver, LegacyPluginServices, SourcePluginHost,
     },
     ComponentStatus, Source, SourceRuntimeContext,
 };
 use async_trait::async_trait;
+use futures::FutureExt;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
@@ -36,6 +37,7 @@ pub(super) struct SourceInstance {
     pub source: Arc<dyn Source>,
     pub borrowed: Arc<SourcePluginHost>,
     services: LegacyPluginServices,
+    parent_control: GraphControl,
     observations: PluginObservations,
     life: Mutex<Life>,
     changed: watch::Sender<u64>,
@@ -45,6 +47,7 @@ impl SourceInstance {
         source: Box<dyn Source>,
         services: LegacyPluginServices,
         changed: watch::Sender<u64>,
+        parent_control: GraphControl,
     ) -> Arc<Self> {
         let source: Arc<dyn Source> = source.into();
         Arc::new(Self {
@@ -52,6 +55,7 @@ impl SourceInstance {
             borrowed: SourcePluginHost::borrowed(source.clone()),
             source,
             services,
+            parent_control,
             life: Mutex::new(Life::default()),
             changed,
         })
@@ -72,14 +76,19 @@ impl RuntimeComponent for SourceInstance {
     fn kind(&self) -> &'static str {
         "source"
     }
-    async fn initialize(&self, _: ComponentGeneration) -> anyhow::Result<()> {
+    async fn initialize(&self, generation: ComponentGeneration) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
-        if life.initialized {
-            if !life.initialized_complete {
-                anyhow::bail!("source initialization was interrupted");
-            }
+        if life.closed {
+            anyhow::bail!("source is permanently shut down");
+        }
+        if life.initialized_complete {
             return Ok(());
         }
+        if life.initialized {
+            self.observations.drive(self.source.stop(), true).await?;
+            life.needs_stop = false;
+        }
+        self.observations.reset().await;
         life.initialized = true;
         let mut context = SourceRuntimeContext::new(
             self.services.scope.as_ref(),
@@ -89,6 +98,11 @@ impl RuntimeComponent for SourceInstance {
             self.services.identity.clone(),
         );
         context.wal_provider = self.services.wal.clone();
+        context.resource_observer = Some(Arc::new(GraphResourceObserver::new(
+            self.parent_control.clone(),
+            ComponentId::try_new(self.source.id())?,
+            generation,
+        )));
         self.observations
             .drive(
                 async {
@@ -129,6 +143,34 @@ impl RuntimeComponent for SourceInstance {
             update?;
             if self.source.status().await == ComponentStatus::Stopped {
                 return Ok(());
+            }
+        }
+    }
+    async fn wait_ready(&self) -> anyhow::Result<()> {
+        let mut changes = self.changed.subscribe();
+        loop {
+            changes.borrow_and_update();
+            match self.source.status().await {
+                ComponentStatus::Running => return Ok(()),
+                ComponentStatus::Error => {
+                    let failure = self
+                        .observations
+                        .failure()
+                        .now_or_never()
+                        .and_then(|result| result.err())
+                        .unwrap_or_else(|| {
+                            anyhow::anyhow!(
+                                "Source '{}' failed before reaching Running",
+                                self.source.id()
+                            )
+                        });
+                    return Err(failure);
+                }
+                _ => {}
+            }
+            tokio::select! {
+                changed = changes.changed() => changed?,
+                running = self.observations.wait_running() => return running,
             }
         }
     }

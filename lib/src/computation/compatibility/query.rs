@@ -34,8 +34,52 @@ use tokio::sync::{watch, Mutex};
 
 struct QueryLife {
     scope: ScopedGraph,
+    creation_attempted: bool,
     activation: Option<BoxFuture<'static, GraphResult<StartReport>>>,
     link: Option<CatalogLink>,
+}
+
+impl QueryLife {
+    async fn ready(&mut self) -> anyhow::Result<GraphControl> {
+        let retry = self.creation_attempted;
+        self.creation_attempted = true;
+        match self.scope.ready().await {
+            Ok(control) => Ok(control),
+            Err(error) if retry => {
+                let control = self.scope.control()?;
+                let failed = control
+                    .observed()
+                    .components
+                    .iter()
+                    .filter(|(_, node)| node.realization == RealizationState::CreationFailed)
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                if failed.is_empty() {
+                    return Err(error);
+                }
+                let request = control.clone();
+                let report = self
+                    .scope
+                    .drive(async move {
+                        let preview = request
+                            .preview(
+                                request.desired_snapshot().revision,
+                                vec![DesiredMutation::Retry(GraphSelection::Exact(failed))],
+                            )
+                            .await?;
+                        Ok(request
+                            .reconcile(preview, TopologyBindings::default())
+                            .await?)
+                    })
+                    .await?;
+                if report.summary != OperationSummary::Completed {
+                    anyhow::bail!("nested query creation retry failed: {report:?}");
+                }
+                Ok(control)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 struct ParentBinding {
@@ -45,17 +89,21 @@ struct ParentBinding {
     initial_status: ComponentStatus,
 }
 
-pub(crate) struct QueryInstance {
-    pub config: QueryConfig,
-    pub catalog: QueryResultsCatalog,
-    pub metrics: Arc<QueryOutputMetrics>,
-    pub sources_bound: bool,
+struct QueryExecution {
+    catalog: QueryResultsCatalog,
     source_bindings: Vec<Arc<SourceInstance>>,
-    parent: OnceLock<ParentBinding>,
-    global_catalog: QueryResultsCatalog,
     subscriptions: Vec<Arc<LegacySourceSubscription>>,
     inspector: ComputationInspector,
     life: Mutex<QueryLife>,
+}
+
+pub(crate) struct QueryInstance {
+    pub config: QueryConfig,
+    pub metrics: Arc<QueryOutputMetrics>,
+    execution: OnceLock<QueryExecution>,
+    initializing: Mutex<()>,
+    parent: OnceLock<ParentBinding>,
+    global_catalog: QueryResultsCatalog,
     started: AtomicBool,
     requested: AtomicBool,
     closed: AtomicBool,
@@ -67,13 +115,41 @@ pub(crate) struct QueryInstance {
 }
 
 impl QueryInstance {
-    pub(super) fn new(
-        config: QueryConfig,
+    pub(super) fn new(config: QueryConfig, owner: &Arc<super::Runtime>) -> Arc<Self> {
+        Arc::new(Self {
+            config,
+            metrics: Arc::new(QueryOutputMetrics::new()),
+            execution: OnceLock::new(),
+            initializing: Mutex::new(()),
+            parent: OnceLock::new(),
+            global_catalog: owner.catalog.clone(),
+            started: AtomicBool::new(false),
+            requested: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            changed: owner.changed.clone(),
+            owner: Arc::downgrade(owner),
+            status: watch::channel(ComponentStatus::Added).0,
+            cleanup: drasi_core::computation::ComputationIoScope::default(),
+            deleted: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    fn construct(
+        &self,
         sources: Vec<Arc<SourceInstance>>,
         owner: &Arc<super::Runtime>,
-    ) -> anyhow::Result<Arc<Self>> {
+    ) -> anyhow::Result<QueryExecution> {
+        let config = &self.config;
+        if let Some(crate::indexes::StorageBackendRef::Inline(spec)) = &config.storage_backend {
+            spec.validate().map_err(|error| {
+                anyhow::anyhow!(
+                    "Query '{}' has invalid inline storage backend configuration: {error}",
+                    config.id
+                )
+            })?;
+        }
+        crate::queries::LabelExtractor::extract_labels(&config.query, &config.query_language)?;
         let runtime = &owner.config;
-        let sources_bound = sources.len() == config.sources.len();
         let source_bindings = sources.clone();
         let services = owner.services.clone();
         let graph_id = format!(
@@ -95,8 +171,6 @@ impl QueryInstance {
         )?
         .for_runtime();
         let catalog = pipeline.catalog();
-        let metrics = Arc::new(QueryOutputMetrics::new());
-        let (status, status_reader) = watch::channel(ComponentStatus::Added);
         catalog.configure_delivery(
             &config.id,
             config.dispatch_mode.unwrap_or_default(),
@@ -104,9 +178,9 @@ impl QueryInstance {
                 .dispatch_buffer_capacity
                 .or(runtime.global_dispatch_buffer_capacity)
                 .unwrap_or(1_000),
-            crate::queries::compute_config_hash(&config),
-            metrics.clone(),
-            status_reader,
+            crate::queries::compute_config_hash(config),
+            self.metrics.clone(),
+            self.status.subscribe(),
         )?;
         let mut pipeline = pipeline;
         let (backend, _) = runtime
@@ -135,39 +209,35 @@ impl QueryInstance {
             )?;
         }
         let mut graph_config = config.clone();
-        if !sources_bound {
-            graph_config.sources.clear();
-        }
         // Subscriber capacity is enforced by the catalogue. The internal relay
         // retains committed notifications within the query's outbox bound.
         graph_config.dispatch_buffer_capacity = Some(config.outbox_capacity.clamp(1, 1_000_000));
         let (graph, subscriptions) = pipeline.query(graph_config).build_with_subscriptions()?;
         let inspector = graph.inspector();
         let scope = ScopedGraph::new(graph, services.scope);
-        Ok(Arc::new(Self {
-            config,
+        Ok(QueryExecution {
             catalog,
-            metrics,
-            sources_bound,
             source_bindings,
-            parent: OnceLock::new(),
-            global_catalog: owner.catalog.clone(),
             subscriptions,
             inspector,
             life: Mutex::new(QueryLife {
                 scope,
+                creation_attempted: false,
                 activation: None,
                 link: None,
             }),
-            started: AtomicBool::new(false),
-            requested: AtomicBool::new(false),
-            closed: AtomicBool::new(false),
-            changed: owner.changed.clone(),
-            owner: Arc::downgrade(owner),
-            status,
-            cleanup: drasi_core::computation::ComputationIoScope::default(),
-            deleted: Arc::new(AtomicBool::new(false)),
-        }))
+        })
+    }
+
+    fn execution(&self) -> anyhow::Result<&QueryExecution> {
+        self.execution
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Query '{}' has not been created", self.config.id))
+    }
+
+    pub(super) fn subscribe_results(&self) -> anyhow::Result<CatalogSubscription> {
+        self.require_current()?;
+        self.execution()?.catalog.subscribe_query(&self.config.id)
     }
     pub(super) fn notify(&self) {
         self.publish_status(self.read_status());
@@ -200,14 +270,15 @@ impl QueryInstance {
             })
             .map_err(|_| anyhow::anyhow!("query already has a construction binding"))
     }
-    pub(super) fn matches_sources(&self, sources: &[Arc<SourceInstance>]) -> bool {
-        self.sources_bound
-            && self.source_bindings.len() == sources.len()
-            && self
-                .source_bindings
-                .iter()
-                .zip(sources)
-                .all(|(left, right)| Arc::ptr_eq(left, right))
+    pub(super) fn has_stale_sources(&self, sources: &[Arc<SourceInstance>]) -> bool {
+        self.execution.get().is_some_and(|execution| {
+            execution.source_bindings.len() != sources.len()
+                || !execution
+                    .source_bindings
+                    .iter()
+                    .zip(sources)
+                    .all(|(left, right)| Arc::ptr_eq(left, right))
+        })
     }
     fn require_current(&self) -> anyhow::Result<()> {
         let binding = self
@@ -222,14 +293,33 @@ impl QueryInstance {
         Ok(())
     }
     pub(crate) fn inspector(&self) -> ComputationInspector {
-        self.inspector.clone()
+        match self.execution.get() {
+            Some(execution) => execution.inspector.clone(),
+            // An unrealized query is inspected through its declared parent node,
+            // including its raw definition and any construction failure.
+            None => self
+                .parent
+                .get()
+                .expect("registered query has a parent binding")
+                .control
+                .inspector(),
+        }
+    }
+    pub(super) fn execution_inspection(
+        &self,
+    ) -> Option<(Arc<ComputationInspection>, &[Arc<SourceInstance>])> {
+        let execution = self.execution.get()?;
+        Some((execution.inspector.snapshot(), &execution.source_bindings))
     }
     pub(crate) fn checkpoint_store(
         &self,
     ) -> anyhow::Result<Option<Arc<dyn drasi_core::interface::CheckpointStore>>> {
-        self.catalog.checkpoint_store(&self.config.id)
+        self.execution()?.catalog.checkpoint_store(&self.config.id)
     }
     fn read_status(&self) -> ComponentStatus {
+        if self.closed.load(Ordering::Acquire) {
+            return ComponentStatus::Stopped;
+        }
         if let Some(binding) = self.parent.get() {
             if super::record_token(&binding.control.desired_snapshot(), &binding.node)
                 != Some(binding.token)
@@ -240,13 +330,21 @@ impl QueryInstance {
                 if parent.failure.is_some() {
                     return ComponentStatus::Error;
                 }
-                if parent.operation.0 == 0 {
+                if !parent.lifecycle_requested {
                     return binding.initial_status;
                 }
                 match parent.lifecycle {
-                    ComponentLifecycle::Starting => return ComponentStatus::Starting,
+                    ComponentLifecycle::Starting if !self.requested.load(Ordering::Acquire) => {
+                        return ComponentStatus::Starting;
+                    }
                     ComponentLifecycle::Stopping => return ComponentStatus::Stopping,
-                    ComponentLifecycle::Stopped => return ComponentStatus::Stopped,
+                    ComponentLifecycle::Stopped => {
+                        return if self.started.load(Ordering::Acquire) {
+                            ComponentStatus::Stopped
+                        } else {
+                            binding.initial_status
+                        };
+                    }
                     ComponentLifecycle::Failed => return ComponentStatus::Error,
                     _ => {}
                 }
@@ -258,7 +356,10 @@ impl QueryInstance {
         if !self.requested.load(Ordering::Acquire) {
             return ComponentStatus::Stopped;
         }
-        let snapshot = self.inspector.snapshot();
+        let Some(execution) = self.execution.get() else {
+            return ComponentStatus::Added;
+        };
+        let snapshot = execution.inspector.snapshot();
         let Some(query) = snapshot
             .observed
             .components
@@ -277,7 +378,7 @@ impl QueryInstance {
         }
     }
     pub(super) fn last_error(&self) -> Option<String> {
-        let snapshot = self.inspector.snapshot();
+        let snapshot = self.execution.get()?.inspector.snapshot();
         let id = ComponentId::try_new(self.config.id.as_str()).expect("validated query");
         snapshot
             .observed
@@ -297,6 +398,31 @@ impl QueryInstance {
 
 #[async_trait]
 impl RuntimeComponent for QueryInstance {
+    async fn wait_ready(&self) -> anyhow::Result<()> {
+        let execution = self.execution()?;
+        let mut changes = execution.inspector.subscribe();
+        let id = ComponentId::try_new(self.config.id.as_str())?;
+        loop {
+            self.require_current()?;
+            // Measure readiness in the execution graph, independently of the
+            // containing service's transitional lifecycle state.
+            let snapshot = changes.borrow_and_update().clone();
+            let node =
+                snapshot.observed.components.get(&id).ok_or_else(|| {
+                    anyhow::anyhow!("query component is not in its execution graph")
+                })?;
+            if node.started && node.lifecycle == ComponentLifecycle::Running {
+                return Ok(());
+            }
+            if let Some(failure) = &node.failure {
+                return Err(GraphError::Reported {
+                    cause: failure.cause.clone(),
+                }
+                .into());
+            }
+            changes.changed().await?;
+        }
+    }
     fn id(&self) -> &str {
         &self.config.id
     }
@@ -304,14 +430,32 @@ impl RuntimeComponent for QueryInstance {
         "query"
     }
     async fn initialize(&self, _: ComponentGeneration) -> anyhow::Result<()> {
-        let mut life = self.life.lock().await;
-        life.scope.ready().await?;
+        let _initializing = self.initializing.lock().await;
+        self.require_current()?;
+        if self.closed.load(Ordering::Acquire) {
+            anyhow::bail!("query is permanently shut down");
+        }
+        if self.execution.get().is_none() {
+            let owner = self
+                .owner
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("native runtime is gone"))?;
+            let sources = owner.query_sources(&self.config).await?;
+            let execution = self.construct(sources, &owner)?;
+            self.execution
+                .set(execution)
+                .map_err(|_| anyhow::anyhow!("query execution was already constructed"))?;
+        }
+        let execution = self.execution()?;
+        let mut life = execution.life.lock().await;
+        life.ready().await?;
         if life.link.is_none() {
             life.link = Some(
                 self.global_catalog
-                    .link_query(&self.config.id, &self.catalog)?,
+                    .link_query(&self.config.id, &execution.catalog)?,
             );
         }
+        self.notify();
         Ok(())
     }
     async fn start(&self) -> anyhow::Result<()> {
@@ -332,18 +476,19 @@ impl RuntimeComponent for QueryInstance {
                 anyhow::bail!("IncompatibleSource: sources that do not support replay cannot feed persistent query '{}' (source '{}', supports_replay=false)", self.config.id, source.source_id);
             }
         }
-        for subscription in &self.subscriptions {
+        let execution = self.execution()?;
+        for subscription in &execution.subscriptions {
             subscription.prepare_start();
         }
         self.started.store(true, Ordering::Release);
         self.requested.store(true, Ordering::Release);
         self.notify();
-        let mut life = self.life.lock().await;
-        let control = life.scope.ready().await?;
+        let mut life = execution.life.lock().await;
+        let control = life.scope.control()?;
         let revision = control.desired_snapshot().revision;
         let mut activation: BoxFuture<'static, GraphResult<StartReport>> =
             Box::pin(async move { control.start_requested(revision, GraphSelection::All).await });
-        let subscriptions = self.subscriptions.clone();
+        let subscriptions = execution.subscriptions.clone();
         let ready = async move {
             for subscription in subscriptions {
                 subscription.wait_subscribed().await?;
@@ -380,15 +525,20 @@ impl RuntimeComponent for QueryInstance {
         Ok(())
     }
     async fn stop(&self) -> anyhow::Result<()> {
+        self.started.store(true, Ordering::Release);
         self.requested.store(false, Ordering::Release);
-        let mut life = self.life.lock().await;
+        let Some(execution) = self.execution.get() else {
+            return Ok(());
+        };
+        let mut life = execution.life.lock().await;
         life.activation = None;
         let result = life.scope.stop().await;
         self.notify();
         result
     }
     async fn run(&self) -> anyhow::Result<()> {
-        let mut life = self.life.lock().await;
+        let execution = self.execution()?;
+        let mut life = execution.life.lock().await;
         if let Some(activation) = life.activation.take() {
             let report = life
                 .scope
@@ -399,7 +549,7 @@ impl RuntimeComponent for QueryInstance {
                 anyhow::bail!("query activation failed: {:?}", report.components);
             }
         }
-        let mut changes = self.inspector.subscribe();
+        let mut changes = execution.inspector.subscribe();
         loop {
             tokio::select! {
                 result = life.scope.run() => return result,
@@ -410,10 +560,13 @@ impl RuntimeComponent for QueryInstance {
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.closed.store(true, Ordering::Release);
         self.requested.store(false, Ordering::Release);
-        let mut life = self.life.lock().await;
-        life.activation = None;
-        life.scope.shutdown().await?;
-        life.link = None;
+        let _initializing = self.initializing.lock().await;
+        if let Some(execution) = self.execution.get() {
+            let mut life = execution.life.lock().await;
+            life.activation = None;
+            life.scope.shutdown().await?;
+            life.link = None;
+        }
         self.notify();
         Ok(())
     }
@@ -422,6 +575,11 @@ impl RuntimeComponent for QueryInstance {
         if self.deleted.load(Ordering::Acquire) {
             return Ok(());
         }
+        let Some(execution) = self.execution.get() else {
+            // Declaration and validation alone never open query indexes.
+            self.deleted.store(true, Ordering::Release);
+            return Ok(());
+        };
         let owner = self
             .owner
             .upgrade()
@@ -436,7 +594,7 @@ impl RuntimeComponent for QueryInstance {
         let query = self.config.id.clone();
         let key = LegacyIndexProviderAdapter::storage_key(
             Some(owner.services.scope.as_ref()),
-            self.inspector.snapshot().desired.id.as_ref(),
+            execution.inspector.snapshot().desired.id.as_ref(),
             &query,
         );
         let deleted = self.deleted.clone();
@@ -537,7 +695,9 @@ impl Query for QueryInstance {
     }
     async fn subscription_count(&self) -> usize {
         if self.requested.load(Ordering::Acquire) {
-            self.subscriptions.len()
+            self.execution
+                .get()
+                .map_or(0, |execution| execution.subscriptions.len())
         } else {
             0
         }
@@ -545,9 +705,7 @@ impl Query for QueryInstance {
     async fn subscribe(&self, _: String) -> anyhow::Result<QuerySubscriptionResponse> {
         Ok(QuerySubscriptionResponse {
             query_id: self.config.id.clone(),
-            receiver: Box::new(LegacyReceiver(
-                self.catalog.subscribe_query(&self.config.id)?,
-            )),
+            receiver: Box::new(LegacyReceiver(self.subscribe_results()?)),
         })
     }
     async fn fetch_snapshot(&self) -> std::result::Result<SnapshotResponse, FetchError> {
@@ -555,7 +713,11 @@ impl Query for QueryInstance {
         if !matches!(status, ComponentStatus::Starting | ComponentStatus::Running) {
             return Err(FetchError::NotRunning { status });
         }
-        self.catalog
+        let Some(execution) = self.execution.get() else {
+            return Err(FetchError::NotRunning { status });
+        };
+        execution
+            .catalog
             .legacy_snapshot(
                 &self.config.id,
                 Duration::from_secs(self.config.bootstrap_timeout_secs),
@@ -580,7 +742,11 @@ impl Query for QueryInstance {
         if !matches!(status, ComponentStatus::Starting | ComponentStatus::Running) {
             return Err(FetchError::NotRunning { status });
         }
-        self.catalog
+        let Some(execution) = self.execution.get() else {
+            return Err(FetchError::NotRunning { status });
+        };
+        execution
+            .catalog
             .legacy_outbox(
                 &self.config.id,
                 after,

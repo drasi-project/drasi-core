@@ -46,6 +46,10 @@ drasi-lib = { version = "0.9", features = ["computation"] }
 
 ### Using the ordinary API with ComputationGraph
 
+For the internal architecture, graph schema, lifecycle state-transition diagrams
+and current compatibility boundaries, see the
+[ComputationGraph technical design](docs/computation-graph-design.md).
+
 Choose the runtime explicitly when constructing the instance:
 
 ```rust,ignore
@@ -77,6 +81,27 @@ The old managers are not used to evaluate queries. A ComponentGraph-shaped
 inspection projection preserves the ordinary public topology and event API;
 the native controller owns lifecycle decisions.
 
+Compatibility is an outer hosting concern. Native ordinary operations do not
+construct the legacy SourceManager, QueryManager, ReactionManager or lifecycle
+orchestrator; the legacy backend is initialized only for ComponentGraph execution
+or explicit engine-specific manager access. Existing plugin status/query contracts
+remain available through their old import paths. The legacy inspection/event view
+is retained for ordinary API compatibility, not used as native authority.
+
+The generic graph uses explicit descriptor semantic metadata and generic resource
+identity/observation contracts. Translation of legacy providers and the standard
+factory catalog live in integration modules outside `graph/`. This is currently a
+module boundary with regression guards, not a separate native-kernel crate.
+
+In this mode the graph also owns **membership and instance identity**. Ordinary
+list/get/status, query configuration/results/metrics, log subscriptions and
+configuration snapshots resolve graph-owned records, not the compatibility view.
+A delayed or stale projection cannot admit, hide, replace or remove a component.
+Instance startup uses the graph's declared autostart policy. Reconfiguration can
+defer activation without rewriting that policy or starting a stopped instance.
+The instance ID remains reserved for the compatibility view's root; the native
+controller enforces that name reservation along with other addition conflicts.
+
 `ExecutionMode::ComponentGraph` remains the default, even with the Cargo feature
 enabled. This is a construction-time choice, not a command to move a running
 pipeline or import its persistent state. Native indexes use separate storage
@@ -96,11 +121,58 @@ without outbox/live-result writers. Their source/index progress can be persisten
 but query output remains **volatile**, not durable or atomic. It must not be used
 as a promise that a reaction can recover output lost across reconstruction.
 
-Creation and activation are separate. A failed creation remains visible and can
-be removed with awaited cleanup; a rejected replacement does not silently swap
-the old runtime object. Cancelling the caller does not roll back a mutation the
-native controller already committed. Start failures can be retried, and a
-component's stop request can interrupt its pending activation.
+In ComputationGraph mode, `add_source`, `add_query`, and `add_reaction` acknowledge
+**node creation**, not successful initialization or startup. Identity conflicts or
+a controller that cannot accept the addition are method errors. Query validation,
+dependency resolution, initialization and activation failures remain on the added
+node. Failed nodes retain their IDs and definitions until explicitly updated or
+removed. Legacy ComponentGraph mode keeps its existing API behavior.
+
+Use the corresponding `*_with_handle` method when the caller needs to await a
+successful start rather than only node creation:
+
+```rust,ignore
+let drasi = DrasiLib::builder()
+    .with_execution_mode(ExecutionMode::ComputationGraph)
+    .build()
+    .await?;
+drasi.start().await?;
+
+let component = drasi.add_source_with_handle(source).await?;
+tokio::time::timeout(
+    std::time::Duration::from_secs(30),
+    component.wait_started(),
+).await??;
+```
+
+The wait is asynchronous; it does not block an executor thread. It returns a
+recorded failure instead of waiting indefinitely after initialization/startup
+fails. A component with `auto_start = false` can be started explicitly with
+`component.start().await`. `wait_started()` records readiness for the latest
+requested activation in that construction generation, including a short-lived
+component that has already finished. Requesting another start resets that wait.
+A handle cannot operate on a replacement that reuses its ID.
+
+`add_transformer_with_handle` / `add_transformer` accept preconstructed native
+transformers. `add_computation_component(ComponentAddition::new(instance))` is the
+common native addition API for sources, transformers, query transformers, sinks
+and services. Bind output streams with the addition's `bind_stream` or the
+returned handle's `bind_stream`, then connect declared ports through
+`drasi.computation_control()?.connect(...)`. Incomplete components remain blocked
+until their required ports are connected. For standalone use,
+`ComputationGraph::empty(id)` creates an incremental graph; keep polling its
+`run()` future while issuing additions through its control handle.
+
+Cancelling an add caller does not undo a node the controller already added.
+Initialization is controller-owned and does not hold the instance mutation lock
+while awaiting plugin work. A stop can cancel pending initialization or activation;
+removal still awaits resource cleanup. A rejected replacement does not silently
+swap the old instance, and failed cleanup remains inspectable and retryable.
+Rejected native additions retain their supplied objects in
+`GraphError::AdditionRejected`. Call `addition.take().await` on that error's owner
+to recover them, or await graph disposal to reclaim newly supplied graph-owned
+resources. Borrowed resources and resources already managed by the graph are not
+shut down as part of rejecting an addition.
 
 Source/query replacement refreshes the affected downstream bindings. A
 reaction-only update leaves upstream sources and queries running. Reactions still
@@ -305,6 +377,10 @@ CRUD, lifecycle, snapshots/outbox and metrics. Native-route assertions inspect
 the actual native query type and its constructed, running query component.
 Additional full-result cases cover fanout and scheduled-future metadata without
 sorting results or dropping result identity, metadata or profiling.
+The paired backend trace also compares ordered insert/update/delete emissions,
+duplicate-valued rows, row signatures, metadata, keyed snapshots and outbox replay
+between independently constructed backends. It normalizes wall-clock timestamps
+and profiling clock values only, retaining the profiling field/presence structure.
 
 ### Native graph contracts
 
@@ -438,6 +514,121 @@ run, external systems to be reachable, or bootstrap to finish. Call
 `graph.dispose().await` to release graph-owned provider resources after component
 cleanup; borrowed providers are never shut down by the graph. Failed provider
 cleanup remains registered and explicitly retryable.
+
+**Control and notifications:** every native component receives a sealed,
+generation-bound `ComponentControl` through `bind_control`. It can notify only
+its current directly connected upstream/downstream neighbors, or one explicitly
+named neighbor. The controller also publishes availability and readiness changes.
+Ordinary Source/Reaction users obtain the same restricted sender from the
+component handle; existing plugin ABI methods are unchanged.
+
+Control messages use their own bounded low-volume queues, not data pipes. A
+component can return a shared `ControlHandler`, or the host can install one through
+`ComponentHandle::set_control_handler`. The controller polls that handler
+independently of the component's mutable data calls, so a blocked data handler or
+full data pipe does not block notifications. Queue saturation, stale senders and
+unrelated destinations are explicit errors. Components must still use cooperative
+handlers and handle control-send errors; this is not durable messaging.
+
+Readiness-driven activation is opt-in. Use
+`ComponentAddition::require_downstream_ready()` or the graph builder's
+`require_downstream_ready(component_id)`. A returned component handle also offers
+`require_downstream_ready(true).await`; configure it while the instance/component
+is stopped or with automatic startup disabled. The producer waits for its connected
+consumers to report readiness. Successful native start hooks report readiness
+automatically; adapters whose underlying component becomes ready later report it
+explicitly. A `NotReady` notification revokes readiness; it does not imply that
+accepted data or external effects were rolled back.
+Consumers must be able to report readiness without requiring the gated producer
+to start first; control messaging does not automatically resolve such an
+application-level startup dependency cycle.
+
+**Host-visible graph inventory:** native inspection exposes component and provider
+resource nodes, derived plugin-family/version nodes and pipe nodes. Provider
+dependencies refer to actual supplied resources; graph-owned and borrowed cleanup
+responsibilities remain distinct. Standard source/reaction bases and dynamic host
+proxies report attached bootstrap, identity, state-store and WAL providers through an
+optional runtime-context observer. A custom implementation with additional opaque
+providers must report those bindings; the host cannot inspect private Rust fields.
+
+All provider instances supplied through `DrasiLibBuilder` are present, including
+the default state store and configured identity, secret-store, WAL and named/default
+index providers, even before a query uses them. Multiple index names for the same
+`Arc` share one resource node, named from the lexically first alias. Queries link to
+their selected index provider, and replacement updates that link with the query.
+Attached-provider reports retain actual instance identity and share nodes where
+the same provider is selected by several components.
+
+Captured service bindings and selected-provider reports are dependencies, not
+per-call usage telemetry. In particular, an available secret store does not prove
+that a component read a secret. Metadata-only declarations such as
+`with_bootstrap_for_source` and storage-backend configuration do not create
+fictitious provider instances. Providers created privately inside existing dynamic
+plugins remain outside this guarantee unless the host can observe them through
+existing setters/context bindings. Existing dynamic plugins remain binary-compatible.
+
+Plugin identity comes from supplied implementation descriptors or component
+provenance, including `pluginId` / `pluginVersion` metadata where available.
+Different versions have distinct nodes, linked by `VERSION_OF` to one unversioned
+plugin-family node per plugin ID within the graph scope:
+
+```text
+component -> plugin version (postgres@1.2.0) -> plugin family (postgres)
+component -> plugin version (postgres@1.3.0) -> plugin family (postgres)
+```
+
+Existing version-node keys, the `ComputationPlugin` label and `USES_PLUGIN` links
+are unchanged. Family nodes use `GraphEntityId::PluginFamily` /
+`PluginFamilyEntity` (`ComputationPluginFamily` in graph-as-data), with
+`versionCount` and distinct `dependentComponentCount` summaries. Version-to-family
+links are available through dependency traversal without imposing lifecycle
+coupling. Both kinds of plugin nodes are derived automatically: a version
+disappears with its last dependent, and a family with its last represented version.
+They are not an inventory of all installed plugin binaries. Unknown provenance is
+not inferred from a type name or represented as a fictitious plugin family.
+
+Pipe nodes distinguish native
+provider-backed bindings from `hostSubscription` pipes for ordinary
+source/query/reaction subscriptions. Host subscriptions do not claim invented
+native-provider capabilities. Control-only connections are not data pipes.
+Representing a pipe as a node does not change its delivery guarantees.
+
+Ordinary query/reaction input subscriptions are committed with their nodes, not
+reconstructed by the projector. Missing producers remain explicit in inspection
+and desired export; they do not make a query disappear. Dependency selections and
+removal policies use those declarations, including direct controller removals.
+`dependencies()` / `dependents()` include normalized
+**consumer -> pipe -> producer** data dependencies as well as resource/plugin
+dependencies. These descriptive links do not impose extra startup coupling or
+turn control-only neighbors into data dependencies.
+
+`drasi.computation_control()?.inspector().topology()` exposes the instance graph.
+`drasi.inspect_query_computation(id).await?.topology()` exposes a query's nested
+native graph, including its actual index/bootstrap resources and internal pipes.
+An unrealized query remains inspectable through its parent declaration.
+
+For the complete host-visible scope hierarchy, use:
+
+```rust,ignore
+let inventory = drasi.inspect_computation_inventory().await?;
+for (scope, graph) in &inventory.scopes {
+    // graph.owner identifies the owning component and its construction generation;
+    // None means the graph was registered directly with this DrasiLib instance.
+    println!("{scope:?}: {} entities", graph.topology.nodes.len());
+}
+```
+
+The inventory includes ordinary components, native additions/transformers, query
+execution graphs and separately added/builder-supplied computation graphs.
+`entities()` uses scope-qualified identities, so repeated names cannot collide.
+`links` includes local topology and host-known cross-scope references from query
+adapters to their source instances, shared services and selected index provider.
+`plugin_dependents()` returns distinct scope-qualified dependents of a known
+plugin/version; `plugin_family_dependents("postgres")` traverses the family links
+to return dependents across all its represented versions and scopes. Each scope
+is a coherent native publication; the combined view
+does not claim a transaction across independently running graphs. It retains no
+live handles or private configuration and cannot keep removed instances alive.
 
 **Live changes:** use `control.preview(revision, mutations)` followed by
 `control.reconcile(preview, bindings)`. The immutable preview identifies creation,

@@ -88,6 +88,7 @@ pub mod reactions;
 pub mod sources;
 
 // Sub-modules for lib_core operations (split for maintainability)
+mod legacy_backend;
 mod lib_core_ops;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod managers;

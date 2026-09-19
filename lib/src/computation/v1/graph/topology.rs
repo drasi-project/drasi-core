@@ -81,6 +81,18 @@ pub struct DesiredTopology {
     pub requirements: PipeRequirements,
     /// Desired links crossing an exact/subset selection boundary are explicit.
     pub boundary_relationships: Vec<DesiredRelationship>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_connections: Vec<(ComponentId, ComponentId)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscriptions: Vec<(ComponentId, ComponentId)>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub readiness_required: BTreeSet<ComponentId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub component_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub component_plugins: BTreeMap<ComponentId, PluginIdentity>,
+    #[serde(default)]
+    pub allow_incomplete: bool,
 }
 
 #[derive(Default, Clone)]
@@ -97,25 +109,6 @@ impl FactoryRegistry {
         self.factories.insert(id, factory);
         Ok(())
     }
-    pub fn standard() -> Self {
-        let factories: Vec<Arc<dyn ComponentFactory>> = vec![
-            Arc::new(crate::computation::v1::ContinuousQueryFactory::default()),
-            Arc::new(crate::computation::v1::LegacySourceFactory::default()),
-            Arc::new(crate::computation::v1::SourcePluginAdapterFactory::default()),
-            Arc::new(crate::computation::v1::LegacyReactionFactory::default()),
-            Arc::new(crate::computation::v1::ReactionPluginAdapterFactory::default()),
-            Arc::new(crate::computation::v1::QueryReplayFactory::default()),
-            Arc::new(crate::computation::v1::QueryResultsOutletFactory::default()),
-            Arc::new(crate::computation::v1::WalReplaySourceFactory::default()),
-            Arc::new(crate::computation::v1::ComputationTopologyFactory::default()),
-        ];
-        Self {
-            factories: factories
-                .into_iter()
-                .map(|factory| (factory.descriptor().implementation.clone(), factory))
-                .collect(),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -124,6 +117,12 @@ pub struct TopologyBindings {
     pub components: BTreeMap<String, ConstructedComponent>,
     pub pipes: BTreeMap<String, Box<dyn PipeProvider>>,
     pub resources: BTreeMap<ResourceId, ResourceHandle>,
+    pub readiness_required: BTreeSet<ComponentId>,
+    pub defer_activation: bool,
+    /// Host-managed input connections committed with the consumer declaration.
+    pub subscriptions: Vec<(ComponentId, ComponentId)>,
+    /// Semantic admission diagnostics belong to the added node, not its caller.
+    pub validation_error: Option<Arc<GraphError>>,
 }
 
 impl DesiredPipe {
@@ -214,6 +213,7 @@ impl DesiredTopology {
         }
         let mut builder = ComputationGraph::builder(self.graph_id.as_str())
             .requirements(self.requirements.clone());
+        builder.allow_empty = self.allow_incomplete;
         builder.unbound_relationships = self.boundary_relationships.clone();
         for resource in &self.resources {
             builder = builder.declare_resource(resource.clone())?;
@@ -282,6 +282,46 @@ impl DesiredTopology {
                 .relationship_policy(relationship.definition.clone(), relationship.policy.clone());
         }
         let mut graph = builder.build()?;
+        if self.control_connections.iter().any(|(from, to)| {
+            from == to || !graph.ids.contains_key(from) || !graph.ids.contains_key(to)
+        }) || self
+            .subscriptions
+            .iter()
+            .any(|(from, to)| from == to || !graph.ids.contains_key(to))
+            || self
+                .readiness_required
+                .iter()
+                .any(|id| !graph.ids.contains_key(id))
+        {
+            return Err(topology("control policy refers to an unknown component"));
+        }
+        if self
+            .component_resources
+            .iter()
+            .any(|(component, resources)| {
+                !graph.ids.contains_key(component)
+                    || resources
+                        .iter()
+                        .any(|resource| !graph.snapshot.resources.contains_key(resource))
+            })
+            || self
+                .component_plugins
+                .keys()
+                .any(|id| !graph.ids.contains_key(id))
+        {
+            return Err(topology(
+                "component provenance or provider binding refers to an unknown node",
+            ));
+        }
+        for plugin in self.component_plugins.values() {
+            validate_identifier("plugin", &plugin.id)?;
+            validate_identifier("plugin version", &plugin.version)?;
+        }
+        graph.snapshot.control_connections = self.control_connections.clone().into();
+        graph.snapshot.subscriptions = self.subscriptions.clone().into();
+        graph.snapshot.readiness_required = self.readiness_required.clone();
+        graph.snapshot.component_resources = self.component_resources.clone();
+        graph.snapshot.component_plugins = self.component_plugins.clone();
         graph.snapshot.external_bindings = self
             .components
             .iter()
@@ -297,6 +337,7 @@ impl DesiredTopology {
             })
             .collect();
         graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+        graph.inspector.publish(&graph.snapshot, graph.observed());
         Ok(graph)
     }
 }
@@ -329,19 +370,13 @@ pub(super) fn selected(
             break;
         }
         let before = selected.len();
-        for edge in snapshot.edges.iter() {
+        for (producer, consumer) in snapshot.data_connections() {
             let (from, to) = if direction < 0 {
-                (
-                    &edge.definition.to.component,
-                    &edge.definition.from.component,
-                )
+                (consumer, producer)
             } else {
-                (
-                    &edge.definition.from.component,
-                    &edge.definition.to.component,
-                )
+                (producer, consumer)
             };
-            if selected.contains(from) {
+            if selected.contains(from) && all.contains(to) {
                 selected.insert(to.clone());
             }
         }
@@ -424,6 +459,11 @@ impl GraphSnapshot {
         if matches!(selection, crate::computation::v1::GraphSelection::All) {
             resources.extend(self.resources.keys().cloned());
         }
+        for id in &selected {
+            if let Some(attached) = self.component_resources.get(id) {
+                resources.extend(attached.iter().cloned());
+            }
+        }
         Ok(DesiredTopology {
             version: 1,
             graph_id: self.id.to_string(),
@@ -438,6 +478,36 @@ impl GraphSnapshot {
                 .collect(),
             requirements: self.requirements.clone(),
             boundary_relationships,
+            control_connections: self
+                .control_connections
+                .iter()
+                .filter(|(from, to)| selected.contains(from) && selected.contains(to))
+                .cloned()
+                .collect(),
+            subscriptions: self
+                .subscriptions
+                .iter()
+                .filter(|(_, to)| selected.contains(to))
+                .cloned()
+                .collect(),
+            readiness_required: self
+                .readiness_required
+                .intersection(&selected)
+                .cloned()
+                .collect(),
+            component_resources: self
+                .component_resources
+                .iter()
+                .filter(|(id, _)| selected.contains(*id))
+                .map(|(id, resources)| (id.clone(), resources.clone()))
+                .collect(),
+            allow_incomplete: self.allow_incomplete,
+            component_plugins: self
+                .component_plugins
+                .iter()
+                .filter(|(id, _)| selected.contains(*id))
+                .map(|(id, plugin)| (id.clone(), plugin.clone()))
+                .collect(),
         })
     }
 }

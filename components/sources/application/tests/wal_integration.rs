@@ -68,6 +68,7 @@ async fn init_source_with_wal(
             state_store: None,
             identity_provider: None,
             wal_provider: Some(wal),
+            resource_observer: None,
         })
         .await;
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::*;
+use super::{entities::encode_entity_key as encode, *};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use drasi_core::models::{
@@ -31,6 +31,14 @@ pub struct ComputationInspection {
     pub timestamp: DateTime<Utc>,
     pub desired: Arc<GraphSnapshot>,
     pub observed: Arc<ObservedGraph>,
+}
+
+impl ComputationInspection {
+    /// Unified component, resource, plugin version/family and pipe entities from
+    /// this publication. A family disappears with its last represented version.
+    pub fn topology(&self) -> ComputationTopology {
+        ComputationTopology::new(&self.desired, &self.observed)
+    }
 }
 
 struct History {
@@ -65,6 +73,9 @@ impl ComputationInspector {
     }
     pub fn snapshot(&self) -> Arc<ComputationInspection> {
         self.0.latest.borrow().clone()
+    }
+    pub fn topology(&self) -> ComputationTopology {
+        self.snapshot().topology()
     }
     pub fn subscribe(&self) -> watch::Receiver<Arc<ComputationInspection>> {
         self.0.latest.subscribe()
@@ -117,7 +128,29 @@ pub struct ComputationInspectionResource(pub ComputationInspector);
 
 /// A graph-as-data source over coherent computation state publications. It
 /// converges to the latest state; callers needing every transition use history().
-/// Configuration values, secrets, failure messages and handles are not emitted.
+/// Raw configuration, secrets, failure messages and handles are not emitted.
+/// Component `kind` is the semantic category; `role` remains its execution role.
+/// Semantic kind comes from explicit descriptor metadata, otherwise the execution
+/// role. No adapter implementation name or configuration field is interpreted.
+/// Plugin nodes use authoritative host observations, then explicit factory or
+/// descriptor provenance; repeated provenance counts a dependent component once.
+/// Version-specific `ComputationPlugin` nodes retain their existing keys and
+/// `USES_PLUGIN` links. `VERSION_OF` links connect them to unversioned
+/// `ComputationPluginFamily` nodes with version and distinct-component counts.
+///
+/// `ComputationPipe` nodes and `INPUT_TO_PIPE`/`OUTPUT_FROM_PIPE` links describe
+/// each data path. `representation` distinguishes `nativeProvider` from
+/// `hostSubscription`. Host subscriptions have observed endpoint generations,
+/// startup/lifecycle state and readiness policies, not native ports, capabilities
+/// or binding guarantees. Current peer-readiness flags are not in these snapshots.
+/// Existing `FLOWS_TO` relations summarize native pipes, not additional delivery
+/// paths. Unbound pipes retain their endpoints even when a component is absent;
+/// endpoint links are emitted only for present components. Legacy unbound
+/// `ComputationRelationship` nodes remain available as compatibility summaries.
+/// `CONTROL_CONNECTION` links describe control-only host wiring and never create
+/// pipe nodes. `USES_RESOURCE` includes factory and attached-provider dependencies.
+/// `DEPENDS_ON_DATA` normalizes consumer -> pipe -> producer dependencies; these
+/// links describe the existing path, not another delivery or activation policy.
 pub struct ComputationTopologySource {
     descriptor: ComponentDescriptor,
     stream: StreamId,
@@ -184,70 +217,263 @@ impl ComputationTopologySource {
     }
     fn project(&self, view: &ComputationInspection) -> BTreeMap<String, Element> {
         let mut elements = BTreeMap::new();
-        let encode = |value: &str| {
-            value
-                .bytes()
-                .map(|value| format!("{value:02x}"))
-                .collect::<String>()
-        };
+        let topology = view.topology();
         elements.insert("graph".into(), self.node("graph", "ComputationGraph", serde_json::json!({
-            "id": view.desired.id, "revision": view.desired.revision.0, "runEpoch": view.observed.run_epoch,
+            "id": topology.graph_id, "revision": topology.revision.0, "runEpoch": topology.run_epoch,
         })));
-        for node in view.desired.nodes.iter() {
-            let id = node.descriptor.id();
-            let key = format!("component:{}", encode(id.as_str()));
-            let observed = view.observed.components.get(id);
-            elements.insert(key.clone(), self.node(&key, "ComputationComponent", serde_json::json!({
-                "id": id.as_str(), "role": format!("{:?}", node.role),
-                "realization": observed.map(|state| format!("{:?}", state.realization)),
-                "lifecycle": observed.map(|state| format!("{:?}", state.lifecycle)),
-                "health": observed.map(|state| format!("{:?}", state.health)),
-                "generation": observed.map(|state| state.generation.0),
-                "operation": observed.map(|state| state.operation.0),
-                "failurePhase": observed.and_then(|state| state.failure.as_ref()).map(|failure| format!("{:?}", failure.phase)),
-            })));
-            let relation = format!("owns:{key}");
-            elements.insert(
-                relation.clone(),
-                self.relation(
-                    &relation,
-                    "HAS_COMPONENT",
-                    "graph",
-                    &key,
-                    serde_json::json!({}),
-                ),
-            );
-            if let Some(spec) = view.desired.specifications.get(id) {
-                for resource in spec.dependencies.values().flatten().chain(
-                    spec.configuration.values().filter_map(|value| {
-                        if let ConfigurationValue::Reference { resource, .. } = value {
-                            Some(resource)
-                        } else {
-                            None
-                        }
-                    }),
-                ) {
-                    let target = format!("resource:{}", encode(resource.as_str()));
-                    let relation = format!("uses:{key}:{target}");
+        for (id, entity) in &topology.nodes {
+            let key = id.key();
+            match entity {
+                GraphEntity::Component(component) => {
+                    let node = &component.desired;
+                    let observed = component.observed.as_ref();
+                    let plugin = component.plugin_identity();
+                    let (construction, implementation, configuration_version) =
+                        match &component.construction {
+                            ComponentEntityConstruction::Factory {
+                                implementation,
+                                configuration_version,
+                            } => (
+                                "Factory",
+                                Some(implementation),
+                                Some(*configuration_version),
+                            ),
+                            ComponentEntityConstruction::External => ("External", None, None),
+                        };
+                    let ports: Vec<_> = node.descriptor.ports().iter().map(|port| {
+                        serde_json::json!({
+                            "id": port.id().as_str(), "direction": format!("{:?}", port.direction()),
+                            "schemaId": port.schema().id().as_str(),
+                            "schemaVersion": port.schema().version().value(),
+                            "encoding": port.schema().encoding(),
+                        })
+                    }).collect();
+                    elements.insert(key.clone(), self.node(&key, "ComputationComponent", serde_json::json!({
+                        "id": node.descriptor.id().as_str(), "role": format!("{:?}", node.role),
+                        "kind": format!("{:?}", component.kind),
+                        "construction": construction,
+                        "implementation": implementation.map(|identity| identity.name.as_ref()),
+                        "implementationVersion": implementation.map(|identity| identity.version.as_ref()),
+                        "configurationVersion": configuration_version,
+                        "pluginId": plugin.map(|identity| identity.id.as_ref()),
+                        "pluginVersion": plugin.map(|identity| identity.version.as_ref()),
+                        "ports": ports,
+                        "realization": observed.map(|state| format!("{:?}", state.realization)),
+                        "lifecycle": observed.map(|state| format!("{:?}", state.lifecycle)),
+                        "health": observed.map(|state| format!("{:?}", state.health)),
+                        "generation": observed.map(|state| state.generation.0),
+                        "operation": observed.map(|state| state.operation.0),
+                        "failurePhase": observed.and_then(|state| state.failure.as_ref()).map(|failure| format!("{:?}", failure.phase)),
+                    })));
+                    let relation = format!("owns:{key}");
                     elements.insert(
                         relation.clone(),
                         self.relation(
                             &relation,
-                            "USES_RESOURCE",
+                            "HAS_COMPONENT",
+                            "graph",
                             &key,
-                            &target,
                             serde_json::json!({}),
                         ),
                     );
                 }
+                GraphEntity::Resource(resource) => {
+                    let observed = resource.observed.as_ref();
+                    elements.insert(key.clone(), self.node(&key, "ComputationResource", serde_json::json!({
+                        "id": resource.desired.id.as_str(), "role": format!("{:?}", resource.desired.role),
+                        "ownership": format!("{:?}", resource.desired.ownership),
+                        "realization": observed.map(|state| format!("{:?}", state.realization)),
+                        "generation": observed.map(|state| state.generation),
+                        "failurePhase": observed.and_then(|state| state.failure.as_ref()).map(|failure| format!("{:?}", failure.phase)),
+                    })));
+                    let relation = format!("v1:declares:{key}");
+                    elements.insert(
+                        relation.clone(),
+                        self.relation(
+                            &relation,
+                            "HAS_RESOURCE",
+                            "graph",
+                            &key,
+                            serde_json::json!({}),
+                        ),
+                    );
+                }
+                GraphEntity::Plugin(plugin) => {
+                    elements.insert(
+                        key.clone(),
+                        self.node(
+                            &key,
+                            "ComputationPlugin",
+                            serde_json::json!({
+                                "id": plugin.identity.id, "version": plugin.identity.version,
+                                "dependentComponentCount": plugin.dependent_component_count(),
+                            }),
+                        ),
+                    );
+                }
+                GraphEntity::PluginFamily(family) => {
+                    elements.insert(
+                        key.clone(),
+                        self.node(
+                            &key,
+                            "ComputationPluginFamily",
+                            serde_json::json!({
+                                "id": family.id,
+                                "versionCount": family.version_count(),
+                                "dependentComponentCount": family.dependent_component_count(),
+                            }),
+                        ),
+                    );
+                }
+                GraphEntity::Pipe(pipe) => {
+                    let definition = &pipe.relationship.definition;
+                    let profile = match &pipe.relationship.pipe {
+                        DesiredPipe::Bounded { .. } => "Bounded",
+                        DesiredPipe::Broadcast { .. } => "Broadcast",
+                        DesiredPipe::Retained(_) => "Retained",
+                        DesiredPipe::External { .. } => "External",
+                    };
+                    elements.insert(key.clone(), self.node(&key, "ComputationPipe", serde_json::json!({
+                        "fromComponent": definition.from.component.as_str(), "fromPort": definition.from.port.as_str(),
+                        "toComponent": definition.to.component.as_str(), "toPort": definition.to.port.as_str(),
+                        "representation": pipe.representation(),
+                        "profile": profile, "declaredOnly": pipe.declared_only,
+                        "binding": format!("{:?}", pipe.binding()),
+                        "availability": format!("{:?}", pipe.availability()),
+                        "generation": pipe.generation(),
+                        "capabilities": pipe.capabilities.as_ref().map(PipeCapabilities::supported),
+                        "capacity": pipe.capabilities.as_ref().and_then(PipeCapabilities::capacity).map(|capacity| capacity.get()),
+                        "orphanPermitted": pipe.relationship.policy.orphan_permitted,
+                        "failurePhase": pipe.failure().map(|failure| format!("{:?}", failure.phase)),
+                    })));
+                    let relation = format!("v1:owns:{key}");
+                    elements.insert(
+                        relation.clone(),
+                        self.relation(&relation, "HAS_PIPE", "graph", &key, serde_json::json!({})),
+                    );
+                }
+                GraphEntity::SubscriptionPipe(pipe) => {
+                    let producer = pipe.producer_observed.as_ref();
+                    let consumer = pipe.consumer_observed.as_ref();
+                    elements.insert(key.clone(), self.node(&key, "ComputationPipe", serde_json::json!({
+                        "representation": pipe.representation(),
+                        "fromComponent": pipe.from.as_str(), "toComponent": pipe.to.as_str(),
+                        "producerGeneration": pipe.producer_generation().map(|generation| generation.0),
+                        "consumerGeneration": pipe.consumer_generation().map(|generation| generation.0),
+                        "producerReadiness": {
+                            "started": pipe.producer_started(),
+                            "lifecycle": producer.map(|state| format!("{:?}", state.lifecycle)),
+                            "requiresDownstreamReady": pipe.producer_requires_downstream_ready,
+                        },
+                        "consumerReadiness": {
+                            "started": pipe.consumer_started(),
+                            "lifecycle": consumer.map(|state| format!("{:?}", state.lifecycle)),
+                            "requiresDownstreamReady": pipe.consumer_requires_downstream_ready,
+                        },
+                        "producerFailurePhase": producer.and_then(|state| state.failure.as_ref()).map(|failure| format!("{:?}", failure.phase)),
+                        "consumerFailurePhase": consumer.and_then(|state| state.failure.as_ref()).map(|failure| format!("{:?}", failure.phase)),
+                    })));
+                    let relation = format!("v1:owns:{key}");
+                    elements.insert(
+                        relation.clone(),
+                        self.relation(&relation, "HAS_PIPE", "graph", &key, serde_json::json!({})),
+                    );
+                }
             }
         }
-        for (id, resource) in &view.desired.resources {
-            let key = format!("resource:{}", encode(id.as_str()));
-            elements.insert(key.clone(), self.node(&key, "ComputationResource", serde_json::json!({
-                "id": id.as_str(), "role": format!("{:?}", resource.role), "ownership": format!("{:?}", resource.ownership),
-                "realization": view.observed.resources.get(id).map(|state| format!("{:?}", state.realization)),
-            })));
+        for link in &topology.links {
+            let from = link.from.key();
+            let to = link.to.key();
+            let (key, label, properties) = match &link.kind {
+                GraphEntityLinkKind::UsesResource => (
+                    format!("uses:{from}:{to}"),
+                    "USES_RESOURCE",
+                    serde_json::json!({}),
+                ),
+                GraphEntityLinkKind::UsesComponent => (
+                    format!("v1:uses-component:{from}:{to}"),
+                    "USES_COMPONENT",
+                    serde_json::json!({}),
+                ),
+                GraphEntityLinkKind::DependsOnData => {
+                    if !topology.nodes.contains_key(&link.from)
+                        || !topology.nodes.contains_key(&link.to)
+                    {
+                        continue;
+                    }
+                    (
+                        format!("v1:depends-on-data:{from}:{to}"),
+                        "DEPENDS_ON_DATA",
+                        serde_json::json!({}),
+                    )
+                }
+                GraphEntityLinkKind::DependsOnPlugin => (
+                    format!("v1:uses-plugin:{from}:{to}"),
+                    "USES_PLUGIN",
+                    serde_json::json!({}),
+                ),
+                GraphEntityLinkKind::VersionOfPlugin => (
+                    format!("v1:version-of:{from}:{to}"),
+                    "VERSION_OF",
+                    serde_json::json!({}),
+                ),
+                GraphEntityLinkKind::ControlConnection => {
+                    if !topology.nodes.contains_key(&link.from)
+                        || !topology.nodes.contains_key(&link.to)
+                    {
+                        continue;
+                    }
+                    (
+                        format!("v1:control-connection:{from}:{to}"),
+                        "CONTROL_CONNECTION",
+                        serde_json::json!({ "representation": "subscriptionAdjacency" }),
+                    )
+                }
+                GraphEntityLinkKind::PipeInput { port } => {
+                    if !topology.nodes.contains_key(&link.from) {
+                        continue;
+                    }
+                    (
+                        format!("v1:pipe-input:{to}"),
+                        "INPUT_TO_PIPE",
+                        serde_json::json!({ "port": port.as_str() }),
+                    )
+                }
+                GraphEntityLinkKind::PipeOutput { port } => {
+                    if !topology.nodes.contains_key(&link.to) {
+                        continue;
+                    }
+                    (
+                        format!("v1:pipe-output:{from}"),
+                        "OUTPUT_FROM_PIPE",
+                        serde_json::json!({ "port": port.as_str() }),
+                    )
+                }
+                GraphEntityLinkKind::SubscriptionInput => {
+                    if !topology.nodes.contains_key(&link.from) {
+                        continue;
+                    }
+                    (
+                        format!("v1:pipe-input:{to}"),
+                        "INPUT_TO_PIPE",
+                        serde_json::json!({ "representation": PipeRepresentation::HostSubscription }),
+                    )
+                }
+                GraphEntityLinkKind::SubscriptionOutput => {
+                    if !topology.nodes.contains_key(&link.to) {
+                        continue;
+                    }
+                    (
+                        format!("v1:pipe-output:{from}"),
+                        "OUTPUT_FROM_PIPE",
+                        serde_json::json!({ "representation": PipeRepresentation::HostSubscription }),
+                    )
+                }
+            };
+            elements.insert(
+                key.clone(),
+                self.relation(&key, label, &from, &to, properties),
+            );
         }
         for edge in view.desired.edges.iter() {
             let from = format!(
@@ -266,6 +492,7 @@ impl ComputationTopologySource {
             let observed = view.observed.relationships.get(&edge.definition);
             elements.insert(key.clone(), self.relation(&key, "FLOWS_TO", &from, &to, serde_json::json!({
                 "fromPort": edge.definition.from.port.as_str(), "toPort": edge.definition.to.port.as_str(),
+                "pipeId": GraphEntityId::Pipe(edge.definition.clone()).key(), "representation": "pipeSummary",
                 "binding": observed.map(|state| format!("{:?}", state.binding)),
                 "availability": observed.map(|state| format!("{:?}", state.availability)),
             })));
@@ -283,6 +510,7 @@ impl ComputationTopologySource {
             elements.insert(key.clone(), self.node(&key, "ComputationRelationship", serde_json::json!({
                 "fromComponent": edge.from.component.as_str(), "fromPort": edge.from.port.as_str(),
                 "toComponent": edge.to.component.as_str(), "toPort": edge.to.port.as_str(),
+                "pipeId": GraphEntityId::Pipe(edge.clone()).key(), "representation": "pipeSummary",
                 "binding": observed.map(|state| format!("{:?}", state.binding)).unwrap_or_else(|| "Declared".into()),
                 "orphanPermitted": relationship.policy.orphan_permitted,
             })));

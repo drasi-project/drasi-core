@@ -27,7 +27,12 @@ use std::{
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 
+mod addition;
 mod controller;
+pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
+mod resources;
+mod registry;
+pub(crate) use registry::GraphRegistrySnapshot;
 mod specification;
 mod topology;
 pub use controller::reconcile::{DesiredMutation, ReconciliationPreview, ReconciliationReport};
@@ -52,6 +57,20 @@ pub type GraphResult<T> = std::result::Result<T, GraphError>;
 pub enum GraphError {
     #[error(transparent)]
     Contract(#[from] ContractError),
+    #[error(transparent)]
+    Control(#[from] super::ControlError),
+    #[error("component {component} validation failed: {source}")]
+    Validation {
+        component: ComponentId,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("component addition rejected: {cause}")]
+    AdditionRejected {
+        #[source]
+        cause: Box<GraphError>,
+        addition: Arc<addition::RejectedAddition>,
+    },
     #[error("invalid graph topology: {reason}")]
     Topology { reason: String },
     #[error("cannot start graph in state {state:?}")]
@@ -65,6 +84,8 @@ pub enum GraphError {
     StaleGeneration,
     #[error("the graph controller is closed")]
     ControllerClosed,
+    #[error("the graph observation queue is full")]
+    ObservationQueueFull,
     #[error("a conflicting component lifecycle operation is still in progress")]
     OperationInProgress,
     #[error("reconciliation did not reach its processing or cleanup boundary before the deadline")]
@@ -328,6 +349,45 @@ pub struct GraphSnapshot {
     pub external_bindings: BTreeMap<ComponentId, Arc<str>>,
     pub resources: BTreeMap<ResourceId, ResourceSpecification>,
     pub unbound_relationships: Arc<[DesiredRelationship]>,
+    /// Host-declared control-only adjacency.
+    pub control_connections: Arc<[(ComponentId, ComponentId)]>,
+    /// Data subscriptions implemented by ordinary source/query/reaction hosts.
+    pub subscriptions: Arc<[(ComponentId, ComponentId)]>,
+    pub readiness_required: BTreeSet<ComponentId>,
+    pub component_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
+    pub component_plugins: BTreeMap<ComponentId, PluginIdentity>,
+    pub allow_incomplete: bool,
+}
+
+impl GraphSnapshot {
+    pub(crate) fn data_connections(&self) -> impl Iterator<Item = (&ComponentId, &ComponentId)> {
+        self.edges
+            .iter()
+            .map(|edge| &edge.definition)
+            .chain(
+                self.unbound_relationships
+                    .iter()
+                    .map(|edge| &edge.definition),
+            )
+            .map(|edge| (&edge.from.component, &edge.to.component))
+            .chain(self.subscriptions.iter().map(|(from, to)| (from, to)))
+    }
+
+    /// Immediate upstream components, including host-managed subscriptions.
+    /// Unresolved producer identities remain visible until supplied or removed.
+    pub fn data_dependencies(&self, component: &ComponentId) -> BTreeSet<ComponentId> {
+        self.data_connections()
+            .filter(|(_, to)| to == &component)
+            .map(|(from, _)| from.clone())
+            .collect()
+    }
+
+    pub fn data_dependents(&self, component: &ComponentId) -> BTreeSet<ComponentId> {
+        self.data_connections()
+            .filter(|(from, _)| from == &component)
+            .map(|(_, to)| to.clone())
+            .collect()
+    }
 }
 
 enum Component {
@@ -340,6 +400,7 @@ enum Component {
         specification: Arc<ComponentSpecification>,
         factory: Arc<dyn ComponentFactory>,
     },
+    Unresolved(Arc<DesiredComponent>),
 }
 
 impl Component {
@@ -351,6 +412,7 @@ impl Component {
             Self::Sink(component) => component.descriptor(),
             Self::Service(component) => component.descriptor(),
             Self::Deferred { specification, .. } => &specification.descriptor,
+            Self::Unresolved(definition) => &definition.descriptor,
         }
     }
 
@@ -362,6 +424,7 @@ impl Component {
             Self::Sink(_) => ComponentRole::Sink,
             Self::Service(_) => ComponentRole::Service,
             Self::Deferred { specification, .. } => specification.role,
+            Self::Unresolved(definition) => definition.role,
         }
     }
 
@@ -369,6 +432,7 @@ impl Component {
         match self {
             Self::Sink(component) => Some(component.completion()),
             Self::Deferred { specification, .. } => specification.completion,
+            Self::Unresolved(definition) => definition.completion,
             _ => None,
         }
     }
@@ -380,7 +444,9 @@ impl Component {
             Self::Query(component) => component.start().await,
             Self::Sink(component) => component.start().await,
             Self::Service(component) => component.start().await,
-            Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                Err(anyhow::anyhow!("component has not been constructed"))
+            }
         }
     }
 
@@ -391,7 +457,9 @@ impl Component {
             Self::Query(component) => component.stop().await,
             Self::Sink(component) => component.stop().await,
             Self::Service(component) => component.stop().await,
-            Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                Err(anyhow::anyhow!("component has not been constructed"))
+            }
         }
     }
 
@@ -403,7 +471,43 @@ impl Component {
             }
             Self::Sink(component) => component.reconfigure(context).await,
             Self::Service(component) => component.reconfigure(context).await,
-            Self::Deferred { .. } => Err(anyhow::anyhow!("component has not been constructed")),
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                Err(anyhow::anyhow!("component has not been constructed"))
+            }
+        }
+    }
+
+    fn bind_control(&mut self, control: super::ComponentControl) {
+        match self {
+            Self::Source(component) => component.bind_control(control),
+            Self::Transformer(component) | Self::Query(component) => {
+                component.bind_control(control)
+            }
+            Self::Sink(component) => component.bind_control(control),
+            Self::Service(component) => component.bind_control(control),
+            Self::Deferred { .. } | Self::Unresolved(_) => {}
+        }
+    }
+
+    fn control_handler(&self) -> Option<Arc<dyn super::ControlHandler>> {
+        match self {
+            Self::Source(component) => component.control_handler(),
+            Self::Transformer(component) | Self::Query(component) => component.control_handler(),
+            Self::Sink(component) => component.control_handler(),
+            Self::Service(component) => component.control_handler(),
+            Self::Deferred { .. } | Self::Unresolved(_) => None,
+        }
+    }
+
+    fn requires_readiness_confirmation(&self) -> bool {
+        match self {
+            Self::Source(component) => component.requires_readiness_confirmation(),
+            Self::Transformer(component) | Self::Query(component) => {
+                component.requires_readiness_confirmation()
+            }
+            Self::Sink(component) => component.requires_readiness_confirmation(),
+            Self::Service(component) => component.requires_readiness_confirmation(),
+            Self::Deferred { .. } | Self::Unresolved(_) => false,
         }
     }
 }
@@ -431,9 +535,15 @@ pub struct ComputationGraphBuilder {
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
     input_merge: BTreeMap<ComponentId, InputMergePolicy>,
     unbound_relationships: Vec<DesiredRelationship>,
+    readiness_required: BTreeSet<ComponentId>,
+    allow_empty: bool,
 }
 
 impl ComputationGraphBuilder {
+    pub fn require_downstream_ready(mut self, component: ComponentId) -> Self {
+        self.readiness_required.insert(component);
+        self
+    }
     pub fn input_merge(mut self, component: ComponentId, policy: InputMergePolicy) -> Self {
         self.input_merge.insert(component, policy);
         self
@@ -538,7 +648,7 @@ impl ComputationGraphBuilder {
 
     pub fn build(self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
-        if self.components.is_empty() {
+        if self.components.is_empty() && !self.allow_empty {
             return Err(topology("graph must be nonempty"));
         }
         if self.cleanup_timeout.is_zero()
@@ -709,14 +819,17 @@ impl ComputationGraphBuilder {
         }
         for node in &nodes {
             for port in node.descriptor.ports() {
-                if !connected.contains(&Endpoint::new(
-                    node.descriptor.id().clone(),
-                    port.id().clone(),
-                )) {
+                if !self.allow_empty
+                    && !connected.contains(&Endpoint::new(
+                        node.descriptor.id().clone(),
+                        port.id().clone(),
+                    ))
+                {
                     return Err(topology("every declared port must be connected"));
                 }
                 if port.direction() == PortDirection::Output
                     && !node.output_streams.contains_key(port.id())
+                    && !self.allow_empty
                 {
                     return Err(topology("every output port must bind a stream"));
                 }
@@ -732,6 +845,10 @@ impl ComputationGraphBuilder {
                 .keys()
                 .any(|edge| !unique_edges.contains(edge))
             || self.input_merge.keys().any(|id| !ids.contains_key(id))
+            || self
+                .readiness_required
+                .iter()
+                .any(|id| !ids.contains_key(id))
         {
             return Err(topology(
                 "lifecycle policy names an undeclared component or relationship",
@@ -786,6 +903,12 @@ impl ComputationGraphBuilder {
                 .collect(),
             resources: self.resources,
             unbound_relationships: self.unbound_relationships.into(),
+            control_connections: Arc::from([]),
+            subscriptions: Arc::from([]),
+            readiness_required: self.readiness_required,
+            component_resources: BTreeMap::new(),
+            component_plugins: BTreeMap::new(),
+            allow_incomplete: self.allow_empty,
         };
         let observed = controller::initial_observations(&snapshot);
         let factories = self
@@ -803,6 +926,12 @@ impl ComputationGraphBuilder {
                 }
             })
             .collect();
+        let registry = watch::channel(Arc::new(GraphRegistrySnapshot::new(
+            &snapshot,
+            Arc::new(observed.clone()),
+            &self.resource_handles,
+        )))
+        .0;
         Ok(ComputationGraph {
             execution_scope: snapshot.id.clone(),
             inspector: super::ComputationInspector::new(&snapshot, Arc::new(observed.clone())),
@@ -832,9 +961,15 @@ impl ComputationGraphBuilder {
                 .collect(),
             order,
             ids,
+            reserved_components: BTreeSet::new(),
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
             resource_handles: self.resource_handles,
+            registry,
+            peers: super::ControlPlane::new(64)?,
+            rejected_additions: Arc::new(std::sync::Mutex::new(Vec::new())),
+            deferred_activation: BTreeSet::new(),
+            reported_resources: BTreeMap::new(),
         })
     }
 }
@@ -908,6 +1043,9 @@ pub struct GraphControl {
     observed: watch::Receiver<Arc<ObservedGraph>>,
     desired: watch::Receiver<Arc<GraphSnapshot>>,
     inspector: super::ComputationInspector,
+    peers: Arc<super::ControlPlane>,
+    registry: watch::Receiver<Arc<GraphRegistrySnapshot>>,
+    rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
 }
 
 impl GraphControl {
@@ -916,6 +1054,9 @@ impl GraphControl {
     }
     pub fn cancel(&self) {
         self.cancel.send_replace(true);
+        if let Err(error) = self.peers.close() {
+            log::error!("Could not close component control channels during cancellation: {error}");
+        }
     }
 
     pub fn state(&self) -> GraphState {
@@ -958,16 +1099,26 @@ pub struct ComputationGraph {
     next_resource_generation: u64,
     order: Vec<usize>,
     ids: BTreeMap<ComponentId, usize>,
+    reserved_components: BTreeSet<Arc<str>>,
     observed: watch::Sender<Arc<ObservedGraph>>,
     desired: watch::Sender<Arc<GraphSnapshot>>,
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    registry: watch::Sender<Arc<GraphRegistrySnapshot>>,
     inspector: super::ComputationInspector,
     execution_scope: Arc<str>,
+    peers: Arc<super::ControlPlane>,
+    rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
+    deferred_activation: BTreeSet<ComponentId>,
+    reported_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
 }
 
 impl ComputationGraph {
+    pub(crate) fn reserve_component_id(&mut self, id: &str) {
+        self.reserved_components.insert(Arc::from(id));
+    }
+
     pub(crate) fn set_execution_scope(&mut self, scope: Arc<str>) {
         self.execution_scope = scope;
     }
@@ -988,7 +1139,17 @@ impl ComputationGraph {
             resource_handles: BTreeMap::new(),
             input_merge: BTreeMap::new(),
             unbound_relationships: Vec::new(),
+            readiness_required: BTreeSet::new(),
+            allow_empty: false,
         }
+    }
+
+    /// Create an empty graph whose controller can accept individual additions.
+    /// Use `run()` to keep it open while adding nodes and connecting their ports.
+    pub fn empty(id: impl Into<Arc<str>>) -> GraphResult<Self> {
+        let mut builder = Self::builder(id);
+        builder.allow_empty = true;
+        builder.build()
     }
 
     pub fn snapshot(&self) -> &GraphSnapshot {
@@ -1040,6 +1201,8 @@ impl ComputationGraph {
         self.observed = watch::channel(Arc::new(observed)).0;
         self.inspector.publish(&self.snapshot, self.observed());
         self.desired = watch::channel(Arc::new(self.snapshot.clone())).0;
+        registry::publish(self);
+        self.peers = super::ControlPlane::new(64)?;
         let (cancel, cancellation) = watch::channel(false);
         let (commands, receiver) = mpsc::channel(64);
         let control = GraphControl {
@@ -1049,10 +1212,14 @@ impl ComputationGraph {
             observed: self.observed.subscribe(),
             desired: self.desired.subscribe(),
             inspector: self.inspector.clone(),
+            peers: self.peers.clone(),
+            registry: self.registry.subscribe(),
+            rejected_additions: self.rejected_additions.clone(),
         };
         let state = self.state.clone();
         let observed = self.observed.clone();
         let inspector = self.inspector.clone();
+        let registry = self.registry.clone();
         Ok(GraphRun {
             future: self.execute(cancellation, receiver, auto_start).boxed(),
             control,
@@ -1060,6 +1227,7 @@ impl ComputationGraph {
             finished: false,
             observed,
             inspector,
+            registry,
         })
     }
 
@@ -1093,6 +1261,30 @@ impl ComputationGraph {
     pub async fn dispose(&mut self) -> GraphResult<()> {
         self.shutdown().await?;
         self.state.send_replace(GraphState::CleanupRequired);
+        let rejected = self
+            .rejected_additions
+            .lock()
+            .map_err(|_| topology("rejected addition cleanup registry is poisoned"))?
+            .clone();
+        let mut errors = Vec::new();
+        for addition in rejected {
+            if let Err(error) = addition
+                .dispose(&self.resource_handles, self.cleanup_timeout)
+                .await
+            {
+                errors.push(error);
+            }
+        }
+        self.rejected_additions
+            .lock()
+            .map_err(|_| topology("rejected addition cleanup registry is poisoned"))?
+            .retain(|addition| !addition.complete());
+        if !errors.is_empty() {
+            return Err(GraphError::Cleanup {
+                primary: None,
+                errors,
+            });
+        }
         controller::dispose_resources(self).await?;
         self.state.send_replace(GraphState::Cancelled);
         Ok(())
@@ -1106,7 +1298,10 @@ impl ComputationGraph {
     ) -> GraphResult<()> {
         let result = controller::run(self, &mut cancel, commands, auto_start).await;
         self.state.send_replace(GraphState::Stopping);
-        let errors = controller::cleanup(self).await;
+        let mut errors = controller::cleanup(self).await;
+        if let Err(error) = self.peers.close() {
+            errors.push(GraphError::Control(error));
+        }
         if !errors.is_empty() {
             self.state.send_replace(GraphState::CleanupRequired);
             return Err(GraphError::Cleanup {
@@ -1133,6 +1328,7 @@ pub struct GraphRun<'a> {
     finished: bool,
     observed: watch::Sender<Arc<ObservedGraph>>,
     inspector: super::ComputationInspector,
+    registry: watch::Sender<Arc<GraphRegistrySnapshot>>,
 }
 
 impl GraphRun<'_> {
@@ -1163,6 +1359,7 @@ impl Drop for GraphRun<'_> {
                 &self.control.desired_snapshot(),
                 self.observed.borrow().clone(),
             );
+            registry::publish_observed(&self.registry, self.observed.borrow().clone());
         }
     }
 }
@@ -1485,7 +1682,7 @@ async fn run_node(
                         Vec::new()
                     }
                     Component::Source(_) | Component::Service(_) => unreachable!(),
-                    Component::Deferred { .. } => {
+                    Component::Deferred { .. } | Component::Unresolved(_) => {
                         return Err(topology("cannot process an unconstructed component"))
                     }
                 }

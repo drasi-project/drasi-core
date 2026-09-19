@@ -15,8 +15,9 @@
 use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc};
 
 use super::{
-    data::validate_schema, ComponentId, ContractError, PortId, Result, SchemaDescriptor,
-    SinkCompletion,
+    data::{validate_identifier, validate_schema},
+    ComponentId, ComponentSemanticKind, ContractError, PluginIdentity, PortId, Result,
+    SchemaDescriptor, SinkCompletion,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -186,6 +187,10 @@ impl PortDescriptor {
 pub struct ComponentDescriptor {
     id: ComponentId,
     ports: Arc<[PortDescriptor]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_identity: Option<PluginIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_kind: Option<ComponentSemanticKind>,
 }
 
 impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
@@ -196,9 +201,23 @@ impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
         struct Specification {
             id: ComponentId,
             ports: Vec<PortDescriptor>,
+            #[serde(default)]
+            plugin_identity: Option<PluginIdentity>,
+            #[serde(default)]
+            semantic_kind: Option<ComponentSemanticKind>,
         }
         let value = Specification::deserialize(deserializer)?;
-        Self::try_new(value.id, value.ports).map_err(serde::de::Error::custom)
+        let mut descriptor =
+            Self::try_new(value.id, value.ports).map_err(serde::de::Error::custom)?;
+        if let Some(identity) = value.plugin_identity {
+            descriptor = descriptor
+                .with_plugin_identity(identity)
+                .map_err(serde::de::Error::custom)?;
+        }
+        if let Some(kind) = value.semantic_kind {
+            descriptor = descriptor.with_semantic_kind(kind);
+        }
+        Ok(descriptor)
     }
 }
 
@@ -215,6 +234,8 @@ impl ComponentDescriptor {
         Ok(Self {
             id,
             ports: ports.into(),
+            plugin_identity: None,
+            semantic_kind: None,
         })
     }
 
@@ -224,6 +245,33 @@ impl ComponentDescriptor {
 
     pub fn ports(&self) -> &[PortDescriptor] {
         &self.ports
+    }
+
+    /// Explicit semantic category, or none to use the native execution role.
+    /// This metadata does not change ports, execution or lifecycle behavior.
+    pub const fn semantic_kind(&self) -> Option<ComponentSemanticKind> {
+        self.semantic_kind
+    }
+
+    /// Declare a host wrapper's meaning independently of its implementation or
+    /// configuration. Unannotated descriptors retain their native role's kind.
+    pub fn with_semantic_kind(mut self, kind: ComponentSemanticKind) -> Self {
+        self.semantic_kind = Some(kind);
+        self
+    }
+
+    /// Explicit provenance of a preconstructed instance, not a construction recipe.
+    pub fn plugin_identity(&self) -> Option<&PluginIdentity> {
+        self.plugin_identity.as_ref()
+    }
+
+    /// Record host-supplied provenance without inferring it from a Rust type.
+    /// Both identifiers reject empty values, whitespace and control characters.
+    pub fn with_plugin_identity(mut self, identity: PluginIdentity) -> Result<Self> {
+        validate_identifier("plugin", &identity.id)?;
+        validate_identifier("plugin version", &identity.version)?;
+        self.plugin_identity = Some(identity);
+        Ok(self)
     }
 }
 

@@ -509,9 +509,8 @@ impl ComponentGraph {
         message: Option<String>,
     ) -> anyhow::Result<Option<ComponentEvent>> {
         let node = self
-            .get_component_mut(id)
+            .get_component(id)
             .ok_or_else(|| anyhow::anyhow!("Component '{id}' not found in graph"))?;
-        let kind = node.kind.clone();
 
         // Same-state updates are idempotent no-ops (no event, no warning)
         if node.status == status {
@@ -528,6 +527,24 @@ impl ComponentGraph {
             return Ok(None);
         }
 
+        self.project_status(id, status, message)
+    }
+
+    /// Apply already-authoritative status to an outward read model. This is not
+    /// a lifecycle command and must not be used to bypass legacy command checks.
+    pub(crate) fn project_status(
+        &mut self,
+        id: &str,
+        status: ComponentStatus,
+        message: Option<String>,
+    ) -> anyhow::Result<Option<ComponentEvent>> {
+        let node = self
+            .get_component_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("Component '{id}' not found in graph"))?;
+        if node.status == status {
+            return Ok(None);
+        }
+        let kind = node.kind.clone();
         node.status = status;
 
         // Wake up any waiters blocking on status changes (e.g., wait_for_status)

@@ -29,6 +29,21 @@ use crate::schema::{GraphSchema, SourceSchema};
 use crate::sources::Source;
 
 impl DrasiLib {
+    pub(crate) async fn source_instance(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<std::sync::Arc<dyn Source>> {
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return runtime.source(id).await;
+        }
+        self.legacy()
+            .source_manager
+            .get_source_instance(id)
+            .await
+            .ok_or_else(|| crate::managers::ComponentNotFoundError::new("source", id).into())
+    }
+
     /// Add a source instance to a running server, taking ownership.
     ///
     /// The source instance is wrapped in an Arc internally - callers transfer
@@ -36,6 +51,10 @@ impl DrasiLib {
     ///
     /// If the server is running and the source has `auto_start=true`, the source
     /// will be started immediately after being added.
+    ///
+    /// In computation mode, this returns once the node is declared. Initialization
+    /// and activation failures remain visible on that node; use
+    /// `add_source_with_handle` to await readiness.
     ///
     /// # Example
     /// ```no_run
@@ -51,6 +70,46 @@ impl DrasiLib {
         self.add_source_with_metadata(source, HashMap::new()).await
     }
 
+    /// Declare a source and return its generation-bound computation handle.
+    ///
+    /// This method requires [`crate::ExecutionMode::ComputationGraph`]. A successful
+    /// return confirms graph addition, not initialization or activation. Await
+    /// `wait_created()` or `wait_started()` on the handle for those outcomes.
+    /// `wait_started()` requires the source to report `Running`, not merely to
+    /// return successfully from its start hook.
+    /// Auto-start is requested only when the instance is running.
+    /// Use the handle's `control()` and `set_control_handler()` methods for
+    /// out-of-band notifications without changing the legacy source contract.
+    /// Ownership-bearing native rejections retain their `GraphError` through
+    /// `DrasiError::Internal`, including the rejected addition's recovery handle.
+    #[cfg(feature = "computation")]
+    pub async fn add_source_with_handle(
+        &self,
+        source: impl Source + 'static,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.add_source_with_metadata_and_handle(source, HashMap::new())
+            .await
+    }
+
+    #[cfg(feature = "computation")]
+    async fn add_source_with_metadata_and_handle(
+        &self,
+        source: impl Source + 'static,
+        metadata: HashMap<String, String>,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
+            DrasiError::invalid_state("Source handles require ComputationGraph execution mode")
+        })?;
+        let id = source.id().to_owned();
+        runtime
+            .add_source(Box::new(source), metadata, self.is_running().await)
+            .await
+            .map_err(|error| {
+                crate::computation::compatibility::map_addition_error("source", &id, error)
+            })
+    }
+
     /// Add a source to a running server with additional metadata.
     ///
     /// Same as [`add_source`](Self::add_source) but merges `extra_metadata`
@@ -62,14 +121,11 @@ impl DrasiLib {
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
         #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.computation_runtime {
-            let id = source.id().to_owned();
-            return runtime
-                .add_source(Box::new(source), extra_metadata, self.is_running().await)
+        if self.computation_runtime.is_some() {
+            return self
+                .add_source_with_metadata_and_handle(source, extra_metadata)
                 .await
-                .map_err(|error| {
-                    DrasiError::operation_failed("source", id, "add", error.to_string())
-                });
+                .map(|_| ());
         }
 
         // Capture auto_start and id before transferring ownership
@@ -95,7 +151,7 @@ impl DrasiLib {
         }
 
         // Step 2: Provision runtime (initialize + store)
-        if let Err(e) = self.source_manager.provision_source(source).await {
+        if let Err(e) = self.legacy().source_manager.provision_source(source).await {
             // Compensating rollback: remove from graph on runtime failure
             let mut graph = self.component_graph.write().await;
             let _ = graph.deregister(&source_id);
@@ -109,7 +165,8 @@ impl DrasiLib {
 
         // Step 3: Auto-start if needed
         if self.is_running().await && should_auto_start {
-            self.source_manager
+            self.legacy()
+                .source_manager
                 .start_source(source_id.clone())
                 .await
                 .map_err(|e| {
@@ -158,7 +215,8 @@ impl DrasiLib {
         }
 
         // Step 2: Teardown runtime (stop, deprovision, remove from runtime map)
-        self.source_manager
+        self.legacy()
+            .source_manager
             .teardown_source(id.to_string(), cleanup)
             .await
             .map_err(|e| {
@@ -246,7 +304,8 @@ impl DrasiLib {
 
         // Delegate to SourceManager which uses the Reconfiguring transition,
         // preserving the graph node, edges, and event history.
-        self.source_manager
+        self.legacy()
+            .source_manager
             .update_source(id.to_string(), new_source)
             .await
             .map_err(|e| DrasiError::operation_failed("source", id, "update", e.to_string()))
@@ -275,7 +334,10 @@ impl DrasiLib {
         }
 
         map_component_error(
-            self.source_manager.start_source(id.to_string()).await,
+            self.legacy()
+                .source_manager
+                .start_source(id.to_string())
+                .await,
             "source",
             id,
             "start",
@@ -305,7 +367,10 @@ impl DrasiLib {
         }
 
         map_component_error(
-            self.source_manager.stop_source(id.to_string()).await,
+            self.legacy()
+                .source_manager
+                .stop_source(id.to_string())
+                .await,
             "source",
             id,
             "stop",
@@ -644,10 +709,33 @@ mod tests {
         core.add_source(s1).await.unwrap();
         let err = core.add_source(s2).await.unwrap_err();
 
-        assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
-            "Duplicate add should return OperationFailed, got: {err:?}"
-        );
+        match core.execution_mode() {
+            crate::ExecutionMode::ComponentGraph => assert!(
+                matches!(err, DrasiError::OperationFailed { .. }),
+                "Duplicate add should return OperationFailed, got: {err:?}"
+            ),
+            #[cfg(feature = "computation")]
+            crate::ExecutionMode::ComputationGraph => {
+                use crate::computation::v1::GraphError;
+
+                let DrasiError::Internal(error) = err else {
+                    panic!("native rejection must retain its ownership-bearing cause: {err:?}");
+                };
+                let GraphError::AdditionRejected { cause, addition } = error
+                    .downcast_ref::<GraphError>()
+                    .expect("native graph error")
+                else {
+                    panic!("expected a rejected addition: {error:?}");
+                };
+                assert!(
+                    matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component dup-src"),
+                    "unexpected rejection cause: {cause:?}"
+                );
+                let rejected = addition.take().await.expect("retained rejected source");
+                assert_eq!(rejected.definition.descriptor.id().as_str(), "dup-src");
+            }
+        }
     }
 
     // ========================================================================

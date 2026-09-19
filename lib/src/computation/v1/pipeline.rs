@@ -117,6 +117,12 @@ impl ComputationPipelineBuilder {
     pub fn reaction_component_id(reaction: &str) -> Result<ComponentId> {
         ComponentId::try_new(format!("reaction/{}", encoded(reaction)))
     }
+    pub(crate) fn source_resource_id(source: &str) -> GraphResult<ResourceId> {
+        resource("source-host", source)
+    }
+    pub(crate) fn index_resource_id(query: &str) -> GraphResult<ResourceId> {
+        resource("query-indexes", query)
+    }
     pub fn source(
         mut self,
         host: Arc<SourcePluginHost>,
@@ -273,7 +279,7 @@ impl ComputationPipelineBuilder {
                 ),
             )?;
         for (name, (host, _)) in &self.sources {
-            let id = resource("source-host", name)?;
+            let id = Self::source_resource_id(name)?;
             builder = builder
                 .declare_resource(ResourceSpecification {
                     id: id.clone(),
@@ -428,7 +434,7 @@ impl ComputationPipelineBuilder {
                 let mut dependencies: BTreeMap<_, _> = [
                     (
                         Arc::from("source"),
-                        vec![resource("source-host", &setting.source_id)?],
+                        vec![Self::source_resource_id(&setting.source_id)?],
                     ),
                     (Arc::from("subscription"), vec![subscription_id]),
                     (Arc::from("progress"), vec![progress_id.clone()]),
@@ -510,7 +516,7 @@ impl ComputationPipelineBuilder {
                         Arc::new(QueryBootstrapResource(bootstrap)),
                     ),
                 )?;
-            let indexes_id = resource("query-indexes", &config.id)?;
+            let indexes_id = Self::index_resource_id(&config.id)?;
             let (handle, publication, ownership) =
                 if let Some((provider, publication)) = self.overrides.get(&config.id) {
                     (

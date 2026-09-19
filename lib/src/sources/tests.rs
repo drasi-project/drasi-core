@@ -494,7 +494,36 @@ mod manager_tests {
         // Try to add same source again
         let result = add_source(&manager, &graph, source2).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists"));
+        let error = result.unwrap_err();
+        match manager.0.execution_mode() {
+            crate::ExecutionMode::ComponentGraph => {
+                assert!(error.to_string().contains("already exists"));
+            }
+            #[cfg(feature = "computation")]
+            crate::ExecutionMode::ComputationGraph => {
+                use crate::computation::v1::GraphError;
+
+                let crate::DrasiError::Internal(error) = error
+                    .downcast_ref::<crate::DrasiError>()
+                    .expect("public API error")
+                else {
+                    panic!("native rejection must retain its ownership-bearing cause: {error:?}");
+                };
+                let GraphError::AdditionRejected { cause, addition } = error
+                    .downcast_ref::<GraphError>()
+                    .expect("native graph error")
+                else {
+                    panic!("expected a rejected addition: {error:?}");
+                };
+                assert!(
+                    matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component test-source"),
+                    "unexpected rejection cause: {cause:?}"
+                );
+                let rejected = addition.take().await.expect("retained rejected source");
+                assert_eq!(rejected.definition.descriptor.id().as_str(), "test-source");
+            }
+        }
     }
 
     #[tokio::test]

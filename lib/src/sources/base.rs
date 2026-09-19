@@ -38,9 +38,9 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
+use crate::channels::ComponentStatusHandle;
 use crate::channels::*;
-use crate::component_graph::ComponentStatusHandle;
-use crate::context::SourceRuntimeContext;
+use crate::context::{ComponentResource, SourceRuntimeContext};
 use crate::identity::IdentityProvider;
 use crate::profiling;
 use crate::sources::PositionComparator;
@@ -177,6 +177,8 @@ pub struct SourceBase {
     pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
+    /// Serializes inventory snapshots so concurrent setters cannot publish stale state.
+    resource_report_lock: Arc<Mutex<()>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Handle to the source's main task
@@ -349,6 +351,7 @@ impl SourceBase {
             status_handle: ComponentStatusHandle::new(&params.id),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
+            resource_report_lock: Arc::new(Mutex::new(())),
             state_store: Arc::new(RwLock::new(params.state_store)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -425,6 +428,7 @@ impl SourceBase {
     /// - `source_id`: The source's unique identifier
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
     /// - `state_store`: Optional persistent state storage
+    /// - `resource_observer`: Optional reporting of the actual selected providers
     pub async fn initialize(&self, context: SourceRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -446,6 +450,41 @@ impl SourceBase {
             if guard.is_none() {
                 *guard = Some(ip.clone());
             }
+        }
+
+        self.report_resources().await;
+    }
+
+    async fn report_resources(&self) {
+        let _report_guard = self.resource_report_lock.lock().await;
+        let Some(context) = self.context().await else {
+            return;
+        };
+        let Some(observer) = context.resource_observer else {
+            return;
+        };
+
+        let mut resources = Vec::new();
+        if let Some(provider) = self.bootstrap_provider.read().await.clone() {
+            resources.push(ComponentResource::Bootstrap(provider));
+        }
+        if let Some(provider) = self.identity_provider().await {
+            resources.push(ComponentResource::Identity(provider));
+        }
+        if let Some(provider) = self.state_store().await {
+            resources.push(ComponentResource::StateStore(provider));
+        }
+        if let Some(provider) = context.wal_provider {
+            resources.push(ComponentResource::Wal(provider));
+        }
+
+        if let Err(error) = observer.observe(resources).await {
+            let message = format!(
+                "Source '{}' failed to report component resources: {error:#}",
+                self.id
+            );
+            error!("{message}");
+            self.set_status(ComponentStatus::Error, Some(message)).await;
         }
     }
 
@@ -477,8 +516,10 @@ impl SourceBase {
     /// This is typically called during source construction when the provider
     /// is available from configuration (e.g., `with_identity_provider()` builder).
     /// Providers set this way take precedence over context-injected providers.
+    /// An initialized computation context is notified of the updated inventory.
     pub async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
         *self.identity_provider.write().await = Some(provider);
+        self.report_resources().await;
     }
 
     /// Create and register a position handle for `query_id`, initialized to `u64::MAX`.
@@ -696,6 +737,7 @@ impl SourceBase {
             status_handle: self.status_handle.clone(),
             dispatchers: self.dispatchers.clone(),
             context: self.context.clone(),
+            resource_report_lock: self.resource_report_lock.clone(),
             state_store: self.state_store.clone(),
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
@@ -719,6 +761,7 @@ impl SourceBase {
     ///
     /// Call this after creating the SourceBase if the source plugin supports bootstrapping.
     /// The bootstrap provider is created by the plugin using its own configuration.
+    /// An initialized computation context is notified of the updated inventory.
     ///
     /// # Example
     /// ```ignore
@@ -728,6 +771,7 @@ impl SourceBase {
     pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static) {
         *self.bootstrap_provider.write().await = Some(Arc::new(provider));
         self.has_bootstrap_provider.store(true, Ordering::Release);
+        self.report_resources().await;
     }
 
     /// Set the position comparator for per-subscriber replay filtering.

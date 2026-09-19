@@ -22,11 +22,9 @@ use crate::component_graph::{ComponentGraph, GraphSnapshot};
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::error::DrasiError;
 use crate::inspection::InspectionAPI;
-use crate::lifecycle::LifecycleManager;
+use crate::legacy_backend::{LegacyBackend, LegacyBackendHost};
 use crate::managers::ComponentLogRegistry;
 use crate::queries::QueryManager;
-use crate::reactions::ReactionManager;
-use crate::sources::SourceManager;
 use crate::state_guard::StateGuard;
 use drasi_core::middleware::MiddlewareTypeRegistry;
 
@@ -156,16 +154,12 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// ```
 pub struct DrasiLib {
     pub(crate) config: Arc<RuntimeConfig>,
-    pub(crate) source_manager: Arc<SourceManager>,
-    pub(crate) query_manager: Arc<QueryManager>,
-    pub(crate) reaction_manager: Arc<ReactionManager>,
+    pub(crate) legacy_backend: Arc<LegacyBackendHost>,
     pub(crate) running: Arc<RwLock<bool>>,
     pub(crate) is_shutdown: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) state_guard: StateGuard,
     // Inspection API for querying server state
     pub(crate) inspection: InspectionAPI,
-    // Lifecycle manager for orchestrating component lifecycle
-    pub(crate) lifecycle: Arc<LifecycleManager>,
     // Middleware registry for source middleware
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
     // Component log registry for live log streaming
@@ -176,10 +170,7 @@ pub struct DrasiLib {
     // events on mutations. Cloned before the graph is wrapped in `Arc<RwLock<>>`,
     // so subscribers can call `.subscribe()` without acquiring the graph lock.
     pub(crate) component_event_broadcast_tx: ComponentEventBroadcastSender,
-    /// Component dependency graph — the single source of truth for component relationships.
-    ///
-    /// All managers share this graph via `Arc<RwLock<>>`. The graph is updated atomically
-    /// alongside the manager HashMaps when components are added, removed, or updated.
+    /// Legacy execution graph, or an outward read model in ComputationGraph mode.
     pub(crate) component_graph: Arc<RwLock<ComponentGraph>>,
     /// Handle to the graph update loop task for clean shutdown.
     pub(crate) graph_update_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -193,14 +184,11 @@ impl Clone for DrasiLib {
     fn clone(&self) -> Self {
         Self {
             config: Arc::clone(&self.config),
-            source_manager: Arc::clone(&self.source_manager),
-            query_manager: Arc::clone(&self.query_manager),
-            reaction_manager: Arc::clone(&self.reaction_manager),
+            legacy_backend: Arc::clone(&self.legacy_backend),
             running: Arc::clone(&self.running),
             is_shutdown: Arc::clone(&self.is_shutdown),
             state_guard: self.state_guard.clone(),
             inspection: self.inspection.clone(),
-            lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
             log_registry: Arc::clone(&self.log_registry),
             component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
@@ -215,6 +203,10 @@ impl Clone for DrasiLib {
 }
 
 impl DrasiLib {
+    pub(crate) fn legacy(&self) -> &LegacyBackend {
+        self.legacy_backend.get()
+    }
+
     pub fn execution_mode(&self) -> crate::ExecutionMode {
         #[cfg(feature = "computation")]
         if self.computation_runtime.is_some() {
@@ -247,30 +239,6 @@ impl DrasiLib {
     /// Internal constructor - creates uninitialized server
     /// Use `builder()` instead
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
-        // Use the shared global log registry.
-        // Since tracing uses a single global subscriber, all DrasiLib instances
-        // share the same log registry. This ensures logs are properly routed
-        // regardless of how many DrasiLib instances are created.
-        let log_registry = crate::managers::get_or_init_global_registry();
-
-        // Get the instance ID from config for log routing
-        let instance_id = config.id.clone();
-
-        // Create the shared component graph with the instance as root node.
-        // Extract the broadcast sender and update sender BEFORE wrapping in Arc<RwLock<>>
-        // so subscribers and components can use them without acquiring the graph lock.
-        let (graph, update_rx) = ComponentGraph::new(&instance_id);
-        let component_event_broadcast_tx = graph.event_sender().clone();
-        let update_tx = graph.update_sender();
-        let component_graph = Arc::new(RwLock::new(graph));
-
-        let source_manager = Arc::new(SourceManager::new(
-            &instance_id,
-            log_registry.clone(),
-            component_graph.clone(),
-            update_tx.clone(),
-        ));
-
         // Initialize middleware registry and register all standard middleware factories
         let mut middleware_registry = MiddlewareTypeRegistry::new();
 
@@ -301,43 +269,30 @@ impl DrasiLib {
             drasi_middleware::promote::PromoteMiddlewareFactory::new(),
         ));
 
-        let middleware_registry = Arc::new(middleware_registry);
+        Self::new_with_middleware(config, Arc::new(middleware_registry))
+    }
 
-        let query_manager = Arc::new(QueryManager::new(
-            &instance_id,
-            source_manager.clone(),
-            config.index_factory.clone(),
+    pub(crate) fn new_with_middleware(
+        config: Arc<RuntimeConfig>,
+        middleware_registry: Arc<MiddlewareTypeRegistry>,
+    ) -> Self {
+        let log_registry = crate::managers::get_or_init_global_registry();
+        let instance_id = config.id.clone();
+        let (graph, update_rx) = ComponentGraph::new(&instance_id);
+        let component_event_broadcast_tx = graph.event_sender().clone();
+        let update_tx = graph.update_sender();
+        let component_graph = Arc::new(RwLock::new(graph));
+        let legacy_backend = Arc::new(LegacyBackendHost::new(
+            config.clone(),
             middleware_registry.clone(),
             log_registry.clone(),
             component_graph.clone(),
-            update_tx.clone(),
-            config.default_recovery_policy,
+            update_tx,
         ));
-
-        let reaction_manager = Arc::new(ReactionManager::new(
-            &instance_id,
-            log_registry.clone(),
-            component_graph.clone(),
-            update_tx.clone(),
-        ));
-
         let state_guard = StateGuard::new();
 
-        let inspection = InspectionAPI::new(
-            source_manager.clone(),
-            query_manager.clone(),
-            reaction_manager.clone(),
-            state_guard.clone(),
-            config.clone(),
-        );
-
-        let lifecycle = Arc::new(LifecycleManager::new(
-            config.clone(),
-            source_manager.clone(),
-            query_manager.clone(),
-            reaction_manager.clone(),
-            component_graph.clone(),
-        ));
+        let inspection =
+            InspectionAPI::new(legacy_backend.clone(), state_guard.clone(), config.clone());
 
         // Spawn the graph update loop — sole consumer of component status updates.
         // Components send status changes via the mpsc update channel (fire-and-forget),
@@ -387,14 +342,11 @@ impl DrasiLib {
 
         Self {
             config,
-            source_manager,
-            query_manager,
-            reaction_manager,
+            legacy_backend,
             running: Arc::new(RwLock::new(false)),
             is_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             state_guard,
             inspection,
-            lifecycle,
             middleware_registry,
             log_registry,
             component_event_broadcast_tx,
@@ -422,33 +374,39 @@ impl DrasiLib {
 
         // Inject QueryManager into ReactionManager
         // This allows the host to subscribe reactions to query results
-        self.reaction_manager
-            .inject_query_provider(
-                Arc::clone(&self.query_manager) as Arc<dyn crate::reactions::QueryProvider>
-            )
+        self.legacy()
+            .reaction_manager
+            .inject_query_provider(Arc::clone(&self.legacy().query_manager)
+                as Arc<dyn crate::reactions::QueryProvider>)
             .await;
 
         // Inject StateStoreProvider into SourceManager and ReactionManager
         // This allows sources and reactions to persist state
         let state_store = self.config.state_store_provider.clone();
-        self.source_manager
+        self.legacy()
+            .source_manager
             .inject_state_store(state_store.clone())
             .await;
-        self.reaction_manager.inject_state_store(state_store).await;
+        self.legacy()
+            .reaction_manager
+            .inject_state_store(state_store)
+            .await;
 
         // Inject IdentityProvider into SourceManager and ReactionManager (if configured)
         // This allows sources and reactions to obtain authentication credentials
         if let Some(identity_provider) = &self.config.identity_provider {
-            self.source_manager
+            self.legacy()
+                .source_manager
                 .inject_identity_provider(identity_provider.clone())
                 .await;
-            self.reaction_manager
+            self.legacy()
+                .reaction_manager
                 .inject_identity_provider(identity_provider.clone())
                 .await;
         }
 
         // Load configuration
-        self.lifecycle.load_configuration().await?;
+        self.legacy().lifecycle.load_configuration().await?;
 
         self.state_guard.mark_initialized();
         info!("drasi-lib initialized successfully");
@@ -521,7 +479,7 @@ impl DrasiLib {
         #[cfg(feature = "computation")]
         self.start_parallel_components().await?;
         #[cfg(not(feature = "computation"))]
-        self.lifecycle.start_components().await?;
+        self.legacy().lifecycle.start_components().await?;
 
         // Brief write lock to set the flag
         *self.running.write().await = true;
@@ -594,10 +552,10 @@ impl DrasiLib {
         let result = if let Some(runtime) = &self.computation_runtime {
             runtime.stop_all().await
         } else {
-            self.lifecycle.stop_all_components().await
+            self.legacy().lifecycle.stop_all_components().await
         };
         #[cfg(not(feature = "computation"))]
-        let result = self.lifecycle.stop_all_components().await;
+        let result = self.legacy().lifecycle.stop_all_components().await;
         #[cfg(feature = "computation")]
         let result = match (result, computation_result) {
             (Ok(()), result) | (result, Ok(())) => result,
@@ -692,7 +650,9 @@ impl DrasiLib {
         // already dropped; this drops the remaining long-lived handles so persistent
         // backends (e.g. RocksDB) release their exclusive lock. On-disk data is left
         // intact for a future reopen.
-        self.query_manager.release_all_persistent_handles().await;
+        if let Some(backend) = self.legacy_backend.initialized() {
+            backend.query_manager.release_all_persistent_handles().await;
+        }
 
         #[cfg(feature = "computation")]
         computation_shutdown?;
@@ -714,8 +674,13 @@ impl DrasiLib {
     /// # Thread Safety
     ///
     /// The returned reference is thread-safe and can be used across threads.
+    ///
+    /// This is an engine-specific compatibility escape hatch. In computation
+    /// mode it lazily constructs a legacy manager over the compatibility view.
+    /// Mutating that manager is not a native graph command; use normal DrasiLib
+    /// operations to manage native components.
     pub fn query_manager(&self) -> &QueryManager {
-        &self.query_manager
+        &self.legacy().query_manager
     }
 
     /// Get access to the middleware registry
@@ -832,6 +797,11 @@ impl DrasiLib {
         };
 
         self.state_guard.require_initialized()?;
+
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.computation_runtime {
+            return Ok(runtime.configuration_snapshot().await?);
+        }
 
         let graph = self.component_graph.read().await;
         let graph_snapshot = graph.snapshot();
@@ -1792,7 +1762,7 @@ mod tests {
         #[tokio::test]
         async fn snapshot_captures_bootstrap_provider_from_graph() {
             let source = PropertiedSource::new("bp-source");
-            let core = DrasiLib::builder()
+            let builder = DrasiLib::builder()
                 .with_id("bootstrap-test")
                 .with_source(source)
                 .with_query(
@@ -1801,15 +1771,25 @@ mod tests {
                         .from_source("bp-source")
                         .auto_start(false)
                         .build(),
+                );
+            #[cfg(feature = "computation")]
+            let builder = if crate::test_helpers::execution_mode()
+                == crate::ExecutionMode::ComputationGraph
+            {
+                builder.with_bootstrap_for_source(
+                    "bp-source",
+                    "postgres",
+                    HashMap::from([("timeout_seconds".to_string(), serde_json::json!(300))]),
                 )
-                .build()
-                .await
-                .unwrap();
+            } else {
+                builder
+            };
+            let core = builder.build().await.unwrap();
             core.start().await.unwrap();
 
             // Manually register a bootstrap provider in the graph
             // (this is what the server would do after creating a source with bootstrap config)
-            {
+            if core.execution_mode() == crate::ExecutionMode::ComponentGraph {
                 let graph = core.component_graph();
                 let mut g = graph.write().await;
                 let mut metadata = HashMap::new();
@@ -1849,16 +1829,29 @@ mod tests {
         #[tokio::test]
         async fn snapshot_bootstrap_json_round_trip() {
             let source = PropertiedSource::new("rt-source");
-            let core = DrasiLib::builder()
+            let builder = DrasiLib::builder()
                 .with_id("bp-roundtrip")
-                .with_source(source)
-                .build()
-                .await
-                .unwrap();
+                .with_source(source);
+            #[cfg(feature = "computation")]
+            let builder = if crate::test_helpers::execution_mode()
+                == crate::ExecutionMode::ComputationGraph
+            {
+                builder.with_bootstrap_for_source(
+                    "rt-source",
+                    "scriptfile",
+                    HashMap::from([(
+                        "file_paths".to_string(),
+                        serde_json::json!(["data.jsonl", "init.jsonl"]),
+                    )]),
+                )
+            } else {
+                builder
+            };
+            let core = builder.build().await.unwrap();
             core.start().await.unwrap();
 
             // Register bootstrap with properties
-            {
+            if core.execution_mode() == crate::ExecutionMode::ComponentGraph {
                 let graph = core.component_graph();
                 let mut g = graph.write().await;
                 let mut metadata = HashMap::new();

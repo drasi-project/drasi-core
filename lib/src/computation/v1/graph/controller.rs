@@ -61,8 +61,17 @@ struct Instance {
 
 impl InstanceSlot {
     pub(super) fn new(component: Component, generation: ComponentGeneration) -> Arc<Self> {
+        let id = component.descriptor().id().clone();
+        Self::declared(id, component, generation)
+    }
+
+    pub(super) fn declared(
+        id: ComponentId,
+        component: Component,
+        generation: ComponentGeneration,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            id: component.descriptor().id().clone(),
+            id,
             generation,
             value: Mutex::new(Some(Instance {
                 component,
@@ -125,6 +134,55 @@ impl Drop for InstanceLease {
 }
 
 pub(super) enum Command {
+    AutoStart,
+    Add {
+        addition: super::ComponentAddition,
+        reply: oneshot::Sender<GraphResult<(ComponentId, ComponentGeneration)>>,
+    },
+    ControlConnections {
+        connections: Vec<(ComponentId, ComponentId)>,
+        subscriptions: bool,
+        reply: oneshot::Sender<GraphResult<()>>,
+    },
+    ControlHandler {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        handler: Arc<dyn crate::computation::v1::ControlHandler>,
+        reply: oneshot::Sender<GraphResult<()>>,
+    },
+    HandleStart {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        reply: oneshot::Sender<GraphResult<StartReport>>,
+    },
+    HandleStop {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        reply: oneshot::Sender<GraphResult<StopReport>>,
+    },
+    ReadinessPolicy {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        required: bool,
+        reply: oneshot::Sender<GraphResult<()>>,
+    },
+    ObserveResources {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        bindings: Vec<(super::ResourceSpecification, super::ResourceHandle)>,
+    },
+    ObservePlugin {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        plugin: super::PluginIdentity,
+    },
+    BindStream {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        port: PortId,
+        stream: crate::computation::v1::StreamId,
+        reply: oneshot::Sender<GraphResult<()>>,
+    },
     Preview {
         revision: GraphRevision,
         changes: Vec<reconcile::DesiredMutation>,
@@ -330,6 +388,8 @@ pub(super) fn initial_observations(snapshot: &GraphSnapshot) -> ObservedGraph {
                         health: ComponentHealth::Unknown,
                         failure: None,
                         exhausted: false,
+                        started: false,
+                        lifecycle_requested: false,
                         transition_time: now,
                     },
                 )
@@ -380,10 +440,11 @@ pub(super) fn initial_observations(snapshot: &GraphSnapshot) -> ObservedGraph {
     }
 }
 
-fn update(graph: &ComputationGraph, change: impl FnOnce(&mut ObservedGraph)) {
+pub(super) fn update(graph: &ComputationGraph, change: impl FnOnce(&mut ObservedGraph)) {
     graph
         .observed
         .send_modify(|snapshot| change(Arc::make_mut(snapshot)));
+    super::registry::publish(graph);
     graph.inspector.publish(&graph.snapshot, graph.observed());
 }
 
@@ -415,11 +476,14 @@ pub(super) fn mark_cleanup_required(observed: &watch::Sender<Arc<ObservedGraph>>
 fn failure(error: GraphError, phase: FailurePhase) -> ComponentFailure {
     ComponentFailure {
         phase,
-        disposition: if let GraphError::Creation { disposition, .. } = &error {
+        disposition: if let GraphError::Creation { disposition, .. } = error.underlying() {
             *disposition
         } else if matches!(
-            &error,
-            GraphError::Contract(_) | GraphError::Emission { .. } | GraphError::Topology { .. }
+            error.underlying(),
+            GraphError::Contract(_)
+                | GraphError::Emission { .. }
+                | GraphError::Topology { .. }
+                | GraphError::Validation { .. }
         ) {
             FailureDisposition::Terminal
         } else {
@@ -442,43 +506,16 @@ fn check_revision(graph: &ComputationGraph, revision: GraphRevision) -> GraphRes
 }
 
 fn select(graph: &ComputationGraph, selection: &GraphSelection) -> GraphResult<BTreeSet<usize>> {
-    let (ids, direction) = match selection {
-        GraphSelection::All => return Ok(graph.ids.values().copied().collect()),
-        GraphSelection::Exact(ids) => (ids, 0),
-        GraphSelection::Dependencies(ids) => (ids, -1),
-        GraphSelection::Dependents(ids) => (ids, 1),
-    };
-    let mut selected = BTreeSet::new();
-    for id in ids {
-        selected.insert(
-            *graph
+    super::topology::selected(&graph.snapshot, selection)?
+        .into_iter()
+        .map(|id| {
+            graph
                 .ids
-                .get(id)
-                .ok_or_else(|| topology(format!("unknown component {id}")))?,
-        );
-    }
-    if direction != 0 {
-        loop {
-            let mut added = Vec::new();
-            for edge in graph.snapshot.edges.iter() {
-                let from = graph.ids[&edge.definition.from.component];
-                let to = graph.ids[&edge.definition.to.component];
-                let (origin, target) = if direction < 0 {
-                    (to, from)
-                } else {
-                    (from, to)
-                };
-                if selected.contains(&origin) && !selected.contains(&target) {
-                    added.push(target);
-                }
-            }
-            if added.is_empty() {
-                break;
-            }
-            selected.extend(added);
-        }
-    }
-    Ok(selected)
+                .get(&id)
+                .copied()
+                .ok_or_else(|| topology(format!("unknown component {id}")))
+        })
+        .collect()
 }
 
 fn binding_dependencies(graph: &ComputationGraph, id: &ComponentId) -> Vec<ComponentId> {
@@ -497,6 +534,11 @@ fn binding_dependencies(graph: &ComputationGraph, id: &ComponentId) -> Vec<Compo
                     edge.definition.to == endpoint && !edge.policy.required_for_binding
                 });
         if !bound && !optional_input {
+            missing.insert(id.clone());
+        }
+        if port.direction() == super::super::PortDirection::Output
+            && !node.output_streams.contains_key(port.id())
+        {
             missing.insert(id.clone());
         }
     }
@@ -570,10 +612,29 @@ async fn deploy(
         if let Some(failure) = graph.observed().components[&slot.id]
             .failure
             .as_ref()
-            .filter(|failure| failure.phase == FailurePhase::Creation)
+            .filter(|failure| {
+                matches!(
+                    failure.phase,
+                    FailurePhase::Creation | FailurePhase::Validation
+                )
+            })
         {
             unavailable.insert(index);
             creation_failures.insert(index, failure.clone());
+            continue;
+        }
+        if matches!(lease.component, Component::Unresolved(_)) {
+            unavailable.insert(index);
+            creation_failures.insert(
+                index,
+                failure(
+                    super::addition::validation_failure(
+                        &slot.id,
+                        topology("component instance is unresolved"),
+                    ),
+                    FailurePhase::Validation,
+                ),
+            );
             continue;
         }
         if let Component::Deferred {
@@ -866,6 +927,7 @@ async fn deploy(
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
+    Create,
     Start,
     Process,
     Stop,
@@ -901,6 +963,12 @@ struct Stopping {
     reply: oneshot::Sender<GraphResult<StopReport>>,
 }
 
+struct ControlCompletion {
+    component: ComponentId,
+    generation: ComponentGeneration,
+    result: Result<anyhow::Result<()>, Aborted>,
+}
+
 #[derive(Default)]
 struct Operations {
     futures: FuturesUnordered<BoxFuture<'static, Completion>>,
@@ -914,9 +982,297 @@ struct Operations {
     quiescing: BTreeSet<usize>,
     paused: BTreeSet<usize>,
     invalidated_bindings: BTreeSet<usize>,
+    control_futures: FuturesUnordered<BoxFuture<'static, ControlCompletion>>,
+    control_handlers:
+        BTreeMap<usize, watch::Sender<Option<Arc<dyn crate::computation::v1::ControlHandler>>>>,
+    peer_controls: BTreeMap<usize, crate::computation::v1::ComponentControl>,
+    control_aborts: BTreeMap<usize, AbortHandle>,
+    pending_auto_start: BTreeMap<usize, bool>,
+    connection_generations:
+        BTreeMap<(ComponentId, ComponentId), BTreeMap<super::EdgeDefinition, u64>>,
 }
 
 impl Operations {
+    fn attach_control(&mut self, graph: &ComputationGraph, index: usize) -> GraphResult<()> {
+        let slot = &graph.components[index];
+        let mut instance = slot.take()?;
+        let valid = instance.component.descriptor() == &graph.nodes[index].descriptor
+            && instance.component.role() == graph.nodes[index].role;
+        if let Some(control) = self.peer_controls.get(&index) {
+            if control.generation() == slot.generation {
+                if valid {
+                    instance.component.bind_control(control.clone());
+                }
+                if let Some(handler) = valid
+                    .then(|| instance.component.control_handler())
+                    .flatten()
+                {
+                    if let Some(handlers) = self.control_handlers.get(&index) {
+                        if handlers.borrow().is_none() {
+                            handlers.send_replace(Some(handler));
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
+        let (control, mut inbox) = graph.peers.attach(slot.id.clone(), slot.generation)?;
+        if let Some(previous) = self.control_aborts.remove(&index) {
+            previous.abort();
+        }
+        if valid {
+            instance.component.bind_control(control.clone());
+        }
+        let (handlers, handler) = watch::channel(
+            valid
+                .then(|| instance.component.control_handler())
+                .flatten(),
+        );
+        self.control_handlers.insert(index, handlers);
+        self.peer_controls.insert(index, control.clone());
+        let plane = graph.peers.clone();
+        let id = slot.id.clone();
+        let generation = slot.generation;
+        let (abort, registration) = AbortHandle::new_pair();
+        self.control_aborts.insert(index, abort);
+        self.control_futures.push(
+            async move {
+                let result = Abortable::new(
+                    async {
+                        while let Some(message) = inbox.recv().await {
+                            let mut changes = plane.subscribe();
+                            if let Err(error) = plane.validate_delivery(&message) {
+                                log::debug!(
+                                    "Discarding obsolete peer notification for {id}: {error}"
+                                );
+                                continue;
+                            }
+                            let callback = handler.borrow().clone();
+                            if let Some(callback) = callback {
+                                let pending = callback.on_message(message.clone(), control.clone());
+                                tokio::pin!(pending);
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        changed = changes.changed() => {
+                                            if changed.is_err() || plane.validate_delivery(&message).is_err() {
+                                                log::debug!("Cancelling a retired peer callback for {id}");
+                                                break;
+                                            }
+                                        }
+                                        result = &mut pending => { result?; break; }
+                                    }
+                                }
+                            } else if matches!(
+                                message.notification,
+                                crate::computation::v1::ControlNotification::Custom { .. }
+                            ) {
+                                anyhow::bail!(
+                                    "component {id} has no handler for a custom control message"
+                                );
+                            }
+                        }
+                        Ok(())
+                    },
+                    registration,
+                )
+                .await;
+                ControlCompletion {
+                    component: id,
+                    generation,
+                    result,
+                }
+            }
+            .boxed(),
+        );
+        Ok(())
+    }
+
+    fn complete_control(&mut self, graph: &ComputationGraph, completed: ControlCompletion) {
+        let Some(&index) = graph.ids.get(&completed.component) else {
+            return;
+        };
+        if graph.components[index].generation != completed.generation {
+            return;
+        }
+        if let Ok(Err(source)) = completed.result {
+            let failure = failure(
+                GraphError::Component {
+                    component: completed.component.clone(),
+                    operation: "control notification",
+                    source,
+                },
+                FailurePhase::Control,
+            );
+            update(graph, |state| {
+                let node = state
+                    .components
+                    .get_mut(&completed.component)
+                    .expect("component");
+                node.health = ComponentHealth::Degraded;
+                node.failure = Some(failure);
+                node.transition_time = Utc::now();
+            });
+        }
+    }
+
+    fn retire_control(&mut self, graph: &ComputationGraph, index: usize) -> GraphResult<()> {
+        let slot = &graph.components[index];
+        if let Some(abort) = self.control_aborts.remove(&index) {
+            abort.abort();
+        }
+        graph.peers.remove(&slot.id, slot.generation)?;
+        self.peer_controls.remove(&index);
+        self.control_handlers.remove(&index);
+        self.pending_auto_start.remove(&index);
+        Ok(())
+    }
+
+    fn refresh_connections(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
+        let observed = graph.observed();
+        let mut current: BTreeMap<_, BTreeMap<_, _>> = BTreeMap::new();
+        for edge in graph.snapshot.edges.iter() {
+            current
+                .entry((
+                    edge.definition.from.component.clone(),
+                    edge.definition.to.component.clone(),
+                ))
+                .or_default()
+                .insert(
+                    edge.definition.clone(),
+                    observed
+                        .relationships
+                        .get(&edge.definition)
+                        .map_or(0, |state| state.generation),
+                );
+        }
+        for pair in graph
+            .snapshot
+            .control_connections
+            .iter()
+            .chain(graph.snapshot.subscriptions.iter())
+        {
+            current.entry(pair.clone()).or_default();
+        }
+        let rebound: Vec<_> = current
+            .iter()
+            .filter(|(pair, bindings)| {
+                self.connection_generations
+                    .get(*pair)
+                    .is_some_and(|previous| previous != *bindings)
+            })
+            .map(|(pair, _)| pair.clone())
+            .collect();
+        graph
+            .peers
+            .sync_connections(current.keys().cloned(), rebound)?;
+        self.connection_generations = current;
+        Ok(())
+    }
+
+    fn advance_additions(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
+        let newly_ready: Vec<_> = graph
+            .observed()
+            .components
+            .iter()
+            .filter(|(id, node)| {
+                !node.started
+                    && node.failure.is_none()
+                    && matches!(
+                        node.lifecycle,
+                        ComponentLifecycle::Starting | ComponentLifecycle::Running
+                    )
+                    && graph.ids.get(*id).is_some_and(|index| {
+                        self.active
+                            .get(index)
+                            .is_some_and(|active| active.operation == Operation::Process)
+                    })
+                    && graph.peers.is_ready(id, node.generation)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !newly_ready.is_empty() {
+            update(graph, |state| {
+                for id in &newly_ready {
+                    let node = state.components.get_mut(id).expect("ready component");
+                    node.started = true;
+                    node.lifecycle = ComponentLifecycle::Running;
+                }
+            });
+            for id in newly_ready {
+                self.notify_availability(
+                    graph.ids[&id],
+                    crate::computation::v1::ControlNotification::Available,
+                );
+            }
+        }
+        if self.starting.is_some() || self.stopping.is_some() {
+            return Ok(());
+        }
+        let eligible = |index: &usize| {
+            let id = graph.nodes[*index].descriptor.id();
+            graph.ids.get(id) == Some(index)
+                && graph.observed().components[id].realization == RealizationState::Created
+                && !graph.deferred_activation.contains(id)
+                && self.readiness_satisfied(graph, id)
+        };
+        let force = self
+            .pending_auto_start
+            .iter()
+            .any(|(index, forced)| *forced && eligible(index));
+        let ready: BTreeSet<_> = self
+            .pending_auto_start
+            .iter()
+            .filter(|(index, forced)| **forced == force && eligible(index))
+            .map(|(index, _)| *index)
+            .collect();
+        self.pending_auto_start.retain(|index, _| {
+            let id = graph.nodes[*index].descriptor.id();
+            graph.ids.get(id) == Some(index) && !ready.contains(index)
+        });
+        if !ready.is_empty() {
+            self.begin_start(graph, ready, None, force);
+        }
+        Ok(())
+    }
+
+    fn readiness_satisfied(&self, graph: &ComputationGraph, id: &ComponentId) -> bool {
+        !graph.snapshot.readiness_required.contains(id)
+            || ((graph
+                .snapshot
+                .edges
+                .iter()
+                .any(|edge| edge.definition.from.component == *id)
+                || graph
+                    .snapshot
+                    .control_connections
+                    .iter()
+                    .chain(graph.snapshot.subscriptions.iter())
+                    .any(|(from, _)| from == id))
+                && graph.peers.downstream_ready(id))
+    }
+
+    fn notify_availability(
+        &self,
+        index: usize,
+        notification: crate::computation::v1::ControlNotification,
+    ) {
+        if let Some(control) = self.peer_controls.get(&index) {
+            if let Err(error) = control.notify_upstream(notification.clone()) {
+                log::warn!(
+                    "Upstream availability notification failed for {}: {error}",
+                    control.id()
+                );
+            }
+            if let Err(error) = control.notify_downstream(notification) {
+                log::warn!(
+                    "Peer availability notification failed for {}: {error}",
+                    control.id()
+                );
+            }
+        }
+    }
+
     fn launch(
         &mut self,
         graph: &ComputationGraph,
@@ -924,6 +1280,9 @@ impl Operations {
         operation: Operation,
     ) -> GraphResult<()> {
         let slot = &graph.components[index];
+        if operation == Operation::Start {
+            graph.peers.reset_ready(&slot.id, slot.generation)?;
+        }
         let mut lease = slot.take()?;
         let node = graph.nodes[index].clone();
         let generation = slot.generation;
@@ -935,6 +1294,10 @@ impl Operations {
                 .ok_or_else(|| topology("component operation epoch exhausted"))?,
         );
         let timeout = graph.cleanup_timeout;
+        let declarations = graph.snapshot.resources.clone();
+        let resources = graph.resource_handles.clone();
+        let scope = graph.execution_scope.clone();
+        let graph_id = graph.snapshot.id.clone();
         let (quiesce, mut quiescence) = watch::channel(false);
         let span = tracing::info_span!("computation_component",
             instance_id = %graph.execution_scope,
@@ -951,7 +1314,9 @@ impl Operations {
             observed.operation = epoch;
             observed.revision = state.revision;
             observed.transition_time = Utc::now();
-            if operation != Operation::Process {
+            if operation == Operation::Create {
+                observed.realization = RealizationState::Creating;
+            } else if operation != Operation::Process {
                 observed.lifecycle = if operation == Operation::Start {
                     ComponentLifecycle::Starting
                 } else {
@@ -961,6 +1326,66 @@ impl Operations {
         });
         let future = async move {
             match operation {
+                Operation::Create => {
+                    super::validate_role(&node.descriptor, node.role, node.completion).map_err(
+                        |error| super::addition::validation_failure(node.descriptor.id(), error),
+                    )?;
+                    if let Component::Deferred {
+                        specification,
+                        factory,
+                    } = &lease.component
+                    {
+                        let specification = specification.clone();
+                        let factory = factory.clone();
+                        super::specification::validate_specification(
+                            &graph_id,
+                            &specification,
+                            factory.as_ref(),
+                            &declarations,
+                            &resources,
+                        )
+                        .map_err(|error| {
+                            super::addition::validation_failure(node.descriptor.id(), error)
+                        })?;
+                        let context = ConstructionContext::resolve(
+                            scope,
+                            graph_id,
+                            generation,
+                            specification,
+                            resources,
+                            &factory.descriptor().configuration,
+                        )
+                        .await
+                        .map_err(|error| GraphError::Creation {
+                            component: node.descriptor.id().clone(),
+                            disposition: error.disposition,
+                            source: error.source,
+                        })?;
+                        let constructed = tokio::time::timeout(timeout, factory.create(context))
+                            .await
+                            .map_err(|_| GraphError::ReconciliationTimeout)?
+                            .map_err(|error| GraphError::Creation {
+                                component: node.descriptor.id().clone(),
+                                disposition: error.disposition,
+                                source: error.source,
+                            })?;
+                        lease.component = constructed.0;
+                    } else if matches!(lease.component, Component::Unresolved(_)) {
+                        return Err(super::addition::validation_failure(
+                            node.descriptor.id(),
+                            topology("component factory or instance binding is missing"),
+                        ));
+                    }
+                    if lease.component.role() != node.role {
+                        return Err(super::addition::validation_failure(
+                            node.descriptor.id(),
+                            topology("constructed role differs from its declaration"),
+                        ));
+                    }
+                    check_descriptor(&lease.component, &node).map_err(|error| {
+                        super::addition::validation_failure(node.descriptor.id(), error)
+                    })
+                }
                 Operation::Start => {
                     check_descriptor(&lease.component, &node)?;
                     lease.attempted = true;
@@ -1036,6 +1461,21 @@ impl Operations {
         reply: Option<oneshot::Sender<GraphResult<StartReport>>>,
         force: bool,
     ) {
+        update(graph, |state| {
+            for index in &selected {
+                let id = graph.nodes[*index].descriptor.id();
+                let node = state.components.get_mut(id).expect("selected component");
+                if (force || graph.snapshot.lifecycle_policies[id].auto_start)
+                    && (force || !graph.deferred_activation.contains(id))
+                    && node.realization == RealizationState::Created
+                    && node.lifecycle == ComponentLifecycle::Stopped
+                {
+                    node.started = false;
+                    node.failure = None;
+                    node.lifecycle_requested = true;
+                }
+            }
+        });
         self.starting = Some(Starting {
             revision: graph.snapshot.revision,
             pending: selected,
@@ -1059,11 +1499,34 @@ impl Operations {
             let current = &observed.components[id];
             let outcome = if current.realization != RealizationState::Created {
                 Some(StartOutcome::NotCreated)
-            } else if !group.force && !graph.snapshot.lifecycle_policies[id].auto_start {
+            } else if !group.force
+                && (graph.deferred_activation.contains(id)
+                    || !graph.snapshot.lifecycle_policies[id].auto_start)
+            {
                 Some(StartOutcome::NotRequested)
             } else if !binding_dependencies(graph, id).is_empty() {
                 Some(StartOutcome::Blocked {
                     dependencies: binding_dependencies(graph, id),
+                })
+            } else if !self.readiness_satisfied(graph, id) {
+                self.pending_auto_start.insert(index, group.force);
+                Some(StartOutcome::Blocked {
+                    dependencies: graph
+                        .snapshot
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.definition.from.component == *id)
+                        .map(|edge| edge.definition.to.component.clone())
+                        .chain(
+                            graph
+                                .snapshot
+                                .control_connections
+                                .iter()
+                                .chain(graph.snapshot.subscriptions.iter())
+                                .filter(|(from, _)| from == id)
+                                .map(|(_, to)| to.clone()),
+                        )
+                        .collect(),
                 })
             } else if current.lifecycle == ComponentLifecycle::Running {
                 Some(StartOutcome::AlreadyRunning)
@@ -1099,10 +1562,11 @@ impl Operations {
                 if dependencies.iter().any(|dependency| {
                     let index = graph.ids[dependency];
                     group.pending.contains(&index)
-                        || self
-                            .active
-                            .get(&index)
-                            .is_some_and(|active| active.operation == Operation::Start)
+                        || self.active.get(&index).is_some_and(|active| {
+                            active.operation == Operation::Start
+                                || observed.components[dependency].lifecycle
+                                    == ComponentLifecycle::Starting
+                        })
                 }) {
                     continue;
                 }
@@ -1166,6 +1630,19 @@ impl Operations {
             reply,
         };
         for index in selected {
+            self.pending_auto_start.remove(&index);
+            update(graph, |state| {
+                state
+                    .components
+                    .get_mut(graph.nodes[index].descriptor.id())
+                    .expect("selected component")
+                    .lifecycle_requested = true;
+            });
+            if let Some(control) = self.peer_controls.get(&index) {
+                if let Err(error) = control.not_ready() {
+                    log::warn!("Cannot revoke readiness for {}: {error}", control.id());
+                }
+            }
             self.propagated_stop.remove(&index);
             let id = graph.nodes[index].descriptor.id();
             if let Some(starting) = &mut self.starting {
@@ -1333,21 +1810,141 @@ impl Operations {
         self.active.remove(&completion.index);
         if self.stop_after_abort.remove(&completion.index) {
             self.quiescing.remove(&completion.index);
+            if completion.operation == Operation::Create {
+                update(graph, |state| {
+                    let node = state.components.get_mut(&slot.id).expect("component");
+                    node.realization = RealizationState::CreationFailed;
+                    node.failure = Some(failure(GraphError::Cancelled, FailurePhase::Creation));
+                    node.lifecycle = ComponentLifecycle::Stopped;
+                });
+            }
             return Ok(());
         }
-        let result = completion.result.map_err(|_| GraphError::Cancelled)?;
+        let mut result = completion.result.map_err(|_| GraphError::Cancelled)?;
         let id = &slot.id;
-        match (completion.operation, result) {
-            (Operation::Start, Ok(())) => {
+        if completion.operation == Operation::Create && result.is_ok() {
+            if let Some(failure) = &graph.observed().components[id].failure {
+                result = Err(GraphError::Reported {
+                    cause: failure.cause.clone(),
+                });
+            }
+        }
+        if completion.operation == Operation::Process
+            && graph.observed().components[id].lifecycle == ComponentLifecycle::Starting
+        {
+            if graph.peers.is_ready(id, slot.generation) {
                 update(graph, |state| {
                     let node = state.components.get_mut(id).expect("component");
+                    node.started = true;
                     node.lifecycle = ComponentLifecycle::Running;
+                });
+            } else if result.is_ok() {
+                result = Err(GraphError::StartupIncomplete);
+            }
+        }
+        if completion.operation == Operation::Create {
+            let outcome = match result {
+                Ok(()) => {
+                    self.attach_control(graph, completion.index)?;
+                    let lease = slot.take()?;
+                    let connected =
+                        graph.nodes[completion.index]
+                            .descriptor
+                            .ports()
+                            .iter()
+                            .all(|port| match port.direction() {
+                                crate::computation::v1::PortDirection::Input => {
+                                    lease.inputs.iter().any(|input| &input.port == port.id())
+                                }
+                                crate::computation::v1::PortDirection::Output => {
+                                    lease.outputs.iter().any(|output| &output.port == port.id())
+                                        && graph.nodes[completion.index]
+                                            .output_streams
+                                            .contains_key(port.id())
+                                }
+                            });
+                    update(graph, |state| {
+                        let node = state.components.get_mut(id).expect("added component");
+                        node.realization = if connected {
+                            RealizationState::Created
+                        } else {
+                            RealizationState::Blocked
+                        };
+                        node.failure = None;
+                        node.transition_time = Utc::now();
+                    });
+                    if connected {
+                        CreationOutcome::Created
+                    } else {
+                        CreationOutcome::Blocked {
+                            dependencies: Vec::new(),
+                            resources: Vec::new(),
+                        }
+                    }
+                }
+                Err(error) => {
+                    let phase = super::addition::creation_phase(&error);
+                    let failure = failure(error, phase);
+                    self.notify_availability(
+                        completion.index,
+                        crate::computation::v1::ControlNotification::Unavailable {
+                            reason: failure.cause.to_string(),
+                        },
+                    );
+                    update(graph, |state| {
+                        let node = state.components.get_mut(id).expect("added component");
+                        node.realization = RealizationState::CreationFailed;
+                        node.health = ComponentHealth::Unavailable;
+                        node.failure = Some(failure.clone());
+                        node.transition_time = Utc::now();
+                    });
+                    CreationOutcome::CreationFailed(failure)
+                }
+            };
+            update(graph, |state| {
+                if let Some(report) = &mut state.deployment {
+                    report.components.insert(id.clone(), outcome);
+                    report.summary = if report
+                        .components
+                        .values()
+                        .all(|outcome| matches!(outcome, CreationOutcome::Created))
+                    {
+                        OperationSummary::Completed
+                    } else {
+                        OperationSummary::CompletedWithFailures
+                    };
+                }
+            });
+            return Ok(());
+        }
+        match (completion.operation, result) {
+            (Operation::Start, Ok(())) => {
+                let automatically_ready = !slot.take()?.component.requires_readiness_confirmation();
+                update(graph, |state| {
+                    let node = state.components.get_mut(id).expect("component");
+                    node.lifecycle = if automatically_ready {
+                        ComponentLifecycle::Running
+                    } else {
+                        ComponentLifecycle::Starting
+                    };
                     node.health = ComponentHealth::Unknown;
                     node.failure = None;
+                    node.started |= automatically_ready;
                     node.transition_time = Utc::now();
                 });
                 if let Some(group) = &mut self.starting {
                     group.outcomes.insert(id.clone(), StartOutcome::Started);
+                }
+                if automatically_ready {
+                    if let Some(control) = self.peer_controls.get(&completion.index) {
+                        if let Err(error) = control.ready() {
+                            log::warn!("Readiness notification failed for {id}: {error}");
+                        }
+                    }
+                    self.notify_availability(
+                        completion.index,
+                        crate::computation::v1::ControlNotification::Available,
+                    );
                 }
                 self.launch(graph, completion.index, Operation::Process)?;
             }
@@ -1380,6 +1977,11 @@ impl Operations {
                 });
             }
             (Operation::Stop, Ok(())) => {
+                if let Some(control) = self.peer_controls.get(&completion.index) {
+                    if let Err(error) = control.not_ready() {
+                        log::warn!("Readiness notification failed for {id}: {error}");
+                    }
+                }
                 let propagated = self.propagated_stop.remove(&completion.index);
                 update(graph, |state| {
                     let node = state.components.get_mut(id).expect("component");
@@ -1418,11 +2020,23 @@ impl Operations {
                         | GraphError::Topology { .. }
                 );
                 let phase = match operation {
+                    Operation::Create => FailurePhase::Creation,
                     Operation::Start => FailurePhase::Activation,
                     Operation::Process => FailurePhase::Processing,
                     Operation::Stop => FailurePhase::Stop,
                 };
                 let failure = failure(error, phase);
+                self.notify_availability(
+                    completion.index,
+                    crate::computation::v1::ControlNotification::Unavailable {
+                        reason: failure.cause.to_string(),
+                    },
+                );
+                if let Some(control) = self.peer_controls.get(&completion.index) {
+                    if let Err(error) = control.not_ready() {
+                        log::warn!("Readiness notification failed for {id}: {error}");
+                    }
+                }
                 self.last_failure = Some(failure.cause.clone());
                 update(graph, |state| {
                     let node = state.components.get_mut(id).expect("component");
@@ -1461,6 +2075,7 @@ impl Operations {
                     self.propagate(graph, completion.index)?;
                 }
             }
+            (Operation::Create, Ok(())) => unreachable!("creation handled above"),
         }
         self.finish_stop(graph);
         Ok(())
@@ -1478,12 +2093,18 @@ pub(super) async fn run(
     }
     let mut controls = deploy(graph, cancel).await?;
     let mut operations = Operations::default();
+    for index in graph.order.clone() {
+        operations.attach_control(graph, index)?;
+    }
+    operations.refresh_connections(graph)?;
+    let mut peer_changes = graph.peers.subscribe();
     if auto_start {
         operations.begin_start(graph, select(graph, &GraphSelection::All)?, None, false);
     } else {
         graph.state.send_replace(GraphState::Ready);
     }
     loop {
+        operations.advance_additions(graph)?;
         operations.advance_start(graph)?;
         operations.advance_stop(graph)?;
         if auto_start
@@ -1508,12 +2129,237 @@ pub(super) async fn run(
         tokio::select! {
             biased;
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                if let Some(completion) = completion {
+                    operations.complete_control(graph, completion);
+                }
+            }
+            changed = peer_changes.changed() => {
+                changed.map_err(|_| GraphError::ControllerClosed)?;
+            }
             completion = operations.futures.next(), if !operations.futures.is_empty() => {
                 if let Some(completion) = completion {
                     operations.complete(graph, completion, &controls)?;
                 }
             }
             command = commands.recv() => match command {
+                Some(Command::ReadinessPolicy { component, generation, required, reply }) => {
+                    let result = (|| {
+                        let state = graph.observed();
+                        let node = state.components.get(&component)
+                            .filter(|node| node.generation == generation)
+                            .ok_or(GraphError::StaleGeneration)?;
+                        if matches!(node.lifecycle, ComponentLifecycle::Starting | ComponentLifecycle::Running) {
+                            return Err(GraphError::OperationInProgress);
+                        }
+                        if graph.snapshot.readiness_required.contains(&component) != required {
+                            let revision = graph.snapshot.revision.0.checked_add(1)
+                                .ok_or_else(|| topology("graph revision exhausted"))?;
+                            if required {
+                                graph.snapshot.readiness_required.insert(component.clone());
+                            } else {
+                                graph.snapshot.readiness_required.remove(&component);
+                            }
+                            graph.snapshot.revision = GraphRevision(revision);
+                            graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                            update(graph, |state| state.revision = GraphRevision(revision));
+                        }
+                        Ok(())
+                    })();
+                    let _ = reply.send(result);
+                }
+                Some(Command::AutoStart) => {
+                    for &index in graph.ids.values() {
+                        if graph.snapshot.lifecycle_policies[graph.nodes[index].descriptor.id()].auto_start {
+                            graph.deferred_activation.remove(graph.nodes[index].descriptor.id());
+                            operations.pending_auto_start.insert(index, false);
+                        }
+                    }
+                }
+                Some(Command::BindStream { component, generation, port, stream, reply }) => {
+                    let result = (|| {
+                        let index = *graph.ids.get(&component).ok_or(GraphError::StaleGeneration)?;
+                        let state = graph.observed();
+                        if state.components[&component].generation != generation {
+                            return Err(GraphError::StaleGeneration);
+                        }
+                        if state.components[&component].started {
+                            return Err(topology("replace or reconcile a previously started output stream"));
+                        }
+                        if !graph.nodes[index].descriptor.ports().iter().any(|candidate| {
+                            candidate.id() == &port
+                                && candidate.direction() == crate::computation::v1::PortDirection::Output
+                        }) {
+                            return Err(topology("stream binding does not name an output port"));
+                        }
+                        if graph.snapshot.nodes.iter().any(|node| {
+                            node.output_streams.iter().any(|(other, value)| {
+                                value == &stream && (node.descriptor.id() != &component || other != &port)
+                            })
+                        }) {
+                            return Err(topology("duplicate output stream identity"));
+                        }
+                        let revision = GraphRevision(graph.snapshot.revision.0.checked_add(1)
+                            .ok_or_else(|| topology("graph revision exhausted"))?);
+                        graph.nodes[index].output_streams.insert(port.clone(), stream.clone());
+                        let mut nodes = graph.snapshot.nodes.to_vec();
+                        nodes.iter_mut().find(|node| node.descriptor.id() == &component)
+                            .expect("component").output_streams.insert(port, stream);
+                        graph.snapshot.nodes = nodes.into();
+                        graph.snapshot.revision = revision;
+                        graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                        update(graph, |state| state.revision = revision);
+                        Ok(())
+                    })();
+                    let _ = reply.send(result);
+                }
+                Some(Command::ObserveResources { component, generation, bindings }) => {
+                    if let Err(error) = super::resources::observe(graph, component.clone(), generation, bindings) {
+                        if matches!(error, GraphError::StaleGeneration) {
+                            log::debug!("Ignoring retired provider observation for {component}");
+                        } else {
+                            log::error!("Provider observation failed for {component}: {error}");
+                            let failure = failure(error, FailurePhase::Control);
+                            update(graph, |state| {
+                                if let Some(node) = state.components.get_mut(&component) {
+                                    node.failure = Some(failure);
+                                    node.health = ComponentHealth::Degraded;
+                                }
+                            });
+                        }
+                    }
+                }
+                Some(Command::ObservePlugin { component, generation, plugin }) => {
+                    if let Err(error) = super::resources::observe_plugin(graph, &component, generation, plugin) {
+                        if matches!(error, GraphError::StaleGeneration) {
+                            log::debug!("Ignoring plugin observation from retired component {component}");
+                        } else {
+                            log::error!("Plugin observation failed for {component}: {error}");
+                            let failure = failure(error, FailurePhase::Validation);
+                            update(graph, |state| {
+                                if let Some(node) = state.components.get_mut(&component) {
+                                    node.failure = Some(failure);
+                                    node.health = ComponentHealth::Degraded;
+                                }
+                            });
+                        }
+                    }
+                }
+                Some(Command::Add { addition, reply }) => {
+                    let validation_error = addition.bindings.validation_error.clone();
+                    let deferred = addition.bindings.defer_activation;
+                    let activate = addition.definition.lifecycle.auto_start
+                        && !addition.bindings.defer_activation;
+                    let mut pending = Some(addition);
+                    match super::addition::insert(graph, &mut pending) {
+                        Ok((index, id, generation)) => {
+                            if deferred {
+                                graph.deferred_activation.insert(id.clone());
+                            }
+                            if activate {
+                                operations.pending_auto_start.insert(index, false);
+                            }
+                            let setup = operations.attach_control(graph, index)
+                                .and_then(|_| operations.refresh_connections(graph))
+                                .and_then(|_| match validation_error {
+                                    Some(cause) => Err(GraphError::Reported { cause }),
+                                    None => operations.launch(graph, index, Operation::Create),
+                                });
+                            if let Err(error) = setup {
+                                let phase = super::addition::creation_phase(&error);
+                                let failure = failure(error, phase);
+                                update(graph, |state| {
+                                    let node = state.components.get_mut(&id).expect("added component");
+                                    node.realization = RealizationState::CreationFailed;
+                                    node.failure = Some(failure);
+                                });
+                            }
+                            let _ = reply.send(Ok((id, generation)));
+                        }
+                        Err(error) => {
+                            let addition = super::addition::RejectedAddition::new(
+                                pending.take().expect("rejected addition retains its ownership")
+                            );
+                            let mut rejected = graph.rejected_additions.lock().unwrap_or_else(|error| {
+                                log::error!("Retaining rejected resources through poisoned registry: {error}");
+                                error.into_inner()
+                            });
+                            rejected.retain(|addition| !addition.complete());
+                            rejected.push(addition.clone());
+                            let _ = reply.send(Err(GraphError::AdditionRejected {
+                                cause: Box::new(error), addition,
+                            }));
+                        }
+                    }
+                }
+                Some(Command::ControlConnections { connections, subscriptions, reply }) => {
+                    let result = if connections.iter().any(|(from, to)| {
+                        from == to || !graph.ids.contains_key(to)
+                            || (!subscriptions && !graph.ids.contains_key(from))
+                    }) {
+                        Err(topology("control connection requires distinct existing components"))
+                    } else {
+                        match graph.snapshot.revision.0.checked_add(1) {
+                            Some(revision) => {
+                                if subscriptions {
+                                    graph.snapshot.subscriptions = connections.into();
+                                } else {
+                                    graph.snapshot.control_connections = connections.into();
+                                }
+                                operations.refresh_connections(graph).map(|_| {
+                                    graph.snapshot.revision = GraphRevision(revision);
+                                    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                                    update(graph, |state| state.revision = GraphRevision(revision));
+                                })
+                            }
+                            None => Err(topology("graph revision exhausted")),
+                        }
+                    };
+                    let _ = reply.send(result);
+                }
+                Some(Command::ControlHandler { component, generation, handler, reply }) => {
+                    let result = graph.ids.get(&component)
+                        .filter(|index| graph.components[**index].generation == generation)
+                        .and_then(|index| operations.control_handlers.get(index))
+                        .ok_or(GraphError::StaleGeneration)
+                        .map(|handlers| { handlers.send_replace(Some(handler)); });
+                    let _ = reply.send(result);
+                }
+                Some(Command::HandleStart { component, generation, reply }) => {
+                    let valid = graph.ids.get(&component)
+                        .filter(|index| graph.components[**index].generation == generation)
+                        .copied().ok_or(GraphError::StaleGeneration)
+                        .and_then(|index| {
+                            if operations.starting.is_some() || operations.stopping.is_some() {
+                                Err(GraphError::OperationInProgress)
+                            } else {
+                                Ok(index)
+                            }
+                        });
+                    match valid {
+                        Ok(index) => {
+                            graph.deferred_activation.remove(&component);
+                            operations.begin_start(graph, BTreeSet::from([index]), Some(reply), true);
+                        }
+                        Err(error) => { let _ = reply.send(Err(error)); }
+                    }
+                }
+                Some(Command::HandleStop { component, generation, reply }) => {
+                    let valid = graph.ids.get(&component)
+                        .filter(|index| graph.components[**index].generation == generation)
+                        .copied().ok_or(GraphError::StaleGeneration)
+                        .and_then(|index| {
+                            if operations.stopping.is_some() {
+                                Err(GraphError::OperationInProgress)
+                            } else {
+                                Ok(index)
+                            }
+                        });
+                    match valid {
+                        Ok(index) => operations.begin_stop(graph, BTreeSet::from([index]), reply)?,
+                        Err(error) => { let _ = reply.send(Err(error)); }
+                    }
+                }
                 Some(Command::Preview { revision, changes, reply }) => {
                     let result = check_revision(graph, revision).and_then(|_| reconcile::preview(graph, changes));
                     let _ = reply.send(result);
@@ -1531,7 +2377,12 @@ pub(super) async fn run(
                         } else { select(graph, &selection) }
                     });
                     match valid {
-                        Ok(selected) => operations.begin_start(graph, selected, Some(reply), force),
+                        Ok(selected) => {
+                            for index in &selected {
+                                graph.deferred_activation.remove(graph.nodes[*index].descriptor.id());
+                            }
+                            operations.begin_start(graph, selected, Some(reply), force);
+                        }
                         Err(error) => { let _ = reply.send(Err(error)); }
                     }
                 }
@@ -1600,6 +2451,19 @@ pub(super) async fn run(
                         });
                         Ok(())
                     });
+                    if result.is_ok() {
+                        let notification = match observation.health {
+                            ComponentHealth::Healthy => Some(crate::computation::v1::ControlNotification::Available),
+                            ComponentHealth::Degraded | ComponentHealth::Unavailable =>
+                                Some(crate::computation::v1::ControlNotification::Unavailable {
+                                    reason: format!("component health is {:?}", observation.health),
+                                }),
+                            ComponentHealth::Unknown => None,
+                        };
+                        if let Some(notification) = notification {
+                            operations.notify_availability(graph.ids[&observation.component], notification);
+                        }
+                    }
                     let _ = reply.send(result);
                 }
                 None => return Err(GraphError::ControllerClosed),

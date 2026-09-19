@@ -56,6 +56,9 @@ use crate::sources::Source;
 use crate::sources::SourceManager;
 use tracing::Instrument;
 
+// Preserve the existing manager-qualified import path for the shared contract.
+pub use super::traits::Query;
+
 /// Default query configuration
 struct DefaultQueryConfig;
 
@@ -204,64 +207,6 @@ mod tests {
             serde_json::Value::String(duration.to_string())
         );
     }
-}
-
-#[async_trait]
-pub trait Query: Send + Sync {
-    /// Start the query - subscribes to sources and begins processing events
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
-    async fn status(&self) -> ComponentStatus;
-    fn get_config(&self) -> &QueryConfig;
-    fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Return the number of active subscription forwarder tasks (diagnostic/testing).
-    async fn subscription_count(&self) -> usize {
-        0
-    }
-
-    /// Subscribe to query results for reactions
-    /// Returns a broadcast receiver for Arc-wrapped QueryResults
-    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
-
-    /// Fetch a snapshot of the live result set.
-    ///
-    /// Returns the current results (as an `im::HashMap` clone — O(1) via structural sharing)
-    /// and the `as_of_sequence` reflecting the latest emission.
-    ///
-    /// Blocks until bootstrap completes. Returns `FetchError::TimedOut` if bootstrap
-    /// does not complete within 5 minutes, or `FetchError::NotRunning` if the query
-    /// terminates in a non-Running state.
-    async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError>;
-
-    /// Fetch outbox entries after the given sequence number.
-    ///
-    /// Returns `Ok(OutboxResponse)` if the requested position is still in the ring buffer,
-    /// or `Err(FetchError::OutboxGap)` if it has been evicted.
-    ///
-    /// Blocks until bootstrap completes, with the same timeout/error semantics as
-    /// `fetch_snapshot`.
-    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
-
-    /// Get the query's output metrics (outbox health, sequence rate, snapshot tracking).
-    ///
-    /// Returns `None` for query implementations that don't support metrics.
-    fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
-        None
-    }
-
-    /// Release the persistent index-backend handles this query retains, **without**
-    /// deleting any on-disk data.
-    ///
-    /// Persistent backends (e.g. RocksDB, which holds a process-exclusive lock on its
-    /// data directory) keep that resource pinned until every clone of their shared
-    /// handle is dropped. A query retains some of those handles for its whole lifetime,
-    /// so they are only freed when the whole `DrasiLib` is dropped. This method drops
-    /// those in-memory handles so the backend can release its lock during a permanent
-    /// shutdown, while leaving persisted state intact for a future reopen.
-    ///
-    /// Default: no-op — volatile/in-memory queries hold no such handles.
-    async fn release_persistent_handles(&self) {}
 }
 
 /// Bootstrap phase tracking for each source

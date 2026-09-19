@@ -16,26 +16,89 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
+use anyhow::Context;
 use async_trait::async_trait;
 
-use drasi_lib::bootstrap::BootstrapProvider;
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::events::SubscriptionResponse;
+use drasi_lib::channels::BootstrapEventSender;
+use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::context::{ComponentResource, ComponentResourceObserver, PluginOrigin};
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::schema::SourceSchema;
 use drasi_lib::sources::Source;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext};
 use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
 use drasi_plugin_sdk::ffi::{
-    FfiComponentStatus, FfiDispatchMode, FfiRuntimeContext, FfiStr, SourcePluginVtable,
-    SourceVtable,
+    FfiComponentStatus, FfiDispatchMode, FfiRuntimeContext, FfiStr, PluginMetadata,
+    SourcePluginVtable, SourceVtable,
 };
 use libloading::Library;
 
 use super::change_receiver::{BootstrapReceiverProxy, ChangeReceiverProxy};
 use crate::state_store_bridge::StateStoreVtableBuilder;
+
+pub(super) fn read_plugin_version(library: &Library) -> Option<String> {
+    // Read the existing export from the retained library, never reopening its
+    // path or substituting the descriptor's unrelated configuration version.
+    let metadata_fn = unsafe {
+        library.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata")
+    };
+    let metadata_fn = match metadata_fn {
+        Ok(metadata_fn) => metadata_fn,
+        Err(error) => {
+            log::debug!("Plugin origin metadata is unavailable: {error}");
+            return None;
+        }
+    };
+    unsafe { copy_plugin_version(metadata_fn()) }
+}
+
+// The metadata and its borrowed FfiStr buffers must remain valid for this call.
+unsafe fn copy_plugin_version(metadata: *const PluginMetadata) -> Option<String> {
+    let metadata = unsafe { metadata.as_ref() }?;
+    let version = unsafe { metadata.plugin_version.to_string() };
+    (!version.is_empty()).then_some(version)
+}
+
+pub(super) fn known_plugin_origin(id: &str, version: Option<&str>) -> Option<PluginOrigin> {
+    let version = version.filter(|version| !version.is_empty())?;
+    (!id.is_empty()).then(|| PluginOrigin {
+        id: id.to_owned(),
+        version: version.to_owned(),
+    })
+}
+
+pub(super) async fn observe_resources_and_plugin(
+    observer: &dyn ComponentResourceObserver,
+    resources: Vec<ComponentResource>,
+    origin: Option<&PluginOrigin>,
+) -> anyhow::Result<()> {
+    let plugin_result = match origin {
+        Some(origin) => observer
+            .observe_plugin(origin.clone())
+            .await
+            .context("Plugin origin observation failed"),
+        None => Ok(()),
+    };
+    let resource_result = observer
+        .observe(resources)
+        .await
+        .context("Provider inventory observation failed");
+
+    match (plugin_result, resource_result) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(plugin_error), Err(resource_error)) => {
+            Err(resource_error.context(format!("{plugin_error:#}")))
+        }
+    }
+}
 
 /// Host-side async executor for FFI vtable operations.
 ///
@@ -84,6 +147,95 @@ pub struct SourceProxy {
     /// any instance-wide provider supplied via
     /// [`SourceRuntimeContext::identity_provider`] during [`Source::initialize`].
     identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
+    resources: tokio::sync::Mutex<SourceResourceInventory>,
+    resource_report_failed: AtomicBool,
+    plugin_origin: Option<PluginOrigin>,
+}
+
+#[derive(Default)]
+struct SourceResourceInventory {
+    // The FFI forwarding wrapper owns the strong reference, so legacy mode does
+    // not prolong provider lifetime merely to support a future observation.
+    bootstrap_provider: Option<Weak<dyn BootstrapProvider>>,
+    // Retained only when observation is enabled, using the identity actually
+    // passed to the plugin rather than a later, unsupported identity setter.
+    context: Option<SourceRuntimeContext>,
+}
+
+impl SourceResourceInventory {
+    fn set_context(
+        &mut self,
+        context: &SourceRuntimeContext,
+        identity_provider: Option<Arc<dyn IdentityProvider>>,
+    ) {
+        self.context = context.resource_observer.as_ref().map(|_| {
+            let mut selected_context = context.clone();
+            selected_context.identity_provider = identity_provider;
+            selected_context
+        });
+    }
+
+    fn share_bootstrap(
+        &mut self,
+        provider: Box<dyn BootstrapProvider>,
+    ) -> Box<dyn BootstrapProvider> {
+        let provider: Arc<dyn BootstrapProvider> = Arc::from(provider);
+        self.bootstrap_provider = Some(Arc::downgrade(&provider));
+        Box::new(SharedBootstrapProvider(provider))
+    }
+
+    async fn report(&self, failed: &AtomicBool, origin: Option<&PluginOrigin>) {
+        let Some(context) = self.context.as_ref() else {
+            return;
+        };
+        let Some(observer) = context.resource_observer.as_ref() else {
+            return;
+        };
+
+        let mut resources = Vec::new();
+        if let Some(provider) = self.bootstrap_provider.as_ref().and_then(Weak::upgrade) {
+            resources.push(ComponentResource::Bootstrap(provider));
+        }
+        if let Some(provider) = context.identity_provider.as_ref() {
+            resources.push(ComponentResource::Identity(provider.clone()));
+        }
+        if let Some(provider) = context.state_store.as_ref() {
+            resources.push(ComponentResource::StateStore(provider.clone()));
+        }
+        if let Some(provider) = context.wal_provider.as_ref() {
+            resources.push(ComponentResource::Wal(provider.clone()));
+        }
+
+        match observe_resources_and_plugin(observer.as_ref(), resources, origin).await {
+            Ok(()) => failed.store(false, Ordering::Release),
+            Err(error) => {
+                failed.store(true, Ordering::Release);
+                let message = format!(
+                    "Source '{}' failed to report component resources: {error:#}",
+                    context.source_id
+                );
+                log::error!("{message}");
+                ComponentStatusHandle::new_wired(&context.source_id, context.update_tx.clone())
+                    .set_status(ComponentStatus::Error, Some(message))
+                    .await;
+            }
+        }
+    }
+}
+
+struct SharedBootstrapProvider(Arc<dyn BootstrapProvider>);
+
+#[async_trait]
+impl BootstrapProvider for SharedBootstrapProvider {
+    async fn bootstrap(
+        &self,
+        request: BootstrapRequest,
+        context: &BootstrapContext,
+        event_tx: BootstrapEventSender,
+        settings: Option<&SourceSubscriptionSettings>,
+    ) -> anyhow::Result<BootstrapResult> {
+        self.0.bootstrap(request, context, event_tx, settings).await
+    }
 }
 
 unsafe impl Send for SourceProxy {}
@@ -101,7 +253,15 @@ impl SourceProxy {
             cached_type_name,
             _callback_ctx: std::sync::Mutex::new(None),
             identity_provider: std::sync::Mutex::new(None),
+            resources: tokio::sync::Mutex::new(SourceResourceInventory::default()),
+            resource_report_failed: AtomicBool::new(false),
+            plugin_origin: None,
         }
+    }
+
+    fn with_plugin_origin(mut self, origin: Option<PluginOrigin>) -> Self {
+        self.plugin_origin = origin;
+        self
     }
 }
 
@@ -180,6 +340,9 @@ impl Source for SourceProxy {
     }
 
     async fn status(&self) -> ComponentStatus {
+        if self.resource_report_failed.load(Ordering::Acquire) {
+            return ComponentStatus::Error;
+        }
         let s = (self.vtable.status_fn)(self.vtable.state as *const c_void);
         match s {
             FfiComponentStatus::Starting => ComponentStatus::Starting,
@@ -448,6 +611,18 @@ impl Source for SourceProxy {
     }
 
     async fn initialize(&self, context: SourceRuntimeContext) {
+        let identity_provider = crate::proxies::identity_resolution::resolve_identity_provider(
+            &self.identity_provider,
+            context.identity_provider.clone(),
+            &format!("Source '{}'", self.cached_id),
+        );
+        let mut resources = self.resources.lock().await;
+        resources.set_context(&context, identity_provider.clone());
+        self.resource_report_failed.store(false, Ordering::Release);
+        resources
+            .report(&self.resource_report_failed, self.plugin_origin.as_ref())
+            .await;
+
         let state_store_vtable = context
             .state_store
             .as_ref()
@@ -497,12 +672,8 @@ impl Source for SourceProxy {
             *guard = Some(per_instance_ctx);
         }
 
-        let identity_vtable = crate::proxies::identity_resolution::resolve_identity_provider(
-            &self.identity_provider,
-            context.identity_provider.clone(),
-            &format!("Source '{}'", self.cached_id),
-        )
-        .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
+        let identity_vtable =
+            identity_provider.map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
         let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)))
@@ -540,13 +711,20 @@ impl Source for SourceProxy {
     }
 
     async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
+        let mut resources = self.resources.lock().await;
+        let provider = resources.share_bootstrap(provider);
         // Wrap the host-side BootstrapProvider into a BootstrapProviderVtable
         // using the SDK's vtable generation.
         // The host executor runs futures on the current tokio runtime via std::thread::spawn.
-        let vtable =
-            drasi_plugin_sdk::ffi::build_bootstrap_provider_vtable(provider, host_executor);
-        let vtable_ptr = Box::into_raw(Box::new(vtable));
-        (self.vtable.set_bootstrap_provider_fn)(self.vtable.state, vtable_ptr);
+        {
+            let vtable =
+                drasi_plugin_sdk::ffi::build_bootstrap_provider_vtable(provider, host_executor);
+            let vtable_ptr = Box::into_raw(Box::new(vtable));
+            (self.vtable.set_bootstrap_provider_fn)(self.vtable.state, vtable_ptr);
+        }
+        resources
+            .report(&self.resource_report_failed, self.plugin_origin.as_ref())
+            .await;
     }
 
     /// Stash a per-instance identity provider that will take precedence over
@@ -607,6 +785,7 @@ pub struct SourcePluginProxy {
     cached_config_version: String,
     cached_config_schema_name: String,
     plugin_id: String,
+    plugin_version: Option<String>,
 }
 
 unsafe impl Send for SourcePluginProxy {}
@@ -619,6 +798,7 @@ impl SourcePluginProxy {
             unsafe { (vtable.config_version_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_schema_name =
             unsafe { (vtable.config_schema_name_fn)(vtable.state as *const c_void).to_string() };
+        let plugin_version = read_plugin_version(&library);
         Self {
             vtable,
             library,
@@ -626,6 +806,7 @@ impl SourcePluginProxy {
             cached_config_version,
             cached_config_schema_name,
             plugin_id: String::new(),
+            plugin_version,
         }
     }
 
@@ -687,7 +868,12 @@ impl SourcePluginDescriptor for SourcePluginProxy {
         }
 
         let vtable = unsafe { *Box::from_raw(vtable_ptr) };
-        Ok(Box::new(SourceProxy::new(vtable, self.library.clone())))
+        Ok(Box::new(
+            SourceProxy::new(vtable, self.library.clone()).with_plugin_origin(known_plugin_origin(
+                &self.plugin_id,
+                self.plugin_version.as_deref(),
+            )),
+        ))
     }
 }
 
@@ -696,5 +882,456 @@ impl Drop for SourcePluginProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         super::drop_worker::execute_drop_fn(drop_fn, state);
+    }
+}
+
+#[cfg(test)]
+pub(super) mod resource_observer_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::{mpsc, Mutex};
+
+    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::context::ComponentResourceObserver;
+    use drasi_lib::identity::PasswordIdentityProvider;
+    use drasi_lib::state_store::{MemoryStateStoreProvider, StateStoreProvider};
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        reports: Mutex<Vec<Vec<ComponentResource>>>,
+        origins: Mutex<Vec<PluginOrigin>>,
+        fail: AtomicBool,
+        fail_plugin: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ComponentResourceObserver for RecordingObserver {
+        async fn observe(&self, resources: Vec<ComponentResource>) -> anyhow::Result<()> {
+            self.reports.lock().await.push(resources);
+            anyhow::ensure!(!self.fail.load(Ordering::Acquire), "inventory rejected");
+            Ok(())
+        }
+
+        async fn observe_plugin(&self, origin: PluginOrigin) -> anyhow::Result<()> {
+            self.origins.lock().await.push(origin);
+            anyhow::ensure!(!self.fail_plugin.load(Ordering::Acquire), "origin rejected");
+            Ok(())
+        }
+    }
+
+    struct CountingBootstrap {
+        calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl BootstrapProvider for CountingBootstrap {
+        async fn bootstrap(
+            &self,
+            request: BootstrapRequest,
+            context: &BootstrapContext,
+            _event_tx: BootstrapEventSender,
+            settings: Option<&SourceSubscriptionSettings>,
+        ) -> anyhow::Result<BootstrapResult> {
+            assert_eq!(request.query_id, "query");
+            assert_eq!(context.source_id, "source");
+            assert_eq!(settings.unwrap().source_id, "source");
+            Ok(BootstrapResult {
+                event_count: self.calls.fetch_add(1, Ordering::AcqRel) + 1,
+                source_position: None,
+            })
+        }
+    }
+
+    impl Drop for CountingBootstrap {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_bootstrap_forwards_to_the_reported_instance_and_drops_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut inventory = SourceResourceInventory::default();
+        let forwarding = inventory.share_bootstrap(Box::new(CountingBootstrap {
+            calls: calls.clone(),
+            drops: drops.clone(),
+        }));
+        let weak = inventory.bootstrap_provider.as_ref().unwrap().clone();
+        assert_eq!(weak.strong_count(), 1);
+
+        let observer = Arc::new(RecordingObserver::default());
+        let (update_tx, _rx) = mpsc::channel(8);
+        let mut context = SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+        context.resource_observer = Some(observer.clone());
+        inventory.set_context(&context, None);
+        inventory.report(&AtomicBool::new(false), None).await;
+
+        {
+            let reports = observer.reports.lock().await;
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].len(), 1);
+            let ComponentResource::Bootstrap(reported) = &reports[0][0] else {
+                panic!("expected bootstrap");
+            };
+            assert!(Arc::ptr_eq(reported, &weak.upgrade().unwrap()));
+            let settings = SourceSubscriptionSettings {
+                source_id: "source".into(),
+                query_id: "query".into(),
+                enable_bootstrap: true,
+                nodes: Default::default(),
+                relations: Default::default(),
+                resume_from: None,
+                resume_sequence: None,
+                request_position_handle: false,
+            };
+            for (provider, count) in [(forwarding.as_ref(), 1), (reported.as_ref(), 2)] {
+                let (tx, _rx) = mpsc::channel(1);
+                let result = provider
+                    .bootstrap(
+                        BootstrapRequest {
+                            query_id: "query".into(),
+                            node_labels: vec![],
+                            relation_labels: vec![],
+                            request_id: "request".into(),
+                        },
+                        &BootstrapContext::new_minimal("instance".into(), "source".into()),
+                        tx,
+                        Some(&settings),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.event_count, count);
+            }
+        }
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+        drop(forwarding);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        observer.reports.lock().await.clear();
+        assert!(weak.upgrade().is_none());
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_inventory_retains_no_context_or_strong_bootstrap_reference() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let (update_tx, mut rx) = mpsc::channel(8);
+        let context =
+            SourceRuntimeContext::new("instance", "source", Some(store.clone()), update_tx, None);
+        let mut inventory = SourceResourceInventory::default();
+        inventory.set_context(&context, None);
+        assert!(inventory.context.is_none());
+        assert_eq!(Arc::strong_count(&store), 2);
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let forwarding = inventory.share_bootstrap(Box::new(CountingBootstrap {
+            calls: Arc::new(AtomicUsize::new(0)),
+            drops: drops.clone(),
+        }));
+        let failed = AtomicBool::new(false);
+        inventory.report(&failed, None).await;
+        assert!(!failed.load(Ordering::Acquire));
+        drop(forwarding);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert!(inventory
+            .bootstrap_provider
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn reports_effective_identity_not_context_default_or_unsupported_late_setter() {
+        let selected: Arc<dyn IdentityProvider> =
+            Arc::new(PasswordIdentityProvider::new("selected", "test"));
+        let per_instance = std::sync::Mutex::new(Some(selected.clone()));
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let (update_tx, _rx) = mpsc::channel(8);
+        let mut context = SourceRuntimeContext::new(
+            "instance",
+            "source",
+            Some(store.clone()),
+            update_tx,
+            Some(Arc::new(PasswordIdentityProvider::new("default", "test"))),
+        );
+        let observer = Arc::new(RecordingObserver::default());
+        context.resource_observer = Some(observer.clone());
+        let resolved = crate::proxies::identity_resolution::resolve_identity_provider(
+            &per_instance,
+            context.identity_provider.clone(),
+            "Source 'source'",
+        );
+        let mut inventory = SourceResourceInventory::default();
+        inventory.set_context(&context, resolved);
+        let failed = AtomicBool::new(false);
+        inventory.report(&failed, None).await;
+
+        *per_instance.lock().unwrap() =
+            Some(Arc::new(PasswordIdentityProvider::new("late", "test")));
+        let forwarding = inventory.share_bootstrap(Box::new(CountingBootstrap {
+            calls: Arc::new(AtomicUsize::new(0)),
+            drops: Arc::new(AtomicUsize::new(0)),
+        }));
+        inventory.report(&failed, None).await;
+        let reports = observer.reports.lock().await;
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].len(), 2);
+        assert_eq!(reports[1].len(), 3);
+        for resources in [&reports[0][..], &reports[1][1..]] {
+            let [ComponentResource::Identity(identity), ComponentResource::StateStore(state)] =
+                resources
+            else {
+                panic!("expected selected identity and state store");
+            };
+            assert!(Arc::ptr_eq(identity, &selected));
+            assert!(Arc::ptr_eq(state, &store));
+        }
+        drop(forwarding);
+    }
+
+    #[tokio::test]
+    async fn failed_reports_signal_error_and_successful_refresh_clears_local_failure() {
+        let observer = Arc::new(RecordingObserver::default());
+        observer.fail.store(true, Ordering::Release);
+        let (update_tx, mut rx) = mpsc::channel(8);
+        let mut context = SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+        context.resource_observer = Some(observer.clone());
+        let mut inventory = SourceResourceInventory::default();
+        inventory.set_context(&context, None);
+        let failed = AtomicBool::new(false);
+        inventory.report(&failed, None).await;
+        assert!(failed.load(Ordering::Acquire));
+        let ComponentUpdate::Status {
+            component_id,
+            status,
+            message,
+        } = rx.try_recv().unwrap();
+        assert_eq!(component_id, "source");
+        assert_eq!(status, ComponentStatus::Error);
+        assert!(message.unwrap().contains("inventory rejected"));
+
+        observer.fail.store(false, Ordering::Release);
+        inventory.report(&failed, None).await;
+        assert!(!failed.load(Ordering::Acquire));
+        assert_eq!(observer.reports.lock().await.len(), 2);
+        assert!(rx.try_recv().is_err());
+    }
+
+    pub(crate) fn test_library() -> Arc<Library> {
+        // Retain the existing process image; no plugin is loaded for these tests.
+        #[cfg(unix)]
+        let library = libloading::os::unix::Library::this().into();
+        #[cfg(windows)]
+        let library = libloading::os::windows::Library::this().unwrap().into();
+        Arc::new(library)
+    }
+
+    pub(crate) fn test_runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        })
+    }
+
+    pub(crate) extern "C" fn test_executor(future_ptr: *mut c_void) -> *mut c_void {
+        host_executor(future_ptr)
+    }
+
+    pub(crate) fn metadata_version(version: Option<&str>) -> Option<String> {
+        let Some(version) = version else {
+            return unsafe { copy_plugin_version(std::ptr::null()) };
+        };
+        let metadata = PluginMetadata {
+            sdk_version: FfiStr::from_str("0.14.0"),
+            core_version: FfiStr::from_str("8.0.0"),
+            lib_version: FfiStr::from_str("9.0.0"),
+            plugin_version: FfiStr::from_str(version),
+            target_triple: FfiStr::from_str("test-target"),
+            git_commit: FfiStr::from_str("test-commit"),
+            build_timestamp: FfiStr::from_str("test-timestamp"),
+        };
+        unsafe { copy_plugin_version(&metadata) }
+    }
+
+    struct OriginSource(String);
+
+    #[async_trait]
+    impl Source for OriginSource {
+        fn id(&self) -> &str {
+            &self.0
+        }
+        fn type_name(&self) -> &str {
+            "unrelated-source-type"
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        async fn initialize(&self, context: SourceRuntimeContext) {
+            assert!(context.resource_observer.is_none());
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Stopped
+        }
+        async fn subscribe(
+            &self,
+            _settings: SourceSubscriptionSettings,
+        ) -> anyhow::Result<SubscriptionResponse> {
+            anyhow::bail!("not used by origin tests")
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct OriginSourceDescriptor;
+
+    #[async_trait]
+    impl SourcePluginDescriptor for OriginSourceDescriptor {
+        fn kind(&self) -> &str {
+            "unrelated-source-kind"
+        }
+        fn config_version(&self) -> &str {
+            "99.0.0"
+        }
+        fn config_schema_json(&self) -> String {
+            "{}".into()
+        }
+        fn config_schema_name(&self) -> &str {
+            "OriginSourceConfig"
+        }
+        async fn create_source(
+            &self,
+            id: &str,
+            _config: &serde_json::Value,
+            _auto_start: bool,
+        ) -> anyhow::Result<Box<dyn Source>> {
+            Ok(Box::new(OriginSource(id.into())))
+        }
+    }
+
+    fn origin_factory(id: &str, version: Option<&str>) -> SourcePluginProxy {
+        let vtable = drasi_plugin_sdk::ffi::build_source_plugin_vtable(
+            OriginSourceDescriptor,
+            test_executor,
+            |_, _, _| {},
+            test_runtime,
+        );
+        let mut factory = SourcePluginProxy::new(vtable, test_library());
+        factory.plugin_version = metadata_version(version);
+        factory.set_plugin_id(id.into());
+        factory
+    }
+
+    #[test]
+    fn metadata_version_is_owned_and_never_uses_sdk_core_or_lib_versions() {
+        let copied = {
+            let version = String::from("1.2.3+build");
+            metadata_version(Some(&version)).unwrap()
+        };
+        assert_eq!(copied, "1.2.3+build");
+        assert!(metadata_version(None).is_none());
+        assert!(metadata_version(Some("")).is_none());
+    }
+
+    #[tokio::test]
+    async fn factory_propagates_only_explicit_id_and_metadata_version() {
+        for (id, version) in [
+            ("explicit-source-plugin", Some("1.2.3")),
+            ("", Some("1.2.3")),
+            ("explicit-source-plugin", None),
+            ("explicit-source-plugin", Some("")),
+        ] {
+            for observed in [false, true] {
+                let factory = origin_factory(id, version);
+                assert_eq!(factory.config_version(), "99.0.0");
+                let source = factory
+                    .create_source("source", &serde_json::json!({}), false)
+                    .await
+                    .unwrap();
+                let expected = if !id.is_empty() && version == Some("1.2.3") {
+                    Some(PluginOrigin {
+                        id: id.into(),
+                        version: "1.2.3".into(),
+                    })
+                } else {
+                    None
+                };
+                let proxy = source.as_any().downcast_ref::<SourceProxy>().unwrap();
+                assert_eq!(proxy.plugin_origin, expected);
+                let observer = Arc::new(RecordingObserver::default());
+                let (update_tx, mut rx) = mpsc::channel(8);
+                let mut context =
+                    SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+                if observed {
+                    context.resource_observer = Some(observer.clone());
+                }
+                source.initialize(context).await;
+                let expected_origins: Vec<_> = expected.filter(|_| observed).into_iter().collect();
+                assert_eq!(*observer.origins.lock().await, expected_origins);
+                assert_eq!(observer.reports.lock().await.len(), usize::from(observed));
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn directly_constructed_source_has_no_inferred_origin() {
+        let vtable = drasi_plugin_sdk::ffi::build_source_vtable(
+            OriginSource("source".into()),
+            test_executor,
+            |_, _, _| {},
+            test_runtime,
+        );
+        let source = SourceProxy::new(vtable, test_library());
+        assert!(source.plugin_origin.is_none());
+        let observer = Arc::new(RecordingObserver::default());
+        let (update_tx, _rx) = mpsc::channel(8);
+        let mut context = SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+        context.resource_observer = Some(observer.clone());
+        source.initialize(context).await;
+        assert!(observer.origins.lock().await.is_empty());
+        assert_eq!(observer.reports.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn origin_failure_preserves_provider_reporting_and_error_status() {
+        for reject_inventory in [false, true] {
+            let source = origin_factory("explicit-source-plugin", Some("1.2.3"))
+                .create_source("source", &serde_json::json!({}), false)
+                .await
+                .unwrap();
+            let observer = Arc::new(RecordingObserver::default());
+            observer.fail_plugin.store(true, Ordering::Release);
+            observer.fail.store(reject_inventory, Ordering::Release);
+            let (update_tx, mut rx) = mpsc::channel(8);
+            let mut context =
+                SourceRuntimeContext::new("instance", "source", None, update_tx, None);
+            context.resource_observer = Some(observer.clone());
+            source.initialize(context).await;
+            assert_eq!(observer.origins.lock().await.len(), 1);
+            assert_eq!(observer.reports.lock().await.len(), 1);
+            assert_eq!(source.status().await, ComponentStatus::Error);
+            let ComponentUpdate::Status {
+                status, message, ..
+            } = rx.try_recv().unwrap();
+            assert_eq!(status, ComponentStatus::Error);
+            let message = message.unwrap();
+            assert!(message.contains("origin rejected"));
+            assert_eq!(message.contains("inventory rejected"), reject_inventory);
+        }
     }
 }

@@ -91,11 +91,7 @@ async fn pipeline_for_mode(
 }
 
 async fn insert(core: &DrasiLib, id: &str, name: &str) {
-    let source = core
-        .source_manager
-        .get_source_instance("source")
-        .await
-        .unwrap();
+    let source = core.source_instance("source").await.unwrap();
     source
         .as_any()
         .downcast_ref::<TestMockSource>()
@@ -121,6 +117,106 @@ async fn receive(
         .await
         .expect("subscriber must make progress")
         .unwrap()
+}
+
+#[cfg(feature = "computation")]
+#[tokio::test]
+async fn both_backends_preserve_ordered_diffs_metadata_snapshots_and_outbox() {
+    use std::collections::BTreeMap;
+
+    fn normalized(result: &QueryResult) -> serde_json::Value {
+        let mut value = serde_json::to_value(result).unwrap();
+        value["timestamp"] = json!("<wall-clock>");
+        if let Some(profile) = value
+            .get_mut("profiling")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for (field, stamp) in profile {
+                assert!(
+                    field.ends_with("_ns"),
+                    "unknown profiling field requires an explicit comparison policy: {field}"
+                );
+                if !stamp.is_null() {
+                    assert!(stamp.is_u64(), "profiling clock must remain a timestamp");
+                    *stamp = json!("<clock>");
+                }
+            }
+        }
+        value
+    }
+
+    fn person(id: &str, name: &str, time: u64) -> Element {
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("source", id),
+                labels: vec!["Person".into()].into(),
+                effective_from: time,
+            },
+            properties: ElementPropertyMap::from(json!({"name": name})),
+        }
+    }
+
+    async fn trace(mode: crate::ExecutionMode) -> serde_json::Value {
+        let (core, query) =
+            pipeline_for_mode("MATCH (n:Person) RETURN n.name AS name", 8, mode).await;
+        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
+        let source = core.source_instance("source").await.unwrap();
+        let source = source.as_any().downcast_ref::<TestMockSource>().unwrap();
+        let changes = [
+            SourceChange::Insert {
+                element: person("one", "same", 1000),
+            },
+            SourceChange::Insert {
+                element: person("two", "same", 1001),
+            },
+            SourceChange::Update {
+                element: person("one", "changed", 1002),
+            },
+            SourceChange::Delete {
+                metadata: person("two", "same", 1003).get_metadata().clone(),
+            },
+            SourceChange::Delete {
+                metadata: person("one", "changed", 1004).get_metadata().clone(),
+            },
+        ];
+        let mut emissions = Vec::new();
+        let mut snapshots = Vec::new();
+        for (index, change) in changes.into_iter().enumerate() {
+            source.inject_event(change).await.unwrap();
+            let result = receive(output.as_mut()).await;
+            assert_eq!(result.sequence, index as u64 + 1);
+            assert_eq!(result.query_id, "query");
+            assert!(!result.results.is_empty());
+            assert_eq!(result.metadata["source_id"], json!("source"));
+            let profile = result.profiling.as_ref().expect("query profiling");
+            assert!(profile.query_receive_ns.is_some());
+            assert!(profile.query_core_call_ns.is_some());
+            assert!(profile.query_core_return_ns.is_some());
+            assert!(profile.query_send_ns.is_some());
+            emissions.push(normalized(&result));
+            let snapshot = query.fetch_snapshot().await.unwrap();
+            assert_eq!(snapshot.as_of_sequence, result.sequence);
+            let rows: BTreeMap<_, _> = snapshot.stream_keyed().collect().await;
+            assert_eq!(rows.len(), [1, 2, 2, 1, 0][index]);
+            snapshots.push(serde_json::to_value(rows).unwrap());
+        }
+        let outbox = query.fetch_outbox(0).await.unwrap();
+        let replay: Vec<_> = outbox
+            .results
+            .iter()
+            .map(|result| normalized(result))
+            .collect();
+        assert_eq!(replay, emissions);
+        if mode == crate::ExecutionMode::ComputationGraph {
+            assert!(core.legacy_backend.initialized().is_none());
+        }
+        core.shutdown().await.unwrap();
+        json!({"emissions": emissions, "snapshots": snapshots, "outbox": replay})
+    }
+
+    let legacy = trace(crate::ExecutionMode::ComponentGraph).await;
+    let native = trace(crate::ExecutionMode::ComputationGraph).await;
+    assert_eq!(native, legacy);
 }
 
 async fn bounded_fanout() {

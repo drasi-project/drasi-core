@@ -38,32 +38,7 @@ pub(crate) async fn core(
         None,
     );
     config.index_factory = indexes;
-    let mut core = DrasiLib::new(Arc::new(config));
-    core.middleware_registry = middleware.clone();
-    core.query_manager = Arc::new(crate::queries::QueryManager::new(
-        "test-instance",
-        core.source_manager.clone(),
-        core.config.index_factory.clone(),
-        middleware,
-        core.log_registry.clone(),
-        core.component_graph.clone(),
-        core.component_graph.read().await.update_sender(),
-        recovery,
-    ));
-    core.inspection = crate::inspection::InspectionAPI::new(
-        core.source_manager.clone(),
-        core.query_manager.clone(),
-        core.reaction_manager.clone(),
-        core.state_guard.clone(),
-        core.config.clone(),
-    );
-    core.lifecycle = Arc::new(crate::lifecycle::LifecycleManager::new(
-        core.config.clone(),
-        core.source_manager.clone(),
-        core.query_manager.clone(),
-        core.reaction_manager.clone(),
-        core.component_graph.clone(),
-    ));
+    let mut core = DrasiLib::new_with_middleware(Arc::new(config), middleware);
     #[cfg(feature = "computation")]
     if super::execution_mode() == crate::ExecutionMode::ComputationGraph {
         let runtime = crate::computation::compatibility::Runtime::new(&core, None)
@@ -91,10 +66,24 @@ pub(crate) struct SourceManager(pub Arc<DrasiLib>);
 impl Deref for SourceManager {
     type Target = crate::sources::SourceManager;
     fn deref(&self) -> &Self::Target {
-        &self.0.source_manager
+        &self.0.legacy().source_manager
     }
 }
 impl SourceManager {
+    pub(crate) async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
+        match self.0.source_instance(id).await {
+            Ok(source) => Some(source),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::managers::ComponentNotFoundError>()
+                    .is_some() =>
+            {
+                None
+            }
+            Err(error) => panic!("source fixture lookup failed: {error:#}"),
+        }
+    }
+
     pub(crate) async fn add(&self, source: impl Source + 'static) -> anyhow::Result<()> {
         Ok(self.0.add_source(source).await?)
     }
@@ -119,7 +108,7 @@ impl SourceManager {
         if let Some(runtime) = &self.0.computation_runtime {
             return runtime.start_kind("source").await;
         }
-        self.0.source_manager.start_all().await
+        self.0.legacy().source_manager.start_all().await
     }
 }
 
@@ -127,7 +116,7 @@ pub(crate) struct QueryManager(pub Arc<DrasiLib>);
 impl Deref for QueryManager {
     type Target = crate::queries::QueryManager;
     fn deref(&self) -> &Self::Target {
-        &self.0.query_manager
+        self.0.query_manager()
     }
 }
 
@@ -135,7 +124,7 @@ pub(crate) struct ReactionManager(pub Arc<DrasiLib>);
 impl Deref for ReactionManager {
     type Target = crate::reactions::ReactionManager;
     fn deref(&self) -> &Self::Target {
-        &self.0.reaction_manager
+        &self.0.legacy().reaction_manager
     }
 }
 impl ReactionManager {
@@ -158,7 +147,11 @@ impl ReactionManager {
                 &queries,
             )?;
         }
-        self.0.reaction_manager.provision_reaction(reaction).await
+        self.0
+            .legacy()
+            .reaction_manager
+            .provision_reaction(reaction)
+            .await
     }
     pub(crate) async fn delete(&self, id: &str, cleanup: bool) -> anyhow::Result<()> {
         Ok(self.0.remove_reaction(id, cleanup).await?)
@@ -181,7 +174,7 @@ impl ReactionManager {
         if let Some(runtime) = &self.0.computation_runtime {
             return runtime.start_kind("reaction").await;
         }
-        self.0.reaction_manager.start_all().await
+        self.0.legacy().reaction_manager.start_all().await
     }
 }
 impl QueryManager {
@@ -189,9 +182,15 @@ impl QueryManager {
         &self,
         id: &str,
     ) -> anyhow::Result<Arc<dyn crate::queries::Query>> {
+        #[cfg(feature = "computation")]
+        if let Some(runtime) = &self.0.computation_runtime {
+            let query = runtime.query(id).await?;
+            assert_query_implementation(&self.0, query.as_ref());
+            return Ok(query);
+        }
         let query = self
             .0
-            .query_manager
+            .query_manager()
             .get_query_instance(id)
             .await
             .map_err(anyhow::Error::msg)?;
@@ -207,14 +206,14 @@ impl QueryManager {
             return runtime.declare_query(config).await;
         }
 
-        self.0.query_manager.provision_query(config).await
+        self.0.legacy().query_manager.provision_query(config).await
     }
     pub(crate) async fn teardown_query(&self, id: String) -> anyhow::Result<()> {
         #[cfg(feature = "computation")]
         if self.0.computation_runtime.is_some() {
             return Ok(self.0.remove_query(&id).await?);
         }
-        self.0.query_manager.teardown_query(id).await
+        self.0.legacy().query_manager.teardown_query(id).await
     }
     pub(crate) async fn declare(&self, config: crate::config::QueryConfig) -> anyhow::Result<()> {
         #[cfg(feature = "computation")]
@@ -243,7 +242,7 @@ impl QueryManager {
                 &sources,
             )?;
         }
-        self.0.query_manager.provision_query(config).await
+        self.0.legacy().query_manager.provision_query(config).await
     }
     pub(crate) async fn add(&self, config: crate::config::QueryConfig) -> anyhow::Result<()> {
         Ok(self.0.add_query(config).await?)

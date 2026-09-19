@@ -48,11 +48,11 @@ use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::channels::ComponentStatusHandle;
 use crate::channels::{
     BroadcastChangeDispatcher, ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher,
     ComponentStatus, DispatchMode, QueryResult, QuerySubscriptionResponse,
 };
-use crate::component_graph::ComponentStatusHandle;
 use crate::config::QueryConfig;
 use crate::context::QueryRuntimeContext;
 // Profiling will be used when implementing performance tracking

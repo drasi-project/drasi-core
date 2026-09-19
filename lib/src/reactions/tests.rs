@@ -146,7 +146,8 @@ pub(crate) mod manager_tests {
     ) {
         let core = crate::test_helpers::managers::empty_core().await;
         if core.execution_mode() == crate::ExecutionMode::ComponentGraph {
-            core.reaction_manager
+            core.legacy()
+                .reaction_manager
                 .inject_query_provider(Arc::new(MockQueryProvider))
                 .await;
         }
@@ -213,7 +214,33 @@ pub(crate) mod manager_tests {
         // Try to add same reaction again
         let result = add_reaction(&manager, &graph, reaction2).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists"));
+        let error = result.unwrap_err();
+        match manager.0.execution_mode() {
+            crate::ExecutionMode::ComponentGraph => {
+                assert!(error.to_string().contains("already exists"));
+            }
+            #[cfg(feature = "computation")]
+            crate::ExecutionMode::ComputationGraph => {
+                use crate::computation::v1::GraphError;
+
+                let GraphError::AdditionRejected { cause, addition } = error
+                    .downcast_ref::<GraphError>()
+                    .expect("native graph error")
+                else {
+                    panic!("expected a rejected addition: {error:?}");
+                };
+                assert!(
+                    matches!(cause.as_ref(), GraphError::Topology { reason }
+                        if reason == "duplicate component test-reaction"),
+                    "unexpected rejection cause: {cause:?}"
+                );
+                let rejected = addition.take().await.expect("retained rejected reaction");
+                assert_eq!(
+                    rejected.definition.descriptor.id().as_str(),
+                    "test-reaction"
+                );
+            }
+        }
     }
 
     #[tokio::test]

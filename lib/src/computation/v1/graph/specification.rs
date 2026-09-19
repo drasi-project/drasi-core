@@ -156,15 +156,85 @@ pub struct ResourceHandle {
     role: ResourceRole,
     value: Arc<dyn Any + Send + Sync>,
     cleanup: Option<Arc<dyn ResourceCleanup>>,
+    identity: Option<Arc<dyn ResourceIdentity>>,
+}
+
+trait ResourceIdentity: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool;
+}
+
+struct SharedResourceIdentity<T: ?Sized>(Arc<T>);
+
+impl<T: ?Sized + Send + Sync + 'static> ResourceIdentity for SharedResourceIdentity<T> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| Arc::ptr_eq(&self.0, &other.0))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct WeakResourceHandle {
+    role: ResourceRole,
+    value: std::sync::Weak<dyn Any + Send + Sync>,
+    cleanup: Option<std::sync::Weak<dyn ResourceCleanup>>,
+    identity: Option<std::sync::Weak<dyn ResourceIdentity>>,
+}
+
+impl WeakResourceHandle {
+    pub(crate) fn upgrade(&self) -> Option<ResourceHandle> {
+        Some(ResourceHandle {
+            role: self.role,
+            value: self.value.upgrade()?,
+            cleanup: match &self.cleanup {
+                Some(cleanup) => Some(cleanup.upgrade()?),
+                None => None,
+            },
+            identity: match &self.identity {
+                Some(identity) => Some(identity.upgrade()?),
+                None => None,
+            },
+        })
+    }
 }
 
 impl ResourceHandle {
+    pub(crate) fn downgrade(&self) -> WeakResourceHandle {
+        WeakResourceHandle {
+            role: self.role,
+            value: Arc::downgrade(&self.value),
+            cleanup: self.cleanup.as_ref().map(Arc::downgrade),
+            identity: self.identity.as_ref().map(Arc::downgrade),
+        }
+    }
     pub fn new<T: Any + Send + Sync>(role: ResourceRole, value: Arc<T>) -> Self {
         Self {
             role,
             value,
             cleanup: None,
+            identity: None,
         }
+    }
+
+    /// Identify the actual shared instance behind a binding wrapper.
+    ///
+    /// The handle retains this `Arc`; identity is compared with typed
+    /// `Arc::ptr_eq`, never an unowned address or configuration value. Reports
+    /// can share an instance only when their roles and concrete binding types
+    /// also agree. Without this identity, the binding's own `Arc` is used.
+    /// This does not change binding identity or transfer cleanup ownership.
+    pub fn with_shared_identity<T: ?Sized + Send + Sync + 'static>(
+        mut self,
+        instance: Arc<T>,
+    ) -> Self {
+        self.identity = Some(Arc::new(SharedResourceIdentity(instance)));
+        self
     }
 
     pub fn with_cleanup(mut self, cleanup: Arc<dyn ResourceCleanup>) -> Self {
@@ -182,6 +252,16 @@ impl ResourceHandle {
 
     pub(super) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.value, &other.value)
+    }
+
+    pub(super) fn same_shared_instance(&self, other: &Self) -> bool {
+        self.role == other.role
+            && self.value.as_ref().type_id() == other.value.as_ref().type_id()
+            && (self.same_instance(other)
+                || match (&self.identity, &other.identity) {
+                    (Some(left), Some(right)) => left.same_identity(right.as_ref()),
+                    _ => false,
+                })
     }
 
     pub fn get<T: Any + Send + Sync>(&self) -> GraphResult<Arc<T>> {

@@ -75,10 +75,12 @@ impl LegacyIndexProviderAdapter {
     /// The adapter owns constructor work; register this handle as graph-owned.
     /// The underlying instance-provided plugin/factory is only borrowed.
     pub fn resource(self: &Arc<Self>) -> ResourceHandle {
+        let provider: Arc<dyn ComputationIndexProvider> = self.clone();
         ResourceHandle::new(
             ResourceRole::IndexBackend,
-            Arc::new(QueryIndexProviderResource(self.clone())),
+            Arc::new(QueryIndexProviderResource(provider.clone())),
         )
+        .with_shared_identity(provider)
         .with_cleanup(self.clone())
     }
 }

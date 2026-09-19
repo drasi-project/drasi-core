@@ -84,6 +84,7 @@ pub enum FailurePhase {
     Processing,
     Stop,
     Removal,
+    Control,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +111,10 @@ pub struct ObservedComponent {
     pub health: ComponentHealth,
     pub failure: Option<ComponentFailure>,
     pub exhausted: bool,
+    /// A successful start has completed in this construction generation.
+    pub started: bool,
+    /// Distinguishes initial creation from an explicitly requested lifecycle.
+    pub lifecycle_requested: bool,
     pub transition_time: DateTime<Utc>,
 }
 

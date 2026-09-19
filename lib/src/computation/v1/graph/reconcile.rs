@@ -40,6 +40,10 @@ pub enum DesiredMutation {
         policy: RemovalPolicy,
     },
     Bind(DesiredRelationship),
+    SetSubscriptions {
+        consumer: ComponentId,
+        producers: Vec<ComponentId>,
+    },
     Unbind {
         edge: EdgeDefinition,
         policy: RemovalPolicy,
@@ -180,6 +184,11 @@ fn dependent_closure(desired: &DesiredTopology, selected: &mut BTreeSet<Componen
                 selected.insert(edge.definition.to.component.clone());
             }
         }
+        for (from, to) in &desired.subscriptions {
+            if selected.contains(from) {
+                selected.insert(to.clone());
+            }
+        }
         if before == selected.len() {
             break;
         }
@@ -192,7 +201,9 @@ fn resource_users(desired: &DesiredTopology, resource: &ResourceId) -> BTreeSet<
         (spec.dependencies.values().flatten().any(|id| id == resource)
             || spec.configuration.values().any(|value| matches!(value, ConfigurationValue::Reference { resource: id, .. } if id == resource)))
             .then(|| node.descriptor.id().clone())
-    }).collect()
+    }).chain(desired.component_resources.iter()
+        .filter(|(_, resources)| resources.contains(resource))
+        .map(|(id, _)| id.clone())).collect()
 }
 
 fn remove_components(
@@ -202,6 +213,11 @@ fn remove_components(
 ) -> GraphResult<BTreeSet<ComponentId>> {
     if matches!(policy, RemovalPolicy::Cascade | RemovalPolicy::Drain) {
         dependent_closure(desired, &mut selected);
+    }
+    for (from, to) in &desired.subscriptions {
+        if selected.contains(from) && !selected.contains(to) && policy == RemovalPolicy::Reject {
+            return Err(topology(format!("component {from} is depended on by {to}")));
+        }
     }
     let mut retained = Vec::new();
     for relationship in &desired.relationships {
@@ -231,6 +247,34 @@ fn remove_components(
     desired
         .components
         .retain(|node| !selected.contains(node.descriptor.id()));
+    let detached: BTreeSet<_> = desired
+        .component_resources
+        .iter()
+        .filter(|(id, _)| selected.contains(*id))
+        .flat_map(|(_, resources)| resources.iter().cloned())
+        .collect();
+    desired
+        .component_resources
+        .retain(|id, _| !selected.contains(id));
+    desired
+        .control_connections
+        .retain(|(from, to)| !selected.contains(from) && !selected.contains(to));
+    desired.subscriptions.retain(|(from, to)| {
+        !selected.contains(to) && (policy == RemovalPolicy::Orphan || !selected.contains(from))
+    });
+    desired
+        .readiness_required
+        .retain(|id| !selected.contains(id));
+    desired
+        .component_plugins
+        .retain(|id, _| !selected.contains(id));
+    let unused: BTreeSet<_> = detached
+        .into_iter()
+        .filter(|id| id.as_str().starts_with("attached/") && resource_users(desired, id).is_empty())
+        .collect();
+    desired
+        .resources
+        .retain(|resource| !unused.contains(&resource.id));
     desired.boundary_relationships.retain(|edge| {
         desired.components.iter().any(|node| {
             node.descriptor.id() == &edge.definition.from.component
@@ -255,10 +299,37 @@ pub(super) fn preview(
     let mut explicit_binds = BTreeSet::new();
     for change in &changes {
         match change {
+            DesiredMutation::SetSubscriptions {
+                consumer,
+                producers,
+            } => {
+                if !desired
+                    .components
+                    .iter()
+                    .any(|node| node.descriptor.id() == consumer)
+                    || producers.iter().any(|producer| producer == consumer)
+                {
+                    return Err(topology("subscription declaration requires an existing consumer and no self-reference"));
+                }
+                desired.subscriptions.retain(|(_, to)| to != consumer);
+                desired.subscriptions.extend(
+                    producers
+                        .iter()
+                        .cloned()
+                        .map(|from| (from, consumer.clone())),
+                );
+                desired.subscriptions.sort();
+                desired.subscriptions.dedup();
+            }
             DesiredMutation::PutComponent(node)
             | DesiredMutation::ReplaceComponent(node)
             | DesiredMutation::UpdateComponent(node) => {
                 let id = node.descriptor.id();
+                if graph.reserved_components.contains(id.as_str()) {
+                    return Err(topology(format!(
+                        "component ID {id} is reserved by the host"
+                    )));
+                }
                 if matches!(change, DesiredMutation::ReplaceComponent(_)) {
                     forced.insert(id.clone());
                 }
@@ -401,6 +472,12 @@ pub(super) fn preview(
         .iter()
         .map(|node| (node.descriptor.id().clone(), node))
         .collect();
+    remove_resources.extend(
+        old.resources
+            .iter()
+            .filter(|resource| !desired.resources.iter().any(|new| new.id == resource.id))
+            .map(|resource| resource.id.clone()),
+    );
     let new_nodes: BTreeMap<_, _> = desired
         .components
         .iter()
@@ -601,6 +678,25 @@ pub(super) fn preview(
             .checked_add(1)
             .ok_or_else(|| topology("graph revision exhausted"))?,
     );
+    let mut retired_reports = BTreeSet::new();
+    for id in &replace {
+        if let Some(reported) = graph.reported_resources.get(id) {
+            retired_reports.extend(reported.iter().cloned());
+            if let Some(resources) = desired.component_resources.get_mut(id) {
+                resources.retain(|resource| !reported.contains(resource));
+            }
+        }
+    }
+    let retired_reports: BTreeSet<_> = retired_reports
+        .into_iter()
+        .filter(|id| {
+            id.as_str().starts_with("attached/") && resource_users(&desired, id).is_empty()
+        })
+        .collect();
+    desired
+        .resources
+        .retain(|resource| !retired_reports.contains(&resource.id));
+    remove_resources.extend(retired_reports);
     describe(&desired)?;
     let epochs = pause
         .iter()
@@ -667,13 +763,17 @@ fn describe(
         if ids.insert(id.clone(), index).is_some() {
             return Err(topology("duplicate desired component"));
         }
-        super::super::validate_role(&node.descriptor, node.role, node.completion)?;
+        if !desired.allow_incomplete {
+            super::super::validate_role(&node.descriptor, node.role, node.completion)?;
+        }
         for port in node.descriptor.ports() {
             if port.direction() == PortDirection::Output {
-                let stream = node
-                    .streams
-                    .get(port.id())
-                    .ok_or_else(|| topology("output port must bind a stream"))?;
+                let Some(stream) = node.streams.get(port.id()) else {
+                    if desired.allow_incomplete {
+                        continue;
+                    }
+                    return Err(topology("output port must bind a stream"));
+                };
                 if !streams.insert(stream.clone()) {
                     return Err(topology("duplicate output stream"));
                 }
@@ -716,6 +816,18 @@ fn describe(
         }
         let (_, output) = resolve(&ids, &nodes, &edge.definition.from)?;
         let (to, input) = resolve(&ids, &nodes, &edge.definition.to)?;
+        for component in [&edge.definition.from.component, &edge.definition.to.component] {
+            let node = &nodes[ids[component]];
+            super::super::validate_role(&node.descriptor, node.role, node.completion)?;
+        }
+        if !nodes[ids[&edge.definition.from.component]]
+            .output_streams
+            .contains_key(&edge.definition.from.port)
+        {
+            return Err(topology(
+                "connect an output only after binding its producer stream",
+            ));
+        }
         let capabilities = desired_capabilities(&edge.pipe)?;
         super::super::validate_edge_contract(
             output,
@@ -767,10 +879,12 @@ fn describe(
     }
     for node in &nodes {
         for port in node.descriptor.ports() {
-            if !connected.contains(&Endpoint::new(
-                node.descriptor.id().clone(),
-                port.id().clone(),
-            )) {
+            if !desired.allow_incomplete
+                && !connected.contains(&Endpoint::new(
+                    node.descriptor.id().clone(),
+                    port.id().clone(),
+                ))
+            {
                 return Err(topology("mutation would leave a port unbound without an explicit permissible orphan relationship"));
             }
         }
@@ -877,6 +991,16 @@ fn prepare(
         let construct = plan.create.contains(id) || plan.replace.contains(id);
         match &node.construction {
             ComponentConstruction::Factory(spec) => {
+                if !construct
+                    && !plan.update.contains(id)
+                    && graph
+                        .observed()
+                        .components
+                        .get(id)
+                        .is_some_and(|node| node.failure.is_some())
+                {
+                    continue;
+                }
                 if spec.descriptor != node.descriptor
                     || spec.role != node.role
                     || spec.completion != node.completion
@@ -1001,6 +1125,9 @@ async fn drive<T>(
         tokio::select! {
             biased;
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_control(graph, completion); }
+            }
             result = &mut operation => return result.map_err(|_| GraphError::ReconciliationTimeout)?,
             completion = operations.futures.next(), if !operations.futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
@@ -1094,6 +1221,9 @@ async fn pause(
             tokio::select! {
                 biased;
                 _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+                completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                    if let Some(completion) = completion { operations.complete_control(graph, completion); }
+                }
                 _ = &mut deadline => {
                     if let Some(active) = operations.active.get(&index) { active.quiesce.send_replace(false); }
                     operations.quiescing.remove(&index);
@@ -1150,6 +1280,7 @@ async fn stop_instance(
     index: usize,
 ) -> GraphResult<()> {
     let slot = graph.components[index].clone();
+    graph.peers.reset_ready(&slot.id, slot.generation)?;
     let node = graph.nodes[index].clone();
     let mut lease = slot.take()?;
     if !lease.attempted {
@@ -1213,7 +1344,36 @@ pub(super) async fn execute(
         }
     }
     let plan = preview(graph, supplied.changes)?;
+    let defer_activation = bindings.defer_activation;
     let mut prepared = prepare(graph, &plan, bindings)?;
+    for id in plan.remove.iter().chain(&plan.replace) {
+        let Some(&index) = graph.ids.get(id) else {
+            continue;
+        };
+        if let Some(active) = operations
+            .active
+            .get(&index)
+            .filter(|active| active.operation == Operation::Create)
+        {
+            active.abort.abort();
+            operations.stop_after_abort.insert(index);
+            let deadline = tokio::time::sleep(graph.cleanup_timeout);
+            tokio::pin!(deadline);
+            while operations.active.contains_key(&index) {
+                tokio::select! {
+                    biased;
+                    _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+                    _ = &mut deadline => return Err(GraphError::ReconciliationTimeout),
+                    completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                        if let Some(completion) = completion { operations.complete_control(graph, completion); }
+                    }
+                    completion = operations.futures.next() => {
+                        if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+                    }
+                }
+            }
+        }
+    }
     let activate_blocked: BTreeSet<_> = plan
         .pause
         .iter()
@@ -1378,6 +1538,15 @@ pub(super) async fn execute(
         return Ok(report);
     }
     commit_desired(graph, operations, controls, &plan, &mut prepared)?;
+    if defer_activation {
+        graph.deferred_activation.extend(
+            plan.create
+                .iter()
+                .chain(&plan.replace)
+                .chain(&plan.restart)
+                .cloned(),
+        );
+    }
     report.revision = graph.snapshot.revision;
     report.committed = true;
     report.removed = plan.remove.clone();
@@ -1451,6 +1620,9 @@ fn commit_desired(
     }
     for id in &plan.remove {
         let index = graph.ids.remove(id).expect("removed component");
+        graph.deferred_activation.remove(id);
+        graph.reported_resources.remove(id);
+        operations.retire_control(graph, index)?;
         let mut lease = graph.components[index].take()?;
         lease.value.take();
         operations.paused.remove(&index);
@@ -1466,6 +1638,8 @@ fn commit_desired(
                 .ok_or_else(|| topology("construction generation exhausted"))?;
             let slot = InstanceSlot::new(component, generation);
             if let Some(&index) = graph.ids.get(&id) {
+                graph.reported_resources.remove(&id);
+                operations.retire_control(graph, index)?;
                 let mut old = graph.components[index].take()?;
                 let mut new = slot.take()?;
                 new.inputs = std::mem::take(&mut old.inputs);
@@ -1521,6 +1695,43 @@ fn commit_desired(
     graph.snapshot.nodes = prepared.nodes.clone().into();
     graph.snapshot.edges = prepared.edges.clone().into();
     graph.snapshot.unbound_relationships = plan.desired.boundary_relationships.clone().into();
+    graph.snapshot.control_connections = plan
+        .desired
+        .control_connections
+        .iter()
+        .filter(|(from, to)| graph.ids.contains_key(from) && graph.ids.contains_key(to))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    graph.snapshot.subscriptions = plan
+        .desired
+        .subscriptions
+        .iter()
+        .filter(|(_, to)| graph.ids.contains_key(to))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    graph.snapshot.readiness_required = plan
+        .desired
+        .readiness_required
+        .iter()
+        .filter(|id| graph.ids.contains_key(*id))
+        .cloned()
+        .collect();
+    graph.snapshot.component_resources = plan
+        .desired
+        .component_resources
+        .iter()
+        .filter(|(id, _)| graph.ids.contains_key(*id))
+        .map(|(id, resources)| (id.clone(), resources.clone()))
+        .collect();
+    graph.snapshot.component_plugins = plan
+        .desired
+        .component_plugins
+        .iter()
+        .filter(|(id, _)| graph.ids.contains_key(*id) && !plan.replace.contains(*id))
+        .map(|(id, plugin)| (id.clone(), plugin.clone()))
+        .collect();
     graph.snapshot.resources = plan
         .desired
         .resources
@@ -1586,6 +1797,8 @@ fn commit_desired(
                     health: ComponentHealth::Unknown,
                     failure: None,
                     exhausted: false,
+                    started: false,
+                    lifecycle_requested: false,
                     transition_time: Utc::now(),
                 },
             );
@@ -1660,6 +1873,12 @@ fn commit_desired(
         }
     }
     graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+    for &index in &graph.order {
+        if !operations.active.contains_key(&index) {
+            operations.attach_control(graph, index)?;
+        }
+    }
+    operations.refresh_connections(graph)?;
     Ok(())
 }
 
@@ -1811,6 +2030,8 @@ async fn realize(
                     .insert(id.clone(), CreationOutcome::CreationFailed(failure));
             }
         }
+        drop(lease);
+        operations.attach_control(graph, index)?;
     }
     for (&index, edge) in &graph.edges {
         if !plan.rebind.contains(&edge.definition) {
@@ -1828,10 +2049,10 @@ async fn realize(
         }
         if matches!(
             graph.components[from].take()?.component,
-            Component::Deferred { .. }
+            Component::Deferred { .. } | Component::Unresolved(_)
         ) || matches!(
             graph.components[to].take()?.component,
-            Component::Deferred { .. }
+            Component::Deferred { .. } | Component::Unresolved(_)
         ) {
             continue;
         }
@@ -1914,19 +2135,22 @@ async fn realize(
             continue;
         };
         let observed = &graph.observed().components[id];
-        if observed
-            .failure
-            .as_ref()
-            .is_some_and(|error| error.phase == FailurePhase::Creation)
-        {
+        if observed.failure.as_ref().is_some_and(|error| {
+            matches!(
+                error.phase,
+                FailurePhase::Creation | FailurePhase::Validation
+            )
+        }) {
             continue;
         }
         if operations.active.contains_key(&index) {
             continue;
         }
         let lease = graph.components[index].take()?;
-        if !matches!(lease.component, Component::Deferred { .. })
-            && binding_dependencies(graph, id).is_empty()
+        if !matches!(
+            lease.component,
+            Component::Deferred { .. } | Component::Unresolved(_)
+        ) && binding_dependencies(graph, id).is_empty()
         {
             update(graph, |state| {
                 state.components.get_mut(id).expect("component").realization =

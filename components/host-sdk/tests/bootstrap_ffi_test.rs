@@ -364,6 +364,7 @@ async fn test_ffi_snapshot_fetcher_vtable() {
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: Some(mock_fetcher.clone()),
+        resource_observer: None,
     };
     reaction.initialize(context).await;
 

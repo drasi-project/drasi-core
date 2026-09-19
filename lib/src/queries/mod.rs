@@ -20,6 +20,7 @@ pub mod output_state;
 pub mod priority_queue;
 pub mod sequence_dedup;
 pub mod subscription_builder;
+pub mod traits;
 
 #[cfg(test)]
 mod tests;
@@ -44,3 +45,4 @@ pub use output_state::{
 pub use priority_queue::*;
 pub use sequence_dedup::SequenceDedup;
 pub use subscription_builder::*;
+pub use traits::Query;

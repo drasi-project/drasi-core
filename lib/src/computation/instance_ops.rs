@@ -19,21 +19,124 @@ use super::v1::{
 use crate::{DrasiError, DrasiLib, Result};
 
 impl DrasiLib {
+    /// Access the native instance controller for explicit port connections and
+    /// graph inspection. Legacy execution mode is not changed by this API.
+    pub fn computation_control(&self) -> Result<super::v1::GraphControl> {
+        self.state_guard.require_initialized()?;
+        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
+            DrasiError::invalid_state("this operation requires ComputationGraph execution mode")
+        })?;
+        runtime.control().map_err(DrasiError::from)
+    }
+
+    pub fn computation_component(&self, id: &str) -> Result<super::v1::ComponentHandle> {
+        let id = super::v1::ComponentId::try_new(id)
+            .map_err(|error| DrasiError::invalid_config(error.to_string()))?;
+        self.computation_control()?
+            .component_handle(&id)
+            .map_err(|error| {
+                DrasiError::operation_failed("component", id.as_str(), "get", error.to_string())
+            })
+    }
+
+    /// Inspect every host-visible native scope, including ordinary query
+    /// execution graphs and independently registered graphs. Scope ownership and
+    /// host-known shared dependencies are explicit; private plugin internals
+    /// are not inferred. Individual scopes are coherent, not globally atomic.
+    pub async fn inspect_computation_inventory(&self) -> Result<super::v1::ComputationInventory> {
+        self.state_guard.require_initialized()?;
+        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
+            DrasiError::invalid_state("this operation requires ComputationGraph execution mode")
+        })?;
+        let mut inventory = runtime.inventory().await?;
+        for graph in self.computation_registry.list().await? {
+            let scope = super::v1::ComputationScope::root(graph.id());
+            if !inventory.scopes.contains_key(&scope) {
+                inventory
+                    .insert(scope, None, graph.inspector().topology())
+                    .map_err(anyhow::Error::from)?;
+            }
+        }
+        Ok(inventory)
+    }
+
+    /// Inspect a query's internal native graph, including its concrete index,
+    /// bootstrap and pipe resources. An unrealized query exposes its parent
+    /// declaration so its construction failure remains inspectable.
+    pub async fn inspect_query_computation(
+        &self,
+        id: &str,
+    ) -> Result<super::v1::ComputationInspector> {
+        self.state_guard.require_initialized()?;
+        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
+            DrasiError::invalid_state("this operation requires ComputationGraph execution mode")
+        })?;
+        runtime
+            .query(id)
+            .await
+            .map(|query| query.inspector())
+            .map_err(|error| {
+                DrasiError::operation_failed("query", id, "inspect_computation", error.to_string())
+            })
+    }
+
+    /// Add a preconstructed native component using the same node-first
+    /// controller used by ordinary source, query and reaction additions.
+    pub async fn add_computation_component(
+        &self,
+        mut addition: super::v1::ComponentAddition,
+    ) -> Result<super::v1::ComponentHandle> {
+        let control = self.computation_control()?;
+        let id = addition.definition.descriptor.id().clone();
+        if !self.is_running().await {
+            addition.bindings.defer_activation = true;
+        }
+        control
+            .add_component(addition)
+            .await
+            .map_err(|error| match error {
+                rejected @ super::v1::GraphError::AdditionRejected { .. } => {
+                    DrasiError::from(anyhow::Error::new(rejected))
+                }
+                error => {
+                    DrasiError::operation_failed("component", id.as_str(), "add", error.to_string())
+                }
+            })
+    }
+
+    pub async fn add_transformer_with_handle(
+        &self,
+        transformer: impl super::v1::Transformer + 'static,
+    ) -> Result<super::v1::ComponentHandle> {
+        self.add_computation_component(super::v1::ComponentAddition::new(
+            super::v1::ConstructedComponent::transformer(Box::new(transformer)),
+        ))
+        .await
+    }
+
+    pub async fn add_transformer(
+        &self,
+        transformer: impl super::v1::Transformer + 'static,
+    ) -> Result<()> {
+        self.add_transformer_with_handle(transformer).await?;
+        Ok(())
+    }
+
     pub async fn borrow_computation_source(
         &self,
         id: &str,
     ) -> Result<std::sync::Arc<super::v1::SourcePluginHost>> {
         self.state_guard.require_initialized()?;
-        if let Some(runtime) = &self.computation_runtime {
-            return Ok(super::v1::SourcePluginHost::borrowed(
-                runtime.source(id).await?,
-            ));
-        }
-        let source = self
-            .source_manager
-            .get_source_instance(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("source", id))?;
+        let source = self.source_instance(id).await.map_err(|error| {
+            if error
+                .downcast_ref::<crate::managers::ComponentNotFoundError>()
+                .is_some()
+            {
+                DrasiError::component_not_found("source", id)
+            } else {
+                DrasiError::from(error)
+            }
+        })?;
         Ok(super::v1::SourcePluginHost::borrowed(source))
     }
     pub async fn borrow_computation_reaction(
@@ -78,6 +181,9 @@ impl DrasiLib {
             // ordinary stop path available for that partially active instance.
             *self.running.write().await = true;
             runtime.start_kind("query").await?;
+            if let Err(error) = runtime.start_native_components().await {
+                failures.push(format!("native components: {error:#}"));
+            }
             if let Err(error) = self.computation_registry.start_auto().await {
                 failures.push(format!("additional native graphs: {error:#}"));
             }
@@ -94,10 +200,10 @@ impl DrasiLib {
             return Ok(());
         }
         if self.computation_registry.is_empty()? {
-            return self.lifecycle.start_components().await;
+            return self.legacy().lifecycle.start_components().await;
         }
         let mut failures = Vec::new();
-        if let Err(error) = self.source_manager.start_all().await {
+        if let Err(error) = self.legacy().source_manager.start_all().await {
             failures.push(format!("legacy sources: {error:#}"));
         }
         *self.running.write().await = true;
@@ -112,11 +218,11 @@ impl DrasiLib {
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("instance shutdown interrupted startup");
         }
-        if let Err(error) = self.query_manager.start_all().await {
+        if let Err(error) = self.legacy().query_manager.start_all().await {
             log::warn!("Some legacy queries failed to start (retaining legacy best-effort behavior): {error}");
         }
-        self.source_manager.subscriptions_complete().await;
-        if let Err(error) = self.reaction_manager.start_all().await {
+        self.legacy().source_manager.subscriptions_complete().await;
+        if let Err(error) = self.legacy().reaction_manager.start_all().await {
             failures.push(format!("legacy reactions: {error:#}"));
         }
         if !failures.is_empty() {
@@ -205,7 +311,12 @@ impl DrasiLib {
         }
         let handle = self.computation_registry.add(graph, options).await?;
         if options.auto_start && self.is_running().await {
-            handle.start().await?;
+            if let Err(error) = handle.control().request_auto_start().await {
+                log::error!(
+                    "Computation {} was added but its driver cannot accept activation: {error}",
+                    handle.id()
+                );
+            }
         }
         Ok(handle)
     }
