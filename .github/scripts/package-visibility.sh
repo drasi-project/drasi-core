@@ -21,10 +21,6 @@ validate_package() {
     if ! [[ "$package" =~ ^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$ ]]; then
         fail "Invalid package name: $package"
     fi
-    case "$package" in
-        drasi-plugin-directory | source/* | reaction/* | bootstrap/* | identity/* | secret-store/*) ;;
-        *) fail "Package is outside the Drasi plugin namespaces: $package" ;;
-    esac
 }
 
 package_endpoint() {

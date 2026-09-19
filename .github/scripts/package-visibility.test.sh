@@ -132,13 +132,10 @@ set -e
 assert_contains "$output" "Invalid package name"
 [[ ! -e "$calls" ]] || fail "all package names should be validated before calling GitHub"
 
-calls="$test_dir/namespace-calls"
-set +e
-output="$(run_mock public "$calls" set-public internal/private 2>&1)"
-status="$?"
-set -e
-[[ "$status" -ne 0 ]] || fail "a package outside the plugin namespaces should fail"
-assert_contains "$output" "outside the Drasi plugin namespaces"
-[[ ! -e "$calls" ]] || fail "a package outside the plugin namespaces should not call GitHub"
+calls="$test_dir/new-category-calls"
+output="$(run_mock private "$calls" set-public index/rocksdb)"
+assert_contains "$output" "Setting drasi-project/index/rocksdb to public"
+[[ "$(cat "$calls")" == $'GET /orgs/drasi-project/packages/container/index%2Frocksdb\nPATCH /orgs/drasi-project/packages/container/index%2Frocksdb' ]] ||
+    fail "a valid package outside the existing plugin categories should be accepted"
 
 echo "package-visibility tests passed"

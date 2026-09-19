@@ -183,6 +183,14 @@ This runs automatically during the release process - no manual invocation needed
 - `CARGO_REGISTRY_TOKEN`: Must be configured in repository secrets for publishing to crates.io
 - `PACKAGES_ADMIN_TOKEN`: PAT classic with package administration access, validated before publishing and used to make GHCR plugin packages public
 
+##### Rotating `PACKAGES_ADMIN_TOKEN`
+
+Repository maintainers are responsible for manual rotation before expiry. GitHub Actions does not renew the token automatically.
+
+1. Check the expiry in [GitHub's classic PAT settings](https://github.com/settings/tokens). Before it expires, create a replacement classic PAT with `write:packages` from an account with admin access to the Drasi container packages. Authorize it for organization SSO if required.
+2. Replace the repository secret using `gh secret set PACKAGES_ADMIN_TOKEN --repo drasi-project/drasi-core` and enter the token at the hidden prompt. Do not put it in source code, command arguments, or logs.
+3. Using the replacement token, verify read access to `drasi-plugin-directory` with `GET /orgs/drasi-project/packages/container/drasi-plugin-directory`, then revoke the previous token.
+
 ### [scorecard.yaml](scorecard.yaml)
 - **Purpose**: Runs OpenSSF Scorecard analysis to evaluate repository security and best practices.
 - **Triggers**:
