@@ -8,6 +8,7 @@ on:
       - feature/*
       - feature-lib
       - release/*
+      - agentofreality/core-0.5.8-base
 
 env:
   CARGO_TERM_COLOR: always

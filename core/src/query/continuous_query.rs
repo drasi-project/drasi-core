@@ -230,10 +230,11 @@ impl ContinuousQuery {
                             before,
                             after,
                             default_before,
+                            default_after,
                             ..
                         } => {
                             if let Some(before) = before {
-                                if before == after && !default_before {
+                                if before == after && !default_before && !default_after {
                                     return;
                                 }
                             }
@@ -598,20 +599,20 @@ impl ContinuousQuery {
                 QueryPartEvaluationContext::Adding { after, .. } => {
                     QueryPartEvaluationContext::Adding {
                         after,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.after_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Updating { before, after, .. } => {
                     QueryPartEvaluationContext::Updating {
                         before,
                         after,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.after_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Removing { before, .. } => {
                     QueryPartEvaluationContext::Removing {
                         before,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.before_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Aggregation {
@@ -798,9 +799,10 @@ impl CollapsedAggregationResults {
             };
 
             match self.data.remove(&after_key) {
-                Some((existing, before_key)) => {
+                Some((existing, existing_before_key)) => {
                     if let QueryPartEvaluationContext::Aggregation {
                         before: existing_before,
+                        default_before: existing_default_before,
                         ..
                     } = existing
                     {
@@ -809,13 +811,13 @@ impl CollapsedAggregationResults {
                             (
                                 QueryPartEvaluationContext::Aggregation {
                                     before: existing_before,
-                                    default_before,
+                                    default_before: existing_default_before,
                                     default_after,
                                     after,
                                     grouping_keys,
                                     row_signature: after_key,
                                 },
-                                before_key,
+                                existing_before_key,
                             ),
                         );
                     }
@@ -890,4 +892,51 @@ fn extract_grouping_value_hash(grouping_keys: &Vec<String>, variables: &QueryVar
         };
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod collapsed_aggregation_tests {
+    use super::*;
+    use crate::evaluation::variable_value::VariableValue;
+
+    fn variables(group: &str, count: i64) -> QueryVariables {
+        QueryVariables::from([
+            ("group".into(), VariableValue::String(group.to_string())),
+            ("count".into(), VariableValue::Integer(count.into())),
+        ])
+    }
+
+    #[test]
+    fn collapse_preserves_first_before_and_last_after_defaults() {
+        let mut collapsed = CollapsedAggregationResults::new();
+        collapsed.insert(QueryPartEvaluationContext::Aggregation {
+            before: Some(variables("group-a", 0)),
+            after: variables("group-a", 0),
+            grouping_keys: vec!["group".to_string()],
+            default_before: true,
+            default_after: false,
+            row_signature: 0,
+        });
+        collapsed.insert(QueryPartEvaluationContext::Aggregation {
+            before: Some(variables("group-a", 0)),
+            after: variables("group-a", 1),
+            grouping_keys: vec!["group".to_string()],
+            default_before: false,
+            default_after: true,
+            row_signature: 0,
+        });
+
+        let results = collapsed.into_result_vec();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            &results[0],
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                default_before: true,
+                default_after: true,
+                ..
+            } if before == &variables("group-a", 0) && after == &variables("group-a", 1)
+        ));
+    }
 }
