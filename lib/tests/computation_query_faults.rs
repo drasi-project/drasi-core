@@ -147,14 +147,23 @@ impl CheckpointStore for Checkpoints {
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
         self.inner.read_config_hash().await
     }
-    async fn write_result_sequence(&self, id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(&self, id: &str, sequence: u64) -> Result<(), IndexError> {
         if self.fault.take(Fault::ResultSequence) {
             return Err(IndexError::IOError);
         }
+        self.inner.stage_result_sequence(id, sequence).await
+    }
+    async fn write_result_sequence(&self, id: &str, sequence: u64) -> Result<(), IndexError> {
         self.inner.write_result_sequence(id, sequence).await
     }
     async fn read_result_sequence(&self, id: &str) -> Result<Option<u64>, IndexError> {
         self.inner.read_result_sequence(id).await
+    }
+    async fn write_output_generation(&self, id: &str, generation: u64) -> Result<(), IndexError> {
+        self.inner.write_output_generation(id, generation).await
+    }
+    async fn read_output_generation(&self, id: &str) -> Result<Option<u64>, IndexError> {
+        self.inner.read_output_generation(id).await
     }
 }
 

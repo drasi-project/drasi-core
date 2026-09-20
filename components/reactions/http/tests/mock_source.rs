@@ -91,7 +91,7 @@ impl MockSource {
             .ok_or_else(|| anyhow::anyhow!("mock source receiver already taken"))?;
 
         let source_name = self.base.id.clone();
-        let base_dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let status_handle = self.base.status_handle();
 
         let handle = tokio::spawn(async move {
@@ -110,9 +110,7 @@ impl MockSource {
                     profiling,
                 );
 
-                let _ =
-                    SourceBase::dispatch_from_task(base_dispatchers.clone(), wrapper, &source_name)
-                        .await;
+                let _ = base.dispatch_event(wrapper).await;
             }
         });
 

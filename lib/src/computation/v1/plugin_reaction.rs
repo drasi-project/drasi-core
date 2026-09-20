@@ -92,7 +92,8 @@ pub(super) fn snapshot_response(
             im::HashMap::new(),
             view.snapshot.as_of_sequence,
             view.config_hash,
-        ));
+        )
+        .with_output_generation(view.snapshot.generation));
     }
     let envelope = QueryChangeCodec::snapshot_envelope(
         query_id,
@@ -116,11 +117,10 @@ pub(super) fn snapshot_response(
             _ => anyhow::bail!("snapshot codec produced a non-add row"),
         }
     }
-    Ok(SnapshotResponse::new(
-        rows,
-        view.snapshot.as_of_sequence,
-        view.config_hash,
-    ))
+    Ok(
+        SnapshotResponse::new(rows, view.snapshot.as_of_sequence, view.config_hash)
+            .with_output_generation(view.snapshot.generation),
+    )
 }
 pub(super) fn outbox_response(
     view: &OutputView,
@@ -163,6 +163,7 @@ pub(super) fn outbox_response(
         results,
         latest_sequence: view.snapshot.as_of_sequence,
         config_hash: view.config_hash,
+        output_generation: view.snapshot.generation,
     })
 }
 

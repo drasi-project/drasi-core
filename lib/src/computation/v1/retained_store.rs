@@ -436,7 +436,7 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
         checkpoint
-            .write_result_sequence(&self.key, position)
+            .stage_result_sequence(&self.key, position)
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
         check_generation(&self.generation, generation)?;

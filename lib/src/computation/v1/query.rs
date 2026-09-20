@@ -790,7 +790,7 @@ impl ContinuousQueryTransformer {
         resources
             .checkpoint_store()
             .ok_or(IndexError::NotSupported)?
-            .write_result_sequence(id, output.system().sequence())
+            .stage_result_sequence(id, output.system().sequence())
             .await
     }
 

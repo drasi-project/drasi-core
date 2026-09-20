@@ -823,6 +823,8 @@ mod tests {
         // Subscribe to events before triggering actions
         let mut event_rx = core.subscribe_all_component_events();
 
+        core.start_query("q1").await.unwrap();
+
         // Start the reaction
         core.start_reaction("r-lifecycle").await.unwrap();
 

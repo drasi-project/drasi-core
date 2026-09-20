@@ -38,6 +38,7 @@ use drasi_lib::{
         PipeRequirements, PortDescriptor, PortDirection, PortId, SchemaDescriptor, SchemaId,
         SchemaVersion, SinkCompletion, StreamId, SystemMetadata,
     },
+    recovery::ReactionRecoveryPolicy,
     ComponentStatus, DrasiLib, Query, Reaction, ReactionBase, ReactionBaseParams,
     ReactionRuntimeContext, Source, SourceBase, SourceBaseParams, SourceRuntimeContext,
     SourceSubscriptionSettings, SubscriptionResponse,
@@ -137,15 +138,20 @@ impl Reaction for CapturingReaction {
         let results = self.results.clone();
         let loop_stops = self.loop_stops.clone();
         let task = tokio::spawn(async move {
-            base.run_standard_loop(shutdown, HashMap::new(), move |result| {
-                let results = results.clone();
-                async move {
-                    results
-                        .send((*result).clone())
-                        .await
-                        .map_err(|_| anyhow::anyhow!("legacy result receiver closed"))
-                }
-            })
+            base.run_standard_loop(
+                shutdown,
+                HashMap::new(),
+                ReactionRecoveryPolicy::Strict,
+                move |result| {
+                    let results = results.clone();
+                    async move {
+                        results
+                            .send((*result).clone())
+                            .await
+                            .map_err(|_| anyhow::anyhow!("legacy result receiver closed"))
+                    }
+                },
+            )
             .await
             .expect("legacy reaction consumer loop");
             loop_stops.fetch_add(1, Ordering::SeqCst);

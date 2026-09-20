@@ -250,7 +250,7 @@ impl CheckpointStore for ComputationCheckpointStore {
         self.read_number("config_hash".to_owned()).await
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         let key = format!("result_sequence:{query_id}");
         let db = self.db.clone();
         let session = self.session.clone();
@@ -264,6 +264,20 @@ impl CheckpointStore for ComputationCheckpointStore {
                         .put_cf(&cf, key, sequence.to_be_bytes())
                         .map_err(IndexError::other)
                 })
+            })
+            .await
+    }
+
+    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+        let key = format!("result_sequence:{query_id}");
+        let db = self.db.clone();
+        self.work
+            .run(move || {
+                let cf = db
+                    .cf_handle(STREAM_STATE_CF)
+                    .ok_or(IndexError::CorruptedData)?;
+                db.put_cf(&cf, key, sequence.to_be_bytes())
+                    .map_err(IndexError::other)
             })
             .await
     }

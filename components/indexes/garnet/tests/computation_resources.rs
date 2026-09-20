@@ -44,7 +44,7 @@ async fn graph_checkpoint_joins_buffer_but_complete_output_remains_unsupported()
                 .await
                 .expect("stage source checkpoint");
             checkpoint
-                .write_result_sequence("query", 7)
+                .stage_result_sequence("query", 7)
                 .await
                 .expect("stage result sequence");
             assert_eq!(
@@ -72,7 +72,7 @@ async fn graph_checkpoint_joins_buffer_but_complete_output_remains_unsupported()
                 .await
                 .expect("begin committed session");
             checkpoint
-                .write_result_sequence("query", 8)
+                .stage_result_sequence("query", 8)
                 .await
                 .expect("stage result sequence");
             session.commit().await.expect("commit sequence");

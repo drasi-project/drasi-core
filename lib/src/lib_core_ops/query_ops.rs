@@ -20,6 +20,7 @@
 use anyhow::Result as AnyhowResult;
 use futures::stream::Stream;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
@@ -130,33 +131,42 @@ impl DrasiLib {
             }
         }
 
-        // Step 2: Teardown runtime (stop, remove from runtime map)
-        self.legacy()
+        // Step 2: Teardown runtime (stop, remove from runtime map, wipe output).
+        let teardown_result = self
+            .legacy()
             .query_manager
             .teardown_query(id.to_string())
-            .await
-            .map_err(|e| {
-                DrasiError::operation_failed("query", id, "remove", format!("Teardown failed: {e}"))
-            })?;
+            .await;
 
-        // Step 3: Deregister from graph (remove node + edges, emit events)
-        // If this fails after teardown, the runtime is already gone. Rather than
-        // returning an error (which would leave an orphaned graph node with no
-        // runtime backing), set the component to Error state and log the failure.
+        // Step 3: Deregister from graph if the runtime is gone. Wipe failure after
+        // teardown_component must not leave an unremovable graph node; the caller
+        // still sees the cleanup error so leftover disk state is not silent.
         {
             let mut graph = self.component_graph.write().await;
-            if let Err(e) = graph.deregister(id) {
-                log::error!(
-                    "Query '{id}' runtime was torn down but graph deregister failed: {e}. \
-                     Setting component to Error state."
-                );
-                let _ = graph.validate_and_transition(
-                    id,
-                    ComponentStatus::Error,
-                    Some(format!("Orphaned: deregister failed after teardown: {e}")),
-                );
+            let is_query = graph
+                .get_component(id)
+                .is_some_and(|node| node.kind == crate::component_graph::ComponentKind::Query);
+            let runtime_gone = graph
+                .get_runtime::<Arc<dyn crate::queries::Query>>(id)
+                .is_none();
+            if is_query && runtime_gone {
+                if let Err(e) = graph.deregister(id) {
+                    log::error!(
+                        "Query '{id}' runtime was torn down but graph deregister failed: {e}. \
+                         Setting component to Error state."
+                    );
+                    let _ = graph.validate_and_transition(
+                        id,
+                        ComponentStatus::Error,
+                        Some(format!("Orphaned: deregister failed after teardown: {e}")),
+                    );
+                }
             }
         }
+
+        teardown_result.map_err(|e| {
+            DrasiError::operation_failed("query", id, "remove", format!("Teardown failed: {e}"))
+        })?;
 
         Ok(())
     }
@@ -581,6 +591,20 @@ mod tests {
 
         let result = core.remove_query("does-not-exist").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn remove_query_does_not_deregister_a_source() {
+        let core = build_core_with_source().await;
+
+        let result = core.remove_query("test-source").await;
+        assert!(result.is_err());
+
+        let sources = core.list_sources().await.unwrap();
+        assert!(
+            sources.iter().any(|(id, _)| id == "test-source"),
+            "remove_query must not deregister a source id, got {sources:?}"
+        );
     }
 
     // ========================================================================

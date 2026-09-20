@@ -298,7 +298,7 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::Strict,
-        true,
+        false,
         false,
     );
 
@@ -375,7 +375,7 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
         "rec",
         vec!["q1".into()],
         ReactionRecoveryPolicy::Strict,
-        true,
+        false,
         false,
     );
 

@@ -83,7 +83,7 @@ impl CheckpointStore for ComputationCheckpointStore {
         self.inner.read_config_hash().await
     }
 
-    async fn write_result_sequence(
+    async fn stage_result_sequence(
         &self,
         _query_id: &str,
         sequence: u64,
@@ -99,6 +99,10 @@ impl CheckpointStore for ComputationCheckpointStore {
             sequence.to_string().into_bytes(),
         );
         Ok(())
+    }
+
+    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+        self.inner.write_result_sequence(query_id, sequence).await
     }
 
     async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {

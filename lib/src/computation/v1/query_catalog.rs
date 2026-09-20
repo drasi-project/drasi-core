@@ -226,6 +226,36 @@ impl QueryResultsCatalog {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
+        self.subscribe_query_locked(&mut state, id)
+    }
+    pub(crate) fn subscribe_query_at_head(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<(CatalogSubscription, u64)> {
+        let id = ComponentId::try_new(id)?;
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
+        let results = state
+            .entries
+            .get(&id)
+            .ok_or_else(|| anyhow::anyhow!("query is not registered"))?
+            .results
+            .clone();
+        let output = results
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+        let receiver = self.subscribe_query_locked(&mut state, id)?;
+        Ok((receiver, output.sequence))
+    }
+    fn subscribe_query_locked(
+        &self,
+        state: &mut CatalogState,
+        id: ComponentId,
+    ) -> anyhow::Result<CatalogSubscription> {
         let configuration = state
             .delivery
             .get(&id)

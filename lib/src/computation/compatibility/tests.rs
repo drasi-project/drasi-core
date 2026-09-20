@@ -1047,24 +1047,20 @@ async fn insert_person(core: &DrasiLib, source: &str, id: &str, name: &str) {
         .downcast_ref::<ControlledSource>()
         .unwrap()
         .inner;
-    SourceBase::dispatch_from_task(
-        base.dispatchers.clone(),
-        crate::channels::SourceEventWrapper::new(
-            source.into(),
-            crate::channels::SourceEvent::Change(SourceChange::Insert {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new(source, id),
-                        labels: vec!["Person".into()].into(),
-                        effective_from: 1000,
-                    },
-                    properties: ElementPropertyMap::from(serde_json::json!({"name":name})),
+    base.dispatch_event(crate::channels::SourceEventWrapper::new(
+        source.into(),
+        crate::channels::SourceEvent::Change(SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source, id),
+                    labels: vec!["Person".into()].into(),
+                    effective_from: 1000,
                 },
-            }),
-            chrono::Utc::now(),
-        ),
-        source,
-    )
+                properties: ElementPropertyMap::from(serde_json::json!({"name":name})),
+            },
+        }),
+        chrono::Utc::now(),
+    ))
     .await
     .unwrap();
 }

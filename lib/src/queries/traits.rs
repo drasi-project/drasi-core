@@ -38,6 +38,9 @@ pub trait Query: Send + Sync {
         0
     }
 
+    /// Attach a receiver and sample the output head atomically with publication.
+    ///
+    /// Persistent implementations must hydrate output before sampling the head.
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
 
     /// Fetch the live result set and its sequence after bootstrap completes.
@@ -46,8 +49,21 @@ pub trait Query: Send + Sync {
     /// Fetch retained entries after a sequence, or report an outbox gap.
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
 
+    /// Distinguish output sequence numbers after a wipe or rebuild.
+    async fn output_generation(&self) -> u64 {
+        0
+    }
+
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         None
+    }
+
+    /// Whether query output is lost on process restart.
+    ///
+    /// Persistent implementations must override this so durable reactions can
+    /// safely resume. Undeclared capabilities are treated as volatile.
+    fn is_volatile(&self) -> bool {
+        true
     }
 
     /// Release persistent handles without deleting stored data.

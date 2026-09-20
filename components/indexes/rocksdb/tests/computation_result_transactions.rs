@@ -175,7 +175,7 @@ async fn stage(fixture: &Fixture, sequence: u64, signature: u64) -> Result<(), I
         .await?;
     fixture
         .checkpoint
-        .write_result_sequence(QUERY, sequence)
+        .stage_result_sequence(QUERY, sequence)
         .await?;
     fixture.outbox.append(QUERY, sequence, b"output").await?;
     fixture.outbox.trim_to_capacity(QUERY, 1).await?;
@@ -611,7 +611,7 @@ async fn graph_writers_require_a_session_and_transactional_trim_rolls_back() {
     let live = resources.live_results_writer().expect("live");
     let checkpoint = resources.checkpoint_store().expect("checkpoint");
     assert!(outbox.append(QUERY, 1, b"no-session").await.is_err());
-    assert!(checkpoint.write_result_sequence(QUERY, 1).await.is_err());
+    assert!(checkpoint.stage_result_sequence(QUERY, 1).await.is_err());
     assert!(live.apply_mutations(QUERY, &[]).await.is_err());
     {
         let guard = SessionGuard::begin(resources.indexes().session_control.clone())

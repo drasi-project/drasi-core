@@ -189,7 +189,7 @@ impl ContinuousQueryTransformer {
                     }
                     checkpoint.stage_checkpoint(BOOTSTRAP, 0, None).await?;
                     checkpoint
-                        .write_result_sequence(self.definition.id.as_str(), highwater)
+                        .stage_result_sequence(self.definition.id.as_str(), highwater)
                         .await?;
                 }
                 Ok(())
@@ -340,7 +340,7 @@ impl ContinuousQueryTransformer {
                     }
                     checkpoint.stage_checkpoint(BOOTSTRAP, 1, None).await?;
                     checkpoint
-                        .write_result_sequence(self.definition.id.as_str(), sequence)
+                        .stage_result_sequence(self.definition.id.as_str(), sequence)
                         .await?;
                     if reset.is_some() {
                         query

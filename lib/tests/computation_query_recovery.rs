@@ -961,7 +961,7 @@ mod persistent {
             resources
                 .checkpoint_store()
                 .expect("checkpoint")
-                .write_result_sequence("query", u64::MAX)
+                .stage_result_sequence("query", u64::MAX)
                 .await
                 .expect("high water");
             resources

@@ -132,6 +132,13 @@ impl CheckpointStore for NativeCheckpoints {
     async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
         self.0.read_config_hash().await
     }
+    async fn stage_result_sequence(
+        &self,
+        query: &str,
+        sequence: u64,
+    ) -> Result<(), drasi_core::interface::IndexError> {
+        self.0.stage_result_sequence(query, sequence).await
+    }
     async fn write_result_sequence(
         &self,
         query: &str,
@@ -144,5 +151,18 @@ impl CheckpointStore for NativeCheckpoints {
         query: &str,
     ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
         self.0.read_result_sequence(query).await
+    }
+    async fn write_output_generation(
+        &self,
+        query: &str,
+        generation: u64,
+    ) -> Result<(), drasi_core::interface::IndexError> {
+        self.0.write_output_generation(query, generation).await
+    }
+    async fn read_output_generation(
+        &self,
+        query: &str,
+    ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+        self.0.read_output_generation(query).await
     }
 }

@@ -93,6 +93,13 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
             .run_async(async move { inner.read_config_hash().await })
             .await
     }
+    async fn stage_result_sequence(&self, query: &str, sequence: u64) -> Result<(), IndexError> {
+        let inner = self.inner.clone();
+        let query = query.to_owned();
+        self.work
+            .run_async(async move { inner.stage_result_sequence(&query, sequence).await })
+            .await
+    }
     async fn write_result_sequence(&self, query: &str, sequence: u64) -> Result<(), IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();
@@ -105,6 +112,24 @@ impl<T: CheckpointStore + ?Sized + 'static> CheckpointStore for ScopedIndex<T> {
         let query = query.to_owned();
         self.work
             .run_async(async move { inner.read_result_sequence(&query).await })
+            .await
+    }
+    async fn write_output_generation(
+        &self,
+        query: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        let inner = self.inner.clone();
+        let query = query.to_owned();
+        self.work
+            .run_async(async move { inner.write_output_generation(&query, generation).await })
+            .await
+    }
+    async fn read_output_generation(&self, query: &str) -> Result<Option<u64>, IndexError> {
+        let inner = self.inner.clone();
+        let query = query.to_owned();
+        self.work
+            .run_async(async move { inner.read_output_generation(&query).await })
             .await
     }
 }

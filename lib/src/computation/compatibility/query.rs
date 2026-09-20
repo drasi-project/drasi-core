@@ -703,9 +703,16 @@ impl Query for QueryInstance {
         }
     }
     async fn subscribe(&self, _: String) -> anyhow::Result<QuerySubscriptionResponse> {
+        self.require_current()?;
+        self.fetch_snapshot().await?;
+        let (receiver, as_of_sequence) = self
+            .execution()?
+            .catalog
+            .subscribe_query_at_head(&self.config.id)?;
         Ok(QuerySubscriptionResponse {
             query_id: self.config.id.clone(),
-            receiver: Box::new(LegacyReceiver(self.subscribe_results()?)),
+            receiver: Box::new(LegacyReceiver(receiver)),
+            as_of_sequence,
         })
     }
     async fn fetch_snapshot(&self) -> std::result::Result<SnapshotResponse, FetchError> {

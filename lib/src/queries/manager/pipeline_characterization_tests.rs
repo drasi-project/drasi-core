@@ -14,14 +14,18 @@
 
 //! Characterization tests for the fixed Source -> Continuous Query -> Reaction pipeline.
 //!
-//! These tests intentionally pin the current transaction and output boundaries. In
-//! particular, they document the known durability gap where source progress commits
-//! before query output is persisted. A later stack layer will intentionally invert
-//! that behavior by staging output inside the core transaction.
+//! These tests pin the legacy manager's transaction and output boundaries:
+//! indexes, source progress, and durable output commit together before dispatch.
+//! The historical test names are retained for the pinned runtime-parity corpus.
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    hash::{Hash, Hasher},
+    ops::Bound,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -30,23 +34,27 @@ use bytes::Bytes;
 use drasi_core::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
-        functions::FunctionRegistry,
+        functions::{aggregation::ValueAccumulator, FunctionRegistry},
         variable_value::VariableValue,
     },
-    in_memory_index::{
-        in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
-        in_memory_result_index::InMemoryResultIndex,
-    },
     interface::{
-        CheckpointStore, CreatedIndexes, ElementIndex, FutureQueue, IndexBackendPlugin, IndexError,
-        IndexSet, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SourceCheckpoint,
+        AccumulatorIndex, CheckpointStore, CreatedIndexes, ElementArchiveIndex, ElementIndex,
+        ElementStream, FutureElementRef, FutureQueue, IndexBackendPlugin, IndexError, IndexSet,
+        LazySortedSetStore, LiveResultsWriter, OutboxWriter, PushType, ResultIndex, ResultKey,
+        ResultOwner, ResultSequence, ResultSequenceCounter, RowMutation, SessionControl,
+        SourceCheckpoint,
     },
     middleware::MiddlewareTypeRegistry,
-    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
+    models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementTimestamp,
+        QueryJoin, SourceChange, TimestampRange,
+    },
+    path_solver::match_path::MatchPath,
     query::QueryBuilder,
 };
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
+use ordered_float::OrderedFloat;
 use serde_json::json;
 use tokio::sync::{mpsc, RwLock};
 
@@ -87,6 +95,10 @@ enum TraceEvent {
         query_id: String,
         sequence: u64,
     },
+    ResultSequenceStaged {
+        query_id: String,
+        sequence: u64,
+    },
     ReactionDispatch {
         sequence: u64,
     },
@@ -111,13 +123,47 @@ impl EventTrace {
     }
 }
 
+type StoredRows = HashMap<String, BTreeMap<u64, Vec<u8>>>;
+type SortedSets = HashMap<u64, BTreeMap<OrderedFloat<f64>, isize>>;
+
+#[derive(Clone, Default)]
+struct TransactionData {
+    elements: HashMap<ElementReference, (Arc<Element>, Vec<usize>)>,
+    accumulators: HashMap<u64, ValueAccumulator>,
+    sorted_sets: SortedSets,
+    index_sequence: ResultSequence,
+    futures: Vec<(usize, FutureElementRef)>,
+    checkpoints: HashMap<String, SourceCheckpoint>,
+    result_sequences: HashMap<String, u64>,
+    outbox: StoredRows,
+    live_results: StoredRows,
+}
+
 #[derive(Default)]
 struct TransactionState {
-    active: bool,
-    pending_checkpoints: HashMap<String, SourceCheckpoint>,
-    committed_checkpoints: HashMap<String, SourceCheckpoint>,
+    pending: Option<TransactionData>,
+    committed: TransactionData,
     config_hash: Option<u64>,
-    result_sequences: HashMap<String, u64>,
+    output_generations: HashMap<String, u64>,
+}
+
+impl TransactionState {
+    fn read(&self) -> &TransactionData {
+        self.pending.as_ref().unwrap_or(&self.committed)
+    }
+
+    fn stage(&mut self) -> Result<&mut TransactionData, IndexError> {
+        self.pending
+            .as_mut()
+            .ok_or_else(|| IndexError::other(std::io::Error::other("write outside a test session")))
+    }
+
+    fn clearable(&mut self) -> &mut TransactionData {
+        match &mut self.pending {
+            Some(pending) => pending,
+            None => &mut self.committed,
+        }
+    }
 }
 
 struct RecordingSessionControl {
@@ -129,35 +175,345 @@ struct RecordingSessionControl {
 impl SessionControl for RecordingSessionControl {
     async fn begin(&self) -> Result<(), IndexError> {
         let mut state = self.state.lock().unwrap();
-        if state.active {
+        if state.pending.is_some() {
             return Err(IndexError::other(std::io::Error::other(
                 "test session already active",
             )));
         }
-        state.active = true;
+        state.pending = Some(state.committed.clone());
         self.trace.record(TraceEvent::SessionBegin);
         Ok(())
     }
 
     async fn commit(&self) -> Result<(), IndexError> {
         let mut state = self.state.lock().unwrap();
-        if !state.active {
-            return Err(IndexError::other(std::io::Error::other(
-                "test session is not active",
-            )));
-        }
-        let pending = std::mem::take(&mut state.pending_checkpoints);
-        state.committed_checkpoints.extend(pending);
-        state.active = false;
+        state.committed = state.pending.take().ok_or_else(|| {
+            IndexError::other(std::io::Error::other("test session is not active"))
+        })?;
         self.trace.record(TraceEvent::SessionCommit);
         Ok(())
     }
 
     fn rollback(&self) -> Result<(), IndexError> {
         let mut state = self.state.lock().unwrap();
-        state.pending_checkpoints.clear();
-        state.active = false;
+        state.pending = None;
         self.trace.record(TraceEvent::SessionRollback);
+        Ok(())
+    }
+}
+
+// The suite exercises node queries without archive or synthetic joins. All
+// mutable index state still shares the output/checkpoint transaction so a failed
+// output write cannot leave an input applied when the recovery test replays it.
+struct TransactionalIndexes {
+    state: Arc<Mutex<TransactionState>>,
+}
+
+#[async_trait]
+impl ElementIndex for TransactionalIndexes {
+    async fn get_element(
+        &self,
+        reference: &ElementReference,
+    ) -> Result<Option<Arc<Element>>, IndexError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .read()
+            .elements
+            .get(reference)
+            .map(|(element, _)| element.clone()))
+    }
+
+    async fn set_element(&self, element: &Element, slots: &Vec<usize>) -> Result<(), IndexError> {
+        self.state.lock().unwrap().stage()?.elements.insert(
+            element.get_reference().clone(),
+            (Arc::new(element.clone()), slots.clone()),
+        );
+        Ok(())
+    }
+
+    async fn delete_element(&self, reference: &ElementReference) -> Result<(), IndexError> {
+        self.state
+            .lock()
+            .unwrap()
+            .stage()?
+            .elements
+            .remove(reference);
+        Ok(())
+    }
+
+    async fn get_slot_element_by_ref(
+        &self,
+        slot: usize,
+        reference: &ElementReference,
+    ) -> Result<Option<Arc<Element>>, IndexError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .read()
+            .elements
+            .get(reference)
+            .filter(|(_, slots)| slots.contains(&slot))
+            .map(|(element, _)| element.clone()))
+    }
+
+    async fn get_slot_elements_by_inbound(
+        &self,
+        _slot: usize,
+        _reference: &ElementReference,
+    ) -> Result<ElementStream, IndexError> {
+        Err(IndexError::NotSupported)
+    }
+
+    async fn get_slot_elements_by_outbound(
+        &self,
+        _slot: usize,
+        _reference: &ElementReference,
+    ) -> Result<ElementStream, IndexError> {
+        Err(IndexError::NotSupported)
+    }
+
+    async fn clear(&self) -> Result<(), IndexError> {
+        self.state.lock().unwrap().clearable().elements.clear();
+        Ok(())
+    }
+
+    async fn set_joins(&self, _match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+        assert!(
+            joins.is_empty(),
+            "the fixture does not implement synthetic joins"
+        );
+    }
+}
+
+#[async_trait]
+impl ElementArchiveIndex for TransactionalIndexes {
+    async fn get_element_as_at(
+        &self,
+        _reference: &ElementReference,
+        _time: ElementTimestamp,
+    ) -> Result<Option<Arc<Element>>, IndexError> {
+        Err(IndexError::NotSupported)
+    }
+
+    async fn get_element_versions(
+        &self,
+        _reference: &ElementReference,
+        _range: TimestampRange<ElementTimestamp>,
+    ) -> Result<ElementStream, IndexError> {
+        Err(IndexError::NotSupported)
+    }
+
+    async fn clear(&self) -> Result<(), IndexError> {
+        Ok(())
+    }
+}
+
+fn accumulator_key(key: &ResultKey, owner: &ResultOwner) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    owner.hash(&mut hasher);
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[async_trait]
+impl AccumulatorIndex for TransactionalIndexes {
+    async fn get(
+        &self,
+        key: &ResultKey,
+        owner: &ResultOwner,
+    ) -> Result<Option<ValueAccumulator>, IndexError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .read()
+            .accumulators
+            .get(&accumulator_key(key, owner))
+            .cloned())
+    }
+
+    async fn set(
+        &self,
+        key: ResultKey,
+        owner: ResultOwner,
+        value: Option<ValueAccumulator>,
+    ) -> Result<(), IndexError> {
+        let mut state = self.state.lock().unwrap();
+        let values = &mut state.stage()?.accumulators;
+        let key = accumulator_key(&key, &owner);
+        match value {
+            Some(value) => {
+                values.insert(key, value);
+            }
+            None => {
+                values.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    async fn clear(&self) -> Result<(), IndexError> {
+        let mut state = self.state.lock().unwrap();
+        let data = state.clearable();
+        data.accumulators.clear();
+        data.sorted_sets.clear();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LazySortedSetStore for TransactionalIndexes {
+    async fn get_next(
+        &self,
+        set_id: u64,
+        value: Option<OrderedFloat<f64>>,
+    ) -> Result<Option<(OrderedFloat<f64>, isize)>, IndexError> {
+        let state = self.state.lock().unwrap();
+        Ok(state.read().sorted_sets.get(&set_id).and_then(|set| {
+            let next = match value {
+                Some(value) => set.range((Bound::Excluded(value), Bound::Unbounded)).next(),
+                None => set.first_key_value(),
+            };
+            next.map(|(value, count)| (*value, *count))
+        }))
+    }
+
+    async fn get_value_count(
+        &self,
+        set_id: u64,
+        value: OrderedFloat<f64>,
+    ) -> Result<isize, IndexError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .read()
+            .sorted_sets
+            .get(&set_id)
+            .and_then(|set| set.get(&value))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    async fn increment_value_count(
+        &self,
+        set_id: u64,
+        value: OrderedFloat<f64>,
+        delta: isize,
+    ) -> Result<(), IndexError> {
+        let mut state = self.state.lock().unwrap();
+        let set = state.stage()?.sorted_sets.entry(set_id).or_default();
+        let count = set.get(&value).copied().unwrap_or(0) + delta;
+        if count < 0 {
+            return Err(IndexError::CorruptedData);
+        }
+        if count == 0 {
+            set.remove(&value);
+        } else {
+            set.insert(value, count);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ResultSequenceCounter for TransactionalIndexes {
+    async fn apply_sequence(
+        &self,
+        sequence: u64,
+        source_change_id: &str,
+    ) -> Result<(), IndexError> {
+        self.state.lock().unwrap().stage()?.index_sequence = ResultSequence {
+            sequence,
+            source_change_id: source_change_id.into(),
+        };
+        Ok(())
+    }
+
+    async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
+        Ok(self.state.lock().unwrap().read().index_sequence.clone())
+    }
+}
+
+impl ResultIndex for TransactionalIndexes {}
+
+#[async_trait]
+impl FutureQueue for TransactionalIndexes {
+    async fn push(
+        &self,
+        push_type: PushType,
+        position: usize,
+        group_signature: u64,
+        element_ref: &ElementReference,
+        original_time: ElementTimestamp,
+        due_time: ElementTimestamp,
+    ) -> Result<bool, IndexError> {
+        let mut state = self.state.lock().unwrap();
+        let futures = &mut state.stage()?.futures;
+        let matches = |(slot, future): &(usize, FutureElementRef)| {
+            *slot == position && future.group_signature == group_signature
+        };
+        if push_type == PushType::IfNotExists && futures.iter().any(matches) {
+            return Ok(false);
+        }
+        if push_type == PushType::Overwrite {
+            futures.retain(|item| !matches(item));
+        }
+        let entry = (
+            position,
+            FutureElementRef {
+                element_ref: element_ref.clone(),
+                original_time,
+                due_time,
+                group_signature,
+            },
+        );
+        if !futures.contains(&entry) {
+            futures.push(entry);
+        }
+        Ok(true)
+    }
+
+    async fn remove(&self, position: usize, group_signature: u64) -> Result<(), IndexError> {
+        self.state
+            .lock()
+            .unwrap()
+            .stage()?
+            .futures
+            .retain(|(slot, future)| {
+                *slot != position || future.group_signature != group_signature
+            });
+        Ok(())
+    }
+
+    async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+        let mut state = self.state.lock().unwrap();
+        let futures = &mut state.stage()?.futures;
+        let next = futures
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (_, future))| future.due_time)
+            .map(|(index, _)| index);
+        Ok(next.map(|index| futures.remove(index).1))
+    }
+
+    async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .read()
+            .futures
+            .iter()
+            .map(|(_, future)| future.due_time)
+            .min())
+    }
+
+    async fn clear(&self) -> Result<(), IndexError> {
+        self.state.lock().unwrap().clearable().futures.clear();
         Ok(())
     }
 }
@@ -181,13 +537,9 @@ impl CheckpointStore for TransactionalCheckpointStore {
     ) -> Result<(), IndexError> {
         let checkpoint = SourceCheckpoint::new(sequence, source_position.cloned());
         let mut state = self.state.lock().unwrap();
-        if !state.active {
-            return Err(IndexError::other(std::io::Error::other(
-                "checkpoint staged outside a test session",
-            )));
-        }
         state
-            .pending_checkpoints
+            .stage()?
+            .checkpoints
             .insert(source_id.to_string(), checkpoint.clone());
         self.trace.record(TraceEvent::CheckpointStaged {
             source_id: source_id.to_string(),
@@ -205,21 +557,23 @@ impl CheckpointStore for TransactionalCheckpointStore {
             .state
             .lock()
             .unwrap()
-            .committed_checkpoints
+            .committed
+            .checkpoints
             .get(source_id)
             .cloned())
     }
 
     async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
-        Ok(self.state.lock().unwrap().committed_checkpoints.clone())
+        Ok(self.state.lock().unwrap().committed.checkpoints.clone())
     }
 
     async fn clear_checkpoints(&self) -> Result<(), IndexError> {
         let mut state = self.state.lock().unwrap();
-        state.pending_checkpoints.clear();
-        state.committed_checkpoints.clear();
+        state.committed.checkpoints.clear();
+        if let Some(pending) = &mut state.pending {
+            pending.checkpoints.clear();
+        }
         state.config_hash = None;
-        state.result_sequences.clear();
         Ok(())
     }
 
@@ -232,12 +586,31 @@ impl CheckpointStore for TransactionalCheckpointStore {
         Ok(self.state.lock().unwrap().config_hash)
     }
 
-    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         self.state
             .lock()
             .unwrap()
+            .stage()?
             .result_sequences
             .insert(query_id.to_string(), sequence);
+        self.trace.record(TraceEvent::ResultSequenceStaged {
+            query_id: query_id.to_string(),
+            sequence,
+        });
+        Ok(())
+    }
+
+    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .committed
+            .result_sequences
+            .insert(query_id.to_string(), sequence);
+        if let Some(pending) = &mut state.pending {
+            pending
+                .result_sequences
+                .insert(query_id.to_string(), sequence);
+        }
         self.trace.record(TraceEvent::ResultSequenceWritten {
             query_id: query_id.to_string(),
             sequence,
@@ -250,26 +623,52 @@ impl CheckpointStore for TransactionalCheckpointStore {
             .state
             .lock()
             .unwrap()
+            .committed
             .result_sequences
+            .get(query_id)
+            .copied())
+    }
+
+    async fn write_output_generation(
+        &self,
+        query_id: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        self.state
+            .lock()
+            .unwrap()
+            .output_generations
+            .insert(query_id.to_string(), generation);
+        Ok(())
+    }
+
+    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .output_generations
             .get(query_id)
             .copied())
     }
 }
 
 struct RecordingOutputStore {
-    fail_writes: bool,
+    fail_live_results: AtomicBool,
     trace: EventTrace,
-    outbox: RwLock<HashMap<String, BTreeMap<u64, Vec<u8>>>>,
-    live_results: RwLock<HashMap<String, BTreeMap<u64, Vec<u8>>>>,
+    state: Arc<Mutex<TransactionState>>,
 }
 
 impl RecordingOutputStore {
-    fn new(fail_writes: bool, trace: EventTrace) -> Self {
+    fn new(
+        fail_live_results: bool,
+        trace: EventTrace,
+        state: Arc<Mutex<TransactionState>>,
+    ) -> Self {
         Self {
-            fail_writes,
+            fail_live_results: AtomicBool::new(fail_live_results),
             trace,
-            outbox: RwLock::new(HashMap::new()),
-            live_results: RwLock::new(HashMap::new()),
+            state,
         }
     }
 
@@ -285,12 +684,11 @@ impl OutboxWriter for RecordingOutputStore {
             query_id: query_id.to_string(),
             sequence,
         });
-        if self.fail_writes {
-            return Err(Self::injected_failure());
-        }
-        self.outbox
-            .write()
-            .await
+        self.state
+            .lock()
+            .unwrap()
+            .stage()?
+            .outbox
             .entry(query_id.to_string())
             .or_default()
             .insert(sequence, data.to_vec());
@@ -303,9 +701,11 @@ impl OutboxWriter for RecordingOutputStore {
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .committed
             .outbox
-            .read()
-            .await
             .get(query_id)
             .map(|entries| {
                 entries
@@ -318,21 +718,38 @@ impl OutboxWriter for RecordingOutputStore {
 
     async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .committed
             .outbox
-            .read()
-            .await
             .get(query_id)
             .and_then(|entries| entries.last_key_value().map(|(sequence, _)| *sequence)))
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        self.outbox.write().await.remove(query_id);
+        self.state
+            .lock()
+            .unwrap()
+            .clearable()
+            .outbox
+            .remove(query_id);
         Ok(())
     }
 
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        let mut state = self.state.lock().unwrap();
+        let Some(entries) = state.stage()?.outbox.get_mut(query_id) else {
+            return Ok(0);
+        };
+        let previous_len = entries.len();
+        entries.retain(|sequence, _| *sequence >= retain_from);
+        Ok(previous_len - entries.len())
+    }
+
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
-        let mut outbox = self.outbox.write().await;
-        let Some(entries) = outbox.get_mut(query_id) else {
+        let mut state = self.state.lock().unwrap();
+        let Some(entries) = state.stage()?.outbox.get_mut(query_id) else {
             return Ok(0);
         };
         let mut removed = 0;
@@ -356,11 +773,15 @@ impl LiveResultsWriter for RecordingOutputStore {
             query_id: query_id.to_string(),
             mutation_count: mutations.len(),
         });
-        if self.fail_writes {
+        if self.fail_live_results.load(Ordering::Acquire) {
             return Err(Self::injected_failure());
         }
-        let mut store = self.live_results.write().await;
-        let rows = store.entry(query_id.to_string()).or_default();
+        let mut state = self.state.lock().unwrap();
+        let rows = state
+            .stage()?
+            .live_results
+            .entry(query_id.to_string())
+            .or_default();
         for mutation in mutations {
             match mutation.data {
                 Some(data) => {
@@ -376,9 +797,11 @@ impl LiveResultsWriter for RecordingOutputStore {
 
     async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .committed
             .live_results
-            .read()
-            .await
             .get(query_id)
             .map(|rows| {
                 rows.iter()
@@ -389,15 +812,22 @@ impl LiveResultsWriter for RecordingOutputStore {
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        self.live_results.write().await.remove(query_id);
+        self.state
+            .lock()
+            .unwrap()
+            .clearable()
+            .live_results
+            .remove(query_id);
         Ok(())
     }
 
     async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
         Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .committed
             .live_results
-            .read()
-            .await
             .get(query_id)
             .map_or(0, BTreeMap::len))
     }
@@ -411,6 +841,10 @@ struct RecordingDispatcher {
 #[async_trait]
 impl ChangeDispatcher<QueryResult> for RecordingDispatcher {
     async fn dispatch_change(&self, change: Arc<QueryResult>) -> anyhow::Result<()> {
+        self.try_dispatch_change(change)
+    }
+
+    fn try_dispatch_change(&self, change: Arc<QueryResult>) -> anyhow::Result<()> {
         self.trace.record(TraceEvent::ReactionDispatch {
             sequence: change.sequence,
         });
@@ -428,9 +862,9 @@ impl ChangeDispatcher<QueryResult> for RecordingDispatcher {
 
 struct CharacterizationBackend {
     trace: EventTrace,
-    element_index: Arc<InMemoryElementIndex>,
-    result_index: Arc<InMemoryResultIndex>,
-    future_queue: Arc<InMemoryFutureQueue>,
+    element_index: Arc<TransactionalIndexes>,
+    result_index: Arc<TransactionalIndexes>,
+    future_queue: Arc<TransactionalIndexes>,
     session_control: Arc<RecordingSessionControl>,
     checkpoint_store: Arc<TransactionalCheckpointStore>,
     output_store: Arc<RecordingOutputStore>,
@@ -440,20 +874,23 @@ impl CharacterizationBackend {
     fn new(fail_output_writes: bool) -> Self {
         let trace = EventTrace::default();
         let state = Arc::new(Mutex::new(TransactionState::default()));
+        let indexes = Arc::new(TransactionalIndexes {
+            state: state.clone(),
+        });
         Self {
             trace: trace.clone(),
-            element_index: Arc::new(InMemoryElementIndex::new()),
-            result_index: Arc::new(InMemoryResultIndex::new()),
-            future_queue: Arc::new(InMemoryFutureQueue::new()),
+            element_index: indexes.clone(),
+            result_index: indexes.clone(),
+            future_queue: indexes,
             session_control: Arc::new(RecordingSessionControl {
                 state: state.clone(),
                 trace: trace.clone(),
             }),
             checkpoint_store: Arc::new(TransactionalCheckpointStore {
-                state,
+                state: state.clone(),
                 trace: trace.clone(),
             }),
-            output_store: Arc::new(RecordingOutputStore::new(fail_output_writes, trace)),
+            output_store: Arc::new(RecordingOutputStore::new(fail_output_writes, trace, state)),
         }
     }
 }
@@ -766,19 +1203,16 @@ async fn next_result(receiver: &mut mpsc::UnboundedReceiver<Arc<QueryResult>>) -
 
 #[tokio::test]
 async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
-    let trace = EventTrace::default();
-    let output_store = Arc::new(RecordingOutputStore::new(false, trace.clone()));
-    let checkpoint_state = Arc::new(Mutex::new(TransactionState::default()));
-    let checkpoint_store = Arc::new(TransactionalCheckpointStore {
-        state: checkpoint_state,
-        trace: trace.clone(),
-    });
+    let backend = CharacterizationBackend::new(false);
+    let trace = backend.trace.clone();
+    let output_store = backend.output_store.clone();
+    let checkpoint_store = backend.checkpoint_store.clone();
     let output_state = RwLock::new(QueryOutputState::new(16));
     let output_metrics = Arc::new(QueryOutputMetrics::new());
     let (result_tx, mut result_rx) = mpsc::unbounded_channel();
     let dispatchers: RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>> =
         RwLock::new(vec![Box::new(RecordingDispatcher {
-            trace,
+            trace: trace.clone(),
             tx: result_tx,
         })]);
     let outbox_writer: Option<Arc<dyn OutboxWriter>> = Some(output_store.clone());
@@ -810,18 +1244,50 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         },
     ];
 
+    backend.session_control.begin().await.unwrap();
+    let staged = stage_durable_query_output(
+        &evaluation_contexts_to_diffs(&contexts),
+        "source-a",
+        "query-a",
+        &output_state,
+        &outbox_writer,
+        &live_results_writer,
+        &checkpoint_writer,
+        ProfilingMetadata::default(),
+    )
+    .await
+    .unwrap();
+    assert!(staged.is_some());
+    assert!(output_store
+        .read_from("query-a", 0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(output_store
+        .read_snapshot("query-a")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        checkpoint_store
+            .read_result_sequence("query-a")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(output_state.read().await.as_of_sequence(), 0);
+    assert!(result_rx.try_recv().is_err());
+    backend.session_control.commit().await.unwrap();
+
     dispatch_query_results(
         &contexts,
         "source-a",
         "query-a",
         &output_state,
         &dispatchers,
-        &outbox_writer,
-        &live_results_writer,
-        &checkpoint_writer,
-        16,
         ProfilingMetadata::default(),
         &output_metrics,
+        staged,
     )
     .await;
 
@@ -857,6 +1323,26 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
     assert_eq!(result.metadata["processed_by"], json!("drasi-core"));
     assert_eq!(result.metadata["result_count"], json!(4));
     assert_eq!(result.profiling, Some(ProfilingMetadata::default()));
+    assert_eq!(
+        trace.snapshot(),
+        vec![
+            TraceEvent::SessionBegin,
+            TraceEvent::OutboxAppendAttempt {
+                query_id: "query-a".to_string(),
+                sequence: 1,
+            },
+            TraceEvent::LiveResultsApplyAttempt {
+                query_id: "query-a".to_string(),
+                mutation_count: 4,
+            },
+            TraceEvent::ResultSequenceStaged {
+                query_id: "query-a".to_string(),
+                sequence: 1,
+            },
+            TraceEvent::SessionCommit,
+            TraceEvent::ReactionDispatch { sequence: 1 },
+        ]
+    );
 
     let state = output_state.read().await;
     assert_eq!(state.as_of_sequence(), 1);
@@ -884,21 +1370,70 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         Some(1)
     );
 
+    let second_contexts = [QueryPartEvaluationContext::Adding {
+        after: variables(&[("kind", VariableValue::String("second".to_string()))]),
+        row_signature: 55,
+    }];
+    let committed_rows = output_store.read_snapshot("query-a").await.unwrap();
+    backend.session_control.begin().await.unwrap();
+    let rolled_back = stage_durable_query_output(
+        &evaluation_contexts_to_diffs(&second_contexts),
+        "source-b",
+        "query-a",
+        &output_state,
+        &outbox_writer,
+        &live_results_writer,
+        &checkpoint_writer,
+        ProfilingMetadata::default(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rolled_back.sequence, 2);
+    backend.session_control.rollback().unwrap();
+    assert_eq!(
+        output_store.read_from("query-a", 0).await.unwrap(),
+        persisted
+    );
+    assert_eq!(
+        output_store.read_snapshot("query-a").await.unwrap(),
+        committed_rows,
+        "rollback must discard staged live rows as well as the outbox append"
+    );
+    assert_eq!(
+        checkpoint_store
+            .read_result_sequence("query-a")
+            .await
+            .unwrap(),
+        Some(1),
+        "rollback must discard the staged result sequence"
+    );
+    assert_eq!(output_state.read().await.as_of_sequence(), 1);
+    assert!(result_rx.try_recv().is_err());
+
+    backend.session_control.begin().await.unwrap();
+    let staged = stage_durable_query_output(
+        &evaluation_contexts_to_diffs(&second_contexts),
+        "source-b",
+        "query-a",
+        &output_state,
+        &outbox_writer,
+        &live_results_writer,
+        &checkpoint_writer,
+        ProfilingMetadata::default(),
+    )
+    .await
+    .unwrap();
+    backend.session_control.commit().await.unwrap();
     dispatch_query_results(
-        &[QueryPartEvaluationContext::Adding {
-            after: variables(&[("kind", VariableValue::String("second".to_string()))]),
-            row_signature: 55,
-        }],
+        &second_contexts,
         "source-b",
         "query-a",
         &output_state,
         &dispatchers,
-        &outbox_writer,
-        &live_results_writer,
-        &checkpoint_writer,
-        16,
         ProfilingMetadata::default(),
         &output_metrics,
+        staged,
     )
     .await;
 
@@ -915,6 +1450,13 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
+    assert_eq!(
+        checkpoint_store
+            .read_result_sequence("query-a")
+            .await
+            .unwrap(),
+        Some(2)
+    );
 }
 
 #[tokio::test]
@@ -926,6 +1468,13 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     let initial_subscription = harness.next_subscription().await;
     assert_eq!(initial_subscription.resume_sequence, None);
     assert_eq!(initial_subscription.resume_from, None);
+    let initial_result_sequence = backend
+        .checkpoint_store
+        .read_result_sequence(QUERY_ID)
+        .await
+        .unwrap();
+    assert_eq!(initial_result_sequence.unwrap_or(0), 0);
+    let mut status_rx = query.base.status_handle().subscribe_status();
     backend.trace.clear();
 
     let first_position = Bytes::from_static(b"position-1");
@@ -936,15 +1485,16 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             first_position.clone(),
         )
         .await;
-    let delivered = next_result(&mut result_rx).await;
-    assert_eq!(delivered.sequence, 1);
-    assert_eq!(delivered.results.len(), 1);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status_rx.wait_for(|status| *status == ComponentStatus::Error),
+    )
+    .await
+    .expect("output persistence failure should fail the query")
+    .expect("query status channel should remain open");
     assert!(
-        matches!(
-            &delivered.results[0],
-            ResultDiff::Add { data, .. } if data == &json!({ "name": "Alice" })
-        ),
-        "the committed input should produce Alice's Add result"
+        result_rx.try_recv().is_err(),
+        "failed output must not be dispatched"
     );
 
     assert_eq!(
@@ -956,7 +1506,6 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 sequence: 1,
                 source_position: Some(first_position.clone()),
             },
-            TraceEvent::SessionCommit,
             TraceEvent::OutboxAppendAttempt {
                 query_id: QUERY_ID.to_string(),
                 sequence: 1,
@@ -965,9 +1514,9 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 query_id: QUERY_ID.to_string(),
                 mutation_count: 1,
             },
-            TraceEvent::ReactionDispatch { sequence: 1 },
+            TraceEvent::SessionRollback,
         ],
-        "current DrasiQuery commits input progress before best-effort output persistence and dispatch"
+        "an output failure must roll back input progress and the already staged outbox append"
     );
 
     assert!(
@@ -976,8 +1525,8 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .get_element(&ElementReference::new(SOURCE_ID, "person-1"))
             .await
             .unwrap()
-            .is_some(),
-        "core element state committed"
+            .is_none(),
+        "core element state must roll back with output"
     );
     assert_eq!(
         backend
@@ -985,8 +1534,8 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .read_checkpoint(SOURCE_ID)
             .await
             .unwrap(),
-        Some(SourceCheckpoint::new(1, Some(first_position.clone()))),
-        "source progress committed with core state"
+        None,
+        "source progress must not commit without its output"
     );
     assert!(
         backend
@@ -995,7 +1544,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .await
             .unwrap()
             .is_empty(),
-        "failed outbox persistence leaves no replayable output"
+        "the outbox append preceding the live-result failure must be rolled back"
     );
     assert!(
         backend
@@ -1012,11 +1561,77 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .read_result_sequence(QUERY_ID)
             .await
             .unwrap(),
-        None,
-        "failed output writes must not claim a durable result sequence"
+        initial_result_sequence,
+        "failed output writes must not advance the durable result sequence"
     );
+    assert_eq!(query.output_state.read().await.as_of_sequence(), 0);
+    assert_eq!(query.output_state.read().await.results_len(), 0);
 
+    // This harness calls DrasiQuery directly, so establish its required pre-stop state.
+    query
+        .base
+        .status_handle()
+        .set_status(ComponentStatus::Stopping, None)
+        .await;
     query.stop().await.unwrap();
+
+    backend
+        .output_store
+        .fail_live_results
+        .store(false, Ordering::Release);
+    let (recovery_query, mut recovery_result_rx) = harness.start_query(backend.trace.clone()).await;
+    let retry_subscription = harness.next_subscription().await;
+    assert_eq!(retry_subscription.resume_sequence, Some(0));
+    assert_eq!(retry_subscription.resume_from, None);
+    harness
+        .inject(
+            person_insert("person-1", "Alice", 1_000),
+            1,
+            first_position.clone(),
+        )
+        .await;
+    let recovered = next_result(&mut recovery_result_rx).await;
+    assert_eq!(recovered.sequence, 1);
+    assert_eq!(recovered.results.len(), 1);
+    assert!(
+        matches!(
+            &recovered.results[0],
+            ResultDiff::Add { data, .. } if data == &json!({ "name": "Alice" })
+        ),
+        "the failed input must still be replayable and produce its original Add result"
+    );
+    assert!(
+        backend
+            .element_index
+            .get_element(&ElementReference::new(SOURCE_ID, "person-1"))
+            .await
+            .unwrap()
+            .is_some(),
+        "successful replay commits the core element"
+    );
+    assert_eq!(
+        backend
+            .checkpoint_store
+            .read_checkpoint(SOURCE_ID)
+            .await
+            .unwrap(),
+        Some(SourceCheckpoint::new(1, Some(first_position.clone())))
+    );
+    assert_eq!(
+        backend
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let persisted = backend.output_store.read_from(QUERY_ID, 0).await.unwrap();
+    assert_eq!(persisted.len(), 1);
+    let persisted_result: QueryResult = rmp_serde::from_slice(&persisted[0].1).unwrap();
+    assert_eq!(persisted_result.sequence, recovered.sequence);
+    assert_eq!(persisted_result.results, recovered.results);
+    assert_eq!(persisted_result.timestamp, recovered.timestamp);
+    recovery_query.stop().await.unwrap();
 
     let (restarted_query, mut restarted_result_rx) =
         harness.start_query(backend.trace.clone()).await;
@@ -1025,10 +1640,11 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(resumed_subscription.resume_from, Some(first_position));
 
     let recovered_snapshot = restarted_query.fetch_snapshot().await.unwrap();
-    assert_eq!(recovered_snapshot.as_of_sequence, 0);
-    assert!(
-        recovered_snapshot.is_empty(),
-        "after a fresh host starts from committed input position 1, output 1 cannot be recovered"
+    assert_eq!(recovered_snapshot.as_of_sequence, 1);
+    assert_eq!(
+        recovered_snapshot.to_vec(),
+        vec![json!({ "name": "Alice" })],
+        "a fresh query must hydrate the output committed with source position 1"
     );
 
     backend.trace.clear();
@@ -1048,7 +1664,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         .await;
 
     let after_restart = next_result(&mut restarted_result_rx).await;
-    assert_eq!(after_restart.sequence, 1);
+    assert_eq!(after_restart.sequence, 2);
     assert_eq!(after_restart.results.len(), 1);
     assert!(
         matches!(
@@ -1066,19 +1682,54 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 sequence: 2,
                 source_position: Some(Bytes::from_static(b"position-3")),
             },
-            TraceEvent::SessionCommit,
             TraceEvent::OutboxAppendAttempt {
                 query_id: QUERY_ID.to_string(),
-                sequence: 1,
+                sequence: 2,
             },
             TraceEvent::LiveResultsApplyAttempt {
                 query_id: QUERY_ID.to_string(),
                 mutation_count: 1,
             },
-            TraceEvent::ReactionDispatch { sequence: 1 },
+            TraceEvent::ResultSequenceStaged {
+                query_id: QUERY_ID.to_string(),
+                sequence: 2,
+            },
+            TraceEvent::SessionCommit,
+            TraceEvent::ReactionDispatch { sequence: 2 },
         ],
-        "the replayed sequence is skipped before a core session begins"
+        "committed input is deduplicated before a session, and new output commits before dispatch"
     );
+    assert_eq!(
+        backend
+            .checkpoint_store
+            .read_checkpoint(SOURCE_ID)
+            .await
+            .unwrap(),
+        Some(SourceCheckpoint::new(
+            2,
+            Some(Bytes::from_static(b"position-3"))
+        ))
+    );
+    assert_eq!(
+        backend
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        backend
+            .output_store
+            .read_from(QUERY_ID, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(sequence, _)| sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(backend.output_store.row_count(QUERY_ID).await.unwrap(), 2);
 
     restarted_query.stop().await.unwrap();
     harness
@@ -1091,20 +1742,11 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
 
 #[tokio::test]
 async fn due_future_output_is_dispatched_after_core_commit() {
-    let trace = EventTrace::default();
-    let state = Arc::new(Mutex::new(TransactionState::default()));
-    let session_control = Arc::new(RecordingSessionControl {
-        state: state.clone(),
-        trace: trace.clone(),
-    });
-    let checkpoint_store = Arc::new(TransactionalCheckpointStore {
-        state,
-        trace: trace.clone(),
-    });
-    let output_store = Arc::new(RecordingOutputStore::new(false, trace.clone()));
-    let element_index = Arc::new(InMemoryElementIndex::new());
-    let result_index = Arc::new(InMemoryResultIndex::new());
-    let future_queue = Arc::new(InMemoryFutureQueue::new());
+    let backend = CharacterizationBackend::new(false);
+    let trace = backend.trace.clone();
+    let checkpoint_store = backend.checkpoint_store.clone();
+    let output_store = backend.output_store.clone();
+    let future_queue = backend.future_queue.clone();
 
     let parser = Arc::new(CypherParser::new(Arc::new(DefaultQueryConfig)));
     let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
@@ -1118,11 +1760,11 @@ async fn due_future_output_is_dispatched_after_core_commit() {
         parser,
     )
     .with_function_registry(function_registry)
-    .with_element_index(element_index.clone())
-    .with_archive_index(element_index)
-    .with_result_index(result_index)
+    .with_element_index(backend.element_index.clone())
+    .with_archive_index(backend.element_index.clone())
+    .with_result_index(backend.result_index.clone())
     .with_future_queue(future_queue.clone())
-    .with_session_control(session_control)
+    .with_session_control(backend.session_control.clone())
     .build()
     .await;
 
@@ -1145,19 +1787,6 @@ async fn due_future_output_is_dispatched_after_core_commit() {
     assert!(initial.is_empty());
     assert!(future_queue.peek_due_time().await.unwrap().is_some());
 
-    trace.clear();
-    let due = query
-        .process_due_futures()
-        .await
-        .unwrap()
-        .expect("the trueFor evaluation should have queued one future");
-    assert!(!due.results.is_empty());
-    assert_eq!(
-        trace.snapshot(),
-        vec![TraceEvent::SessionBegin, TraceEvent::SessionCommit],
-        "the future pop and core evaluation commit before output handling starts"
-    );
-
     let output_state = RwLock::new(QueryOutputState::new(16));
     let output_metrics = Arc::new(QueryOutputMetrics::new());
     let (result_tx, mut result_rx) = mpsc::unbounded_channel();
@@ -1167,44 +1796,128 @@ async fn due_future_output_is_dispatched_after_core_commit() {
             tx: result_tx,
         })]);
     let outbox_writer: Option<Arc<dyn OutboxWriter>> = Some(output_store.clone());
-    let live_results_writer: Option<Arc<dyn LiveResultsWriter>> = Some(output_store);
-    let checkpoint_writer: Option<Arc<dyn CheckpointStore>> = Some(checkpoint_store);
+    let live_results_writer: Option<Arc<dyn LiveResultsWriter>> = Some(output_store.clone());
+    let checkpoint_writer: Option<Arc<dyn CheckpointStore>> = Some(checkpoint_store.clone());
 
+    let staged = StagedOutputSequence::new();
+    trace.clear();
+    let due = query
+        .process_due_futures_with_hook(|results, source_id| {
+            let diffs = evaluation_contexts_to_diffs(results);
+            let source_id = source_id.to_string();
+            let output_state = &output_state;
+            let outbox_writer = &outbox_writer;
+            let live_results_writer = &live_results_writer;
+            let checkpoint_writer = &checkpoint_writer;
+            let staged = &staged;
+            let backend = &backend;
+            async move {
+                staged.record(
+                    stage_durable_query_output(
+                        &diffs,
+                        &source_id,
+                        "future-query",
+                        output_state,
+                        outbox_writer,
+                        live_results_writer,
+                        checkpoint_writer,
+                        ProfilingMetadata::default(),
+                    )
+                    .await?,
+                )?;
+                assert_eq!(
+                    backend
+                        .future_queue
+                        .state
+                        .lock()
+                        .unwrap()
+                        .committed
+                        .futures
+                        .len(),
+                    1,
+                    "the future pop must not commit ahead of its output"
+                );
+                assert!(backend
+                    .output_store
+                    .read_from("future-query", 0)
+                    .await?
+                    .is_empty());
+                assert!(backend
+                    .output_store
+                    .read_snapshot("future-query")
+                    .await?
+                    .is_empty());
+                assert_eq!(
+                    backend
+                        .checkpoint_store
+                        .read_result_sequence("future-query")
+                        .await?,
+                    None
+                );
+                Ok(())
+            }
+        })
+        .await
+        .unwrap()
+        .expect("the trueFor evaluation should have queued one future");
+    assert!(!due.results.is_empty());
+    assert!(future_queue.peek_due_time().await.unwrap().is_none());
+    assert!(result_rx.try_recv().is_err());
+    let mut expected_trace = vec![
+        TraceEvent::SessionBegin,
+        TraceEvent::OutboxAppendAttempt {
+            query_id: "future-query".to_string(),
+            sequence: 1,
+        },
+        TraceEvent::LiveResultsApplyAttempt {
+            query_id: "future-query".to_string(),
+            mutation_count: evaluation_contexts_to_diffs(&due.results).len(),
+        },
+        TraceEvent::ResultSequenceStaged {
+            query_id: "future-query".to_string(),
+            sequence: 1,
+        },
+        TraceEvent::SessionCommit,
+    ];
+    assert_eq!(
+        trace.snapshot(),
+        expected_trace,
+        "future evaluation and durable output must commit together before dispatch"
+    );
+
+    let staged = staged.take().expect("durable future output was staged");
+    assert_eq!(staged.sequence, 1);
     dispatch_query_results(
         &due.results,
         &due.source_id,
         "future-query",
         &output_state,
         &dispatchers,
-        &outbox_writer,
-        &live_results_writer,
-        &checkpoint_writer,
-        16,
         ProfilingMetadata::default(),
         &output_metrics,
+        Some(staged),
     )
     .await;
     let dispatched = next_result(&mut result_rx).await;
+    assert_eq!(dispatched.sequence, 1);
     assert_eq!(dispatched.metadata["source_id"], json!("future-source"));
+    expected_trace.push(TraceEvent::ReactionDispatch { sequence: 1 });
+    assert_eq!(trace.snapshot(), expected_trace);
+    let persisted = output_store.read_from("future-query", 0).await.unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].0, 1);
     assert_eq!(
-        trace.snapshot(),
-        vec![
-            TraceEvent::SessionBegin,
-            TraceEvent::SessionCommit,
-            TraceEvent::OutboxAppendAttempt {
-                query_id: "future-query".to_string(),
-                sequence: 1,
-            },
-            TraceEvent::LiveResultsApplyAttempt {
-                query_id: "future-query".to_string(),
-                mutation_count: due.results.len(),
-            },
-            TraceEvent::ResultSequenceWritten {
-                query_id: "future-query".to_string(),
-                sequence: 1,
-            },
-            TraceEvent::ReactionDispatch { sequence: 1 },
-        ],
-        "due-future output persistence and dispatch currently happen after the core commit"
+        persisted[0].1,
+        rmp_serde::to_vec(dispatched.as_ref()).unwrap()
     );
+    assert_eq!(
+        checkpoint_store
+            .read_result_sequence("future-query")
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(output_state.read().await.as_of_sequence(), 1);
+    assert_eq!(output_state.read().await.results_len(), 1);
+    assert_eq!(output_store.row_count("future-query").await.unwrap(), 1);
 }

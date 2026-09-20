@@ -48,7 +48,7 @@ lib::queries::config_hash::tests::	shared	Unchanged public configuration hash us
 lib::queries::e2e_checkpoint_tests::	runtime	Original durable-store reconstruction scenarios use the selected DrasiLib builder.
 lib::queries::joins_test::	runtime	Original multi-source join inputs and assertions use shared native/legacy manager fixtures.
 lib::queries::label_extractor::tests::	shared	Unchanged parser-based label extraction used by both runtimes.
-lib::queries::manager::pipeline_characterization_tests::	legacy-boundary	A1 explicitly pins old private commit order, MessagePack payloads and lost-output defect; not relabelled as native parity or reproduced in the native engine.
+lib::queries::manager::pipeline_characterization_tests::	legacy-boundary	Pins legacy query internals: transactional commit/rollback, MessagePack payloads, delivery order, replay and restart deduplication; not native parity coverage.
 lib::queries::manager::tests::	codec	The same original temporal-value assertions execute the selected native result codec or legacy conversion.
 lib::queries::output_state::tests::	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
 lib::queries::output_state::tests::test_snapshot_stream_from_bare_values_uses_zero_signature	shared	Unchanged public SnapshotStream constructor.

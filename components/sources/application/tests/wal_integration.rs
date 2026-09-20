@@ -20,10 +20,15 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use drasi_lib::channels::ChangeReceiver;
+use async_trait::async_trait;
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
+use drasi_lib::channels::{BootstrapEventSender, ChangeReceiver};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
@@ -652,4 +657,109 @@ async fn test_resume_from_position_end_to_end() {
     );
 
     source2.stop().await.unwrap();
+}
+
+/// With durability **disabled**, the Application source must still stamp a
+/// framework-assigned monotonic sequence on every emitted event (issue #828).
+/// Before the migration to `dispatch_event`, task-emitted events left
+/// `sequence = None` whenever the WAL was off.
+#[tokio::test]
+async fn test_sequence_stamped_without_durability() {
+    // durability: None → WAL off, so no source-supplied sequence.
+    let config = app_config(None);
+    let (source, handle) = ApplicationSource::new("noseq-src", config).unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(tmp.path()));
+    init_source_with_wal(&source, wal.clone(), "noseq-src").await;
+
+    source.start().await.unwrap();
+
+    // Durability is off, so the source neither persists nor supports replay.
+    assert!(!source.supports_replay());
+
+    let mut rx = subscribe_fresh(&source, "noseq-src").await;
+
+    let event_count = 5u64;
+    for i in 1..=event_count {
+        let props = PropertyMapBuilder::new()
+            .with_string("name", format!("Name{i}"))
+            .build();
+        handle
+            .send_node_insert(format!("node-{i}"), vec!["Person"], props)
+            .await
+            .unwrap();
+    }
+
+    // Every emitted event must carry a framework-stamped, strictly increasing
+    // sequence (1, 2, 3, ...), even though the WAL is disabled.
+    for expected_seq in 1..=event_count {
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("event stream closed unexpectedly");
+        assert_eq!(
+            event.sequence,
+            Some(expected_seq),
+            "event {expected_seq} should carry a framework sequence with durability off"
+        );
+    }
+
+    source.stop().await.unwrap();
+}
+
+struct RecordingBootstrapProvider {
+    called: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl BootstrapProvider for RecordingBootstrapProvider {
+    async fn bootstrap(
+        &self,
+        _request: BootstrapRequest,
+        _context: &BootstrapContext,
+        _event_tx: BootstrapEventSender,
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> anyhow::Result<BootstrapResult> {
+        self.called.store(true, Ordering::SeqCst);
+        Ok(BootstrapResult::default())
+    }
+}
+
+/// Fresh WAL-enabled subscribe with bootstrap requested must still invoke the
+/// provider instead of always taking `subscribe_with_replay`.
+#[tokio::test]
+async fn test_wal_enabled_fresh_subscribe_still_bootstraps() {
+    let config = app_config(Some(durability_config(
+        true,
+        10_000,
+        CapacityPolicy::RejectIncoming,
+    )));
+    let (source, _handle) = ApplicationSource::new("bootstrap-src", config).unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(tmp.path()));
+    init_source_with_wal(&source, wal, "bootstrap-src").await;
+    source.start().await.unwrap();
+
+    let called = Arc::new(AtomicBool::new(false));
+    source
+        .set_bootstrap_provider(Box::new(RecordingBootstrapProvider {
+            called: called.clone(),
+        }))
+        .await;
+
+    let mut settings = fresh_settings("bootstrap-src", "bootstrap-query");
+    settings.enable_bootstrap = true;
+    source.subscribe(settings).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !called.load(Ordering::SeqCst) {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("bootstrap provider was not invoked for a fresh WAL-enabled subscribe");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    source.stop().await.unwrap();
 }
