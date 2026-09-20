@@ -195,7 +195,6 @@ mod tests {
                     relations: vec![],
                     source_id,
                     pipeline: vec![],
-                    priority: None,
                 })
                 .collect(),
             auto_start: true,
@@ -1535,7 +1534,6 @@ mod tests {
                     relations: vec![],
                     source_id,
                     pipeline: vec![],
-                    priority: None,
                 })
                 .collect(),
             auto_start: true,
@@ -1832,7 +1830,6 @@ mod tests {
                         relations: vec![],
                         source_id: "mismatch-src".to_string(),
                         pipeline: vec![],
-                        priority: None,
                     }],
                     auto_start: true,
                     joins: None,
@@ -2755,7 +2752,6 @@ mod orchestration_tests {
                     relations: vec![],
                     source_id,
                     pipeline: vec![],
-                    priority: None,
                 })
                 .collect(),
             auto_start: false,
@@ -2790,7 +2786,6 @@ mod orchestration_tests {
                     relations: vec![],
                     source_id,
                     pipeline: vec![],
-                    priority: None,
                 })
                 .collect(),
             auto_start: false,

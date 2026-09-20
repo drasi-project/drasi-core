@@ -26,7 +26,7 @@ use tokio::sync::{Mutex, Notify};
 ///
 /// - `timestamp` — event time; the primary ordering component.
 /// - `source_rank` — a per-query, precomputed rank for the producing source,
-///   derived from the query's `sources` list and any explicit per-source priority.
+///   derived from the source's position in the query's `sources` list.
 ///   It is stamped by the per-source forwarder at enqueue time and breaks ties
 ///   between events from *different* sources so cross-source ordering is
 ///   deterministic. It is inert for single-source queries (every event has the
@@ -209,8 +209,8 @@ where
     /// Enqueue an event into the priority queue
     ///
     /// `source_rank` is the precomputed rank of the producing source within the
-    /// owning query, derived from `config.sources` and any explicit per-source
-    /// priority. It is used as a tie-breaker between events from different
+    /// owning query, derived from its position in `config.sources`.
+    /// It is used as a tie-breaker between events from different
     /// sources that share a timestamp. Pass `0` for single-source queues where
     /// the rank is inert.
     ///

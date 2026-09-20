@@ -122,18 +122,15 @@ pub enum QueryLanguage {
 ///     pipeline: []
 /// ```
 ///
-/// ## Explicit Tie-Break Priority
+/// ## Same-Timestamp Ordering
 ///
-/// `priority` breaks same-timestamp ties between sources in the query's
-/// priority queue (lower is evaluated first). Sources without it fall back to
-/// their position in the list.
+/// Events from different sources with the same timestamp are evaluated in the
+/// order the sources are listed in the query's `sources` configuration.
 ///
 /// ```yaml
-/// source_subscriptions:
-///   - source_id: orders_db
-///     priority: 0        # evaluated first on a timestamp tie
+/// sources:
+///   - source_id: orders_db  # evaluated first on a timestamp tie
 ///   - source_id: audit_log
-///     priority: 1
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceSubscriptionConfig {
@@ -144,21 +141,6 @@ pub struct SourceSubscriptionConfig {
     pub relations: Vec<String>,
     #[serde(default)]
     pub pipeline: Vec<String>,
-    /// Optional explicit ordering priority for this source within the query.
-    ///
-    /// Used to break **same-timestamp** ties between events from different
-    /// sources in the query's priority queue: lower values are dequeued (and
-    /// therefore evaluated) first. When omitted, the source falls back to its
-    /// **position in the `sources` list** (implicit rank).
-    ///
-    /// Explicit and implicit ranks combine deterministically: sources are
-    /// ordered by `(priority.unwrap_or(list_index), list_index)`, so an
-    /// unspecified source uses its list index as its effective priority, and
-    /// the list index always breaks any remaining ties. This guarantees every
-    /// source in a query gets a distinct, stable rank. The field is inert for
-    /// single-source queries and for events with distinct timestamps.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<i64>,
 }
 
 /// Settings passed to a source when subscribing

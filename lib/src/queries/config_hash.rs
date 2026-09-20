@@ -44,7 +44,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///   - `query` text
 ///   - `query_language`
 ///   - `middleware` (order preserved — pipeline order matters)
-///   - `sources` (including effective ordering rank, sorted by `source_id`;
+///   - `sources` (including declared list position, sorted by `source_id`;
 ///     within each source, `nodes` and
 ///     `relations` are sorted + deduped because they are consumed as `HashSet`s
 ///     downstream in `SubscriptionSettingsBuilder`)
@@ -116,16 +116,11 @@ fn canonicalize_join(join: &QueryJoinConfig) -> JoinIdentity<'_> {
 /// Compute a deterministic hash of the identity-defining portion of a query config.
 ///
 /// The hash is stable across processes, platforms, and Rust toolchain versions,
-/// and it is invariant under reordering of `sources` that preserves effective
-/// source ranks, and cosmetic reordering of `joins`, a source's `nodes` /
-/// `relations`, and a join's `keys`.
+/// and it is invariant under cosmetic reordering of `joins`, a source's
+/// `nodes` / `relations`, and a join's `keys`. Reordering `sources` changes
+/// the hash because their declared order determines same-timestamp tie-breaking.
 pub fn compute_config_hash(config: &QueryConfig) -> u64 {
-    let priorities: Vec<Option<i64>> = config
-        .sources
-        .iter()
-        .map(|source| source.priority)
-        .collect();
-    let ranks = super::manager::compute_source_ranks(&priorities);
+    let ranks = super::manager::compute_source_ranks(config.sources.len());
     let mut sources: Vec<SourceIdentity> = config
         .sources
         .iter()
@@ -179,7 +174,6 @@ mod tests {
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             }],
             auto_start: true,
             joins: None,
@@ -375,14 +369,12 @@ mod tests {
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "s2".into(),
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
         ];
 
@@ -393,87 +385,16 @@ mod tests {
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "s1".into(),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
         ];
 
         assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
-    }
-
-    fn two_source_config() -> QueryConfig {
-        let mut config = base();
-        let mut second_source = config.sources[0].clone();
-        second_source.source_id = "s2".into();
-        config.sources.push(second_source);
-        config
-    }
-
-    #[test]
-    fn priority_reordering_sources_changes_hash() {
-        let original = two_source_config();
-        let mut reordered = original.clone();
-        reordered.sources[1].priority = Some(-1);
-        assert_ne!(
-            compute_config_hash(&original),
-            compute_config_hash(&reordered)
-        );
-    }
-
-    #[test]
-    fn priority_change_preserving_ranks_keeps_hash() {
-        let original = two_source_config();
-        let mut equivalent = original.clone();
-        equivalent.sources[0].priority = Some(-10);
-        equivalent.sources[1].priority = Some(10);
-        assert_eq!(
-            compute_config_hash(&original),
-            compute_config_hash(&equivalent)
-        );
-    }
-
-    #[test]
-    fn source_reorder_preserving_explicit_ranks_keeps_hash() {
-        let mut original = two_source_config();
-        original.sources[0].priority = Some(10);
-        original.sources[1].priority = Some(-10);
-        let mut equivalent = original.clone();
-        equivalent.sources.reverse();
-        assert_eq!(
-            compute_config_hash(&original),
-            compute_config_hash(&equivalent)
-        );
-    }
-
-    #[test]
-    fn source_reorder_with_equal_priorities_changes_hash() {
-        let mut original = two_source_config();
-        for source in &mut original.sources {
-            source.priority = Some(5);
-        }
-        let mut reordered = original.clone();
-        reordered.sources.reverse();
-        assert_ne!(
-            compute_config_hash(&original),
-            compute_config_hash(&reordered)
-        );
-    }
-
-    #[test]
-    fn single_source_priority_change_keeps_hash() {
-        let original = base();
-        let mut equivalent = original.clone();
-        equivalent.sources[0].priority = Some(42);
-        assert_eq!(
-            compute_config_hash(&original),
-            compute_config_hash(&equivalent)
-        );
     }
 
     #[test]

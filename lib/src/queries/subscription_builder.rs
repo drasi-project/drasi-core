@@ -194,7 +194,6 @@ mod tests {
             nodes: vec!["Person".to_string()],
             relations: vec![],
             pipeline: vec![],
-            priority: None,
         }];
 
         let query_config = create_test_query_config(sources);
@@ -220,14 +219,12 @@ mod tests {
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "source2".to_string(),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
         ];
 
@@ -255,14 +252,12 @@ mod tests {
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "source2".to_string(),
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
         ];
 
@@ -285,7 +280,6 @@ mod tests {
             nodes: vec![],
             relations: vec!["KNOWS".to_string()],
             pipeline: vec![],
-            priority: None,
         }];
 
         let query_config = create_test_query_config(sources);
@@ -311,14 +305,12 @@ mod tests {
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "source2".to_string(),
                 nodes: vec![],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
         ];
 
@@ -346,14 +338,12 @@ mod tests {
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
                 pipeline: vec![],
-                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "source2".to_string(),
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
                 pipeline: vec![],
-                priority: None,
             },
         ];
 
@@ -376,7 +366,6 @@ mod tests {
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
-            priority: None,
         }];
 
         let mut query_config = create_test_query_config(sources);
@@ -419,7 +408,6 @@ mod tests {
             nodes: vec![],
             relations: vec!["CUSTOMER".to_string()],
             pipeline: vec![],
-            priority: None,
         }];
 
         let mut query_config = create_test_query_config(sources);
@@ -461,7 +449,6 @@ mod tests {
                     nodes: vec![],
                     relations: vec![],
                     pipeline: vec![],
-                    priority: None,
                 })
                 .collect();
             let mut query_config = create_test_query_config(sources);
@@ -517,7 +504,6 @@ mod tests {
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],
-            priority: None,
         }];
 
         let mut query_config = create_test_query_config(sources);
@@ -557,14 +543,12 @@ mod tests {
                 nodes: vec!["Order".to_string()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "customers_db".to_string(),
                 nodes: vec!["Customer".to_string()],
                 relations: vec![],
                 pipeline: vec![],
-                priority: None,
             },
         ];
 

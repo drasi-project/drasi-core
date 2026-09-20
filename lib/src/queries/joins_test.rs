@@ -59,7 +59,6 @@ mod query_joins_tests {
                     relations: vec![],
                     source_id,
                     pipeline: vec![],
-                    priority: None,
                 })
                 .collect(),
             auto_start: false,
