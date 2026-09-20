@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Graph-scoped Garnet resources. Index/checkpoint mutations use the session
-//! buffer, but outbox and live results are independent: complete atomic output
-//! is explicitly unsupported. No legacy plugin contract is extended.
+//! Graph-scoped Garnet resources. Indexes, checkpoints, outbox retention, and
+//! live rows share one session buffer and commit through one MULTI/EXEC.
+//! Primary output keeps the existing graph partition keys; auxiliary output
+//! identities are isolated within the same Redis Cluster hash tag.
 
 mod checkpoint;
 
@@ -116,16 +117,26 @@ impl ComputationIndexProvider for GarnetComputationProvider {
                 Arc::new(ComputationCheckpointStore::new(
                     &partition,
                     connection.clone(),
-                    session,
+                    session.clone(),
                 )),
                 &domain,
             )),
-            Some(ComputationResource::independent(Arc::new(
-                GarnetOutboxWriter::new(&partition, connection.clone()),
-            ))),
-            Some(ComputationResource::independent(Arc::new(
-                GarnetLiveResultsWriter::new(&partition, connection),
-            ))),
+            Some(ComputationResource::participating(
+                Arc::new(
+                    GarnetOutboxWriter::new(&partition, connection.clone())
+                        .with_query_id(query_id)
+                        .with_session_state(session.clone()),
+                ),
+                &domain,
+            )),
+            Some(ComputationResource::participating(
+                Arc::new(
+                    GarnetLiveResultsWriter::new(&partition, connection)
+                        .with_query_id(query_id)
+                        .with_session_state(session),
+                ),
+                &domain,
+            )),
         )
         .map_err(IndexError::other)
     }

@@ -191,9 +191,12 @@ impl OutboxWriter for RocksDbOutboxWriter {
         query_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let Some(first_sequence) = after_sequence.checked_add(1) else {
+            return Ok(Vec::new());
+        };
         let db = self.db.clone();
         let prefix = make_prefix(query_id);
-        let start_key = make_key(query_id, after_sequence.saturating_add(1));
+        let start_key = make_key(query_id, first_sequence);
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
@@ -258,31 +261,8 @@ impl OutboxWriter for RocksDbOutboxWriter {
     }
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
-        let db = self.db.clone();
-        let prefix = make_prefix(query_id);
-
-        task::spawn_blocking(move || {
-            let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            let iter = db.iterator_cf(
-                &cf,
-                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        db.delete_cf(&cf, &key).map_err(IndexError::other)?;
-                    }
-                    Err(e) => return Err(IndexError::other(e)),
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(IndexError::other)?
+        self.trim_to_capacity(query_id, 0).await?;
+        Ok(())
     }
 
     async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {

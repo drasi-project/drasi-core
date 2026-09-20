@@ -126,6 +126,14 @@ pub(super) fn outbox_response(
     view: &OutputView,
     after: u64,
 ) -> std::result::Result<OutboxResponse, FetchError> {
+    if after == u64::MAX {
+        return Ok(OutboxResponse {
+            results: Vec::new(),
+            latest_sequence: view.snapshot.as_of_sequence,
+            config_hash: view.config_hash,
+            output_generation: view.snapshot.generation,
+        });
+    }
     let oldest = view
         .retained
         .first()
@@ -257,6 +265,7 @@ impl BootstrapBackend for BootstrapView {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RecoveryMetadata {
+    // Plugin checkpoints preserve the snapshot's hash; native epoch fences live alongside it.
     config_hash: u64,
     reset_generation: u64,
     bootstrap_pending: bool,
@@ -272,6 +281,7 @@ struct ReactionLife {
     replace_on_start: bool,
     closed: bool,
     accepted: BTreeMap<String, (u64, u64)>,
+    query_generations: BTreeMap<String, u64>,
 }
 
 pub struct ReactionPluginHost {
@@ -380,6 +390,13 @@ impl ReactionPluginHost {
         let policy = options
             .recovery
             .unwrap_or_else(|| reaction.default_recovery_policy());
+        if owned
+            && !deferred_validation
+            && policy == ReactionRecoveryPolicy::AutoSkipGap
+            && reaction.needs_snapshot_on_fresh_start()
+        {
+            anyhow::bail!("snapshot recovery is incompatible with AutoSkipGap");
+        }
         if owned
             && !deferred_validation
             && policy == ReactionRecoveryPolicy::AutoReset
@@ -536,7 +553,139 @@ impl ReactionPluginHost {
         }
         Ok(())
     }
+
+    fn reject_startup(&self, reason: crate::metrics::StartupRejectionReason) {
+        if let Some(metrics) = &self.runtime_metrics {
+            metrics.lifecycle.record_startup_rejection(reason);
+        }
+    }
+
+    async fn validate_startup(&self, reaction: &dyn Reaction) -> anyhow::Result<()> {
+        let policy = self
+            .options
+            .recovery
+            .unwrap_or_else(|| reaction.default_recovery_policy());
+        if reaction.is_durable()
+            && self
+                .services
+                .state_store
+                .as_ref()
+                .map_or(true, |store| !store.is_durable())
+        {
+            let reason = if self.services.state_store.is_some() {
+                self.reject_startup(crate::metrics::StartupRejectionReason::DurableOnVolatile);
+                "the configured state store is volatile"
+            } else {
+                self.reject_startup(crate::metrics::StartupRejectionReason::DurableNoStore);
+                "no state store is configured"
+            };
+            anyhow::bail!(
+                "Reaction '{}' requires a durable state store (is_durable=true), but {reason}",
+                self.id
+            );
+        }
+        if reaction.is_durable() {
+            for query in &self.query_ids {
+                self.validate_output_persistence(query).await?;
+            }
+        }
+        if reaction.needs_snapshot_on_fresh_start() && policy == ReactionRecoveryPolicy::AutoSkipGap
+        {
+            self.reject_startup(crate::metrics::StartupRejectionReason::SnapshotSkipGap);
+            anyhow::bail!("snapshot recovery is incompatible with AutoSkipGap");
+        }
+        if !reaction.needs_snapshot_on_fresh_start() && policy == ReactionRecoveryPolicy::AutoReset
+        {
+            self.reject_startup(crate::metrics::StartupRejectionReason::NoSnapshotAutoReset);
+            anyhow::bail!("needs_snapshot_on_fresh_start=false is incompatible with AutoReset (snapshot/bootstrap support is required)");
+        }
+        Ok(())
+    }
+
+    async fn validate_output_persistence(&self, query: &str) -> anyhow::Result<()> {
+        // An active query may still be constructing its stores. Wait only when
+        // the capability is unknown, never before validating the state store.
+        if self.catalog.output_is_persistent(query).is_err() {
+            self.wait_query_ready(query).await.map_err(|error| {
+                error.context(format!(
+                    "cannot verify durable output for reaction '{}' query '{query}'",
+                    self.id
+                ))
+            })?;
+        }
+        let persistent = self.catalog.output_is_persistent(query).map_err(|error| {
+            error.context(format!(
+                "cannot verify durable output for reaction '{}' query '{query}'",
+                self.id
+            ))
+        })?;
+        if !persistent {
+            self.reject_startup(crate::metrics::StartupRejectionReason::DurableOnVolatileQuery);
+            anyhow::bail!(
+                "Reaction '{}' requires a persistent query (is_durable=true), but subscribed query '{query}' has volatile output",
+                self.id
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_head(
+        query_id: &str,
+        head: &QuerySubscriptionHead,
+        query: &CatalogQuery,
+        view: &OutputView,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            head.belongs_to(query)
+                && head.generation == view.snapshot.generation
+                && head.config_hash == view.config_hash
+                && head.incarnation == view.incarnation
+                && head.sequence <= view.snapshot.as_of_sequence,
+            "query '{query_id}' changed after its reaction subscription was attached"
+        );
+        Ok(())
+    }
+
+    async fn checkpoint(&self, query: &str) -> anyhow::Result<Option<ReactionCheckpoint>> {
+        match &self.services.state_store {
+            Some(store) => {
+                crate::reactions::checkpoint::read_checkpoint(store.as_ref(), &self.id, query).await
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn seed_position(
+        &self,
+        query: &str,
+        sequence: u64,
+        view: &OutputView,
+    ) -> anyhow::Result<()> {
+        // Only fresh-start/explicit-skip cutoffs belong here, never enqueue progress.
+        self.write_metadata(query, view, false).await?;
+        if let Some(store) = &self.services.state_store {
+            crate::reactions::checkpoint::write_checkpoint(
+                store.as_ref(),
+                &self.id,
+                query,
+                &ReactionCheckpoint {
+                    sequence,
+                    config_hash: view.config_hash,
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn start(&self) -> anyhow::Result<()> {
+        self.start_with_heads(None).await
+    }
+
+    async fn start_with_heads(
+        &self,
+        mut supplied_heads: Option<BTreeMap<String, QuerySubscriptionHead>>,
+    ) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
         if life.closed {
             anyhow::bail!("reaction host is closed");
@@ -548,51 +697,7 @@ impl ReactionPluginHost {
             life.running = true;
             return Ok(());
         }
-        if self.deferred_validation {
-            let reaction = self.reaction()?;
-            let policy = self
-                .options
-                .recovery
-                .unwrap_or_else(|| reaction.default_recovery_policy());
-            if reaction.is_durable()
-                && self
-                    .services
-                    .state_store
-                    .as_ref()
-                    .map_or(true, |store| !store.is_durable())
-            {
-                if let Some(metrics) = &self.runtime_metrics {
-                    metrics.lifecycle.record_startup_rejection(
-                        if self.services.state_store.is_some() {
-                            crate::metrics::StartupRejectionReason::DurableOnVolatile
-                        } else {
-                            crate::metrics::StartupRejectionReason::DurableNoStore
-                        },
-                    );
-                }
-                anyhow::bail!("durable reaction requires a durable state store");
-            }
-            if reaction.needs_snapshot_on_fresh_start()
-                && policy == ReactionRecoveryPolicy::AutoSkipGap
-            {
-                if let Some(metrics) = &self.runtime_metrics {
-                    metrics.lifecycle.record_startup_rejection(
-                        crate::metrics::StartupRejectionReason::SnapshotSkipGap,
-                    );
-                }
-                anyhow::bail!("snapshot recovery is incompatible with AutoSkipGap");
-            }
-            if !reaction.needs_snapshot_on_fresh_start()
-                && policy == ReactionRecoveryPolicy::AutoReset
-            {
-                if let Some(metrics) = &self.runtime_metrics {
-                    metrics.lifecycle.record_startup_rejection(
-                        crate::metrics::StartupRejectionReason::NoSnapshotAutoReset,
-                    );
-                }
-                anyhow::bail!("needs_snapshot_on_fresh_start=false is incompatible with AutoReset (snapshot/bootstrap support is required)");
-            }
-        }
+        self.validate_startup(self.reaction()?.as_ref()).await?;
         if life.replace_on_start {
             let reaction = self
                 .constructor
@@ -621,67 +726,36 @@ impl ReactionPluginHost {
         }
         let reaction = self.initialize_locked(&mut life).await?;
         self.observations.reset().await;
-        if !self.deferred_validation {
-            for query in &self.query_ids {
-                self.catalog
-                    .ready(
-                        query,
-                        Duration::from_secs(self.options.bootstrap_timeout_secs),
-                    )
-                    .await?;
+        let mut heads = BTreeMap::new();
+        for query_id in &self.query_ids {
+            let query = self
+                .catalog
+                .ready(
+                    query_id,
+                    Duration::from_secs(self.options.bootstrap_timeout_secs),
+                )
+                .await?;
+            if reaction.is_durable() {
+                self.validate_output_persistence(query_id).await?;
             }
+            let head = match &mut supplied_heads {
+                Some(heads) => heads.remove(query_id).ok_or_else(|| {
+                    anyhow::anyhow!("query '{query_id}' has no subscription head")
+                })?,
+                None => self.catalog.query_head(query_id)?,
+            };
+            Self::validate_head(query_id, &head, &query, &output_view(&query)?)?;
+            heads.insert(query_id.clone(), head);
         }
+        anyhow::ensure!(
+            supplied_heads.as_ref().map_or(true, BTreeMap::is_empty),
+            "reaction received subscription heads for unrelated queries"
+        );
         life.needs_stop = true;
         self.observations.drive(reaction.start(), false).await?;
         life.accepted.clear();
+        life.query_generations.clear();
         for query_id in &self.query_ids {
-            let checkpoint = if let Some(store) = &self.services.state_store {
-                crate::reactions::checkpoint::read_checkpoint(store.as_ref(), &self.id, query_id)
-                    .await?
-            } else {
-                None
-            };
-            if self.deferred_validation
-                && checkpoint.is_none()
-                && !reaction.needs_snapshot_on_fresh_start()
-            {
-                if let Some(query) = self
-                    .catalog
-                    .get(&ComponentId::try_new(query_id.as_str())?)?
-                {
-                    if query.status.as_ref().is_some_and(|status| {
-                        !matches!(
-                            *status.borrow(),
-                            ComponentStatus::Starting | ComponentStatus::Running
-                        )
-                    }) {
-                        let view = output_view(&query)?;
-                        if let Some(metrics) = self
-                            .runtime_metrics
-                            .as_ref()
-                            .and_then(|metrics| metrics.queries.get(query_id))
-                        {
-                            metrics.record_fetch_outbox();
-                        }
-                        if let Some(store) = &self.services.state_store {
-                            crate::reactions::checkpoint::write_checkpoint(
-                                store.as_ref(),
-                                &self.id,
-                                query_id,
-                                &ReactionCheckpoint {
-                                    sequence: 0,
-                                    config_hash: view.config_hash,
-                                },
-                            )
-                            .await?;
-                        }
-                        life.accepted
-                            .insert(query_id.clone(), (view.snapshot.generation, 0));
-                        self.write_metadata(query_id, &view, false).await?;
-                        continue;
-                    }
-                }
-            }
             let query = self
                 .catalog
                 .ready(
@@ -690,6 +764,11 @@ impl ReactionPluginHost {
                 )
                 .await?;
             let view = output_view(&query)?;
+            let head = &heads[query_id];
+            Self::validate_head(query_id, head, &query, &view)?;
+            life.query_generations
+                .insert(query_id.clone(), query.generation);
+            let checkpoint = self.checkpoint(query_id).await?;
             let metadata = self.read_metadata(query_id).await?;
             if checkpoint
                 .as_ref()
@@ -717,30 +796,7 @@ impl ReactionPluginHost {
                 .recovery
                 .unwrap_or_else(|| reaction.default_recovery_policy());
             let needs_snapshot = checkpoint.is_none() && reaction.needs_snapshot_on_fresh_start();
-            let after = checkpoint
-                .as_ref()
-                .map(|checkpoint| checkpoint.sequence)
-                .unwrap_or(0);
-            let replay = outbox_response(&view, after);
-            if !needs_snapshot {
-                if let Some(metrics) = self
-                    .runtime_metrics
-                    .as_ref()
-                    .and_then(|metrics| metrics.queries.get(query_id))
-                {
-                    metrics.record_fetch_outbox();
-                    if matches!(&replay, Err(FetchError::OutboxGap(_))) {
-                        metrics.record_gap_detection();
-                    }
-                }
-            }
-            if needs_snapshot
-                || changed && policy == ReactionRecoveryPolicy::AutoReset
-                || replay.is_err() && policy == ReactionRecoveryPolicy::AutoReset
-            {
-                if !reaction.needs_snapshot_on_fresh_start() {
-                    anyhow::bail!("reaction cannot reset from a snapshot");
-                }
+            if needs_snapshot || changed && policy == ReactionRecoveryPolicy::AutoReset {
                 let reset = changed || checkpoint.is_some();
                 self.bootstrap(reaction.as_ref(), query_id, &view, checkpoint, reset)
                     .await?;
@@ -750,26 +806,56 @@ impl ReactionPluginHost {
                 );
                 continue;
             }
-            if changed && policy != ReactionRecoveryPolicy::AutoReset {
-                if self.deferred_validation {
-                    anyhow::bail!("{policy:?} recovery policy cannot recover a checkpoint from a different query/reset generation");
+            if changed {
+                anyhow::bail!("{policy:?} recovery policy cannot recover a checkpoint from a different query/reset generation");
+            }
+            if checkpoint.is_none() {
+                // This is an explicit fresh-start cutoff, not acknowledgement of
+                // retained results. Arrivals during start remain above this head.
+                self.seed_position(query_id, head.sequence, &view).await?;
+                life.accepted
+                    .insert(query_id.clone(), (head.generation, head.sequence));
+                continue;
+            }
+            let after = checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.sequence)
+                .unwrap_or(0);
+            let replay = outbox_response(&view, after);
+            if let Some(metrics) = self
+                .runtime_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.queries.get(query_id))
+            {
+                metrics.record_fetch_outbox();
+                if matches!(&replay, Err(FetchError::OutboxGap(_))) {
+                    metrics.record_gap_detection();
                 }
-                anyhow::bail!("reaction checkpoint belongs to a different query/reset generation");
+            }
+            if replay.is_err() && policy == ReactionRecoveryPolicy::AutoReset {
+                self.bootstrap(reaction.as_ref(), query_id, &view, checkpoint, true)
+                    .await?;
+                life.accepted.insert(
+                    query_id.clone(),
+                    (view.snapshot.generation, view.snapshot.as_of_sequence),
+                );
+                continue;
             }
             let entries = match replay {
                 Ok(replay) => replay.results,
-                Err(FetchError::OutboxGap(_))
-                    if policy == ReactionRecoveryPolicy::AutoSkipGap
-                        || checkpoint.is_none() && !reaction.needs_snapshot_on_fresh_start() =>
-                {
-                    log::warn!("Reaction {} starts at available retained history for query {query_id}; missing history is not claimed handled", self.id);
-                    view.retained
-                        .iter()
-                        .map(|event| QueryChangeCodec::to_legacy_result(event).map(Arc::new))
-                        .collect::<std::result::Result<Vec<_>, _>>()?
+                Err(FetchError::OutboxGap(_)) if policy == ReactionRecoveryPolicy::AutoSkipGap => {
+                    log::warn!("Reaction {} skips unavailable history for query {query_id} per AutoSkipGap", self.id);
+                    self.seed_position(query_id, view.snapshot.as_of_sequence, &view)
+                        .await?;
+                    life.accepted.insert(
+                        query_id.clone(),
+                        (view.snapshot.generation, view.snapshot.as_of_sequence),
+                    );
+                    continue;
                 }
                 Err(error) => return Err(error.into()),
             };
+            self.write_metadata(query_id, &view, false).await?;
             let mut accepted = after;
             for result in entries {
                 self.observations
@@ -783,21 +869,6 @@ impl ReactionPluginHost {
             // This is delivery dedup within this run, never a handled checkpoint.
             life.accepted
                 .insert(query_id.clone(), (view.snapshot.generation, accepted));
-            if self.deferred_validation {
-                if let Some(store) = &self.services.state_store {
-                    crate::reactions::checkpoint::write_checkpoint(
-                        store.as_ref(),
-                        &self.id,
-                        query_id,
-                        &ReactionCheckpoint {
-                            sequence: accepted,
-                            config_hash: view.config_hash,
-                        },
-                    )
-                    .await?;
-                }
-            }
-            self.write_metadata(query_id, &view, false).await?;
         }
         life.running = true;
         Ok(())
@@ -812,6 +883,10 @@ impl ReactionPluginHost {
             life.replace_on_start = self.constructor.is_some();
         }
         life.running = false;
+        if self.owned {
+            life.accepted.clear();
+            life.query_generations.clear();
+        }
         Ok(())
     }
     pub(crate) async fn initialize_component(&self) -> anyhow::Result<()> {
@@ -891,43 +966,71 @@ impl ReactionPluginHost {
             anyhow::bail!("reaction does not subscribe to this query");
         }
         let generation = QueryChangeCodec::query_generation(envelope)?;
-        let mut life = self.life.lock().await;
-        if !life.running {
-            anyhow::bail!("reaction is not activated");
-        }
-        if let Some((previous_generation, sequence)) = life.accepted.get(&result.query_id) {
-            if generation < *previous_generation {
-                anyhow::bail!("obsolete query reset generation");
+        let mut recovered_gap = false;
+        loop {
+            let mut life = self.life.lock().await;
+            if !life.running {
+                anyhow::bail!("reaction is not activated");
             }
-            if generation == *previous_generation && result.sequence <= *sequence {
-                if let Some(metrics) = self
-                    .runtime_metrics
-                    .as_ref()
-                    .and_then(|metrics| metrics.queries.get(&result.query_id))
-                {
-                    metrics.record_dedup_skip();
+            if self.owned {
+                self.require_query_generation(&life, &result.query_id)?;
+            }
+            if let Some((previous_generation, sequence)) = life.accepted.get(&result.query_id) {
+                if generation < *previous_generation {
+                    anyhow::bail!("obsolete query reset generation");
                 }
-                return Ok(());
+                if generation == *previous_generation && result.sequence <= *sequence {
+                    if let Some(metrics) = self
+                        .runtime_metrics
+                        .as_ref()
+                        .and_then(|metrics| metrics.queries.get(&result.query_id))
+                    {
+                        metrics.record_dedup_skip();
+                    }
+                    return Ok(());
+                }
+                if generation != *previous_generation {
+                    anyhow::bail!("query generation changed; restart reaction recovery");
+                }
+                if self.owned && result.sequence > sequence.saturating_add(1) {
+                    anyhow::ensure!(
+                        !recovered_gap,
+                        "query output is still discontinuous after recovery"
+                    );
+                    drop(life);
+                    self.recover_gap(&result.query_id).await?;
+                    recovered_gap = true;
+                    continue;
+                }
             }
-            if generation != *previous_generation {
-                anyhow::bail!("query generation changed; restart reaction recovery");
+            self.observations
+                .drive(self.reaction()?.enqueue_query_result(result.clone()), false)
+                .await?;
+            if let Some(metrics) = self
+                .runtime_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.queries.get(&result.query_id))
+            {
+                metrics.record_checkpoint(
+                    result.sequence,
+                    self.catalog.current_sequence(&result.query_id)?,
+                );
             }
+            life.accepted
+                .insert(result.query_id.clone(), (generation, result.sequence));
+            return Ok(());
         }
-        self.observations
-            .drive(self.reaction()?.enqueue_query_result(result.clone()), false)
-            .await?;
-        if let Some(metrics) = self
-            .runtime_metrics
-            .as_ref()
-            .and_then(|metrics| metrics.queries.get(&result.query_id))
-        {
-            metrics.record_checkpoint(
-                result.sequence,
-                self.catalog.current_sequence(&result.query_id)?,
-            );
-        }
-        life.accepted
-            .insert(result.query_id, (generation, result.sequence));
+    }
+
+    fn require_query_generation(&self, life: &ReactionLife, query: &str) -> anyhow::Result<()> {
+        let current = self
+            .catalog
+            .get(&ComponentId::try_new(query)?)?
+            .ok_or_else(|| anyhow::anyhow!("query '{query}' is no longer registered"))?;
+        anyhow::ensure!(
+            life.query_generations.get(query) == Some(&current.generation),
+            "query '{query}' was replaced; restart the reaction subscription"
+        );
         Ok(())
     }
     pub async fn deprovision_owned(&self) -> anyhow::Result<()> {
@@ -940,6 +1043,24 @@ impl ReactionPluginHost {
     pub(crate) async fn start_component(&self) -> anyhow::Result<()> {
         self.start().await
     }
+    pub(crate) async fn validate_startup_configuration(&self) -> anyhow::Result<()> {
+        self.validate_startup(self.reaction()?.as_ref()).await
+    }
+    pub(crate) async fn wait_query_ready(&self, query: &str) -> anyhow::Result<()> {
+        self.catalog
+            .ready(
+                query,
+                Duration::from_secs(self.options.bootstrap_timeout_secs),
+            )
+            .await?;
+        Ok(())
+    }
+    pub(crate) async fn start_component_with_heads(
+        &self,
+        heads: BTreeMap<String, QuerySubscriptionHead>,
+    ) -> anyhow::Result<()> {
+        self.start_with_heads(Some(heads)).await
+    }
     pub(crate) async fn stop_component(&self) -> anyhow::Result<()> {
         self.stop().await
     }
@@ -951,17 +1072,70 @@ impl ReactionPluginHost {
     }
     pub(crate) async fn recover_gap(&self, query: &str) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
+        anyhow::ensure!(
+            self.owned,
+            "borrowed reaction recovery belongs to its owner"
+        );
+        self.require_query_generation(&life, query)?;
         let reaction = self.reaction()?;
         let policy = self
             .options
             .recovery
             .unwrap_or_else(|| reaction.default_recovery_policy());
-        if let Some(metrics) = self
+        let metrics = self
             .runtime_metrics
             .as_ref()
-            .and_then(|metrics| metrics.queries.get(query))
-        {
+            .and_then(|metrics| metrics.queries.get(query));
+        if let Some(metrics) = metrics {
             metrics.record_gap_detection();
+            metrics.record_fetch_outbox();
+        }
+        let entry = self
+            .catalog
+            .ready(
+                query,
+                Duration::from_secs(self.options.bootstrap_timeout_secs),
+            )
+            .await?;
+        let view = output_view(&entry)?;
+        self.require_query_generation(&life, query)?;
+        let (generation, after) = life.accepted.get(query).copied().ok_or_else(|| {
+            anyhow::anyhow!("query '{query}' has no accepted subscription position")
+        })?;
+        if generation == view.snapshot.generation {
+            match outbox_response(&view, after) {
+                Ok(replay) => {
+                    let mut last = after;
+                    let contiguous = replay.results.iter().all(|result| {
+                        let next = last.checked_add(1) == Some(result.sequence);
+                        last = result.sequence;
+                        next
+                    }) && last == view.snapshot.as_of_sequence;
+                    if contiguous {
+                        // Recover transport loss from the last in-memory acceptance.
+                        // The reaction alone checkpoints completed side effects.
+                        for result in replay.results {
+                            self.observations
+                                .drive(
+                                    reaction.enqueue_query_result(result.as_ref().clone()),
+                                    false,
+                                )
+                                .await?;
+                            self.require_query_generation(&life, query)?;
+                            life.accepted
+                                .insert(query.to_owned(), (generation, result.sequence));
+                        }
+                        if let Some(metrics) = metrics {
+                            metrics.record_checkpoint(last, self.catalog.current_sequence(query)?);
+                        }
+                        return Ok(());
+                    }
+                }
+                Err(FetchError::OutboxGap(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(metrics) = metrics {
             metrics.record_recovery_trigger(match policy {
                 ReactionRecoveryPolicy::Strict => crate::metrics::RecoveryPolicyKind::Strict,
                 ReactionRecoveryPolicy::AutoReset => crate::metrics::RecoveryPolicyKind::AutoReset,
@@ -973,41 +1147,19 @@ impl ReactionPluginHost {
         if policy == ReactionRecoveryPolicy::Strict {
             anyhow::bail!("Strict recovery policy cannot recover a live query output gap");
         }
-        let entry = self
-            .catalog
-            .ready(
-                query,
-                Duration::from_secs(self.options.bootstrap_timeout_secs),
-            )
-            .await?;
-        let view = output_view(&entry)?;
-        let checkpoint = life
-            .accepted
-            .get(query)
-            .map(|(_, sequence)| ReactionCheckpoint {
-                sequence: *sequence,
-                config_hash: view.config_hash,
-            });
+        let checkpoint = self.checkpoint(query).await?;
         if policy == ReactionRecoveryPolicy::AutoReset {
             self.bootstrap(reaction.as_ref(), query, &view, checkpoint, true)
                 .await?;
-        } else if let Some(store) = &self.services.state_store {
-            crate::reactions::checkpoint::write_checkpoint(
-                store.as_ref(),
-                &self.id,
-                query,
-                &ReactionCheckpoint {
-                    sequence: view.snapshot.as_of_sequence,
-                    config_hash: view.config_hash,
-                },
-            )
-            .await?;
+        } else {
+            self.seed_position(query, view.snapshot.as_of_sequence, &view)
+                .await?;
         }
         life.accepted.insert(
             query.to_owned(),
             (view.snapshot.generation, view.snapshot.as_of_sequence),
         );
-        self.write_metadata(query, &view, false).await
+        Ok(())
     }
 }
 #[async_trait]
@@ -1054,7 +1206,7 @@ impl ComputationComponent for ReactionPluginAdapter {
         &self.descriptor
     }
     async fn start(&mut self) -> anyhow::Result<()> {
-        self.host.start().await
+        self.host.start_component().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.host.stop().await
@@ -1190,5 +1342,41 @@ impl ComponentFactory for ReactionPluginAdapterFactory {
             ReactionPluginAdapter::new(context.component_id, host)
                 .map_err(ComponentCreationError::terminal)?,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbox_head_lookup_preserves_generation_without_requiring_retained_history() {
+        for sequence in [0, 42, u64::MAX] {
+            let view = OutputView {
+                snapshot: QuerySnapshot {
+                    rows: im::HashMap::new(),
+                    as_of_sequence: sequence,
+                    generation: 7,
+                },
+                retained: Vec::new(),
+                config_hash: 123,
+                incarnation: None,
+            };
+            let head = outbox_response(&view, u64::MAX).unwrap();
+            assert!(head.results.is_empty());
+            assert_eq!(head.latest_sequence, sequence);
+            assert_eq!(head.output_generation, 7);
+            assert_eq!(head.config_hash, 123);
+            if sequence == 42 {
+                assert!(matches!(
+                    outbox_response(&view, 0),
+                    Err(FetchError::OutboxGap(_))
+                ));
+                assert!(matches!(
+                    outbox_response(&view, 43),
+                    Err(FetchError::OutboxGap(_))
+                ));
+            }
+        }
     }
 }

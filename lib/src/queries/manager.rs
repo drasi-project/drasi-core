@@ -48,6 +48,7 @@ use crate::managers::{
     ComponentLogRegistry,
 };
 use crate::metrics::QueryOutputMetrics;
+use crate::queries::config_hash::output_reset_in_progress_hash;
 use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
     next_output_generation, reconcile_durable_output, DurableOutputInconsistency, FetchError,
@@ -568,12 +569,6 @@ struct DurableOutputStores {
     checkpoint_store: Arc<dyn CheckpointStore>,
     outbox_writer: Option<Arc<dyn OutboxWriter>>,
     live_results_writer: Option<Arc<dyn LiveResultsWriter>>,
-}
-
-/// Config-hash value written before an AutoReset wipe so a crash mid-wipe is
-/// visible on the next start (`stored_hash == !current_hash`).
-fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
-    !current_hash
 }
 
 async fn persisted_output_generation(

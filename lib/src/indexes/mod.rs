@@ -101,6 +101,35 @@ pub mod factory;
 pub use config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use factory::{IndexError, IndexFactory};
 
+#[cfg(feature = "computation")]
+pub(crate) fn operation_error(
+    query: &str,
+    operation: &str,
+    error: drasi_core::interface::IndexError,
+) -> drasi_core::interface::IndexError {
+    drasi_core::interface::IndexError::Other(
+        anyhow::Error::new(error)
+            .context(format!("Query '{query}' failed to {operation}"))
+            .into_boxed_dyn_error(),
+    )
+}
+
+#[cfg(feature = "computation")]
+pub(crate) fn check_clear(
+    query: &str,
+    operation: &str,
+    result: Result<(), drasi_core::interface::IndexError>,
+    allow_unsupported: bool,
+) -> Result<(), drasi_core::interface::IndexError> {
+    match result {
+        Err(drasi_core::interface::IndexError::NotSupported) if allow_unsupported => {
+            log::debug!("Query '{query}' provider does not support {operation}");
+            Ok(())
+        }
+        result => result.map_err(|error| operation_error(query, operation, error)),
+    }
+}
+
 // Re-export IndexSet and IndexBackendPlugin from drasi_core for plugin developers
 pub use drasi_core::interface::CreatedIndexes;
 pub use drasi_core::interface::IndexBackendPlugin;

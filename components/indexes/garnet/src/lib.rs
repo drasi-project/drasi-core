@@ -41,6 +41,7 @@ pub mod element_index;
 pub mod future_queue;
 pub mod live_results;
 pub mod outbox;
+mod output_scope;
 mod plugin;
 pub mod result_index;
 pub(crate) mod session_state;

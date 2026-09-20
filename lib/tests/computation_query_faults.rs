@@ -244,14 +244,29 @@ impl ComputationIndexProvider for Provider {
     }
 }
 fn provider(path: &std::path::Path) -> Arc<dyn ComputationIndexProvider> {
-    Arc::new(RocksDbComputationProvider::new(
-        path,
-        RocksIndexOptions::new(
-            false,
-            false,
-            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("budget"),
-        ),
-    ))
+    provider_for(path, Backend::Computation)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Backend {
+    Computation,
+    OrdinaryPlugin,
+}
+
+fn provider_for(path: &std::path::Path, backend: Backend) -> Arc<dyn ComputationIndexProvider> {
+    match backend {
+        Backend::Computation => Arc::new(RocksDbComputationProvider::new(
+            path,
+            RocksIndexOptions::new(
+                false,
+                false,
+                RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("budget"),
+            ),
+        )),
+        Backend::OrdinaryPlugin => LegacyIndexProviderAdapter::new(Arc::new(
+            drasi_index_rocksdb::RocksDbIndexProvider::new(path, false, false),
+        )),
+    }
 }
 fn definition(temporal: bool) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
@@ -297,9 +312,15 @@ fn input(sequence: u64) -> InputEnvelope {
 
 #[tokio::test]
 async fn atomic_fault_matrix_rolls_back_all_output_and_source_progress_before_fencing() {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        atomic_fault_matrix(backend).await;
+    }
+}
+
+async fn atomic_fault_matrix(backend: Backend) {
     for point in [Fault::InputCheckpoint, Fault::LiveRows, Fault::ResultSequence, Fault::Commit] {
         let temp = tempfile::tempdir().expect("temp");
-        let base = provider(temp.path());
+        let base = provider_for(temp.path(), backend);
         let fault = Injection::new(point);
         let progress = Arc::new(
             QuerySourceProgress::new("faults", ComponentId::try_new("query").expect("id"))
@@ -368,6 +389,84 @@ async fn atomic_fault_matrix_rolls_back_all_output_and_source_progress_before_fe
             1
         );
         reopened.stop().await.expect("stop");
+    }
+}
+
+#[tokio::test]
+async fn outbox_overflow_eviction_rolls_back_with_failed_output_and_stays_bounded_after_restart() {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        let temp = tempfile::tempdir().expect("temp");
+        let base = provider_for(temp.path(), backend);
+        let fault = Injection::new(Fault::LiveRows);
+        let definition = || {
+            let mut query = definition(false);
+            query.outbox_capacity = NonZeroUsize::new(2).expect("capacity");
+            query
+        };
+        {
+            let mut query = ContinuousQueryTransformer::new(
+                definition(),
+                Arc::new(Provider {
+                    inner: base.clone(),
+                    fault: fault.clone(),
+                }),
+            )
+            .await
+            .expect("construct");
+            query.start().await.expect("start");
+            query.transform(input(1)).await.expect("first output");
+            query.transform(input(2)).await.expect("full outbox");
+            fault.armed.store(true, Ordering::Release);
+            assert!(query.transform(input(3)).await.is_err(), "{backend:?}");
+            query.stop().await.expect("stop failed query");
+        }
+        {
+            let mut query = ContinuousQueryTransformer::new(definition(), base.clone())
+                .await
+                .expect("reopen");
+            query.start().await.expect("recover rolled-back eviction");
+            assert_eq!(
+                query
+                    .results()
+                    .replay(0)
+                    .expect("original retained prefix")
+                    .iter()
+                    .map(|output| output.system().sequence())
+                    .collect::<Vec<_>>(),
+                vec![1, 2],
+                "{backend:?}"
+            );
+            let output = query
+                .transform(input(3))
+                .await
+                .expect("replay failed input");
+            assert_eq!(output.len(), 1);
+            let result = QueryChangeCodec::to_legacy_result(&output[0].envelope).expect("result");
+            assert!(matches!(
+                result.results.as_slice(),
+                [drasi_lib::channels::ResultDiff::Update { before, after, .. }]
+                    if before == &serde_json::json!({"name": "name-2"})
+                        && after == &serde_json::json!({"name": "name-3"})
+            ));
+            query.stop().await.expect("stop successful replay");
+        }
+        let mut query = ContinuousQueryTransformer::new(definition(), base)
+            .await
+            .expect("second reopen");
+        query.start().await.expect("recover committed retention");
+        assert!(query.results().replay(0).is_err());
+        assert_eq!(
+            query
+                .results()
+                .replay(1)
+                .expect("retained suffix")
+                .iter()
+                .map(|output| output.system().sequence())
+                .collect::<Vec<_>>(),
+            vec![2, 3],
+            "{backend:?}"
+        );
+        query.stop().await.expect("cleanup");
     }
 }
 
@@ -504,9 +603,15 @@ async fn bootstrap_projection_and_completion_checkpoint_failures_keep_handoff_cl
 
 #[tokio::test]
 async fn cancelled_committed_source_and_future_outputs_recover_without_reusing_sequences() {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        cancelled_committed_outputs(backend).await;
+    }
+}
+
+async fn cancelled_committed_outputs(backend: Backend) {
     for temporal in [false, true] {
         let temp = tempfile::tempdir().expect("temp");
-        let base = provider(temp.path());
+        let base = provider_for(temp.path(), backend);
         let fault = Injection::new(Fault::CommittedThenWait);
         {
             let mut query = ContinuousQueryTransformer::new(
@@ -589,9 +694,15 @@ async fn cancelled_committed_source_and_future_outputs_recover_without_reusing_s
 
 #[tokio::test]
 async fn strict_recovery_rejects_missing_or_gapped_committed_output() {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        strict_recovery_output_validation(backend).await;
+    }
+}
+
+async fn strict_recovery_output_validation(backend: Backend) {
     for gap in [false, true] {
         let temp = tempfile::tempdir().expect("temp");
-        let base = provider(temp.path());
+        let base = provider_for(temp.path(), backend);
         {
             let mut query = ContinuousQueryTransformer::new(definition(false), base.clone())
                 .await

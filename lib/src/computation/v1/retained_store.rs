@@ -428,11 +428,14 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
         outbox
-            .append(&self.key, position, &bytes)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?;
-        outbox
-            .trim_to_capacity(&self.key, self.capacity.get())
+            .append_and_trim(
+                &self.key,
+                position,
+                &bytes,
+                position
+                    .saturating_sub(self.capacity.get() as u64)
+                    .saturating_add(1),
+            )
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
         checkpoint

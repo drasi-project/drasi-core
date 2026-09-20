@@ -1,7 +1,7 @@
 # ComputationGraph: technical design and implementation
 
 **Status:** as-built design of the experimental, default-off `computation` feature,
-including the current working-tree changes. Last reviewed: 2026-09-18.
+including the current working-tree changes. Last reviewed: 2026-09-20.
 
 **Scope:** `drasi_lib::computation::v1`, its DrasiLib hosting layer, and the ordinary
 API adapters selected by `ExecutionMode::ComputationGraph`. This is not a redesign
@@ -747,6 +747,46 @@ can create an application startup deadlock even when the data graph is acyclic.
 The controller emits availability/readiness notifications. Reconnection or
 recovery in response to arbitrary messages is component policy, not a universal
 automatic restart rule.
+
+### 8.1 Persistent query output and reaction recovery
+
+An atomic query commit includes index changes, source progress, the result
+sequence, retained output and its eviction, and live result rows. Ordinary
+`IndexBackendPlugin` providers opt into this contract through
+`supports_atomic_query_output()`. The integration adapter gives their writers
+the same transaction domain as the index session, and the ordinary query
+pipeline selects atomic publication. Providers that do not opt in keep explicit
+non-atomic publication and its pending-output failure marker; merely supplying
+persistent writers is not proof of a shared transaction.
+
+`stage_result_sequence` and `append_and_trim` run before the outer commit.
+Scoped wrappers preserve these provider operations rather than falling back to
+standalone sequence writes or count-based retention. Only committed results
+become visible in the live query view. Recovery verifies the retained tail,
+snapshot and committed sequence before accepting further input.
+
+Reaction queue acceptance is not successful delivery. The adapter tracks accepted
+positions in memory, while the reaction saves handled progress after its side
+effect completes. Completed snapshot bootstrap can establish a saved starting
+position. A new trigger reaction instead captures the query head while attaching
+its receiver and skips only history preceding that subscription; results arriving
+during startup remain eligible. A durable reaction requires both a persistent
+state store and persistent output from every subscribed query.
+
+Persistent output generations distinguish separate lifetimes of the same query
+ID and configuration. Reset and deletion retain that identity metadata even when
+rows, source checkpoints and retained output are cleared. Recreating the query
+therefore cannot make an old reaction checkpoint describe unrelated new output.
+This generation is separate from component-handle generations. Native resets can
+retain the output sequence high-water mark while advancing the output generation;
+stop/restart without a reset preserves both.
+
+The ordinary profile also writes a reset-in-progress configuration marker before
+destructive cleanup, including for checkpoint-only providers without an outbox.
+The matching configuration hash is published only after clearing and checkpoint
+writes succeed. A failed wipe therefore cannot make a later start resume a
+partially cleared index. Optional legacy index-clear operations retain their
+`NotSupported` handling; actual cleanup errors remain visible and retain ownership.
 
 ## 9. Reconciliation, replacement and cleanup
 

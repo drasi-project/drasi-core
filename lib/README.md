@@ -262,7 +262,7 @@ instance is **not** a substitute for awaited shutdown.
 | Reaction | `ReactionPluginHost` injects a native snapshot fetcher, bridges bootstrap/checkpoint/outbox recovery, and accepts normal `QueryResult` values. Completion is always **Accepted**, never Handled. |
 | Bootstrap | Install the existing provider with `SourcePluginHost::set_bootstrap_provider` before initialization. `LegacySourceBootstrap` coordinates snapshots and live subscriptions with native query progress. |
 | State, identity, WAL, secrets | `pipeline.services()` exposes graph-scoped instance services. Captured services and bootstrap providers are explicit declared dependencies, separate from desired configuration. State and WAL partitions include instance and graph identity. |
-| Index backend | `LegacyIndexProviderAdapter` runs existing `IndexBackendPlugin` implementations in separate namespaces. The pipeline also uses the instance's named/default index provider. Legacy writers imply **non-atomic** publication; persistent recovery requires actual checkpoint, outbox and live-result stores. |
+| Index backend | `LegacyIndexProviderAdapter` runs existing `IndexBackendPlugin` implementations in separate namespaces. Providers explicitly declaring `supports_atomic_query_output()` use a shared output/index transaction in the ordinary pipeline. Other providers retain **non-atomic** publication; persistent recovery requires actual checkpoint, outbox and live-result stores. |
 | Native index provider | `query_provider(query_id, provider, publication)` supplies an explicit native provider, including supported atomic output bundles. Callers sharing a provider across instances must supply distinct graph/storage scopes. |
 
 An underlying plugin has exactly one lifecycle owner. A borrowed source is not
@@ -370,9 +370,10 @@ disposition.
 The structural cases deliberately still exercise their named implementation:
 for example, QueryBase's task fields, ComponentGraph's internal transitions and
 the old priority heap. They are **not** counted as native runtime substitution.
-The three A1 cases additionally pin legacy private persistence bytes, commit order
-and a known lost-output boundary; native failure handling does not reproduce that
-defect. Shared real-runtime tests cover bootstrap, joins, checkpoints, recovery,
+The three A1 cases additionally pin legacy private persistence bytes, transactional
+commit/rollback order, replay and restart deduplication. Their original identifiers
+are retained, but they now assert the corrected failure handling merged from main
+rather than preserving the former lost-output defect. Shared real-runtime tests cover bootstrap, joins, checkpoints, recovery,
 CRUD, lifecycle, snapshots/outbox and metrics. Native-route assertions inspect
 the actual native query type and its constructed, running query component.
 Additional full-result cases cover fanout and scheduled-future metadata without
@@ -1495,23 +1496,27 @@ impl Reaction for MyReaction {
 
 ### Reaction Recovery
 
-Reactions can be stopped and restarted without losing data. The runtime uses a **checkpoint + outbox** mechanism to guarantee at-least-once delivery:
+Recovery combines a saved delivery position with retained query results. With
+persistent query output and a reaction that saves progress only after handling,
+restart can redeliver unconfirmed results: this is **at-least-once**, not
+exactly-once delivery. Retention gaps follow the configured recovery policy.
 
 ```
-Query emits results ──► Outbox (ring buffer) ──► Forwarder ──► Reaction
-                           │                        │
-                           │  retained N entries     │  tracks last-delivered seq
-                           │                        ▼
-                           │                   Checkpoint Store
-                           │                   (persisted per query)
-                           ▼
-                     On restart: replay from checkpoint
+Query -> Outbox -> Forwarder -> Reaction handler -> External effect
+           ^                                           |
+           | replay after saved position               | success
+           +---------------- Checkpoint store <--------+
 ```
 
 1. Each query retains the last N results in an **outbox** (configurable via `with_outbox_capacity`).
-2. Reactions persist a **checkpoint** (sequence number + config hash) after each delivered result.
+2. Reactions persist a **checkpoint** after successful handling, not merely after enqueueing. The saved position includes the query configuration/output identity.
 3. On restart, the runtime replays missed results from the outbox starting after the checkpoint.
 4. If the checkpoint falls behind the outbox (gap), the **recovery policy** decides what happens.
+
+A fresh trigger reaction starts at the head captured when it subscribes; it does
+not replay earlier retained notifications. Snapshot reactions can instead request
+an initial bootstrap. The ComputationGraph adapter never advances handled
+checkpoints simply because catch-up results entered a plugin queue.
 
 #### Recovery Policies
 
@@ -1582,6 +1587,7 @@ The runtime validates these constraints at startup:
 | Condition | Result |
 |-----------|--------|
 | `is_durable=true` + no durable `StateStoreProvider` | Error: cannot persist checkpoints |
+| `is_durable=true` + any query with volatile output | Error: the saved position could not be recovered after restart |
 | `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` | Error: contradictory (skip means no snapshot) |
 | `needs_snapshot_on_fresh_start=false` + `AutoReset` | Error: AutoReset requires bootstrap capability |
 

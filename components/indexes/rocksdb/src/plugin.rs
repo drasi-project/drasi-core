@@ -275,6 +275,10 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
     fn is_volatile(&self) -> bool {
         false // RocksDB is persistent
     }
+
+    fn supports_atomic_query_output(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +361,7 @@ mod tests {
     fn test_rocksdb_index_provider_is_volatile() {
         let provider = RocksDbIndexProvider::new("/tmp/test", false, false);
         assert!(!provider.is_volatile());
+        assert!(provider.supports_atomic_query_output());
     }
 
     #[test]

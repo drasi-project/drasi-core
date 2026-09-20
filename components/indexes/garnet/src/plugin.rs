@@ -119,11 +119,16 @@ impl GarnetIndexProvider {
     pub fn is_archive_enabled(&self) -> bool {
         self.enable_archive
     }
-}
 
-#[async_trait]
-impl IndexBackendPlugin for GarnetIndexProvider {
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
+    /// Create indexes under a storage scope while binding output to a logical query.
+    ///
+    /// The primary query keeps the scope's existing output keys. Other output
+    /// identities are isolated within that scope's Redis Cluster hash tag.
+    pub async fn create_scoped_indexes(
+        &self,
+        storage_scope: &str,
+        query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
         let client = redis::Client::open(self.connection_string.as_str())
             .map_err(IndexError::connection_failed)?;
         let connection = client
@@ -135,32 +140,35 @@ impl IndexBackendPlugin for GarnetIndexProvider {
         let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
 
         let element_index = Arc::new(GarnetElementIndex::new(
-            query_id,
+            storage_scope,
             connection.clone(),
             self.enable_archive,
             session_state.clone(),
         ));
         let result_index = Arc::new(GarnetResultIndex::new(
-            query_id,
+            storage_scope,
             connection.clone(),
             session_state.clone(),
         ));
         let future_queue = Arc::new(GarnetFutureQueue::new(
-            query_id,
+            storage_scope,
             connection.clone(),
             session_state.clone(),
         ));
         let checkpoint_store = Arc::new(GarnetCheckpointStore::new(
-            query_id,
+            storage_scope,
             connection.clone(),
             session_state.clone(),
         ));
         let outbox_writer = Arc::new(
-            GarnetOutboxWriter::new(query_id, connection.clone())
+            GarnetOutboxWriter::new(storage_scope, connection.clone())
+                .with_query_id(query_id)
                 .with_session_state(session_state.clone()),
         );
         let live_results_writer = Arc::new(
-            GarnetLiveResultsWriter::new(query_id, connection).with_session_state(session_state),
+            GarnetLiveResultsWriter::new(storage_scope, connection)
+                .with_query_id(query_id)
+                .with_session_state(session_state),
         );
 
         Ok(CreatedIndexes {
@@ -176,9 +184,28 @@ impl IndexBackendPlugin for GarnetIndexProvider {
             live_results_writer: Some(live_results_writer),
         })
     }
+}
+
+#[async_trait]
+impl IndexBackendPlugin for GarnetIndexProvider {
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(query_id, query_id).await
+    }
+
+    async fn create_scoped_indexes(
+        &self,
+        storage_scope: &str,
+        query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
+        GarnetIndexProvider::create_scoped_indexes(self, storage_scope, query_id).await
+    }
 
     fn is_volatile(&self) -> bool {
         false // Redis/Garnet is persistent (assuming persistence is configured)
+    }
+
+    fn supports_atomic_query_output(&self) -> bool {
+        true
     }
 }
 
@@ -212,6 +239,7 @@ mod tests {
     fn test_garnet_index_provider_is_volatile() {
         let provider = GarnetIndexProvider::new("redis://localhost:6379", None, false); // DevSkim: ignore DS162092
         assert!(!provider.is_volatile());
+        assert!(provider.supports_atomic_query_output());
     }
 
     #[test]

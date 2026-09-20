@@ -17,17 +17,18 @@ use async_trait::async_trait;
 use drasi_core::{
     computation::{
         ComputationIndexProvider, ComputationIndexes, ComputationIoScope, ComputationResource,
-        ScopedIndex,
+        ScopedIndex, TransactionDomain,
     },
     interface::{
         CheckpointStore, IndexBackendPlugin, IndexError, IndexSet, LiveResultsWriter, OutboxWriter,
+        SessionControl,
     },
 };
 use std::sync::Arc;
 
-/// Reuses an existing index plugin in an isolated computation namespace. Its
-/// legacy writers are never inferred to participate in one atomic transaction.
-/// Use explicit non-atomic publication unless a native provider proves more.
+/// Reuses an existing index plugin in an isolated computation namespace.
+/// Output writers participate atomically only when the provider explicitly
+/// guarantees their participation in the index session.
 pub struct LegacyIndexProviderAdapter {
     provider: Arc<dyn IndexBackendPlugin>,
     construction: Arc<ComputationIoScope>,
@@ -103,26 +104,42 @@ impl ComputationIndexProvider for LegacyIndexProviderAdapter {
         super::data::validate_identifier("graph", graph).map_err(IndexError::other)?;
         super::data::validate_identifier("query", query).map_err(IndexError::other)?;
         let key = Self::storage_key(self.namespace.as_deref(), graph, query);
+        let query_id = query.to_owned();
         let provider = self.provider.clone();
         let original = self
             .construction
-            .run_async(async move { provider.create_indexes(&key).await })
+            .run_async(async move { provider.create_scoped_indexes(&key, &query_id).await })
             .await?;
         let work = Arc::new(ComputationIoScope::default());
+        let control: Arc<dyn SessionControl> = Arc::new(ScopedIndex::from_arc(
+            original.set.session_control,
+            work.clone(),
+        ));
+        let domain = TransactionDomain::new(control.clone());
+        let atomic_output = self.provider.supports_atomic_query_output();
         let checkpoint = original.checkpoint_store.map(|value| {
-            ComputationResource::independent(
-                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn CheckpointStore>
+            ComputationResource::participating(
+                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn CheckpointStore>,
+                &domain,
             )
         });
         let outbox = original.outbox_writer.map(|value| {
-            ComputationResource::independent(
-                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn OutboxWriter>
-            )
+            let writer =
+                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn OutboxWriter>;
+            if atomic_output {
+                ComputationResource::participating(writer, &domain)
+            } else {
+                ComputationResource::independent(writer)
+            }
         });
         let live = original.live_results_writer.map(|value| {
-            ComputationResource::independent(
-                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn LiveResultsWriter>
-            )
+            let writer =
+                Arc::new(ScopedIndex::from_arc(value, work.clone())) as Arc<dyn LiveResultsWriter>;
+            if atomic_output {
+                ComputationResource::participating(writer, &domain)
+            } else {
+                ComputationResource::independent(writer)
+            }
         });
         let indexes = ComputationIndexes::try_new(
             IndexSet {
@@ -142,12 +159,9 @@ impl ComputationIndexProvider for LegacyIndexProviderAdapter {
                     original.set.future_queue,
                     work.clone(),
                 )),
-                session_control: Arc::new(ScopedIndex::from_arc(
-                    original.set.session_control,
-                    work.clone(),
-                )),
+                session_control: control,
             },
-            None,
+            Some(domain),
             checkpoint,
             outbox,
             live,

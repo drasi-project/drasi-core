@@ -144,6 +144,31 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
             .run_async(async move { inner.append(&query, sequence, &data).await })
             .await
     }
+    async fn append_and_trim(
+        &self,
+        query: &str,
+        sequence: u64,
+        data: &[u8],
+        retain_from: u64,
+    ) -> Result<usize, IndexError> {
+        let inner = self.inner.clone();
+        let query = query.to_owned();
+        let data = data.to_vec();
+        self.work
+            .run_async(async move {
+                inner
+                    .append_and_trim(&query, sequence, &data, retain_from)
+                    .await
+            })
+            .await
+    }
+    async fn trim_before(&self, query: &str, retain_from: u64) -> Result<usize, IndexError> {
+        let inner = self.inner.clone();
+        let query = query.to_owned();
+        self.work
+            .run_async(async move { inner.trim_before(&query, retain_from).await })
+            .await
+    }
     async fn read_from(&self, query: &str, after: u64) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();

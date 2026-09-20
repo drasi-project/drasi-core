@@ -640,6 +640,358 @@ async fn graph_writers_require_a_session_and_transactional_trim_rolls_back() {
 }
 
 #[tokio::test]
+async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reopen() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    {
+        let resources = resources(temp.path(), "generation").await;
+        let checkpoint = resources.checkpoint_store().expect("checkpoint");
+        assert_eq!(
+            checkpoint
+                .read_output_generation(QUERY)
+                .await
+                .expect("new generation"),
+            None
+        );
+        checkpoint
+            .write_output_generation(QUERY, u64::MAX)
+            .await
+            .expect("persist lifetime");
+        checkpoint
+            .write_result_sequence(QUERY, 41)
+            .await
+            .expect("persist standalone head");
+        checkpoint
+            .write_output_generation("other-query", 3)
+            .await
+            .expect("other lifetime");
+        checkpoint
+            .write_result_sequence("other-query", 9)
+            .await
+            .expect("other head");
+        checkpoint
+            .write_config_hash(123)
+            .await
+            .expect("config hash");
+        let session = SessionGuard::begin(resources.indexes().session_control.clone())
+            .await
+            .expect("begin source checkpoint");
+        checkpoint
+            .stage_checkpoint("source", 7, Some(&Bytes::from_static(b"position")))
+            .await
+            .expect("stage source");
+        session.commit().await.expect("commit source");
+        {
+            let _session = SessionGuard::begin(resources.indexes().session_control.clone())
+                .await
+                .expect("begin discarded head");
+            checkpoint
+                .stage_result_sequence(QUERY, 42)
+                .await
+                .expect("stage head");
+            assert_eq!(
+                checkpoint
+                    .read_result_sequence(QUERY)
+                    .await
+                    .expect("committed head"),
+                Some(41)
+            );
+        }
+        checkpoint
+            .clear_checkpoints()
+            .await
+            .expect("clear bootstrap state");
+        assert!(checkpoint
+            .read_all_checkpoints()
+            .await
+            .expect("cleared sources")
+            .is_empty());
+        assert_eq!(
+            checkpoint.read_config_hash().await.expect("cleared config"),
+            None
+        );
+        assert_eq!(
+            checkpoint
+                .read_result_sequence(QUERY)
+                .await
+                .expect("retained head"),
+            Some(41)
+        );
+        assert_eq!(
+            checkpoint
+                .read_output_generation(QUERY)
+                .await
+                .expect("retained lifetime"),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            checkpoint
+                .read_output_generation("other-query")
+                .await
+                .expect("other retained lifetime"),
+            Some(3)
+        );
+        assert_eq!(
+            checkpoint
+                .read_result_sequence("other-query")
+                .await
+                .expect("other retained head"),
+            Some(9)
+        );
+    }
+    let reopened = resources(temp.path(), "generation").await;
+    let checkpoint = reopened.checkpoint_store().expect("checkpoint");
+    assert!(checkpoint
+        .read_all_checkpoints()
+        .await
+        .expect("sources after reopen")
+        .is_empty());
+    assert_eq!(
+        checkpoint
+            .read_config_hash()
+            .await
+            .expect("config after reopen"),
+        None
+    );
+    assert_eq!(
+        checkpoint
+            .read_result_sequence(QUERY)
+            .await
+            .expect("head after reopen"),
+        Some(41)
+    );
+    assert_eq!(
+        checkpoint
+            .read_output_generation(QUERY)
+            .await
+            .expect("lifetime after reopen"),
+        Some(u64::MAX)
+    );
+    let other = resources(temp.path(), "other-generation").await;
+    assert_eq!(
+        other
+            .checkpoint_store()
+            .expect("checkpoint")
+            .read_output_generation(QUERY)
+            .await
+            .expect("isolated lifetime"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn native_retention_includes_staged_entries_and_respects_full_width_sequences() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let resources = resources(temp.path(), "retention").await;
+    let outbox = resources.outbox_writer().expect("outbox");
+    let session = SessionGuard::begin(resources.indexes().session_control.clone())
+        .await
+        .expect("begin seed");
+    outbox.append(QUERY, 1, b"one").await.expect("one");
+    outbox.append(QUERY, 2, b"two").await.expect("two");
+    outbox
+        .append("metadata", 1, b"marker")
+        .await
+        .expect("metadata");
+    assert_eq!(outbox.trim_before(QUERY, 0).await.expect("retain all"), 0);
+    session.commit().await.expect("commit seed");
+    {
+        let _session = SessionGuard::begin(resources.indexes().session_control.clone())
+            .await
+            .expect("begin rolled back retention");
+        assert_eq!(
+            outbox
+                .append_and_trim(QUERY, 3, b"three", 3)
+                .await
+                .expect("staged trim"),
+            2
+        );
+        assert_eq!(
+            outbox
+                .read_latest_sequence(QUERY)
+                .await
+                .expect("committed head"),
+            Some(2)
+        );
+    }
+    assert_eq!(
+        outbox
+            .read_from(QUERY, 0)
+            .await
+            .expect("rolled back retention"),
+        [(1, b"one".to_vec()), (2, b"two".to_vec())]
+    );
+    let session = SessionGuard::begin(resources.indexes().session_control.clone())
+        .await
+        .expect("begin committed retention");
+    assert_eq!(
+        outbox
+            .append_and_trim(QUERY, 3, b"three", 3)
+            .await
+            .expect("staged trim"),
+        2
+    );
+    session.commit().await.expect("commit retention");
+    assert_eq!(
+        outbox
+            .read_from(QUERY, 0)
+            .await
+            .expect("retained staged append"),
+        [(3, b"three".to_vec())]
+    );
+    let session = SessionGuard::begin(resources.indexes().session_control.clone())
+        .await
+        .expect("begin boundary writes");
+    outbox
+        .append(QUERY, u64::MAX - 1, b"penultimate")
+        .await
+        .expect("penultimate");
+    assert_eq!(
+        outbox
+            .append_and_trim(QUERY, u64::MAX, b"last", u64::MAX - 1)
+            .await
+            .expect("boundary retention"),
+        1
+    );
+    assert_eq!(
+        outbox
+            .trim_to_capacity(QUERY, 1)
+            .await
+            .expect("retain maximum"),
+        1
+    );
+    resources
+        .checkpoint_store()
+        .expect("checkpoint")
+        .stage_result_sequence(QUERY, u64::MAX)
+        .await
+        .expect("stage maximum head");
+    session.commit().await.expect("commit maximum");
+    assert_eq!(
+        outbox
+            .read_latest_sequence(QUERY)
+            .await
+            .expect("maximum head"),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        outbox
+            .read_from(QUERY, u64::MAX - 1)
+            .await
+            .expect("read maximum"),
+        [(u64::MAX, b"last".to_vec())]
+    );
+    assert!(outbox
+        .read_from(QUERY, u64::MAX)
+        .await
+        .expect("past maximum")
+        .is_empty());
+    assert_eq!(
+        outbox
+            .read_from("metadata", 0)
+            .await
+            .expect("metadata is isolated"),
+        [(1, b"marker".to_vec())]
+    );
+    drop(resources);
+    let reopened = self::resources(temp.path(), "retention").await;
+    let outbox = reopened.outbox_writer().expect("outbox");
+    assert_eq!(
+        reopened
+            .checkpoint_store()
+            .expect("checkpoint")
+            .read_result_sequence(QUERY)
+            .await
+            .expect("reopened maximum head"),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        outbox
+            .read_latest_sequence(QUERY)
+            .await
+            .expect("reopened outbox head"),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        outbox
+            .read_from(QUERY, 0)
+            .await
+            .expect("persisted retention"),
+        [(u64::MAX, b"last".to_vec())]
+    );
+    assert!(outbox
+        .read_from(QUERY, u64::MAX)
+        .await
+        .expect("reopened past maximum")
+        .is_empty());
+    assert_eq!(
+        outbox
+            .read_from("metadata", 0)
+            .await
+            .expect("reopened metadata"),
+        [(1, b"marker".to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn existing_native_outbox_namespaces_remain_readable_without_migration() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let graph = "persisted-format";
+    let metadata_id = "recovery:people";
+    let marker = br#"{"sequence":7,"in_progress":false,"generation":3}"#;
+    let encode = |id: &str| -> String { id.bytes().map(|byte| format!("{byte:02x}")).collect() };
+    let path = temp.path().join("computation-v1").join(encode(graph));
+    {
+        let options = RocksIndexOptions::new(
+            false,
+            false,
+            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("memory budget"),
+        );
+        let db = drasi_index_rocksdb::open_unified_db(
+            path.to_str().expect("UTF-8 path"),
+            &encode(QUERY),
+            &options,
+        )
+        .expect("existing native database");
+        let cf = db.cf_handle("outbox").expect("outbox column");
+        for (id, sequence, data) in [
+            (QUERY, 7u64, b"envelope".as_slice()),
+            (metadata_id, 1u64, marker.as_slice()),
+        ] {
+            let mut key = id.as_bytes().to_vec();
+            key.push(0);
+            key.extend_from_slice(&sequence.to_be_bytes());
+            db.put_cf(&cf, key, data)
+                .expect("persist existing key format");
+        }
+    }
+    let reopened = resources(temp.path(), graph).await;
+    let outbox = reopened.outbox_writer().expect("outbox");
+    assert_eq!(
+        outbox.read_from(QUERY, 0).await.expect("existing envelope"),
+        [(7, b"envelope".to_vec())]
+    );
+    assert_eq!(
+        outbox
+            .read_from(metadata_id, 0)
+            .await
+            .expect("existing recovery metadata"),
+        [(1, marker.to_vec())]
+    );
+    let session = SessionGuard::begin(reopened.indexes().session_control.clone())
+        .await
+        .expect("begin primary clear");
+    outbox.clear(QUERY).await.expect("clear primary");
+    session.commit().await.expect("commit clear");
+    assert_eq!(
+        outbox
+            .read_from(metadata_id, 0)
+            .await
+            .expect("recovery metadata survives"),
+        [(1, marker.to_vec())]
+    );
+}
+
+#[tokio::test]
 async fn computation_and_legacy_queries_with_same_id_use_separate_persistent_storage() {
     let temp = tempfile::tempdir().expect("temp dir");
     let legacy = RocksDbIndexProvider::new(temp.path(), false, false)

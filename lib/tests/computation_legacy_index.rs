@@ -15,7 +15,7 @@
 #![cfg(feature = "computation")]
 use drasi_core::{
     computation::ComputationIndexProvider,
-    interface::IndexBackendPlugin,
+    interface::{CreatedIndexes, IndexBackendPlugin, IndexError},
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
 use drasi_lib::computation::v1::*;
@@ -60,7 +60,7 @@ fn options() -> QueryOptions {
 }
 
 #[tokio::test]
-async fn ordinary_rocks_plugin_runs_in_an_isolated_non_atomic_computation_scope_and_recovers() {
+async fn ordinary_rocks_plugin_proves_atomic_output_and_recovers_in_an_isolated_scope() {
     let temp = tempfile::tempdir().expect("temp");
     let plugin = Arc::new(drasi_index_rocksdb::RocksDbIndexProvider::new(
         temp.path(),
@@ -74,8 +74,8 @@ async fn ordinary_rocks_plugin_runs_in_an_isolated_non_atomic_computation_scope_
             .await
             .expect("adapted indexes");
         assert!(
-            resources.atomic_result_transaction().is_err(),
-            "legacy writers do not prove a shared output transaction"
+            resources.atomic_result_transaction().is_ok(),
+            "the provider explicitly guarantees a shared output transaction"
         );
         resources
             .cleanup()
@@ -85,11 +85,15 @@ async fn ordinary_rocks_plugin_runs_in_an_isolated_non_atomic_computation_scope_
             .expect("cleanup");
     }
     let text = "MATCH (n:Item) RETURN n.name AS name";
+    let options = QueryOptions {
+        publication: QueryPublicationMode::Atomic,
+        ..options()
+    };
     {
         let mut query = ContinuousQueryTransformer::new_with_options(
             definition(text),
             adapter.clone(),
-            options(),
+            options,
         )
         .await
         .expect("construct");
@@ -107,7 +111,7 @@ async fn ordinary_rocks_plugin_runs_in_an_isolated_non_atomic_computation_scope_
         let mut query = ContinuousQueryTransformer::new_with_options(
             definition(text),
             adapter.clone(),
-            options(),
+            options,
         )
         .await
         .expect("reopen");
@@ -132,6 +136,39 @@ async fn ordinary_rocks_plugin_runs_in_an_isolated_non_atomic_computation_scope_
         .expect("legacy read")
         .is_empty());
     adapter.shutdown().await.expect("constructor work cleanup");
+}
+
+struct UndeclaredAtomicity(Arc<dyn IndexBackendPlugin>);
+
+#[async_trait::async_trait]
+impl IndexBackendPlugin for UndeclaredAtomicity {
+    async fn create_indexes(&self, id: &str) -> std::result::Result<CreatedIndexes, IndexError> {
+        self.0.create_indexes(id).await
+    }
+
+    fn is_volatile(&self) -> bool {
+        self.0.is_volatile()
+    }
+}
+
+#[tokio::test]
+async fn output_atomicity_is_not_inferred_from_the_presence_of_persistent_writers() {
+    let temp = tempfile::tempdir().expect("temp");
+    let adapter = LegacyIndexProviderAdapter::new(Arc::new(UndeclaredAtomicity(Arc::new(
+        drasi_index_rocksdb::RocksDbIndexProvider::new(temp.path(), false, false),
+    ))));
+    let resources = adapter
+        .create_indexes("unproven", "query")
+        .await
+        .expect("resources");
+    assert!(resources.atomic_result_transaction().is_err());
+    resources
+        .cleanup()
+        .expect("I/O owner")
+        .shutdown()
+        .await
+        .expect("cleanup");
+    adapter.shutdown().await.expect("provider cleanup");
 }
 
 #[tokio::test]

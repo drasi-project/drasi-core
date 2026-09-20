@@ -96,6 +96,14 @@ impl ContinuousQueryTransformer {
         let resources = query.resources();
         let mut highwater = self.results.snapshot()?.as_of_sequence;
         let old_marker = self.read_reset_marker().await?;
+        let persisted_generation = if let Some(checkpoint) = resources.checkpoint_store() {
+            checkpoint
+                .read_output_generation(self.definition.id.as_str())
+                .await?
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let generation = self
             .results
             .snapshot()?
@@ -106,6 +114,7 @@ impl ContinuousQueryTransformer {
                     .map(|marker| marker.generation)
                     .unwrap_or(0),
             )
+            .max(persisted_generation)
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("query reset generation exhausted"))?;
         if self.provider.is_volatile() {
@@ -156,21 +165,45 @@ impl ContinuousQueryTransformer {
                 })
                 .await?;
         }
+        if let Some(checkpoint) = resources.checkpoint_store() {
+            if let Some(hash) = self.legacy_hash.filter(|_| self.runtime_compatibility) {
+                checkpoint
+                    .write_config_hash(crate::queries::config_hash::output_reset_in_progress_hash(
+                        hash,
+                    ))
+                    .await?;
+            }
+            checkpoint
+                .write_output_generation(self.definition.id.as_str(), generation)
+                .await?;
+        }
         let config = self.definition.configuration_bytes(&self.execution)?;
         query
             .resource_transaction(|| async {
-                resources.indexes().element_index.clear().await?;
-                match resources.indexes().archive_index.clear().await {
-                    Err(IndexError::NotSupported) if self.runtime_compatibility => {
-                        log::debug!(
-                            "Query {} has no clearable archive index",
-                            self.definition.id
-                        );
-                    }
-                    result => result?,
-                }
-                resources.indexes().result_index.clear().await?;
-                query.future_queue().clear().await?;
+                crate::indexes::check_clear(
+                    self.definition.id.as_str(),
+                    "clear element index",
+                    resources.indexes().element_index.clear().await,
+                    self.runtime_compatibility,
+                )?;
+                crate::indexes::check_clear(
+                    self.definition.id.as_str(),
+                    "clear archive index",
+                    resources.indexes().archive_index.clear().await,
+                    self.runtime_compatibility,
+                )?;
+                crate::indexes::check_clear(
+                    self.definition.id.as_str(),
+                    "clear result index",
+                    resources.indexes().result_index.clear().await,
+                    self.runtime_compatibility,
+                )?;
+                crate::indexes::check_clear(
+                    self.definition.id.as_str(),
+                    "clear future queue",
+                    query.future_queue().clear().await,
+                    self.runtime_compatibility,
+                )?;
                 if let Some(outbox) = resources.outbox_writer() {
                     outbox.clear(self.definition.id.as_str()).await?;
                 }
@@ -182,11 +215,6 @@ impl ContinuousQueryTransformer {
                     checkpoint
                         .stage_checkpoint(CONFIGURATION, 1, Some(&config))
                         .await?;
-                    if self.runtime_compatibility {
-                        if let Some(hash) = self.legacy_hash {
-                            checkpoint.write_config_hash(hash).await?;
-                        }
-                    }
                     checkpoint.stage_checkpoint(BOOTSTRAP, 0, None).await?;
                     checkpoint
                         .stage_result_sequence(self.definition.id.as_str(), highwater)
@@ -195,6 +223,13 @@ impl ContinuousQueryTransformer {
                 Ok(())
             })
             .await?;
+        if let (true, Some(hash), Some(checkpoint)) = (
+            self.runtime_compatibility,
+            self.legacy_hash,
+            resources.checkpoint_store(),
+        ) {
+            checkpoint.write_config_hash(hash).await?;
+        }
         self.results
             .state
             .write()

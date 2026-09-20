@@ -21,6 +21,7 @@ use drasi_lib::{computation::v1::*, DrasiLib, Reaction, StateStoreProvider};
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -39,6 +40,15 @@ fn endpoint(node: &str, name: &str) -> Endpoint {
 }
 fn resource(value: &str) -> ResourceId {
     ResourceId::try_new(value).expect("resource")
+}
+fn test_root() -> tempfile::TempDir {
+    let parent =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/computation-plugin-reaction");
+    std::fs::create_dir_all(&parent).expect("test directory");
+    tempfile::Builder::new()
+        .prefix("adapter-")
+        .tempdir_in(parent)
+        .expect("test root")
 }
 struct Bootstrap;
 #[async_trait]
@@ -90,12 +100,14 @@ async fn make_graph(
     host: Arc<ReactionPluginHost>,
     catalog: QueryResultsCatalog,
     services: &LegacyPluginServices,
+    index_path: &Path,
 ) -> ComputationGraph {
     make_graph_query(
         host,
         catalog,
         services,
         "MATCH (n:Item) RETURN n.name AS name",
+        index_path,
     )
     .await
 }
@@ -104,8 +116,9 @@ async fn make_graph_query(
     catalog: QueryResultsCatalog,
     services: &LegacyPluginServices,
     text: &str,
+    index_path: &Path,
 ) -> ComputationGraph {
-    let query = ContinuousQueryTransformer::new(
+    let query = ContinuousQueryTransformer::new_with_options(
         ContinuousQueryDefinition {
             graph_id: "reactions".into(),
             id: id("query"),
@@ -114,7 +127,13 @@ async fn make_graph_query(
             output_stream: StreamId::try_new("query/out").expect("stream"),
             outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
         },
-        Arc::new(drasi_core::computation::InMemoryComputationProvider),
+        LegacyIndexProviderAdapter::new(Arc::new(drasi_index_rocksdb::RocksDbIndexProvider::new(
+            index_path, false, false,
+        ))),
+        QueryOptions {
+            recovery: QueryRecoveryPolicy::Strict,
+            publication: QueryPublicationMode::NonAtomic,
+        },
     )
     .await
     .expect("query")
@@ -211,7 +230,7 @@ async fn make_graph_query(
 
 #[tokio::test]
 async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_contexts() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = test_root();
     let state = Arc::new(
         drasi_state_store_redb::RedbStateStoreProvider::new(temp.path().join("state.redb"))
             .expect("store"),
@@ -238,7 +257,7 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
         },
     )
     .expect("host");
-    let graph = make_graph(host, catalog, &services).await;
+    let graph = make_graph(host, catalog, &services, &temp.path().join("indexes")).await;
     let managed = drasi
         .add_computation_graph(graph, ComputationOptions { auto_start: false })
         .await
@@ -328,6 +347,7 @@ impl Reaction for FailingBootstrap {
 
 #[tokio::test]
 async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
+    let temp = test_root();
     let drasi = DrasiLib::builder().build().await.expect("instance");
     let services = drasi
         .computation_plugin_services("reactions")
@@ -350,7 +370,7 @@ async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
     .expect("host");
     let managed = drasi
         .add_computation_graph(
-            make_graph(host, catalog, &services).await,
+            make_graph(host, catalog, &services, &temp.path().join("indexes")).await,
             ComputationOptions { auto_start: false },
         )
         .await
@@ -396,7 +416,7 @@ async fn existing_snapshot_reaction_accepts_empty_and_aggregate_native_snapshots
             Some(serde_json::json!({"total":1})),
         ),
     ] {
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = test_root();
         let drasi = DrasiLib::builder()
             .with_state_store_provider(Arc::new(
                 drasi_state_store_redb::RedbStateStoreProvider::new(temp.path().join("state.redb"))
@@ -420,7 +440,8 @@ async fn existing_snapshot_reaction_accepts_empty_and_aggregate_native_snapshots
             ReactionPluginOptions::default(),
         )
         .expect("host");
-        let graph = make_graph_query(host, catalog, &services, text).await;
+        let graph =
+            make_graph_query(host, catalog, &services, text, &temp.path().join("indexes")).await;
         let handle = drasi
             .add_computation_graph(graph, ComputationOptions { auto_start: false })
             .await
@@ -464,7 +485,9 @@ impl Reaction for MaterializedReaction {
         vec!["query".into()]
     }
     fn is_durable(&self) -> bool {
-        true
+        // These fixtures deliberately recover from volatile-query incarnations.
+        // Persisting a checkpoint does not promise durable upstream output.
+        false
     }
     fn needs_snapshot_on_fresh_start(&self) -> bool {
         true
@@ -575,7 +598,7 @@ async fn materialization_instance(state: Arc<dyn StateStoreProvider>) -> DrasiLi
 
 #[tokio::test]
 async fn persisted_reaction_checkpoint_is_reset_for_a_new_volatile_query_incarnation() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = test_root();
     let state = Arc::new(
         drasi_state_store_redb::RedbStateStoreProvider::new(temp.path().join("state.redb"))
             .expect("state"),
@@ -619,7 +642,7 @@ async fn persisted_reaction_checkpoint_is_reset_for_a_new_volatile_query_incarna
 
 #[tokio::test]
 async fn a_gap_after_a_sequence_zero_checkpoint_discards_prior_materialized_state() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = test_root();
     let drasi = materialization_instance(Arc::new(
         drasi_state_store_redb::RedbStateStoreProvider::new(temp.path().join("state.redb"))
             .expect("state"),

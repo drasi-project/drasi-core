@@ -33,6 +33,7 @@ struct FactoryProvider {
     factory: Arc<IndexFactory>,
     backend: StorageBackendRef,
     volatile: bool,
+    atomic_output: bool,
 }
 #[async_trait]
 impl IndexBackendPlugin for FactoryProvider {
@@ -42,8 +43,21 @@ impl IndexBackendPlugin for FactoryProvider {
             .await
             .map_err(IndexError::other)
     }
+    async fn create_scoped_indexes(
+        &self,
+        storage_scope: &str,
+        query_id: &str,
+    ) -> std::result::Result<CreatedIndexes, IndexError> {
+        self.factory
+            .build_scoped(&self.backend, storage_scope, query_id)
+            .await
+            .map_err(IndexError::other)
+    }
     fn is_volatile(&self) -> bool {
         self.volatile
+    }
+    fn supports_atomic_query_output(&self) -> bool {
+        self.atomic_output
     }
 }
 
@@ -532,17 +546,26 @@ impl ComputationPipelineBuilder {
                         .indexes
                         .computation_backend(config.storage_backend.as_ref())
                         .map_err(|error| invalid(error.to_string()))?;
+                    let atomic_output = self
+                        .indexes
+                        .configured_provider(Some(&backend))
+                        .is_some_and(|(_, provider)| provider.supports_atomic_query_output());
                     let provider = LegacyIndexProviderAdapter::scoped(
                         Arc::new(FactoryProvider {
                             factory: self.indexes.clone(),
                             backend,
                             volatile,
+                            atomic_output,
                         }),
                         self.services.scope.clone(),
                     )?;
                     (
                         provider.resource(),
-                        QueryPublicationMode::NonAtomic,
+                        if atomic_output {
+                            QueryPublicationMode::Atomic
+                        } else {
+                            QueryPublicationMode::NonAtomic
+                        },
                         ResourceOwnership::Graph,
                     )
                 };

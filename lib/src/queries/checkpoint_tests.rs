@@ -2046,6 +2046,21 @@ mod tests {
             self.fail_write_result_sequence
                 .store(fail, std::sync::atomic::Ordering::Relaxed);
         }
+
+        fn check_result_sequence_write(&self) -> Result<(), drasi_core::interface::IndexError> {
+            if self
+                .fail_write_result_sequence
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(drasi_core::interface::IndexError::other(
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "injected result sequence write failure",
+                    ),
+                ));
+            }
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -2126,6 +2141,7 @@ mod tests {
             query_id: &str,
             sequence: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
+            self.check_result_sequence_write()?;
             self.inner.stage_result_sequence(query_id, sequence).await
         }
 
@@ -2134,17 +2150,7 @@ mod tests {
             query_id: &str,
             sequence: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
-            if self
-                .fail_write_result_sequence
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                return Err(drasi_core::interface::IndexError::other(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "injected write_result_sequence failure",
-                    ),
-                ));
-            }
+            self.check_result_sequence_write()?;
             self.inner.write_result_sequence(query_id, sequence).await
         }
 
@@ -2328,7 +2334,7 @@ mod tests {
 
         async fn get_element_index(&self, query_id: &str) -> Arc<ClearFailingElementIndex> {
             let mut map = self.element_indexes.write().await;
-            map.entry(query_id.to_string())
+            map.entry(crate::test_helpers::checkpoints::storage_id(query_id))
                 .or_insert_with(|| Arc::new(ClearFailingElementIndex::new()))
                 .clone()
         }
@@ -2500,7 +2506,7 @@ mod tests {
         let current_hash = crate::queries::compute_config_hash(&config);
         add_query(&query_manager, &graph, config).await.unwrap();
         let result = query_manager
-            .start_query("clear-fail-query".to_string())
+            .start_query_and_wait("clear-fail-query".to_string())
             .await;
         assert!(
             result.is_err(),
@@ -2558,7 +2564,7 @@ mod tests {
             create_persistent_query_config("wipe-fail-query", vec!["wipe-fail-src".to_string()]);
         add_query(&query_manager, &graph, config).await.unwrap();
         let result = query_manager
-            .start_query("wipe-fail-query".to_string())
+            .start_query_and_wait("wipe-fail-query".to_string())
             .await;
         assert!(
             result.is_err(),
@@ -2598,7 +2604,7 @@ mod tests {
             create_persistent_query_config("stale-idx-query", vec!["stale-idx-src".to_string()]);
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("stale-idx-query".to_string())
+            .start_query_and_wait("stale-idx-query".to_string())
             .await
             .unwrap();
         wait_for_component_status(
@@ -2635,13 +2641,13 @@ mod tests {
         store.write_config_hash(99999).await.unwrap();
         store.set_fail_write_result_sequence(true);
         let failed = query_manager
-            .start_query("stale-idx-query".to_string())
+            .start_query_and_wait("stale-idx-query".to_string())
             .await;
         assert!(failed.is_err(), "wipe failure should abort start");
 
         store.set_fail_write_result_sequence(false);
         query_manager
-            .start_query("stale-idx-query".to_string())
+            .start_query_and_wait("stale-idx-query".to_string())
             .await
             .unwrap();
         wait_for_component_status(
@@ -2691,7 +2697,7 @@ mod tests {
         );
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
-            .start_query("mismatch-idx-query".to_string())
+            .start_query_and_wait("mismatch-idx-query".to_string())
             .await
             .unwrap();
         wait_for_component_status(
@@ -2734,7 +2740,7 @@ mod tests {
         element_index.set_fail_clear(true);
 
         let failed = query_manager
-            .start_query("mismatch-idx-query".to_string())
+            .start_query_and_wait("mismatch-idx-query".to_string())
             .await;
         assert!(
             failed.is_err(),
@@ -2743,7 +2749,7 @@ mod tests {
 
         element_index.set_fail_clear(false);
         query_manager
-            .start_query("mismatch-idx-query".to_string())
+            .start_query_and_wait("mismatch-idx-query".to_string())
             .await
             .unwrap();
         wait_for_component_status(

@@ -172,12 +172,29 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
 
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let prefix = make_prefix(query_id);
+        let require_session = session_state.has_active_session()?;
 
         task::spawn_blocking(move || {
             let cf = db
                 .cf_handle(LIVE_RESULTS_CF)
                 .expect("live_results cf not found");
+            if require_session {
+                return session_state.with_txn(|txn| {
+                    for item in txn.iterator_cf(
+                        &cf,
+                        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+                    ) {
+                        let (key, _) = item.map_err(IndexError::other)?;
+                        if !key.starts_with(&prefix) {
+                            break;
+                        }
+                        txn.delete_cf(&cf, key).map_err(IndexError::other)?;
+                    }
+                    Ok(())
+                });
+            }
             let iter = db.iterator_cf(
                 &cf,
                 IteratorMode::From(&prefix, rocksdb::Direction::Forward),

@@ -226,7 +226,12 @@ impl CheckpointStore for ComputationCheckpointStore {
                 let mut batch = WriteBatchWithTransaction::<true>::default();
                 for entry in db.iterator_cf(&cf, IteratorMode::Start) {
                     let (key, _) = entry.map_err(IndexError::other)?;
-                    batch.delete_cf(&cf, key);
+                    if key.starts_with(SOURCE_SEQUENCE.as_bytes())
+                        || key.starts_with(SOURCE_POSITION.as_bytes())
+                        || key.as_ref() == b"config_hash"
+                    {
+                        batch.delete_cf(&cf, key);
+                    }
                 }
                 db.write(batch).map_err(IndexError::other)
             })
@@ -284,6 +289,29 @@ impl CheckpointStore for ComputationCheckpointStore {
 
     async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         self.read_number(format!("result_sequence:{query_id}"))
+            .await
+    }
+
+    async fn write_output_generation(
+        &self,
+        query_id: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        let key = format!("output_generation:{query_id}");
+        let db = self.db.clone();
+        self.work
+            .run(move || {
+                let cf = db
+                    .cf_handle(STREAM_STATE_CF)
+                    .ok_or(IndexError::CorruptedData)?;
+                db.put_cf(&cf, key, generation.to_be_bytes())
+                    .map_err(IndexError::other)
+            })
+            .await
+    }
+
+    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        self.read_number(format!("output_generation:{query_id}"))
             .await
     }
 }

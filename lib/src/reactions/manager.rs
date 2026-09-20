@@ -1957,9 +1957,8 @@ mod tests {
     async fn fresh_trigger_does_not_enqueue_retained_outbox() {
         let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let core = build_core_with_store(store.clone()).await;
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",
@@ -2020,9 +2019,8 @@ mod tests {
     async fn subscribe_head_is_not_raised_by_later_outbox() {
         let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let core = build_core_with_store(store).await;
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",
@@ -2052,9 +2050,8 @@ mod tests {
     async fn fresh_trigger_does_not_persist_zero_when_query_unavailable() {
         let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
         let core = build_core_with_store(store.clone()).await;
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",
@@ -2106,9 +2103,8 @@ mod tests {
             .build()
             .await
             .unwrap();
-        core.start().await.unwrap();
-
         let mut event_rx = core.subscribe_all_component_events();
+        core.start().await.unwrap();
         crate::test_helpers::wait_for_component_status(
             &mut event_rx,
             "q1",

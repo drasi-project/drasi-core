@@ -140,6 +140,32 @@ impl OutboxWriter for ComputationOutboxWriter {
         Ok(())
     }
 
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
+        let prefix = prefix(query_id)?;
+        let db = self.db.clone();
+        let session = self.session.clone();
+        self.work
+            .run(move || {
+                let cf = db.cf_handle(OUTBOX_CF).ok_or(IndexError::CorruptedData)?;
+                session.with_txn(|transaction| {
+                    let mut removed = 0;
+                    for entry in transaction
+                        .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward))
+                    {
+                        let (key, _) = entry.map_err(IndexError::other)?;
+                        if !key.starts_with(&prefix) || sequence(&key, prefix.len())? >= retain_from
+                        {
+                            break;
+                        }
+                        transaction.delete_cf(&cf, key).map_err(IndexError::other)?;
+                        removed += 1;
+                    }
+                    Ok(removed)
+                })
+            })
+            .await
+    }
+
     async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let prefix = prefix(query_id)?;
         let db = self.db.clone();

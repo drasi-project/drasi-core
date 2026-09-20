@@ -325,6 +325,7 @@ pub struct ContinuousQueryTransformer {
     output_persistent: bool,
     legacy_hash: Option<u64>,
     checkpoint_view: Arc<RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
+    output_persistence_view: Arc<RwLock<Option<bool>>>,
     publication_identity: Arc<RwLock<Option<uuid::Uuid>>>,
 }
 
@@ -405,6 +406,7 @@ impl ContinuousQueryTransformer {
             output_persistent: false,
             legacy_hash: None,
             checkpoint_view: Arc::new(RwLock::new(None)),
+            output_persistence_view: Arc::new(RwLock::new(None)),
             publication_identity: Arc::new(RwLock::new(Some(uuid::Uuid::new_v4()))),
         };
         if !defer_build {
@@ -459,6 +461,7 @@ impl ContinuousQueryTransformer {
             hasher.finish(),
             self.publication_identity.clone(),
             self.checkpoint_view.clone(),
+            self.output_persistence_view.clone(),
         )?);
         Ok(self)
     }
@@ -525,6 +528,10 @@ impl ContinuousQueryTransformer {
     }
 
     async fn build(&mut self) -> anyhow::Result<()> {
+        *self
+            .output_persistence_view
+            .write()
+            .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? = None;
         let mut resources = self
             .provider
             .create_indexes(&self.definition.graph_id, self.definition.id.as_str())
@@ -533,6 +540,9 @@ impl ContinuousQueryTransformer {
             resources = resources.with_fallback_checkpoint(Arc::new(drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore::new()));
         }
         self.output_persistent = !self.provider.is_volatile()
+            && resources
+                .checkpoint_store()
+                .is_some_and(|store| store.is_persistent())
             && resources.outbox_writer().is_some()
             && resources.live_results_writer().is_some();
         if self.output_persistent {
@@ -545,14 +555,9 @@ impl ContinuousQueryTransformer {
         {
             resources.atomic_result_transaction()?;
         }
-        if !self.runtime_compatibility
-            && !self.provider.is_volatile()
-            && (resources.checkpoint_store().is_none()
-                || resources.outbox_writer().is_none()
-                || resources.live_results_writer().is_none())
-        {
+        if !self.runtime_compatibility && !self.provider.is_volatile() && !self.output_persistent {
             anyhow::bail!(
-                "persistent query recovery requires checkpoint, outbox and live-result resources"
+                "persistent query recovery requires persistent checkpoint, outbox and live-result resources"
             );
         }
         let (parser, functions) = parser(self.definition.language);
@@ -566,6 +571,11 @@ impl ContinuousQueryTransformer {
             .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))? =
             resources.checkpoint_store().cloned();
         self.query = Some(ComputationQuery::try_build(builder, resources).await?);
+        *self
+            .output_persistence_view
+            .write()
+            .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? =
+            Some(self.output_persistent);
         Ok(())
     }
 
@@ -615,6 +625,11 @@ impl ContinuousQueryTransformer {
         if reset.as_ref().is_some_and(|marker| marker.in_progress) {
             return Err(QueryRecoveryError::IncompleteReset.into());
         }
+        let generation = checkpoint
+            .read_output_generation(self.definition.id.as_str())
+            .await?
+            .unwrap_or(0)
+            .max(reset.as_ref().map_or(0, |marker| marker.generation));
         let configuration = self.definition.configuration_bytes(&self.execution)?;
         let stored = checkpoint.read_checkpoint(CONFIGURATION).await?;
         if let Some(stored) = stored {
@@ -743,12 +758,7 @@ impl ContinuousQueryTransformer {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .hydrate(
-                rows,
-                sequence,
-                recovered,
-                reset.map(|marker| marker.generation).unwrap_or(0),
-            );
+            .hydrate(rows, sequence, recovered, generation);
         let saved = checkpoint.read_all_checkpoints().await?;
         *self
             .watermarks
@@ -776,21 +786,20 @@ impl ContinuousQueryTransformer {
         let bytes = self.codec.encode(output).map_err(IndexError::other)?;
         let id = self.definition.id.as_str();
         let resources = query.resources();
+        let sequence = output.system().sequence();
+        let retain_from = sequence
+            .saturating_sub(self.definition.outbox_capacity.get() as u64)
+            .saturating_add(1);
         resources
             .outbox_writer()
             .ok_or(IndexError::NotSupported)?
-            .append(id, output.system().sequence(), &bytes)
-            .await?;
-        resources
-            .outbox_writer()
-            .ok_or(IndexError::NotSupported)?
-            .trim_to_capacity(id, self.definition.outbox_capacity.get())
+            .append_and_trim(id, sequence, &bytes, retain_from)
             .await?;
         self.stage_projection(output).await?;
         resources
             .checkpoint_store()
             .ok_or(IndexError::NotSupported)?
-            .stage_result_sequence(id, output.system().sequence())
+            .stage_result_sequence(id, sequence)
             .await
     }
 

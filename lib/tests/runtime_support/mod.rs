@@ -37,16 +37,12 @@ pub async fn wait_for_gap_recovery(
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let output = core.get_query_output_metrics(query).await?;
-            let reactions = core.get_reaction_metrics(reaction).await?;
-            if output.outbox_latest_seq >= produced
-                && reactions
-                    .get(query)
-                    .is_some_and(|metrics| metrics.gap_detection_count > 0)
-            {
+            // Covered broadcast lag can be replayed without recording an outbox gap.
+            if output.outbox_latest_seq >= produced {
                 if let Some(bytes) = store.get(reaction, &format!("checkpoint:{query}")).await? {
                     let checkpoint: drasi_lib::reactions::checkpoint::ReactionCheckpoint =
                         bincode::deserialize(&bytes)?;
-                    if checkpoint.sequence > 0 {
+                    if checkpoint.sequence >= produced {
                         return Ok::<_, anyhow::Error>(());
                     }
                 }

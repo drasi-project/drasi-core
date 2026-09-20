@@ -35,6 +35,11 @@ use crate::config::{
 };
 use drasi_core::models::SourceMiddlewareConfig;
 
+/// Marks an unfinished wipe so a later start cannot resume partially cleared state.
+pub(crate) fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
+    !current_hash
+}
+
 /// Minimal projection of `QueryConfig` containing only identity-defining fields.
 ///
 /// Fields included (changes trigger index wipe + re-bootstrap):

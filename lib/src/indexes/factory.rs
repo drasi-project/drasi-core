@@ -290,6 +290,24 @@ impl IndexFactory {
         }
     }
 
+    #[cfg(feature = "computation")]
+    pub(crate) async fn build_scoped(
+        &self,
+        backend_ref: &StorageBackendRef,
+        storage_scope: &str,
+        query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
+        if let StorageBackendRef::Named(name) = backend_ref {
+            if let Some(provider) = self.providers.get(name) {
+                return provider
+                    .create_scoped_indexes(storage_scope, query_id)
+                    .await
+                    .map_err(|error| Self::initialization_error(query_id, error));
+            }
+        }
+        self.build(backend_ref, storage_scope).await
+    }
+
     /// Build in-memory indexes (returns checkpoint_store: None — caller provides InMemoryCheckpointStore)
     fn build_memory_indexes(&self, enable_archive: bool) -> Result<CreatedIndexes, IndexError> {
         let mut element_index = InMemoryElementIndex::new();
@@ -320,12 +338,20 @@ impl IndexFactory {
         plugin: &Arc<dyn IndexBackendPlugin>,
         query_id: &str,
     ) -> Result<CreatedIndexes, IndexError> {
-        plugin.create_indexes(query_id).await.map_err(|e| {
-            log::error!("Failed to create indexes for query '{query_id}': {e}");
-            IndexError::InitializationFailed(format!(
-                "Failed to create indexes for query '{query_id}': {e}"
-            ))
-        })
+        plugin
+            .create_indexes(query_id)
+            .await
+            .map_err(|error| Self::initialization_error(query_id, error))
+    }
+
+    fn initialization_error(
+        query_id: &str,
+        error: drasi_core::interface::IndexError,
+    ) -> IndexError {
+        log::error!("Failed to create indexes for query '{query_id}': {error}");
+        IndexError::InitializationFailed(format!(
+            "Failed to create indexes for query '{query_id}': {error}"
+        ))
     }
 
     /// Check if a storage backend is volatile (requires re-bootstrap after restart)
@@ -393,6 +419,66 @@ mod tests {
         let mut m: HashMap<String, Arc<dyn IndexBackendPlugin>> = HashMap::new();
         m.insert(name.to_string(), Arc::new(MockPlugin { volatile }));
         m
+    }
+
+    #[cfg(feature = "computation")]
+    #[tokio::test]
+    async fn scoped_provider_receives_separate_storage_and_logical_query_ids() {
+        struct ScopedProvider(std::sync::Mutex<Vec<(String, String)>>);
+
+        #[async_trait]
+        impl IndexBackendPlugin for ScopedProvider {
+            async fn create_indexes(
+                &self,
+                query_id: &str,
+            ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((query_id.to_owned(), query_id.to_owned()));
+                MockPlugin { volatile: true }.create_indexes(query_id).await
+            }
+
+            async fn create_scoped_indexes(
+                &self,
+                storage_scope: &str,
+                query_id: &str,
+            ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((storage_scope.to_owned(), query_id.to_owned()));
+                MockPlugin { volatile: true }
+                    .create_indexes(storage_scope)
+                    .await
+            }
+
+            fn is_volatile(&self) -> bool {
+                true
+            }
+        }
+
+        let provider = Arc::new(ScopedProvider(std::sync::Mutex::new(Vec::new())));
+        let factory = IndexFactory::new(
+            vec![],
+            HashMap::from([(
+                "scoped".to_owned(),
+                provider.clone() as Arc<dyn IndexBackendPlugin>,
+            )]),
+        );
+        let backend = StorageBackendRef::Named("scoped".to_owned());
+        factory.build(&backend, "ordinary").await.unwrap();
+        factory
+            .build_scoped(&backend, "isolated-storage", "logical-query")
+            .await
+            .unwrap();
+        assert_eq!(
+            *provider.0.lock().unwrap(),
+            vec![
+                ("ordinary".to_owned(), "ordinary".to_owned()),
+                ("isolated-storage".to_owned(), "logical-query".to_owned()),
+            ]
+        );
     }
 
     #[test]

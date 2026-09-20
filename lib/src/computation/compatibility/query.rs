@@ -91,6 +91,7 @@ struct ParentBinding {
 
 struct QueryExecution {
     catalog: QueryResultsCatalog,
+    output_generation: OnceLock<QueryOutputGenerationReader>,
     source_bindings: Vec<Arc<SourceInstance>>,
     subscriptions: Vec<Arc<LegacySourceSubscription>>,
     inspector: ComputationInspector,
@@ -100,6 +101,7 @@ struct QueryExecution {
 pub(crate) struct QueryInstance {
     pub config: QueryConfig,
     pub metrics: Arc<QueryOutputMetrics>,
+    volatile: bool,
     execution: OnceLock<QueryExecution>,
     initializing: Mutex<()>,
     parent: OnceLock<ParentBinding>,
@@ -116,9 +118,14 @@ pub(crate) struct QueryInstance {
 
 impl QueryInstance {
     pub(super) fn new(config: QueryConfig, owner: &Arc<super::Runtime>) -> Arc<Self> {
+        let volatile = owner
+            .config
+            .index_factory
+            .is_volatile_for_query(config.storage_backend.as_ref());
         Arc::new(Self {
             config,
             metrics: Arc::new(QueryOutputMetrics::new()),
+            volatile,
             execution: OnceLock::new(),
             initializing: Mutex::new(()),
             parent: OnceLock::new(),
@@ -217,6 +224,7 @@ impl QueryInstance {
         let scope = ScopedGraph::new(graph, services.scope);
         Ok(QueryExecution {
             catalog,
+            output_generation: OnceLock::new(),
             source_bindings,
             subscriptions,
             inspector,
@@ -449,6 +457,15 @@ impl RuntimeComponent for QueryInstance {
         let execution = self.execution()?;
         let mut life = execution.life.lock().await;
         life.ready().await?;
+        if execution.output_generation.get().is_none() {
+            let reader = execution
+                .catalog
+                .output_generation_reader(&self.config.id)?;
+            execution
+                .output_generation
+                .set(reader)
+                .map_err(|_| anyhow::anyhow!("query generation reader was already initialized"))?;
+        }
         if life.link.is_none() {
             life.link = Some(
                 self.global_catalog
@@ -592,6 +609,7 @@ impl RuntimeComponent for QueryInstance {
             return Ok(());
         }
         let query = self.config.id.clone();
+        let config_hash = crate::queries::compute_config_hash(&self.config);
         let key = LegacyIndexProviderAdapter::storage_key(
             Some(owner.services.scope.as_ref()),
             execution.inspector.snapshot().desired.id.as_ref(),
@@ -602,23 +620,68 @@ impl RuntimeComponent for QueryInstance {
             .run_async(async move {
                 use drasi_core::interface::IndexError;
                 let indexes = factory
-                    .build(&backend, &key)
+                    .build_scoped(&backend, &key, &query)
                     .await
                     .map_err(IndexError::other)?;
+                if let Some(store) = &indexes.checkpoint_store {
+                    store
+                        .write_config_hash(
+                            crate::queries::config_hash::output_reset_in_progress_hash(config_hash),
+                        )
+                        .await?;
+                    let generation = store
+                        .read_output_generation(&query)
+                        .await?
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            IndexError::other(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "query output generation exhausted",
+                            ))
+                        })?;
+                    store.write_output_generation(&query, generation).await?;
+                }
                 indexes.set.session_control.begin().await?;
                 let clear = async {
-                    indexes.set.element_index.clear().await?;
-                    indexes.set.archive_index.clear().await?;
-                    indexes.set.result_index.clear().await?;
-                    indexes.set.result_index.apply_sequence(0, "").await?;
-                    indexes.set.future_queue.clear().await?;
+                    crate::indexes::check_clear(
+                        &query,
+                        "clear element index",
+                        indexes.set.element_index.clear().await,
+                        true,
+                    )?;
+                    crate::indexes::check_clear(
+                        &query,
+                        "clear archive index",
+                        indexes.set.archive_index.clear().await,
+                        true,
+                    )?;
+                    crate::indexes::check_clear(
+                        &query,
+                        "clear result index",
+                        indexes.set.result_index.clear().await,
+                        true,
+                    )?;
+                    crate::indexes::check_clear(
+                        &query,
+                        "reset result sequence",
+                        indexes.set.result_index.apply_sequence(0, "").await,
+                        true,
+                    )?;
+                    crate::indexes::check_clear(
+                        &query,
+                        "clear future queue",
+                        indexes.set.future_queue.clear().await,
+                        true,
+                    )?;
                     if let Some(store) = &indexes.checkpoint_store {
-                        store.clear_checkpoints().await?;
+                        store.clear_checkpoints().await.map_err(|error| {
+                            crate::indexes::operation_error(&query, "clear checkpoints", error)
+                        })?;
                         store.write_result_sequence(&query, 0).await?;
                     }
                     if let Some(store) = &indexes.outbox_writer {
                         store.clear(&query).await?;
-                        store.clear(&query_reset_key(&query)).await?;
                     }
                     if let Some(store) = &indexes.live_results_writer {
                         store.clear(&query).await?;
@@ -761,8 +824,32 @@ impl Query for QueryInstance {
             )
             .await
     }
+    async fn output_generation(&self) -> u64 {
+        self.execution
+            .get()
+            .and_then(|execution| execution.output_generation.get())
+            .map_or(0, QueryOutputGenerationReader::generation)
+    }
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         Some(self.metrics.clone())
+    }
+    fn is_volatile(&self) -> bool {
+        if self.volatile {
+            return true;
+        }
+        let Some(execution) = self.execution.get() else {
+            return true;
+        };
+        match execution.catalog.output_is_persistent(&self.config.id) {
+            Ok(persistent) => !persistent,
+            Err(error) => {
+                log::warn!(
+                    "Cannot confirm persistent output for query '{}'; treating it as volatile: {error:#}",
+                    self.config.id
+                );
+                true
+            }
+        }
     }
     async fn release_persistent_handles(&self) {
         if let Err(error) = RuntimeComponent::shutdown(self).await {

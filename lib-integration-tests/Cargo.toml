@@ -7,6 +7,13 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+computation = [
+    "drasi-lib/computation",
+    "drasi-index-rocksdb/computation",
+    "drasi-index-garnet/computation",
+]
+
 [dependencies]
 # Test dependencies only - this crate has no library code
 drasi-lib.workspace = true
@@ -15,6 +22,7 @@ drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true
 drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
+drasi-index-garnet.workspace = true
 drasi-plugin-sdk.workspace = true
 drasi-state-store-redb.workspace = true
 drasi-wal-redb.workspace = true
@@ -34,3 +42,5 @@ serial_test = "3"
 tempfile = "3"
 bytes = "1"
 rmp-serde = "1"
+futures = "0.3"
+shared-tests = { path = "../shared-tests" }

@@ -15,6 +15,7 @@
 //! Explicit computation resources, separate from the ordinary index plugin.
 //! Data lives below `computation-v1/<encoded graph>/<encoded query>`, never in a
 //! legacy query's database. Output staging requires this bundle's active session.
+//! Bootstrap checkpoint clearing preserves committed output heads and generations.
 
 mod checkpoint;
 mod output;

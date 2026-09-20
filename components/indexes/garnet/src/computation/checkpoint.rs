@@ -17,15 +17,12 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
-use redis::{aio::MultiplexedConnection, AsyncCommands};
+use redis::aio::MultiplexedConnection;
 
-use crate::{session_state::BufferReadResult, GarnetCheckpointStore, GarnetSessionState};
+use crate::{GarnetCheckpointStore, GarnetSessionState};
 
 pub(super) struct ComputationCheckpointStore {
     inner: GarnetCheckpointStore,
-    result_sequence_key: String,
-    connection: MultiplexedConnection,
-    session: Arc<GarnetSessionState>,
 }
 
 impl ComputationCheckpointStore {
@@ -35,10 +32,7 @@ impl ComputationCheckpointStore {
         session: Arc<GarnetSessionState>,
     ) -> Self {
         Self {
-            inner: GarnetCheckpointStore::new(partition, connection.clone(), session.clone()),
-            result_sequence_key: format!("ss:{{{partition}}}:result_seq"),
-            connection,
-            session,
+            inner: GarnetCheckpointStore::new(partition, connection, session),
         }
     }
 }
@@ -83,50 +77,29 @@ impl CheckpointStore for ComputationCheckpointStore {
         self.inner.read_config_hash().await
     }
 
-    async fn stage_result_sequence(
-        &self,
-        _query_id: &str,
-        sequence: u64,
-    ) -> Result<(), IndexError> {
-        let mut guard = self.session.lock()?;
-        let buffer = guard.as_mut().ok_or_else(|| {
-            IndexError::other(std::io::Error::other(
-                "computation result-sequence staging requires an active session",
-            ))
-        })?;
-        buffer.string_set(
-            self.result_sequence_key.clone(),
-            sequence.to_string().into_bytes(),
-        );
-        Ok(())
+    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+        self.inner.stage_result_sequence(query_id, sequence).await
     }
 
     async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         self.inner.write_result_sequence(query_id, sequence).await
     }
 
-    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
-        let buffered = {
-            let guard = self.session.lock()?;
-            match guard.as_ref() {
-                Some(buffer) => buffer.string_get(&self.result_sequence_key),
-                None => BufferReadResult::NotInBuffer,
-            }
-        };
-        match buffered {
-            BufferReadResult::Found(bytes) => Ok(Some(
-                String::from_utf8(bytes)
-                    .map_err(IndexError::other)?
-                    .parse()
-                    .map_err(IndexError::other)?,
-            )),
-            BufferReadResult::KeyDeleted => Ok(None),
-            BufferReadResult::NotInBuffer => self
-                .connection
-                .clone()
-                .get(&self.result_sequence_key)
-                .await
-                .map_err(IndexError::other),
-        }
+    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        self.inner.read_result_sequence(query_id).await
+    }
+
+    async fn write_output_generation(
+        &self,
+        query_id: &str,
+        generation: u64,
+    ) -> Result<(), IndexError> {
+        self.inner
+            .write_output_generation(query_id, generation)
+            .await
+    }
+
+    async fn read_output_generation(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        self.inner.read_output_generation(query_id).await
     }
 }

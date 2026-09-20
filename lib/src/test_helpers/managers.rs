@@ -253,6 +253,16 @@ impl QueryManager {
     pub(crate) async fn start_query(&self, id: String) -> anyhow::Result<()> {
         Ok(self.0.start_query(&id).await?)
     }
+    pub(crate) async fn start_query_and_wait(&self, id: String) -> anyhow::Result<()> {
+        self.0.start_query(&id).await?;
+        #[cfg(feature = "computation")]
+        if self.0.computation_runtime.is_some() {
+            let handle = self.0.computation_component(&id)?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_started())
+                .await??;
+        }
+        Ok(())
+    }
     pub(crate) async fn stop_query(&self, id: String) -> anyhow::Result<()> {
         Ok(self.0.stop_query(&id).await?)
     }

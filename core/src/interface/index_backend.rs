@@ -153,9 +153,32 @@ pub trait IndexBackendPlugin: Send + Sync {
     /// index updates. Volatile backends return `checkpoint_store: None`.
     async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError>;
 
+    /// Create an isolated storage partition for a logical query.
+    ///
+    /// Output writers still receive `query_id` for primary output and distinct
+    /// IDs for auxiliary records. Providers whose writers bind a query at
+    /// construction should override this to preserve that distinction without
+    /// changing the partition's existing primary keys.
+    async fn create_scoped_indexes(
+        &self,
+        storage_scope: &str,
+        _query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
+        self.create_indexes(storage_scope).await
+    }
+
     /// Returns true if this backend is volatile (data lost on restart).
     ///
     /// Volatile backends (like in-memory) require re-bootstrapping after restart,
     /// while persistent backends (like RocksDB) retain data.
     fn is_volatile(&self) -> bool;
+
+    /// Whether query output writers participate in the returned index session.
+    ///
+    /// Opting in guarantees that outbox appends/retention, live-result mutations,
+    /// source checkpoints, and staged result sequences commit or roll back with
+    /// index changes. Undeclared providers retain independent output semantics.
+    fn supports_atomic_query_output(&self) -> bool {
+        false
+    }
 }
