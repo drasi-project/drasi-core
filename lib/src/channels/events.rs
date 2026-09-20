@@ -28,10 +28,9 @@ pub trait Timestamped {
 
 /// Trait for types carrying a monotonic per-source sequence number.
 ///
-/// Used by the priority queue as the final tie-breaker when both the timestamp
-/// and the source rank are equal (i.e. two events from the *same* source that
-/// share a timestamp). Because a sequence is only meaningful within a single
-/// source, it is only ever compared between events of equal source rank.
+/// Used as a timestamp tie-breaker by the generic priority queue. Query queues
+/// wrap events with a source rank so per-source sequences are compared only
+/// within the same source.
 pub trait Sequenced {
     fn sequence(&self) -> u64;
 }

@@ -329,7 +329,7 @@ impl ReactionBase {
     pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
         // Reaction result queues carry a single logical stream per query, so the
         // source rank is inert here; ties fall through to the per-query sequence.
-        self.priority_queue.enqueue_wait(Arc::new(result), 0).await;
+        self.priority_queue.enqueue_wait(Arc::new(result)).await;
         Ok(())
     }
 
@@ -640,7 +640,7 @@ mod tests {
         );
 
         // Enqueue result
-        let enqueued = base.priority_queue.enqueue(Arc::new(query_result), 0).await;
+        let enqueued = base.priority_queue.enqueue(Arc::new(query_result)).await;
         assert!(enqueued);
 
         // Drain queue

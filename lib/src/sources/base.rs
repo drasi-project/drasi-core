@@ -222,13 +222,11 @@ pub struct SourceBase {
     /// silently drops it (issue #640).
     ///
     /// The guarded value is the last timestamp stamped on a dispatched event.
-    /// The priority queue is a min-heap keyed on the wrapper timestamp, so each
-    /// event's timestamp is clamped to be strictly greater than the previous
-    /// one — keeping per-source timestamps monotonic in sequence order so the
-    /// heap never reorders same-source events relative to their sequence. The
-    /// wrapper timestamp is used only for merge ordering (the query consumer
-    /// never reads it; event-time semantics use `effective_from`), so nudging
-    /// it forward by nanoseconds when the wall clock stalls is harmless.
+    /// Each event's timestamp is clamped to at least the previous timestamp to
+    /// prevent clock rollback from reversing sequence order. Equal timestamps
+    /// are preserved and ordered by sequence in the composite priority queue.
+    /// The wrapper timestamp is used only for merge ordering; event-time
+    /// semantics use `effective_from`.
     dispatch_order: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
     /// Original raw config JSON from the descriptor, preserving ConfigValue
     /// envelopes (secrets, env vars) for lossless persistence roundtrips.
@@ -1296,27 +1294,17 @@ impl SourceBase {
     /// to prevent memory issues, preserving the last good position.
     pub const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
 
-    /// Return a dispatch timestamp strictly greater than `*last`, using
-    /// `candidate` when it already advances past `*last` and otherwise nudging
-    /// forward by one nanosecond. Updates `*last` to the returned value.
+    /// Return `candidate` clamped to at least `*last`, updating `*last`.
     ///
     /// Called while holding the `dispatch_order` lock, so per-source dispatch
-    /// timestamps stay strictly increasing in sequence order — the priority
-    /// queue is a min-heap keyed on this timestamp, so this prevents it from
-    /// reordering same-source events relative to their sequence (#640).
+    /// timestamps stay nondecreasing in sequence order even after clock rollback.
+    /// Equal timestamps are preserved; the priority queue's composite key uses
+    /// sequence to break same-source timestamp ties (#640).
     fn next_monotonic_timestamp(
         last: &mut chrono::DateTime<chrono::Utc>,
         candidate: chrono::DateTime<chrono::Utc>,
     ) -> chrono::DateTime<chrono::Utc> {
-        let next = if candidate > *last {
-            candidate
-        } else {
-            // `checked_add_signed` keeps this panic-free; `None` only occurs at
-            // the far edge of the representable range, where `*last` is already
-            // effectively "infinitely far in the future".
-            last.checked_add_signed(chrono::Duration::nanoseconds(1))
-                .unwrap_or(*last)
-        };
+        let next = candidate.max(*last);
         *last = next;
         next
     }
@@ -1365,8 +1353,7 @@ impl SourceBase {
         // Stamp the draft into a downstream event.
         let mut wrapper = StampedSourceEvent::stamp(draft, sequence);
 
-        // Keep per-source timestamps strictly increasing in sequence order so
-        // the timestamp-keyed priority queue cannot reorder same-source events.
+        // Clamp clock rollback; the composite queue key breaks ties by sequence.
         wrapper.timestamp =
             Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
@@ -1483,8 +1470,7 @@ impl SourceBase {
             // Stamp the draft into a downstream event.
             let mut wrapper = StampedSourceEvent::stamp(draft, sequence);
 
-            // Keep per-source timestamps strictly increasing in sequence order
-            // so the timestamp-keyed priority queue preserves that order.
+            // Clamp clock rollback; the composite queue key breaks ties by sequence.
             wrapper.timestamp =
                 Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
@@ -2265,32 +2251,85 @@ mod tests {
     }
 
     #[test]
-    fn next_monotonic_timestamp_is_strictly_increasing() {
+    fn next_monotonic_timestamp_is_nondecreasing() {
         use chrono::{Duration, Utc};
 
         let mut last = chrono::DateTime::<Utc>::MIN_UTC;
 
-        let t1 = Utc::now();
-        let r1 = SourceBase::next_monotonic_timestamp(&mut last, t1);
-        assert_eq!(r1, t1, "a candidate ahead of `last` is used verbatim");
-        assert_eq!(last, t1);
+        let timestamp = Utc::now();
+        assert_eq!(
+            SourceBase::next_monotonic_timestamp(&mut last, timestamp),
+            timestamp
+        );
+        assert_eq!(last, timestamp);
+        assert_eq!(
+            SourceBase::next_monotonic_timestamp(&mut last, timestamp),
+            timestamp,
+            "equal timestamps must be preserved"
+        );
+        assert_eq!(
+            SourceBase::next_monotonic_timestamp(&mut last, timestamp - Duration::seconds(5)),
+            timestamp,
+            "clock rollback must clamp to the last timestamp"
+        );
+        assert_eq!(last, timestamp);
 
-        // Equal candidate must be nudged strictly forward.
-        let r2 = SourceBase::next_monotonic_timestamp(&mut last, t1);
-        assert_eq!(r2, t1 + Duration::nanoseconds(1));
-        assert!(r2 > r1);
+        let later = timestamp + Duration::seconds(5);
+        assert_eq!(
+            SourceBase::next_monotonic_timestamp(&mut last, later),
+            later
+        );
+        assert_eq!(last, later);
+    }
 
-        // A candidate that goes backwards (reversed wall clock) must still
-        // advance past the previous timestamp.
-        let earlier = t1 - Duration::seconds(5);
-        let r3 = SourceBase::next_monotonic_timestamp(&mut last, earlier);
-        assert!(r3 > r2, "reversed candidate must not rewind the clock");
+    #[tokio::test]
+    async fn dispatch_preserves_timestamp_ties_and_queue_sequence_order() {
+        for batch_dispatch in [false, true] {
+            let source_id = "timestamp-ties";
+            let params = SourceBaseParams::new(source_id).with_dispatch_mode(DispatchMode::Channel);
+            let base = SourceBase::new(params).unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+            let timestamp = chrono::Utc::now();
+            let later = timestamp + chrono::Duration::seconds(5);
+            let timestamps =
+                [timestamp, timestamp, timestamp - chrono::Duration::seconds(5), later];
+            let drafts: Vec<_> = timestamps
+                .into_iter()
+                .map(|candidate| {
+                    let mut draft = make_event(source_id, None);
+                    draft.timestamp = candidate;
+                    draft
+                })
+                .collect();
 
-        // A genuinely later candidate is used as-is.
-        let much_later = t1 + Duration::seconds(5);
-        let r4 = SourceBase::next_monotonic_timestamp(&mut last, much_later);
-        assert_eq!(r4, much_later);
-        assert!(r4 > r3);
+            if batch_dispatch {
+                base.dispatch_events_batch(drafts).await.unwrap();
+            } else {
+                for draft in drafts {
+                    base.dispatch_event(draft).await.unwrap();
+                }
+            }
+
+            let expected_timestamps = [timestamp, timestamp, timestamp, later];
+            let mut events = Vec::new();
+            for (index, expected_timestamp) in expected_timestamps.into_iter().enumerate() {
+                let event = receiver.recv().await.unwrap();
+                assert_eq!(event.timestamp, expected_timestamp);
+                assert_eq!(event.sequence, index as u64 + 1);
+                events.push(event);
+            }
+
+            let queue = crate::queries::PriorityQueue::new(events.len());
+            for event in events.into_iter().rev() {
+                let entry = crate::queries::priority_queue::RankedSourceEvent::new(event, 0);
+                assert!(queue.enqueue(Arc::new(entry)).await);
+            }
+            for (index, expected_timestamp) in expected_timestamps.into_iter().enumerate() {
+                let event = queue.try_dequeue().await.unwrap();
+                assert_eq!(event.timestamp, expected_timestamp);
+                assert_eq!(event.sequence, index as u64 + 1);
+            }
+        }
     }
 
     /// Regression test for issue #640: dispatching changes concurrently on a
@@ -2367,9 +2406,7 @@ mod tests {
                 "trial {trial}: every dispatched change must be delivered"
             );
 
-            // Delivery order must match sequence order (strictly increasing),
-            // and per-source timestamps must be strictly increasing so the
-            // timestamp-keyed priority queue cannot reorder them either.
+            // Sequences increase strictly; timestamps may tie but cannot rewind.
             for pair in delivered_sequences.windows(2) {
                 assert!(
                     pair[1] > pair[0],
@@ -2380,7 +2417,7 @@ mod tests {
             }
             for pair in delivered_timestamps.windows(2) {
                 assert!(
-                    pair[1] > pair[0],
+                    pair[1] >= pair[0],
                     "trial {trial}: timestamps delivered out of order"
                 );
             }

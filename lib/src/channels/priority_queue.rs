@@ -21,63 +21,58 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
-/// Wrapper for priority queue events, ordered by the composite key
-/// `(timestamp, source_rank, sequence)`.
-///
-/// - `timestamp` — event time; the primary ordering component.
-/// - `source_rank` — a per-query, precomputed rank for the producing source,
-///   derived from the source's position in the query's `sources` list.
-///   It is stamped by the per-source forwarder at enqueue time and breaks ties
-///   between events from *different* sources so cross-source ordering is
-///   deterministic. It is inert for single-source queries (every event has the
-///   same rank).
-/// - `sequence` — the per-source monotonic sequence read from the event. It
-///   breaks ties between events from the *same* source, guaranteeing they
-///   dequeue in emission order even when their timestamps collide.
+/// Supplies the ordering key for a buffered queue entry.
+pub trait QueueOrder {
+    type Key: Ord;
+
+    fn order_key(&self) -> Self::Key;
+}
+
+impl<T: Timestamped + Sequenced> QueueOrder for T {
+    type Key = (chrono::DateTime<chrono::Utc>, u64);
+
+    fn order_key(&self) -> Self::Key {
+        (self.timestamp(), self.sequence())
+    }
+}
+
+/// Shared event ordered by its entry-specific key.
 #[derive(Clone)]
 struct PriorityQueueEvent<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     event: Arc<T>,
-    /// Rank of the source that produced this event within the owning query.
-    source_rank: u32,
 }
 
 impl<T> PriorityQueueEvent<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
-    fn new(event: Arc<T>, source_rank: u32) -> Self {
-        Self { event, source_rank }
+    fn new(event: Arc<T>) -> Self {
+        Self { event }
     }
 
-    /// The composite ordering key: `(timestamp, source_rank, sequence)`.
-    fn order_key(&self) -> (chrono::DateTime<chrono::Utc>, u32, u64) {
-        (
-            self.event.timestamp(),
-            self.source_rank,
-            self.event.sequence(),
-        )
+    fn order_key(&self) -> T::Key {
+        self.event.order_key()
     }
 }
 
 // Implement ordering for priority queue (oldest events first - min-heap)
 impl<T> PartialEq for PriorityQueueEvent<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn eq(&self, other: &Self) -> bool {
         self.order_key() == other.order_key()
     }
 }
 
-impl<T> Eq for PriorityQueueEvent<T> where T: Timestamped + Sequenced + Clone + Send + Sync + 'static
-{}
+impl<T> Eq for PriorityQueueEvent<T> where T: QueueOrder + Clone + Send + Sync + 'static {}
 
 impl<T> PartialOrd for PriorityQueueEvent<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -86,12 +81,10 @@ where
 
 impl<T> Ord for PriorityQueueEvent<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior: the smallest composite key
-        // `(timestamp, source_rank, sequence)` dequeues first, so equal
-        // timestamps resolve deterministically instead of by heap layout.
+        // Reverse ordering for min-heap behavior: the smallest key dequeues first.
         other.order_key().cmp(&self.order_key())
     }
 }
@@ -170,19 +163,19 @@ impl Default for PriorityQueueMetrics {
 /// ```ignore
 /// // Channel mode (isolated channels) - SAFE to use blocking enqueue
 /// if dispatch_mode == DispatchMode::Channel {
-///     priority_queue.enqueue_wait(event, 0).await;  // Blocks until space available
+///     priority_queue.enqueue_wait(event).await;  // Blocks until space available
 /// } else {
 ///     // Broadcast mode (shared channel) - MUST use non-blocking
-///     if !priority_queue.enqueue(event, 0).await {
+///     if !priority_queue.enqueue(event).await {
 ///         warn!("Dropped event - queue at capacity");
 ///     }
 /// }
 /// ```
 pub struct PriorityQueue<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
-    /// Internal heap storing events (min-heap by `(timestamp, source_rank, sequence)`)
+    /// Internal heap storing events ordered by their entry-specific keys.
     heap: Arc<Mutex<BinaryHeap<PriorityQueueEvent<T>>>>,
     /// Notification mechanism for waiting on new events
     notify: Arc<Notify>,
@@ -194,7 +187,7 @@ where
 
 impl<T> PriorityQueue<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + Debug + 'static,
+    T: QueueOrder + Clone + Send + Sync + Debug + 'static,
 {
     /// Create a new priority queue with the specified maximum capacity
     pub fn new(max_capacity: usize) -> Self {
@@ -208,14 +201,8 @@ where
 
     /// Enqueue an event into the priority queue
     ///
-    /// `source_rank` is the precomputed rank of the producing source within the
-    /// owning query, derived from its position in `config.sources`.
-    /// It is used as a tie-breaker between events from different
-    /// sources that share a timestamp. Pass `0` for single-source queues where
-    /// the rank is inert.
-    ///
     /// Returns true if enqueued, false if queue is at capacity
-    pub async fn enqueue(&self, event: Arc<T>, source_rank: u32) -> bool {
+    pub async fn enqueue(&self, event: Arc<T>) -> bool {
         let mut heap = self.heap.lock().await;
 
         // Check capacity
@@ -243,7 +230,7 @@ where
         }
 
         // Enqueue event
-        heap.push(PriorityQueueEvent::new(event, source_rank));
+        heap.push(PriorityQueueEvent::new(event));
 
         // Update metrics using atomic operations (lock-free)
         self.metrics
@@ -283,10 +270,7 @@ where
     ///
     /// WARNING: Do NOT use with Broadcast dispatch mode - will cause deadlock!
     /// In broadcast mode, use the non-blocking `enqueue()` method instead.
-    ///
-    /// `source_rank` is the rank of the producing source within the owning
-    /// query; see [`enqueue`](Self::enqueue).
-    pub async fn enqueue_wait(&self, event: Arc<T>, source_rank: u32) {
+    pub async fn enqueue_wait(&self, event: Arc<T>) {
         loop {
             // Register notified future BEFORE acquiring lock to avoid race
             let notified = self.notify.notified();
@@ -297,7 +281,7 @@ where
             // Check if there's capacity
             if heap.len() < self.max_capacity {
                 // Space available - enqueue the event
-                heap.push(PriorityQueueEvent::new(event, source_rank));
+                heap.push(PriorityQueueEvent::new(event));
 
                 // Update metrics using atomic operations (lock-free)
                 self.metrics
@@ -462,7 +446,7 @@ where
 
 impl<T> Clone for PriorityQueue<T>
 where
-    T: Timestamped + Sequenced + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -477,10 +461,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::{SourceControl, SourceEvent, SourceEventDraft, StampedSourceEvent};
-    use crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
     use chrono::Utc;
-    use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
 
     #[derive(Debug, Clone)]
     struct TestEvent {
@@ -532,9 +513,9 @@ mod tests {
         let event3 = create_test_event("event3", now + chrono::Duration::seconds(5));
 
         // Enqueue in random order
-        pq.enqueue(event1, 0).await;
-        pq.enqueue(event3, 0).await;
-        pq.enqueue(event2, 0).await;
+        pq.enqueue(event1).await;
+        pq.enqueue(event3).await;
+        pq.enqueue(event2).await;
 
         // Dequeue should return oldest first
         let dequeued1 = pq.try_dequeue().await.unwrap();
@@ -547,104 +528,33 @@ mod tests {
         assert_eq!(dequeued3.id, "event3"); // Newest
     }
 
-    // Same timestamp, different source ranks: the lower rank must dequeue first,
-    // regardless of enqueue order, so cross-source ties are deterministic.
-    #[tokio::test]
-    async fn test_same_timestamp_ordered_by_source_rank() {
-        let pq = PriorityQueue::new(100);
-        let now = Utc::now();
-
-        // Enqueue in reverse rank order to prove ordering is by rank, not arrival.
-        pq.enqueue(create_test_event_seq("rank2", now, 0), 2).await;
-        pq.enqueue(create_test_event_seq("rank0", now, 0), 0).await;
-        pq.enqueue(create_test_event_seq("rank1", now, 0), 1).await;
-
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "rank0");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "rank1");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "rank2");
-    }
-
-    // Same timestamp and same source rank: the lower sequence must dequeue
-    // first, so same-source events keep their emission order under a tie.
+    // Same-timestamp events dequeue in sequence order.
     #[tokio::test]
     async fn test_same_timestamp_same_source_ordered_by_sequence() {
         let pq = PriorityQueue::new(100);
         let now = Utc::now();
 
-        // Enqueue out of sequence order; rank identical.
-        pq.enqueue(create_test_event_seq("seq7", now, 7), 0).await;
-        pq.enqueue(create_test_event_seq("seq5", now, 5), 0).await;
-        pq.enqueue(create_test_event_seq("seq6", now, 6), 0).await;
+        // Enqueue out of sequence order.
+        pq.enqueue(create_test_event_seq("seq7", now, 7)).await;
+        pq.enqueue(create_test_event_seq("seq5", now, 5)).await;
+        pq.enqueue(create_test_event_seq("seq6", now, 6)).await;
 
         assert_eq!(pq.try_dequeue().await.unwrap().id, "seq5");
         assert_eq!(pq.try_dequeue().await.unwrap().id, "seq6");
         assert_eq!(pq.try_dequeue().await.unwrap().id, "seq7");
     }
 
-    // Full composite key: timestamp dominates rank and sequence, rank dominates
-    // sequence, and sequence resolves the innermost ties.
     #[tokio::test]
-    async fn test_composite_key_precedence() {
+    async fn test_timestamp_precedes_sequence() {
         let pq = PriorityQueue::new(100);
         let now = Utc::now();
         let later = now + chrono::Duration::seconds(1);
 
-        // Interleave two sources sharing timestamp `now`, plus one later event.
-        pq.enqueue(create_test_event_seq("late", later, 0), 0).await; // newest ts
-        pq.enqueue(create_test_event_seq("s1-b", now, 6), 1).await; // rank1, seq6
-        pq.enqueue(create_test_event_seq("s0-b", now, 3), 0).await; // rank0, seq3
-        pq.enqueue(create_test_event_seq("s1-a", now, 5), 1).await; // rank1, seq5
-        pq.enqueue(create_test_event_seq("s0-a", now, 2), 0).await; // rank0, seq2
+        pq.enqueue(create_test_event_seq("late", later, 0)).await;
+        pq.enqueue(create_test_event_seq("early", now, 5)).await;
 
-        // Expected: all `now` events (rank0 then rank1, each by sequence), then `later`.
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "s0-a");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "s0-b");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "s1-a");
-        assert_eq!(pq.try_dequeue().await.unwrap().id, "s1-b");
+        assert_eq!(pq.try_dequeue().await.unwrap().id, "early");
         assert_eq!(pq.try_dequeue().await.unwrap().id, "late");
-    }
-
-    #[tokio::test]
-    async fn test_futures_due_sorts_after_real_source_at_same_timestamp() {
-        let queue = PriorityQueue::new(3);
-        let timestamp = Utc::now();
-        let change = SourceEvent::Change(SourceChange::Delete {
-            metadata: ElementMetadata {
-                reference: ElementReference::new("source", "node"),
-                labels: Arc::from([]),
-                effective_from: timestamp.timestamp_millis() as u64,
-            },
-        });
-        let real_event = Arc::new(StampedSourceEvent::stamp(
-            SourceEventDraft::new("source".to_string(), change.clone(), timestamp),
-            99,
-        ));
-        for sequence in [2, 1] {
-            let signal = Arc::new(StampedSourceEvent::stamp(
-                SourceEventDraft::new(
-                    FUTURE_QUEUE_SOURCE_ID.to_string(),
-                    SourceEvent::Control(SourceControl::FuturesDue),
-                    timestamp,
-                ),
-                sequence,
-            ));
-            queue.enqueue_wait(signal, u32::MAX).await;
-        }
-        queue.enqueue_wait(real_event, 0).await;
-
-        let first = queue.try_dequeue().await.unwrap();
-        assert_eq!(first.source_id, "source");
-        assert_eq!(first.event, change);
-        for sequence in [1, 2] {
-            let signal = queue.try_dequeue().await.unwrap();
-            assert_eq!(signal.source_id, FUTURE_QUEUE_SOURCE_ID);
-            assert_eq!(
-                signal.event,
-                SourceEvent::Control(SourceControl::FuturesDue)
-            );
-            assert_eq!(signal.sequence, sequence);
-        }
-        assert!(queue.try_dequeue().await.is_none());
     }
 
     #[tokio::test]
@@ -657,11 +567,11 @@ mod tests {
         let event3 = create_test_event("event3", now);
 
         // Enqueue up to capacity
-        assert!(pq.enqueue(event1, 0).await);
-        assert!(pq.enqueue(event2, 0).await);
+        assert!(pq.enqueue(event1).await);
+        assert!(pq.enqueue(event2).await);
 
         // Should reject when at capacity
-        assert!(!pq.enqueue(event3, 0).await);
+        assert!(!pq.enqueue(event3).await);
 
         // Metrics should reflect the drop
         let metrics = pq.metrics().await;
@@ -674,8 +584,8 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(create_test_event("event1", now), 0).await;
-        pq.enqueue(create_test_event("event2", now), 0).await;
+        pq.enqueue(create_test_event("event1", now)).await;
+        pq.enqueue(create_test_event("event2", now)).await;
 
         let metrics = pq.metrics().await;
         assert_eq!(metrics.total_enqueued, 2);
@@ -698,7 +608,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::task::yield_now().await;
             let event = create_test_event("event1", Utc::now());
-            pq_clone.enqueue(event, 0).await;
+            pq_clone.enqueue(event).await;
         });
 
         // This should block until the event arrives
@@ -711,9 +621,9 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(create_test_event("event1", now), 0).await;
-        pq.enqueue(create_test_event("event2", now), 0).await;
-        pq.enqueue(create_test_event("event3", now), 0).await;
+        pq.enqueue(create_test_event("event1", now)).await;
+        pq.enqueue(create_test_event("event2", now)).await;
+        pq.enqueue(create_test_event("event3", now)).await;
 
         let drained = pq.drain().await;
         assert_eq!(drained.len(), 3);
@@ -726,8 +636,8 @@ mod tests {
         let now = Utc::now();
 
         // Fill queue to capacity
-        pq.enqueue_wait(create_test_event("event1", now), 0).await;
-        pq.enqueue_wait(create_test_event("event2", now), 0).await;
+        pq.enqueue_wait(create_test_event("event1", now)).await;
+        pq.enqueue_wait(create_test_event("event2", now)).await;
 
         // Verify queue is at capacity
         assert_eq!(pq.depth().await, 2);
@@ -736,7 +646,7 @@ mod tests {
         let pq_clone = pq.clone();
         let event3 = create_test_event("event3", now);
         let enqueue_task = tokio::spawn(async move {
-            pq_clone.enqueue_wait(event3, 0).await;
+            pq_clone.enqueue_wait(event3).await;
             "enqueued"
         });
 
@@ -763,13 +673,13 @@ mod tests {
         let now = Utc::now();
 
         // Fill queue
-        pq.enqueue_wait(create_test_event("event1", now), 0).await;
+        pq.enqueue_wait(create_test_event("event1", now)).await;
 
         // Spawn task that will block on enqueue
         let pq_clone = pq.clone();
         let event2 = create_test_event("event2", now);
         let enqueue_task = tokio::spawn(async move {
-            pq_clone.enqueue_wait(event2, 0).await;
+            pq_clone.enqueue_wait(event2).await;
         });
 
         // Wait a bit to ensure it's blocked
@@ -793,7 +703,7 @@ mod tests {
         let now = Utc::now();
 
         // Fill queue
-        pq.enqueue_wait(create_test_event("event1", now), 0).await;
+        pq.enqueue_wait(create_test_event("event1", now)).await;
 
         // Spawn multiple tasks that will block
         let mut tasks = vec![];
@@ -801,7 +711,7 @@ mod tests {
             let pq_clone = pq.clone();
             let event = create_test_event(&format!("event{i}"), now);
             let task = tokio::spawn(async move {
-                pq_clone.enqueue_wait(event, 0).await;
+                pq_clone.enqueue_wait(event).await;
                 i
             });
             tasks.push(task);
@@ -840,8 +750,8 @@ mod tests {
         let now = Utc::now();
 
         // Fill queue
-        pq.enqueue_wait(create_test_event("event1", now), 0).await;
-        pq.enqueue_wait(create_test_event("event2", now), 0).await;
+        pq.enqueue_wait(create_test_event("event1", now)).await;
+        pq.enqueue_wait(create_test_event("event2", now)).await;
 
         // Reset metrics to test blocked count
         pq.reset_metrics().await;
@@ -850,7 +760,7 @@ mod tests {
         let pq_clone = pq.clone();
         let event3 = create_test_event("event3", now);
         let enqueue_task = tokio::spawn(async move {
-            pq_clone.enqueue_wait(event3, 0).await;
+            pq_clone.enqueue_wait(event3).await;
         });
 
         // Wait for it to block
@@ -886,11 +796,11 @@ mod tests {
         let now = Utc::now();
 
         // Fill queue
-        pq.enqueue(create_test_event("event1", now), 0).await;
-        pq.enqueue(create_test_event("event2", now), 0).await;
+        pq.enqueue(create_test_event("event1", now)).await;
+        pq.enqueue(create_test_event("event2", now)).await;
 
         // Non-blocking enqueue should fail
-        let result = pq.enqueue(create_test_event("event3", now), 0).await;
+        let result = pq.enqueue(create_test_event("event3", now)).await;
         assert!(
             !result,
             "Non-blocking enqueue should return false when full"
@@ -904,7 +814,7 @@ mod tests {
         let pq_clone = pq.clone();
         let event4 = create_test_event("event4", now);
         let enqueue_task = tokio::spawn(async move {
-            pq_clone.enqueue_wait(event4, 0).await;
+            pq_clone.enqueue_wait(event4).await;
         });
 
         // Dequeue to make space

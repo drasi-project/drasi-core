@@ -302,6 +302,109 @@ mod tests {
     // Tests
     // ========================================================================
 
+    #[tokio::test]
+    async fn test_future_wakeup_bypasses_source_checkpoint_dedup() {
+        use crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
+        use std::time::Duration;
+
+        for source_id in ["ordinary-source", FUTURE_QUEUE_SOURCE_ID] {
+            let (query_manager, source_manager, graph) = create_test_env().await;
+            let mut event_rx = graph.read().await.subscribe();
+            let source = CheckpointTestSource::new(source_id)
+                .unwrap()
+                .with_position_handle();
+            source.base.set_next_sequence(100_000);
+            add_source(&source_manager, &graph, source).await.unwrap();
+            source_manager
+                .start_source(source_id.to_string())
+                .await
+                .unwrap();
+            wait_for_component_status(
+                &mut event_rx,
+                source_id,
+                ComponentStatus::Running,
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let query_id = "future-checkpoint-query";
+            let mut config = create_query_config(query_id, vec![source_id.to_string()]);
+            config.query = "MATCH (n:Person) \
+                WHERE drasi.trueFor(n.name = 'ready', duration({ milliseconds: 100 })) \
+                RETURN n.name AS name"
+                .to_string();
+            add_query(&query_manager, &graph, config).await.unwrap();
+            query_manager
+                .start_query(query_id.to_string())
+                .await
+                .unwrap();
+            wait_for_component_status(
+                &mut event_rx,
+                query_id,
+                ComponentStatus::Running,
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let query = query_manager.get_query_instance(query_id).await.unwrap();
+            let mut subscription = query
+                .subscribe("future-observer".to_string())
+                .await
+                .unwrap();
+            let source_instance = source_manager.get_source_instance(source_id).await.unwrap();
+            let source = source_instance
+                .as_any()
+                .downcast_ref::<CheckpointTestSource>()
+                .unwrap();
+            let change = drasi_core::models::SourceChange::Insert {
+                element: drasi_core::models::Element::Node {
+                    metadata: drasi_core::models::ElementMetadata {
+                        reference: drasi_core::models::ElementReference::new(source_id, "person"),
+                        labels: Arc::new([Arc::from("Person")]),
+                        effective_from: chrono::Utc::now().timestamp_millis() as u64,
+                    },
+                    properties: drasi_core::models::ElementPropertyMap::from(
+                        serde_json::json!({"name": "ready"}),
+                    ),
+                },
+            };
+            source
+                .inject_change_with_position(change, None)
+                .await
+                .unwrap();
+
+            let wakeup = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let result = subscription.receiver.recv().await.unwrap();
+                    if result.results.iter().any(|diff| {
+                        matches!(diff, ResultDiff::Add { data, .. } if data["name"] == "ready")
+                    }) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            let confirmed_sequence = source.get_position_handle_value();
+            query_manager
+                .stop_query(query_id.to_string())
+                .await
+                .unwrap();
+            source_manager
+                .stop_source(source_id.to_string())
+                .await
+                .unwrap();
+
+            assert!(
+                wakeup.is_ok(),
+                "future wakeup suppressed for source {source_id}"
+            );
+            assert_eq!(
+                confirmed_sequence, 100_001,
+                "future wakeups must not advance the source checkpoint"
+            );
+        }
+    }
+
     /// Test that the framework assigns monotonically increasing sequence numbers
     /// to events dispatched through SourceBase, independent of source_position.
     #[tokio::test]

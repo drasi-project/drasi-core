@@ -124,8 +124,14 @@ pub enum QueryLanguage {
 ///
 /// ## Same-Timestamp Ordering
 ///
-/// Events from different sources with the same timestamp are evaluated in the
-/// order the sources are listed in the query's `sources` configuration.
+/// Among events already buffered with the same timestamp, all events from an
+/// earlier source in the query's `sources` list are evaluated before those from
+/// a later source. Within each source, events are ordered by sequence. For
+/// sources listed as A then B, buffered arrivals `A, B, A, B` become `A, A, B, B`.
+/// This is the query's merge policy, not arrival order, and can affect intermediate
+/// join results. The queue does not wait for other sources or reorder events
+/// already processed, so this does not guarantee a global cross-source order
+/// independent of arrival timing.
 ///
 /// ```yaml
 /// sources:

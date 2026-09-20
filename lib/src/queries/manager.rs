@@ -49,6 +49,7 @@ use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
     FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
 };
+use crate::queries::priority_queue::RankedSourceEvent;
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
@@ -136,7 +137,10 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
 
 /// Compute per-source priority-queue ranks for same-timestamp tie-breaking.
 ///
-/// Ranks follow the query's declared `sources` order.
+/// Ranks follow the query's declared `sources` order. Among buffered events at
+/// the same timestamp, all events from an earlier source precede those from a
+/// later source; sequence orders events within each source. This is a merge
+/// policy, not arrival ordering or coordination with sources yet to deliver.
 pub(super) fn compute_source_ranks(source_count: usize) -> Vec<u32> {
     (0..source_count).map(|index| index as u32).collect()
 }
@@ -1639,18 +1643,22 @@ impl Query for DrasiQuery {
                         loop {
                             match receiver.recv().await {
                                 Ok(arc_event) => {
+                                    let entry = Arc::new(RankedSourceEvent::new(
+                                        arc_event,
+                                        forwarder_source_rank,
+                                    ));
                                     // Use appropriate enqueue method based on dispatch mode
                                     if use_blocking_enqueue {
                                         // Channel mode: Use blocking enqueue to prevent message loss
                                         // This creates backpressure when the priority queue is full
                                         priority_queue
-                                            .enqueue_wait(arc_event, forwarder_source_rank)
+                                            .enqueue_wait(entry)
                                             .await;
                                     } else {
                                         // Broadcast mode: Use non-blocking enqueue to prevent deadlock
                                         // Messages may be dropped when priority queue is full
                                         if !priority_queue
-                                            .enqueue(arc_event, forwarder_source_rank)
+                                            .enqueue(entry)
                                             .await
                                         {
                                             warn!(
@@ -2104,7 +2112,9 @@ impl Query for DrasiQuery {
                     // source (u32::MAX) so that, on a timestamp tie, its
                     // re-evaluation signals order deterministically last. Its
                     // own monotonic sequence still breaks ties among its events.
-                    fq_priority_queue.enqueue_wait(event, u32::MAX).await;
+                    fq_priority_queue
+                        .enqueue_wait(Arc::new(RankedSourceEvent::new(event, u32::MAX)))
+                        .await;
                 }
             });
             self.subscription_tasks.write().await.push(fq_forwarder);
@@ -2226,6 +2236,7 @@ impl Query for DrasiQuery {
 
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
+                            let arc_event = Arc::unwrap_or_clone(arc_event).into_event();
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
                             let parts =
                                 match StampedSourceEvent::try_unwrap_arc(arc_event) {
@@ -2248,16 +2259,6 @@ impl Query for DrasiQuery {
                             let source_position = parts.source_position;
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
-
-                            // Dedup: skip events already processed for this source
-                            if dedup.should_skip(&source_id, sequence) {
-                                debug!(
-                                    "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
-                                    seq = sequence,
-                                    cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
-                                );
-                                continue;
-                            }
 
                             match event {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
@@ -2293,6 +2294,15 @@ impl Query for DrasiQuery {
                                     continue;
                                 }
                                 SourceEvent::Change(source_change) => {
+                                    if dedup.should_skip(&source_id, sequence) {
+                                        debug!(
+                                            "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
+                                            seq = sequence,
+                                            cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
+                                        );
+                                        continue;
+                                    }
+
                                     let mut profiling =
                                         profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
                                     profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());

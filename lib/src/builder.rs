@@ -877,8 +877,10 @@ impl Query {
 
     /// Subscribe to a source.
     ///
-    /// Same-timestamp events from different sources are evaluated in the order
-    /// sources are added to this query.
+    /// Buffered same-timestamp events are grouped by the order sources are added,
+    /// then ordered by sequence within each source. This merge policy can affect
+    /// intermediate join results; it is not arrival ordering. The queue does not
+    /// wait for other sources or reorder events already processed.
     pub fn from_source(mut self, source_id: impl Into<String>) -> Self {
         self.sources.push(SourceSubscriptionConfig {
             source_id: source_id.into(),
@@ -893,6 +895,7 @@ impl Query {
     ///
     /// The pipeline is a list of middleware names (strings) that will be applied to
     /// data from this source before it reaches the query.
+    /// Source ordering follows the same merge policy as [`Self::from_source`].
     pub fn from_source_with_pipeline(
         mut self,
         source_id: impl Into<String>,
