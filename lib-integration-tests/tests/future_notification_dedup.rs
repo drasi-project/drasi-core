@@ -19,7 +19,10 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
     }
     timeout(Duration::from_secs(5), async {
         loop {
-            let event = events.recv().await.unwrap();
+            let event = events
+                .recv()
+                .await
+                .expect("failed to receive component event while waiting for startup");
             if event.component_id == component_id && event.status == ComponentStatus::Running {
                 break;
             }
