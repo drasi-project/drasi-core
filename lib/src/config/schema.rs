@@ -306,15 +306,16 @@ impl Default for DrasiLibConfig {
 ///
 /// Queries can be written in either:
 /// - **Cypher**: Default graph pattern matching language
-/// - **GQL**: GraphQL-style queries (compiled to Cypher)
+/// - **GQL**: ISO/IEC 39075 graph query language, not GraphQL
 ///
-/// **Important**: ORDER BY, TOP, and LIMIT clauses are not supported in continuous
+/// **Important**: ORDER BY, LIMIT, and SKIP clauses are not supported in continuous
 /// queries as they conflict with incremental result computation.
 ///
 /// # Bootstrap Processing
 ///
 /// - **enableBootstrap**: Controls whether the query processes initial data (default: true)
-/// - **bootstrapBufferSize**: Event buffer size during bootstrap phase (default: 10000)
+/// - **bootstrapBufferSize**: ComponentGraph bootstrap buffer setting (default: 10000).
+///   ComputationGraph's live-event inbox during bootstrap uses `priority_queue_capacity`.
 ///
 /// During bootstrap, events are buffered to maintain ordering while initial data loads.
 /// After bootstrap completes, queries switch to incremental processing mode.
@@ -330,11 +331,11 @@ impl Default for DrasiLibConfig {
 /// - **id**: Unique identifier (referenced by reactions)
 /// - **query**: Query string in specified language
 /// - **queryLanguage**: Cypher or GQL (default: Cypher)
-/// - **sources**: Source IDs to subscribe to
+/// - **sources**: Ordered subscription objects containing `source_id` and optional label/pipeline mappings
 /// - **auto_start**: Start automatically (default: true)
 /// - **joins**: Optional synthetic join definitions
 /// - **enableBootstrap**: Process initial data (default: true)
-/// - **bootstrapBufferSize**: Buffer size during bootstrap (default: 10000)
+/// - **bootstrapBufferSize**: ComponentGraph bootstrap buffer setting (default: 10000)
 /// - **priority_queue_capacity**: Out-of-order event queue size (overrides global)
 /// - **dispatch_buffer_capacity**: Output buffer size (overrides global)
 /// - **dispatch_mode**: Broadcast or Channel routing
@@ -348,7 +349,8 @@ impl Default for DrasiLibConfig {
 ///   - id: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
 ///     queryLanguage: Cypher  # Optional, this is default
-///     sources: [orders_db]
+///     sources:
+///       - source_id: orders_db
 ///     auto_start: true
 ///     enableBootstrap: true
 ///     bootstrapBufferSize: 10000
@@ -363,7 +365,9 @@ impl Default for DrasiLibConfig {
 ///       MATCH (o:Order)-[:BELONGS_TO]->(c:Customer)
 ///       WHERE o.status = 'active'
 ///       RETURN o, c
-///     sources: [orders_db, customers_db]
+///     sources:
+///       - source_id: orders_db
+///       - source_id: customers_db
 /// ```
 ///
 /// ## Query with Synthetic Joins
@@ -374,7 +378,9 @@ impl Default for DrasiLibConfig {
 ///     query: |
 ///       MATCH (o:Order)-[:CUSTOMER]->(c:Customer)
 ///       RETURN o.id, c.name
-///     sources: [orders_db, customers_db]
+///     sources:
+///       - source_id: orders_db
+///       - source_id: customers_db
 ///     joins:
 ///       - id: CUSTOMER              # Relationship type in query
 ///         keys:
@@ -390,10 +396,11 @@ impl Default for DrasiLibConfig {
 /// queries:
 ///   - id: high_volume_processing
 ///     query: "MATCH (n:Event) WHERE n.timestamp > timestamp() - 60000 RETURN n"
-///     sources: [event_stream]
+///     sources:
+///       - source_id: event_stream
 ///     priority_queue_capacity: 100000  # Large queue for many out-of-order events
 ///     dispatch_buffer_capacity: 10000  # Large output buffer
-///     bootstrapBufferSize: 50000       # Large bootstrap buffer
+///     bootstrapBufferSize: 50000       # ComponentGraph bootstrap buffer
 /// ```
 ///
 /// ## GQL Query
@@ -402,15 +409,12 @@ impl Default for DrasiLibConfig {
 /// queries:
 ///   - id: gql_users
 ///     query: |
-///       {
-///         users(status: "active") {
-///           id
-///           name
-///           email
-///         }
-///       }
+///       MATCH (u:User)
+///       WHERE u.status = 'active'
+///       RETURN u.id, u.name, u.email
 ///     queryLanguage: GQL
-///     sources: [users_db]
+///     sources:
+///       - source_id: users_db
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {

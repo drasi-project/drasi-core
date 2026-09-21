@@ -932,7 +932,7 @@ impl Query {
         }
     }
 
-    /// Create a new GQL (ISO 9074:2024) query builder.
+    /// Create a new GQL (ISO/IEC 39075:2024) query builder.
     pub fn gql(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),

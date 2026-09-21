@@ -32,11 +32,12 @@ use std::collections::HashMap;
 ///
 /// `ApplicationReactionHandle` provides APIs for receiving continuous query results in your
 /// application code. It supports multiple consumption patterns: callback-based, async streams,
-/// and flexible subscriptions with filtering and buffering options.
+/// and subscriptions with timeouts and batch receives. Callback filtering is
+/// available through `subscribe_filtered`.
 ///
 /// # Usage Pattern
 ///
-/// 1. Get the handle from `DrasiLib::reaction_handle()`
+/// 1. Keep the handle returned by `ApplicationReaction::new()` or its builder.
 /// 2. Choose a consumption pattern:
 ///    - **Subscription** (recommended): Use `subscribe_with_options()` for flexible result consumption
 ///    - **Async Stream**: Use `as_stream()` for async iteration
@@ -58,7 +59,8 @@ use std::collections::HashMap;
 ///
 /// ```ignore
 /// // This example shows how to use ApplicationReactionHandle with DrasiLib
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// // Create a subscription with default options
 /// let mut subscription = handle.subscribe_with_options(
@@ -77,7 +79,8 @@ use std::collections::HashMap;
 /// ## Async Stream Pattern
 ///
 /// ```ignore
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// // Get as async stream
 /// if let Some(mut stream) = handle.as_stream().await {
@@ -90,7 +93,8 @@ use std::collections::HashMap;
 /// ## Callback Pattern
 ///
 /// ```ignore
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// // Process results with a callback (spawns background task)
 /// handle.subscribe(|result| {
@@ -104,7 +108,8 @@ use std::collections::HashMap;
 /// ## Filtered Subscription
 ///
 /// ```ignore
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// // Only receive results from specific queries
 /// handle.subscribe_filtered(
@@ -118,12 +123,11 @@ use std::collections::HashMap;
 /// ## Subscription with Options
 ///
 /// ```ignore
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// // Configure subscription behavior
 /// let options = SubscriptionOptions::default()
-///     .with_buffer_size(1000)      // Buffer up to 1000 results
-///     .with_query_filter(vec!["users".to_string()])  // Filter by query
 ///     .with_batch_size(10);        // Receive up to 10 at a time
 ///
 /// let mut subscription = handle.subscribe_with_options(options).await?;
@@ -190,7 +194,8 @@ impl ApplicationReactionHandle {
     /// # Examples
     ///
     /// ```ignore
-    /// let handle = core.reaction_handle("results").await?;
+    /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+    /// core.add_reaction(reaction).await?;
     ///
     /// handle.subscribe(|result| {
     ///     println!("Received {} results from query {}",
@@ -236,7 +241,8 @@ impl ApplicationReactionHandle {
     /// # Examples
     ///
     /// ```ignore
-    /// let handle = core.reaction_handle("results").await?;
+    /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+    /// core.add_reaction(reaction).await?;
     ///
     /// // Only process results from "users" query
     /// handle.subscribe_filtered(
@@ -287,7 +293,8 @@ impl ApplicationReactionHandle {
     /// # Examples
     ///
     /// ```ignore
-    /// let handle = core.reaction_handle("results").await?;
+    /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+    /// core.add_reaction(reaction).await?;
     ///
     /// if let Some(mut stream) = handle.as_stream().await {
     ///     while let Some(result) = stream.next().await {
@@ -303,8 +310,8 @@ impl ApplicationReactionHandle {
 
     /// Create a flexible subscription with custom options (recommended)
     ///
-    /// Creates a [`Subscription`] with configurable behavior including buffering, filtering,
-    /// and batch processing. This is the most flexible way to consume query results.
+    /// Creates a [`Subscription`] with receive timeouts and batch processing.
+    /// Its stored buffer-size and query-filter options are currently not applied.
     ///
     /// **Note**: This method takes ownership of the receiver, so it can only be called once.
     ///
@@ -327,11 +334,11 @@ impl ApplicationReactionHandle {
     /// # Examples
     ///
     /// ```ignore
-    /// let handle = core.reaction_handle("results").await?;
+    /// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+    /// core.add_reaction(reaction).await?;
     ///
     /// // Configure subscription
     /// let options = SubscriptionOptions::default()
-    ///     .with_buffer_size(1000)
     ///     .with_batch_size(10);
     ///
     /// let mut subscription = handle.subscribe_with_options(options).await?;
@@ -364,7 +371,7 @@ impl ApplicationReactionHandle {
     /// # Examples
     ///
     /// ```ignore
-    /// let handle = core.reaction_handle("results").await?;
+    /// let (_reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
     /// assert_eq!(handle.reaction_id(), "results");
     /// ```
     pub fn reaction_id(&self) -> &str {
@@ -380,7 +387,8 @@ impl ApplicationReactionHandle {
 /// # Examples
 ///
 /// ```ignore
-/// let handle = core.reaction_handle("results").await?;
+/// let (reaction, handle) = ApplicationReaction::new("results", vec!["users".into()]);
+/// core.add_reaction(reaction).await?;
 ///
 /// if let Some(mut stream) = handle.as_stream().await {
 ///     while let Some(result) = stream.next().await {

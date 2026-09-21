@@ -16,7 +16,7 @@ Data In       Change Detection       Actions Out
 ```
 
 1. **Sources** connect to databases, APIs, or streams and model incoming data as a property graph of nodes and relationships.
-2. **Continuous Queries** run [Cypher](https://opencypher.org/) or [GQL (ISO 9074:2024)](https://www.iso.org/standard/76120.html) queries perpetually against that graph. When source data changes, queries detect which results were **added**, **updated** (with before/after), or **deleted**.
+2. **Continuous Queries** run [Cypher](https://opencypher.org/) or [GQL (ISO/IEC 39075:2024)](https://www.iso.org/standard/76120.html) queries perpetually against that graph. When source data changes, queries detect which results were **added**, **updated** (with before/after), or **deleted**.
 3. **Reactions** receive those result changes and take action — send webhooks, write to databases, log alerts, or anything else.
 
 You declare *what changes matter* with a query. DrasiLib handles the rest.
@@ -37,705 +37,44 @@ tokio = { version = "1", features = ["full"] }
 
 ## Experimental computation graphs
 
-The **default-off** `computation` feature exposes additive, versioned contracts and a runtime at
-`drasi_lib::computation::v1`:
+ComputationGraph is an opt-in engine for the existing source, query and reaction
+APIs. It owns the running components, keeps failed additions visible, supports
+dependency-aware changes and lets independent queries run in parallel.
+**ComponentGraph remains the default.**
 
-```toml
-drasi-lib = { version = "0.9", features = ["computation"] }
-```
+Start with the guide for your task:
 
-### Using the ordinary API with ComputationGraph
+| Guide | What it covers |
+|---|---|
+| [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
+| [Usage](docs/computation-graph-usage.md) | A runnable example, engine selection, readiness, results and shutdown |
+| [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
+| [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 
-For the internal architecture, graph schema, lifecycle state-transition diagrams
-and current compatibility boundaries, see the
-[ComputationGraph technical design](docs/computation-graph-design.md).
-
-Choose the runtime explicitly when constructing the instance:
-
-```rust,ignore
-use drasi_lib::{DrasiLib, ExecutionMode, Query};
-
-let drasi = DrasiLib::builder()
-    .with_execution_mode(ExecutionMode::ComputationGraph)
-    .with_source(source)
-    .with_query(
-        Query::cypher("orders")
-            .query("MATCH (o:Order) RETURN o.name AS name")
-            .from_source("order-source")
-            .build(),
-    )
-    .with_reaction(reaction)
-    .build()
-    .await?;
-
-drasi.start().await?;
-let rows = drasi.get_query_results("orders").await?;
-drasi.shutdown().await?;
-```
-
-`source` and `reaction` are ordinary, fresh plugin instances. The normal
-add/update/remove/start/stop, query results, configuration, schema, event and metric
-APIs address the selected runtime. Native source and reaction services own the
-plugins; native query services own actual `ContinuousQueryTransformer` graphs.
-The old managers are not used to evaluate queries. A ComponentGraph-shaped
-inspection projection preserves the ordinary public topology and event API;
-the native controller owns lifecycle decisions.
-
-Each ordinary query's graph has an owned Tokio driver, so independent queries can
-use different workers on a multi-thread runtime. Single-thread runtimes remain
-supported. Quiescence awaits the nested graph's pause; shutdown joins its driver
-before disposing query resources. Query event order is unchanged.
-
-Compatibility is an outer hosting concern. Native ordinary operations do not
-construct the legacy SourceManager, QueryManager, ReactionManager or lifecycle
-orchestrator; the legacy backend is initialized only for ComponentGraph execution
-or explicit engine-specific manager access. Existing plugin status/query contracts
-remain available through their old import paths. The legacy inspection/event view
-is retained for ordinary API compatibility, not used as native authority.
-
-The generic graph uses explicit descriptor semantic metadata and generic resource
-identity/observation contracts. Translation of legacy providers and the standard
-factory catalog live in integration modules outside `graph/`. This is currently a
-module boundary with regression guards, not a separate native-kernel crate.
-
-In this mode the graph also owns **membership and instance identity**. Ordinary
-list/get/status, query configuration/results/metrics, log subscriptions and
-configuration snapshots resolve graph-owned records, not the compatibility view.
-A delayed or stale projection cannot admit, hide, replace or remove a component.
-Instance startup uses the graph's declared autostart policy. Reconfiguration can
-defer activation without rewriting that policy or starting a stopped instance.
-The instance ID remains reserved for the compatibility view's root; the native
-controller enforces that name reservation along with other addition conflicts.
-
-`ExecutionMode::ComponentGraph` remains the default, even with the Cargo feature
-enabled. This is a construction-time choice, not a command to move a running
-pipeline or import its persistent state. Native indexes use separate storage
-namespaces. Additional explicitly registered computation graphs remain available
-in either mode.
-
-The [ordinary-API example](examples/computation_runtime.rs) uses an
-ApplicationSource, a query and an ApplicationReaction without constructing adapters
-by hand:
+From the drasi-core repository root, run a complete in-process example:
 
 ```bash
-cargo run -p drasi-lib --features computation --example computation_runtime
+cargo run --locked -p drasi-lib --features computation --example computation_runtime
 ```
 
-The ordinary-API profile also accepts legacy index providers with checkpoints but
-without outbox/live-result writers. Their source/index progress can be persistent,
-but query output remains **volatile**, not durable or atomic. It must not be used
-as a promise that a reaction can recover output lost across reconstruction.
-
-In ComputationGraph mode, `add_source`, `add_query`, and `add_reaction` acknowledge
-**node creation**, not successful initialization or startup. Identity conflicts or
-a controller that cannot accept the addition are method errors. Query validation,
-dependency resolution, initialization and activation failures remain on the added
-node. Failed nodes retain their IDs and definitions until explicitly updated or
-removed. Legacy ComponentGraph mode keeps its existing API behavior.
-
-Use the corresponding `*_with_handle` method when the caller needs to await a
-successful start rather than only node creation:
-
-```rust,ignore
-let drasi = DrasiLib::builder()
-    .with_execution_mode(ExecutionMode::ComputationGraph)
-    .build()
-    .await?;
-drasi.start().await?;
-
-let component = drasi.add_source_with_handle(source).await?;
-tokio::time::timeout(
-    std::time::Duration::from_secs(30),
-    component.wait_started(),
-).await??;
-```
-
-The wait is asynchronous; it does not block an executor thread. It returns a
-recorded failure instead of waiting indefinitely after initialization/startup
-fails. A component with `auto_start = false` can be started explicitly with
-`component.start().await`. `wait_started()` records readiness for the latest
-requested activation in that construction generation, including a short-lived
-component that has already finished. Requesting another start resets that wait.
-A handle cannot operate on a replacement that reuses its ID.
-
-`add_transformer_with_handle` / `add_transformer` accept preconstructed native
-transformers. `add_computation_component(ComponentAddition::new(instance))` is the
-common native addition API for sources, transformers, query transformers, sinks
-and services. Bind output streams with the addition's `bind_stream` or the
-returned handle's `bind_stream`, then connect declared ports through
-`drasi.computation_control()?.connect(...)`. Incomplete components remain blocked
-until their required ports are connected. For standalone use,
-`ComputationGraph::empty(id)` creates an incremental graph; keep polling its
-`run()` future while issuing additions through its control handle.
-
-Cancelling an add caller does not undo a node the controller already added.
-Initialization is controller-owned and does not hold the instance mutation lock
-while awaiting plugin work. A stop can cancel pending initialization or activation;
-removal still awaits resource cleanup. A rejected replacement does not silently
-swap the old instance, and failed cleanup remains inspectable and retryable.
-Rejected native additions retain their supplied objects in
-`GraphError::AdditionRejected`. Call `addition.take().await` on that error's owner
-to recover them, or await graph disposal to reclaim newly supplied graph-owned
-resources. Borrowed resources and resources already managed by the graph are not
-shut down as part of rejecting an addition.
-
-Source/query replacement refreshes the affected downstream bindings. A
-reaction-only update leaves upstream sources and queries running. Reactions still
-follow their configured recovery policy when a query is reconstructed: a strict
-checkpoint cannot be reused against an unrelated query incarnation, and a plugin
-that cannot bootstrap cannot claim to have reset itself. A partially failed
-instance start can leave independent components running; inspect their statuses
-and use `stop()` or `shutdown()` to finish their cleanup.
-
-### Hosting both graphs in one DrasiLib instance
-
-`DrasiLib` can now own **both** its existing ComponentGraph pipeline and explicitly
-registered ComputationGraphs. Nothing is automatically converted. Native queries
-run their own evaluator, indexes, bootstrap and output recovery; they do not call
-the legacy QueryManager.
-
-Run the complete [side-by-side example](examples/computation_instance.rs):
-
-```bash
-cargo run -p drasi-lib --features computation --example computation_instance
-```
-
-It uses a real ApplicationSource and two ApplicationReactions. Both engines run the
-same query over a shared source, then the native graph is stopped while the legacy
-pipeline continues.
-
-For an initialized `drasi` instance, an existing `query_config`, and a **fresh**
-reaction plugin instance, the compatibility builder looks like this:
-
-```rust,ignore
-use drasi_lib::computation::v1::*;
-
-let pipeline = drasi.computation_pipeline("analytics")?;
-let reaction = ReactionPluginHost::owned(
-    Box::new(reaction),
-    pipeline.services(),
-    pipeline.catalog(),
-    ReactionPluginOptions::default(),
-)?;
-let graph = pipeline
-    .source(
-        drasi.borrow_computation_source("orders").await?,
-        SourceSubscriptionOptions::default(),
-    )?
-    .query(query_config)
-    .reaction(reaction, true)
-    .build()?;
-let handle = drasi.add_computation_graph(graph, ComputationOptions::default()).await?;
-drasi.start().await?;
-// ...
-drasi.shutdown().await?;
-```
-
-The query must name sources supplied to this builder. Existing `QueryConfig`
-synthetic joins, Cypher/GQL, registered middleware, per-source middleware pipelines,
-label filters, bootstrap settings, queue capacities and dispatch choices are
-translated into native specifications and bindings. The builder includes a
-`QueryResultsOutletFactory`, so a query can expose results without any reaction.
-`pipeline.catalog()` provides native snapshots, retained replay and a bounded live
-broadcast subscription; a lag error is not a lossless subscription.
-
-`add_computation_graph` registers a graph and its instance-owned driver. Its
-`auto_start` option joins instance startup, or starts it immediately if the instance
-is already running. `with_computation_graph` is also available on `DrasiLibBuilder`
-for graphs constructed independently of instance services. Creation and activation
-remain separate, with per-item reports on the returned `ComputationHandle`.
-Builder validation failures await disposal of transferred graph resources; keep
-awaiting a consuming build when those resources require asynchronous cleanup.
-If rollback itself fails, the returned `DrasiError::Internal` contains a
-`ComputationCleanupError`; downcast to it and await `cleanup()` to retry the
-still-owned resources. The same ownership rule applies to rejected registrations.
-
-Use `start_computation_graph`, `stop_computation_graph`, and
-`remove_computation_graph` to manage only the selected native graph. Soft stop
-parks processing at safe boundaries without destroying the controller; restart
-reuses native state and reconstructs plugins when their host has a constructor.
-Instance `stop()` stops both systems, while `shutdown()` permanently cancels,
-joins and disposes native drivers before completing legacy shutdown. A cancelled
-shutdown retains cleanup ownership: await `shutdown()` again. Dropping the entire
-instance is **not** a substitute for awaited shutdown.
-
-### Reusing existing plugins
-
-| Plugin family | ComputationGraph integration |
-| --- | --- |
-| Source | `SourcePluginHost::owned`, `recreatable`, or `borrowed`, with one `LegacySourceSubscription` per native query. Full adapters preserve filtering, bootstrap results, cursor/sequence, schema, timestamps and profiling. |
-| Reaction | `ReactionPluginHost` injects a native snapshot fetcher, bridges bootstrap/checkpoint/outbox recovery, and accepts normal `QueryResult` values. Completion is always **Accepted**, never Handled. |
-| Bootstrap | Install the existing provider with `SourcePluginHost::set_bootstrap_provider` before initialization. `LegacySourceBootstrap` coordinates snapshots and live subscriptions with native query progress. |
-| State, identity, WAL, secrets | `pipeline.services()` exposes graph-scoped instance services. Captured services and bootstrap providers are explicit declared dependencies, separate from desired configuration. State and WAL partitions include instance and graph identity. |
-| Index backend | `LegacyIndexProviderAdapter` runs existing `IndexBackendPlugin` implementations in separate namespaces. Providers explicitly declaring `supports_atomic_query_output()` use a shared output/index transaction in the ordinary pipeline. Other providers retain **non-atomic** publication; persistent recovery requires actual checkpoint, outbox and live-result stores. |
-| Native index provider | `query_provider(query_id, provider, publication)` supplies an explicit native provider, including supported atomic output bundles. Callers sharing a provider across instances must supply distinct graph/storage scopes. |
-
-An underlying plugin has exactly one lifecycle owner. A borrowed source is not
-initialized, started, stopped, deprovisioned or given a new bootstrap provider by
-the native graph. Owned hosts must receive fresh plugin instances. Borrowed
-bootstrap/replay requires explicit `borrowed_recovery` permission; source-side
-Broadcast requires `allow_broadcast_loss`. Neither permission upgrades a plugin's
-capabilities. The instance places initial native subscriptions before the common
-legacy source subscription-complete fence.
-
-Use a `SourcePluginConstructor` or `ReactionPluginConstructor` when a plugin cannot
-restart the same object. ApplicationSource, for example, consumes its receiver on
-first start: reconstruct it and obtain its new application handle. A transient
-source cannot recover changes emitted while its native subscription was stopped.
-Replay-capable Channel sources resume from **confirmed raw source progress**, not
-adapter receipt; the native producer sequence is separate. Snapshot reset, strict
-recovery and deliberately lossy gap handling remain distinct policies. A legacy
-reaction without handled checkpoints can receive duplicates after restart.
-Recreated volatile sources retain the committed raw sequence floor even without
-positional replay. Reconstructed volatile queries have a separate incarnation
-identity, so an old durable reaction checkpoint cannot match unrelated fresh
-query state merely because its sequence and reset generation are both zero.
-
-The optional `drasi-plugin-sdk/computation` module supplies descriptor-backed
-`SourcePluginFactory`, `ReactionPluginFactory`, `BootstrapPluginFactory`, and
-provider creation helpers. They validate the descriptor's exact kind/configuration
-version and available schema, retain an unresolved `PluginConfiguration` recipe,
-and reuse existing plugin constructors. No library-to-SDK dependency or plugin ABI
-change is introduced. Store the original recipes alongside exported topology and
-re-supply their external bindings on import; export never calls `properties()` to
-recover potentially secret-bearing resolved configuration.
-
-In-process descriptor creation uses task-scoped instance secret resolution through
-`PluginResolution`, not a process-global resolver replacement. This scope also
-wraps automatic source/reaction reconstruction. `create_with_services` and
-`create_scoped_index_provider` apply it to bootstrap/index creation; other helper
-calls can be wrapped with `PluginResolution::run`. Existing schemas sometimes erase
-the inner type of `ConfigValue<T>`: those references get structural validation,
-then the descriptor performs the concrete type conversion during creation.
-
-**Compatibility limits:** descriptors must already be safely loaded and
-version-checked by the host. An FFI plugin retains its host-injected resolver and
-executor; task-local scopes do not cross that boundary. Current FFI SourceProxy
-reports replay unsupported because its ABI cannot remove position handles.
-The adapter does not bypass that restriction. Full source adapters consume and
-ignore subscription-control notifications, as the legacy query path does, rather
-than encoding them as data; native queries own their scheduled-future control.
-Cleanup can only await the plugin's own `stop()` contract; it cannot join
-opaque workers that a plugin fails to join itself. No adapter makes arbitrary
-plugins durable, lossless, externally exactly-once, or restartable.
-
-### Inspecting and changing a managed graph
-
-`get_computation_graph`, `list_computation_graphs` and
-`inspect_computation_graph` expose native state without adding native components
-to ComponentGraph. `ComputationInspector` publishes coherent desired/observed
-snapshots and the latest 256 controller publications. Requests for evicted history
-fail explicitly. The handle exposes the same revision/generation-checked control,
-preview/reconcile and desired export APIs as a standalone graph.
-
-`ComputationTopologySource`/`ComputationTopologyFactory` expose that inspection as
-queryable graph data: components, resources, active flows and explicitly unbound
-relationships. They converge to the latest publication, not every intermediate
-transition, and omit configuration values, secret values and failure messages.
-`subscribe_computation_logs` reads the existing log registry under
-`<instance>::computation::<graph>`; use a wrapped plugin's own ID for its worker
-logs. Native transformers use the Query log category and native sinks use Reaction.
-
-This milestone does not add Server YAML/REST routing, a dynamic-plugin loader,
-automatic legacy persistence migration, or a second legacy manager hierarchy.
-
-### Running the original behaviour scenarios on both runtimes
-
-The original application scenarios use the same source events and expected
-assertions. Unit-test builders and shared manager fixtures select the runtime
-with `DRASI_TEST_EXECUTION`; integration tests use an explicit fixture builder.
-Production code never reads this environment variable.
-
-```bash
-# Original and new library tests with the default runtime.
-DRASI_TEST_EXECUTION=component cargo test -p drasi-lib --lib --tests --no-fail-fast
-
-# Same original scenarios, native query execution.
-DRASI_TEST_EXECUTION=computation cargo test -p drasi-lib --features computation \
-    --lib --tests --no-fail-fast
-
-# Feature-off, feature-on legacy, and feature-on native, with corpus accounting.
-bash lib/tests/run-runtime-parity.sh
-```
-
-The runner records complete logs and exit codes under `target/runtime-parity`,
-checks that every original case is still discovered, and does not skip or turn
-known failures into successes. `RUSTUP_TOOLCHAIN=1.95.0` can select the CI toolchain.
-The unchanged shared test
-`reactions::common::base::tests::test_run_standard_loop_dedup_and_checkpoint`
-has a known intermittent legacy ordering failure. The runner returns nonzero if
-it recurs, while still attempting the other profiles.
-The [per-case inventory](tests/runtime_parity/original-cases.tsv) is pinned to
-`01813156`: 260 application/runtime cases, one shared legacy/native codec scenario,
-470 unchanged shared helper/plugin cases, 174 concrete legacy-structure units,
-and three A1 legacy-boundary characterizations. The
-[classification rules](tests/runtime_parity/classification.tsv) explain each
-disposition.
-
-The structural cases deliberately still exercise their named implementation:
-for example, QueryBase's task fields, ComponentGraph's internal transitions and
-the old priority heap. They are **not** counted as native runtime substitution.
-The three A1 cases additionally pin legacy private persistence bytes, transactional
-commit/rollback order, replay and restart deduplication. Their original identifiers
-are retained, but they now assert the corrected failure handling merged from main
-rather than preserving the former lost-output defect. Shared real-runtime tests cover bootstrap, joins, checkpoints, recovery,
-CRUD, lifecycle, snapshots/outbox and metrics. Native-route assertions inspect
-the actual native query type and its constructed, running query component.
-Additional full-result cases cover fanout and scheduled-future metadata without
-sorting results or dropping result identity, metadata or profiling.
-The paired backend trace also compares ordered insert/update/delete emissions,
-duplicate-valued rows, row signatures, metadata, keyed snapshots and outbox replay
-between independently constructed backends. It normalizes wall-clock timestamps
-and profiling clock values only, retaining the profiling field/presence structure.
-
-### Native graph contracts
-
-These contracts support custom schema-validated immutable record bytes, ordered
-Adds/Updates/Deletes (explicit PATCH versus REPLACE), and input lineage.
-Every new graph data-plane boundary carries a `ChangeEnvelope`: a shared immutable
-`ChangeEvent` describing a set diff at a time, plus a branch-owned appendable list
-of immutable context entries. `append_annotation` extends only that envelope's
-history; fanout shares the event and existing entries without mixing branch histories.
-`derive` creates a new event for a transformed diff without changing the input.
-`Envelope` is a compatibility name for the same type. These contracts also define host-owned
-`EnvelopeSource`, `Transformer`, and `EnvelopeSink` traits, named schema ports, and
-pipe capability negotiation. A transformer can emit zero, one, or many outputs,
-using its own producer stream and sequence while retaining input lineage.
-
-`ComputationGraph::builder` accepts owned native components, explicit named-port
-edges with `PipeProvider` instances (normally `BoundedPipeConfig { capacity }`),
-and one unique stream binding per output port. Build validates the entire DAG
-before provider creation or component starts: roles, endpoints, every connected
-port, full schemas, stream identities, finite capacities, capabilities and cycles.
-Direct Source -> Sink and arbitrary acyclic transformer chains require **no
-Continuous Query**. Fanout shares payloads; ordinary FIFO pipes preserve per-stream FIFO.
-One output stream cannot feed multiple input ports on the same component:
-independent queues for that stream would not preserve component-wide FIFO.
-
-Declarative components use `component(ComponentSpecification, Arc<dyn ComponentFactory>)`.
-Factories declare implementation/plugin identity, configuration schema/version,
-resource interfaces and cardinalities. The complete graph is validated before
-factory creation. `declare_resource` records ownership and an unresolved binding;
-`provide_resource` supplies the actual instance separately. Missing instances and
-failed creation remain visible in per-item deployment reports without erasing
-desired specifications. Secret fields require unresolved references; resolved
-values and resource handles are excluded from desired snapshots.
-
-Run the native custom-schema example (direct graph and two-transformer chain):
-
-```bash
-cargo run -p drasi-lib --features computation --example computation_graph
-```
-
-The example includes inputs and expected outputs. Its source, transforms and sink
-implement the public traits directly; no legacy adapter or query is hidden inside.
-
-**Pipe profiles:** `BoundedPipeConfig` provides FIFO/backpressure.
-`BroadcastPipeConfig` provides exact bounded retention with an explicit report-or-skip
-lag policy and no backpressure claim. `RetainedPipeConfig` names a declared
-`RetainedStoreResource`; `MemoryEnvelopeStore` retains history within the process,
-while `IndexedEnvelopeStore` uses a complete persistent computation index bundle
-and `EnvelopeCodec` for durable acceptance/replay. The versioned codec requires
-registered schema validators on decode and preserves event metadata, lineage and
-immutable annotations; it does not change any legacy serializer.
-
-Retained deliveries use separate one-shot acknowledgements. Dropping or failing
-a delivery does not advance its consumer position. The graph acknowledges only
-after local handling and output forwarding succeed; it rejects acknowledging
-pipes into acceptance-only sinks. These boundaries do not make external effects
-exactly-once. Store dependencies participate in graph preflight/ownership, and
-retained journals require exclusive binding ownership.
-
-`send_batch` preserves accepted receipts and the exact failed/unattempted suffix.
-For a durable commit error, inspect `SendFailure::acceptance()` before deciding
-what to retry: `Unknown` is not definite rejection. Explicit event-time input
-merging compares available stream heads without reordering any producer's stream.
-
-**Continuous-query input ordering:** ordinary queries in either execution mode,
-and queries assembled by `ComputationPipelineBuilder`, use one bounded inbox per
-query. Its order is **SourceEvent wrapper timestamp, source declaration rank,
-source sequence**. Rank is the zero-based position in that query's `sources`
-list, not a lexical source ID or a property of the shared source. The input
-wrapper timestamp is used as delivered by the source—not the element's
-`effective_from`, the adapter's receipt clock, or its native producer sequence.
-Raw source sequence/cursor/profiling metadata remains intact. Standard
-`SourceBase` dispatch stamps the source sequence before fanout and retains its
-existing per-source dispatch/timestamp policy; custom sources must supply an
-authoritative sequence rather than relying on an adapter-generated substitute.
-
-Native query inputs use `RankedInputPipeConfig` branches of a shared
-`RankedInputQueue`, explicitly negotiating `RankedEventOrder` rather than FIFO.
-The query's `priority_queue_capacity` bounds the **shared** inbox, including
-scheduled signals. Channel sources block when full; broadcast sources explicitly
-drop new arrivals when full. Other source buffers and a sender's in-flight event
-are separate from that bound.
-
-This is ordering of **currently admitted/queued events**. A quiet source is not
-awaited, and an earlier timestamp arriving after a dequeue cannot preempt that
-in-flight event. There is no event-time watermark or guarantee over unseen events.
-Scheduled `FuturesDue` signals use the future queue's due time, a rank after all
-declared sources, and their own increasing signal sequence. A selected signal
-drains the scheduled batch before the next input, as in the legacy processor;
-native continuations emit one bounded result batch at a time.
-The internal `__future_queue__` source ID is reserved and cannot be declared as
-an ordinary query source.
-
-**Graph-owned queries and legacy boundaries:** `ContinuousQueryFactory` constructs
-a Cypher or GQL transformer using an explicit `QueryIndexProviderResource`.
-`ContinuousQueryTransformer` also supports programmatic construction and exposes
-typed snapshot/retained-history readers. Query evaluation, scheduled future work,
-source checkpoints and output publication belong to the new graph; no legacy
-query manager is used. Complete persistent bundles stage index/checkpoint/sequence/
-outbox/live-row changes together, and startup reconciles those records before
-accepting more input. Failed processing is fenced until cleanup/recovery.
-
-`LegacySourceFactory` adapts compatible isolated Channel subscriptions while
-preserving raw source sequence/cursor/time/profiling/schema separately from its
-own producer sequence. Borrowed sources are never initialized/stopped/deprovisioned;
-owned sources require a fresh transferred instance and registered cleanup owner.
-The basic adapter does not implicitly inject identity/state/WAL/bootstrap services.
-`LegacyReactionFactory` borrows an already-managed Reaction and only enqueues
-normal `QueryResult` values, declaring `Accepted`, never `Handled`.
-For a dedicated borrowed-source adapter, an edge can explicitly enable
-`fence_producer_on_failure`: consumer failure stops only that graph-owned adapter,
-releasing its isolated subscription so it cannot block the shared legacy Source.
-This is opt-in lifecycle coupling, not a change to default independent activation
-or to the legacy Source's lifecycle.
-
-**Recovery:** graph-owned bootstrap streams and watermarks establish the initial
-query state separately from creation. Persistent in-progress markers reject
-partial bootstrap; explicitly configured `AutoReset` requires a bootstrap provider
-and preserves output high-water and reset generation. Non-atomic publication is
-an explicit mode with a durable pending-output fence, not an atomicity claim.
-`WalReplaySourceFactory` resumes/tails an explicitly registered WAL partition and
-reports unavailable positions instead of silently skipping them.
-
-An optional declared `QuerySourceProgressResource` connects that source to its
-owning query's confirmed input checkpoints. The source waits for query recovery,
-then resumes after the committed **raw source** sequence; adapter producer sequence
-remains separate. Confirmation follows successful query/checkpoint/output commit,
-not receipt or failed handling. The read-only view is rehydrated from the actual
-persistent checkpoint store after reconstruction, carries reset generation and
-opaque cursor bytes, and wakes waiting sources with an error if its query fails.
-It does not install a position handle on a borrowed legacy Source or prune its WAL.
-
-`QueryReplayTransformer` joins a typed snapshot or retained suffix to the bound
-live stream. Native `CheckpointedSink` advances its query-sequence/reset-generation
-checkpoint only after actual handling or supported snapshot replacement; failed
-initialization never seeds progress. Strict, snapshot-reset and explicitly lossy
-gap policies are distinct. A borrowed legacy enqueue sink cannot pretend to
-replace external state from a snapshot.
-
-Desired topology snapshots support exact/dependency/dependent/all selections and
-versioned JSON export/import. They contain component/resource specifications and
-unresolved bindings, not observed health/lifecycle, secrets, data or live handles.
-External components/providers must be supplied again; incomplete selections keep
-their boundary relationships explicit rather than silently omitting dependencies.
-
-**Lifecycle:** `let run = graph.start()?; run.await?;` drives a caller-owned future.
-Every eligible created component is attempted; data relationships are
-activation-independent unless explicitly configured otherwise. A failed Source
-does not prevent its consumers from starting, and its bound pipes do not turn
-into false EOF. There are no detached graph workers. `run.control()` supplies a generation-specific
-cancel/status handle; call `control.cancel()` and **keep awaiting the run** to
-cancel pending operations and await asynchronous stop hooks. Mutable component
-calls use exclusive instance leases, but cancellation never waits for their locks.
-`graph.run()` drives deployment without automatic activation and keeps a live
-controller open. The control handle exposes deployment/start reports, immutable
-desired/observed snapshots, revision-checked lifecycle-policy changes and scoped
-start/stop commands, plus generation/operation-bound health reporting.
-Deployment constructs and binds components without requiring their sources to
-run, external systems to be reachable, or bootstrap to finish. Call
-`graph.dispose().await` to release graph-owned provider resources after component
-cleanup; borrowed providers are never shut down by the graph. Failed provider
-cleanup remains registered and explicitly retryable.
-
-**Control and notifications:** every native component receives a sealed,
-generation-bound `ComponentControl` through `bind_control`. It can notify only
-its current directly connected upstream/downstream neighbors, or one explicitly
-named neighbor. The controller also publishes availability and readiness changes.
-Ordinary Source/Reaction users obtain the same restricted sender from the
-component handle; existing plugin ABI methods are unchanged.
-
-Control messages use their own bounded low-volume queues, not data pipes. A
-component can return a shared `ControlHandler`, or the host can install one through
-`ComponentHandle::set_control_handler`. The controller polls that handler
-independently of the component's mutable data calls, so a blocked data handler or
-full data pipe does not block notifications. Queue saturation, stale senders and
-unrelated destinations are explicit errors. Components must still use cooperative
-handlers and handle control-send errors; this is not durable messaging.
-
-Readiness-driven activation is opt-in. Use
-`ComponentAddition::require_downstream_ready()` or the graph builder's
-`require_downstream_ready(component_id)`. A returned component handle also offers
-`require_downstream_ready(true).await`; configure it while the instance/component
-is stopped or with automatic startup disabled. The producer waits for its connected
-consumers to report readiness. Successful native start hooks report readiness
-automatically; adapters whose underlying component becomes ready later report it
-explicitly. A `NotReady` notification revokes readiness; it does not imply that
-accepted data or external effects were rolled back.
-Consumers must be able to report readiness without requiring the gated producer
-to start first; control messaging does not automatically resolve such an
-application-level startup dependency cycle.
-
-**Host-visible graph inventory:** native inspection exposes component and provider
-resource nodes, derived plugin-family/version nodes and pipe nodes. Provider
-dependencies refer to actual supplied resources; graph-owned and borrowed cleanup
-responsibilities remain distinct. Standard source/reaction bases and dynamic host
-proxies report attached bootstrap, identity, state-store and WAL providers through an
-optional runtime-context observer. A custom implementation with additional opaque
-providers must report those bindings; the host cannot inspect private Rust fields.
-
-All provider instances supplied through `DrasiLibBuilder` are present, including
-the default state store and configured identity, secret-store, WAL and named/default
-index providers, even before a query uses them. Multiple index names for the same
-`Arc` share one resource node, named from the lexically first alias. Queries link to
-their selected index provider, and replacement updates that link with the query.
-Attached-provider reports retain actual instance identity and share nodes where
-the same provider is selected by several components.
-
-Captured service bindings and selected-provider reports are dependencies, not
-per-call usage telemetry. In particular, an available secret store does not prove
-that a component read a secret. Metadata-only declarations such as
-`with_bootstrap_for_source` and storage-backend configuration do not create
-fictitious provider instances. Providers created privately inside existing dynamic
-plugins remain outside this guarantee unless the host can observe them through
-existing setters/context bindings. Existing dynamic plugins remain binary-compatible.
-
-Plugin identity comes from supplied implementation descriptors or component
-provenance, including `pluginId` / `pluginVersion` metadata where available.
-Different versions have distinct nodes, linked by `VERSION_OF` to one unversioned
-plugin-family node per plugin ID within the graph scope:
-
-```text
-component -> plugin version (postgres@1.2.0) -> plugin family (postgres)
-component -> plugin version (postgres@1.3.0) -> plugin family (postgres)
-```
-
-Existing version-node keys, the `ComputationPlugin` label and `USES_PLUGIN` links
-are unchanged. Family nodes use `GraphEntityId::PluginFamily` /
-`PluginFamilyEntity` (`ComputationPluginFamily` in graph-as-data), with
-`versionCount` and distinct `dependentComponentCount` summaries. Version-to-family
-links are available through dependency traversal without imposing lifecycle
-coupling. Both kinds of plugin nodes are derived automatically: a version
-disappears with its last dependent, and a family with its last represented version.
-They are not an inventory of all installed plugin binaries. Unknown provenance is
-not inferred from a type name or represented as a fictitious plugin family.
-
-Pipe nodes distinguish native
-provider-backed bindings from `hostSubscription` pipes for ordinary
-source/query/reaction subscriptions. Host subscriptions do not claim invented
-native-provider capabilities. Control-only connections are not data pipes.
-Representing a pipe as a node does not change its delivery guarantees.
-
-Ordinary query/reaction input subscriptions are committed with their nodes, not
-reconstructed by the projector. Missing producers remain explicit in inspection
-and desired export; they do not make a query disappear. Dependency selections and
-removal policies use those declarations, including direct controller removals.
-`dependencies()` / `dependents()` include normalized
-**consumer -> pipe -> producer** data dependencies as well as resource/plugin
-dependencies. These descriptive links do not impose extra startup coupling or
-turn control-only neighbors into data dependencies.
-
-`drasi.computation_control()?.inspector().topology()` exposes the instance graph.
-`drasi.inspect_query_computation(id).await?.topology()` exposes a query's nested
-native graph, including its actual index/bootstrap resources and internal pipes.
-An unrealized query remains inspectable through its parent declaration.
-
-For the complete host-visible scope hierarchy, use:
-
-```rust,ignore
-let inventory = drasi.inspect_computation_inventory().await?;
-for (scope, graph) in &inventory.scopes {
-    // graph.owner identifies the owning component and its construction generation;
-    // None means the graph was registered directly with this DrasiLib instance.
-    println!("{scope:?}: {} entities", graph.topology.nodes.len());
-}
-```
-
-The inventory includes ordinary components, native additions/transformers, query
-execution graphs and separately added/builder-supplied computation graphs.
-`entities()` uses scope-qualified identities, so repeated names cannot collide.
-`links` includes local topology and host-known cross-scope references from query
-adapters to their source instances, shared services and selected index provider.
-`plugin_dependents()` returns distinct scope-qualified dependents of a known
-plugin/version; `plugin_family_dependents("postgres")` traverses the family links
-to return dependents across all its represented versions and scopes. Each scope
-is a coherent native publication; the combined view
-does not claim a transaction across independently running graphs. It retains no
-live handles or private configuration and cannot keep removed instances alive.
-
-**Live changes:** use `control.preview(revision, mutations)` followed by
-`control.reconcile(preview, bindings)`. The immutable preview identifies creation,
-replacement, in-place update, restart, pause, binding and removal impact. Execution
-checks revision and generation/operation epochs again, then validates all actual
-factories/resources before changing desired topology. Factory identities cannot
-silently switch implementations. Explicitly supported in-place configuration
-updates keep the construction generation; other specification changes reconstruct
-only affected instances.
-
-A sink-only replacement parks that sink at a handling boundary, transfers its
-unconsumed input queues, and leaves upstream lifecycle hooks alone. Changed pipes
-drain in dependency order while their consumers are still active. Providers must
-implement `PipeControl::is_idle` to prove a binding can be drained, including
-recovered retained backlog; diagnostic metrics are not used as that proof.
-Old senders are revoked before replacement bindings are installed. Unchanged
-producer streams retain sequence high-water; newly named streams start independent
-sequences. Exhausted components and their closed bindings can be explicitly restarted.
-
-`Reject` refuses dependency-breaking removal. `Cascade` removes selected components
-and their dependents. `Orphan` requires an explicitly optional, orphan-permitted
-relationship and retains that unsatisfied relationship in desired export. `Drain`
-waits for pending work through handled boundaries and refuses acceptance-only sinks
-or failed processing boundaries. All binding removal waits for admitted work; no
-operation claims to undo or drain an external effect merely accepted by a legacy
-queue. A removal that would strand a mandatory port is rejected.
-
-Cleanup failure leaves the old desired topology intact and reports partial effects:
-successfully stopped instances remain stopped, and bindings to released or
-cleanup-failed resources remain visibly failed and quiesced until explicit repair.
-Creation/start failures after a desired update leave the new specifications present.
-`Retry` applies only to visible retryable failures; terminal creation failures require
-a changed specification or removal. Reconciliation remains caller-polled, bounded
-by the cleanup deadline, and cancellable while unrelated graph workers keep running.
-
-Only a fully drained, successfully stopped `Completed` graph can restart.
-Components and sequence high-watermarks are retained; each new generation gets
-fresh pipes. No automatic failure retry or rollback is implied. While the
-controller is open, a failed activation may be explicitly stopped and retried
-without restarting its independent consumers. Dropping a run closes
-its pipes and drops all scoped operations, but leaves `CleanupRequired`: explicitly
-call `graph.shutdown().await` to await remaining stop hooks. Cleanup has a bounded
-shared deadline; failed/timed-out hooks remain visibly incomplete. Dropping a graph
-cannot await cleanup for resources a component itself spawned.
-
-This is a parallel in-process runtime, not a replacement for the platform.
-Server configuration, plugin loading/ABI changes, distributed graph control and
-generic cross-component exactly-once transactions are not supplied by these
-components. Enabling computation alone does not migrate existing Sources, Queries,
-Reactions, or change an unextended `DrasiLib` pipeline. Immutable topology snapshots contain no live provider handles
-or resolved secrets. The explicit boundary codecs preserve typed values; internal
-canonical identity bytes are not used as a reversible wire codec.
-
-Enqueue receipts mean **acceptance only**, not handling or acknowledgement.
-Sinks declare a fixed `Accepted` or `Handled` completion boundary; legacy reaction
-queue acceptance must never be advertised as completed handling. Local
-acknowledgement handles remain outside envelopes and contexts. The volatile bounded
-pipe advertises only per-stream FIFO and backpressure; stronger requirements need
-an explicitly capable provider. Cross-component transactions and exactly-once
-effects are not inferred from a pipe. FIFO pipes order by producer sequence, not
-timestamps. Explicit ranked pipes instead order queued query inputs by the key
-described above and do not advertise producer FIFO. Opaque logical IDs remain producer-owned; `emission_id` is an optional
-stream/sequence identity helper, not a global arbitrary-ID deduplication service.
-
-Explicit pipe close rejects sends and drains accepted events. Runtime cancellation
-may discard queued/in-flight events and cannot roll back effects. Sequential fanout
-is **not atomic**: failure reports prior branch acceptances, cancellation can also
-leave partial delivery, and a slow branch backpressures its producer. No failed
-branch is automatically retried. Queue capacity bounds envelopes (shared across
-ranked branches, per edge for ordinary bounded pipes), not
-bytes, component state or transformer result vectors. See the v1 rustdocs for the
-complete lifecycle, provider and delivery contracts.
+The Cargo feature makes the implementation available. A Rust application also
+selects `.with_execution_mode(ExecutionMode::ComputationGraph)` on its
+`DrasiLib::builder()`. The [usage guide](docs/computation-graph-usage.md#select-the-engine-in-an-application)
+shows the dependency setup for this branch and the existing APIs.
+
+The main behaviour to understand before using it:
+
+- Adding a component accepts its node; it does not prove successful
+  initialization or startup. Use a component handle to wait for readiness.
+- Queued query inputs are ordered by source event time, source order in that
+  query's definition, then source sequence. Unseen events are not held back.
+- Persistent recovery depends on the source, query storage and reaction
+  capabilities. Disk indexes alone do not make all output durable.
+- Changing engines does not migrate stored state. Always await shutdown.
+
+[Server configuration](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#execution-engine)
+and [test-framework configuration](https://github.com/drasi-project/test-infra/blob/agentofreality-parallel-computation-graph/e2e-test-framework/README.md)
+use different settings; their guides show where each setting belongs.
 
 ## Identity Providers
 
@@ -872,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## Table of Contents
 
+- [ComputationGraph](#experimental-computation-graphs)
 - [Builder API](#builder-api)
 - [Query Builder](#query-builder)
 - [Multi-Source Queries and Joins](#multi-source-queries-and-joins)
@@ -1643,20 +983,20 @@ If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap
 
 ### Result Format
 
-Reactions receive `QueryResult` values containing `ResultDiff` items:
+Reactions receive `QueryResult` values containing a `query_id`, a per-query
+`sequence`, a `timestamp`, metadata, optional profiling and an ordered
+`Vec<ResultDiff>`. Each change is one of:
 
-```rust
-pub enum ResultDiff {
-    Add { data: serde_json::Value },
-    Delete { data: serde_json::Value },
-    Update {
-        data: serde_json::Value,      // current row
-        before: serde_json::Value,    // previous values
-        after: serde_json::Value,     // new values
-        grouping_keys: Option<Vec<String>>,
-    },
-}
-```
+| Variant | Data |
+|---|---|
+| `Add` / `Delete` | `data`, `row_signature` |
+| `Update` | `data`, `before`, `after`, optional `grouping_keys`, `row_signature` |
+| `Aggregation` | optional `before`, `after`, `row_signature` |
+| `Noop` | No row change |
+
+The [application reaction guide](../components/reactions/application/README.md#what-a-result-contains)
+shows the complete message shape, serialized type tags and a handler covering
+every variant. Results are changes to rows, not just plain JSON rows.
 
 ---
 
@@ -1701,23 +1041,39 @@ queries:
 
 ### Loading YAML
 
-```rust
-use drasi_lib::DrasiLibConfig;
+Inside an async function, with the source/reaction objects already constructed:
+
+```rust,ignore
+use drasi_lib::{DrasiLib, DrasiLibConfig};
 
 let yaml = std::fs::read_to_string("config.yaml")?;
 let config: DrasiLibConfig = serde_yaml::from_str(&yaml)?;
 config.validate()?;
 
 let mut builder = DrasiLib::builder().with_id(&config.id);
+if let Some(capacity) = config.priority_queue_capacity {
+    builder = builder.with_priority_queue_capacity(capacity);
+}
+if let Some(capacity) = config.dispatch_buffer_capacity {
+    builder = builder.with_dispatch_buffer_capacity(capacity);
+}
 for q in &config.queries {
     builder = builder.with_query(q.clone());
 }
 let core = builder
-    .with_source(my_source)
+    .with_source(sensors_source)
+    .with_source(orders_source)
+    .with_source(customers_source)
     .with_reaction(my_reaction)
     .build()
     .await?;
 ```
+
+This excerpt uses in-memory indexes. Register actual named storage providers
+when using storage references; parsing `storage_backends` does not construct
+external providers. The three source objects must use the IDs referenced in
+the YAML above. Engine selection is also separate from `DrasiLibConfig`;
+see the [ComputationGraph configuration reference](docs/computation-graph-configuration.md).
 
 ### `DrasiLibConfig` Fields
 
@@ -1742,9 +1098,12 @@ let core = builder
 | `enable_bootstrap` | `enableBootstrap` | `bool` | `true` |
 | `bootstrap_buffer_size` | `bootstrapBufferSize` | `usize` | `10,000` |
 | `joins` | `joins` | `Option<Vec<QueryJoinConfig>>` | `None` |
+| `priority_queue_capacity` | `priority_queue_capacity` | `Option<usize>` | Instance default, otherwise `10,000` |
+| `dispatch_buffer_capacity` | `dispatch_buffer_capacity` | `Option<usize>` | Instance default, otherwise `1,000` |
 | `dispatch_mode` | `dispatch_mode` | `Option<DispatchMode>` | `Channel` |
-| `storage_backend` | `storage_backend` | `Option<StorageBackendRef>` | In-memory |
-| `outbox_capacity` | `outbox_capacity` | `Option<usize>` | `1,000` |
+| `storage_backend` | `storage_backend` | `Option<StorageBackendRef>` | Instance default, otherwise in-memory |
+| `outbox_capacity` | `outboxCapacity` | `usize` | `1,000` |
+| `bootstrap_timeout_secs` | `bootstrapTimeoutSecs` | `u64` | `300` |
 | `recovery_policy` | `recoveryPolicy` | `Option<RecoveryPolicy>` | `Strict` (via global default) |
 
 ---

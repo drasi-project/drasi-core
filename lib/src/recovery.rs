@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Behavior when a source cannot honor a requested resume position.
 ///
 /// Configured per-query via `QueryConfig::recovery_policy`. When the field is
-/// `None`, a future global default applies (which itself defaults to `Strict`).
+/// `None`, the instance's global default applies (itself defaulting to `Strict`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryPolicy {
