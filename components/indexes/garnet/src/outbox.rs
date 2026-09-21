@@ -23,6 +23,7 @@
 //! Keys are hash-tagged (`{<query_id>}`) for Redis Cluster slot compatibility.
 //! Note: u64 sequences above 2^53 lose precision when stored as f64 scores.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,7 +31,7 @@ use drasi_core::interface::{IndexError, OutboxWriter};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
 
-use crate::session_state::GarnetSessionState;
+use crate::session_state::{BufferReadResult, GarnetSessionState, SortedSetDeltas};
 
 /// Garnet/Redis-backed outbox writer.
 ///
@@ -69,6 +70,102 @@ impl GarnetOutboxWriter {
     fn data_key(&self) -> String {
         format!("outbox_data:{{{}}}", self.query_id)
     }
+
+    async fn remove_sequences(
+        &self,
+        outbox_key: &str,
+        data_key: &str,
+        sequences: &[String],
+    ) -> Result<(), IndexError> {
+        if sequences.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(session_state) = &self.session_state {
+            if session_state
+                .with_active_buffer(|buffer| {
+                    for seq_str in sequences {
+                        buffer.zset_remove(outbox_key.to_string(), seq_str.as_bytes().to_vec());
+                        buffer.hash_del(data_key.to_string(), seq_str);
+                    }
+                })?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+
+        let mut con = self.connection.clone();
+        let mut pipe = redis::pipe();
+        pipe.zrem(outbox_key, sequences).ignore();
+        pipe.hdel(data_key, sequences).ignore();
+        pipe.query_async::<_, ()>(&mut con)
+            .await
+            .map_err(IndexError::other)?;
+        Ok(())
+    }
+
+    async fn committed_sequences(&self) -> Result<Vec<u64>, IndexError> {
+        let mut con = self.connection.clone();
+        let outbox_key = self.outbox_key();
+        let raw: Vec<String> = cmd("ZRANGE")
+            .arg(&outbox_key)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut con)
+            .await
+            .map_err(IndexError::other)?;
+        raw.into_iter()
+            .map(|seq_str| {
+                seq_str.parse().map_err(|e| {
+                    IndexError::other(std::io::Error::other(format!(
+                        "Invalid sequence in outbox: {e}"
+                    )))
+                })
+            })
+            .collect()
+    }
+
+    fn buffer_overlay(&self, outbox_key: &str) -> Result<Option<SortedSetDeltas>, IndexError> {
+        let Some(session_state) = &self.session_state else {
+            return Ok(None);
+        };
+        Ok(session_state
+            .with_active_buffer(|buffer| match buffer.zset_get_deltas(outbox_key) {
+                BufferReadResult::Found(deltas) => Some(deltas),
+                BufferReadResult::KeyDeleted => Some(SortedSetDeltas {
+                    added: HashMap::new(),
+                    removed: HashSet::new(),
+                    full_replace: true,
+                }),
+                BufferReadResult::NotInBuffer => None,
+            })?
+            .flatten())
+    }
+}
+
+fn parse_seq(member: &[u8]) -> Option<u64> {
+    std::str::from_utf8(member).ok()?.parse().ok()
+}
+
+fn merge_sequences(committed: Vec<u64>, overlay: Option<&SortedSetDeltas>) -> Vec<u64> {
+    let mut set: BTreeSet<u64> = match overlay {
+        Some(deltas) if deltas.full_replace => BTreeSet::new(),
+        _ => committed.into_iter().collect(),
+    };
+    if let Some(deltas) = overlay {
+        for member in &deltas.removed {
+            if let Some(seq) = parse_seq(member) {
+                set.remove(&seq);
+            }
+        }
+        for member in deltas.added.keys() {
+            if let Some(seq) = parse_seq(member) {
+                set.insert(seq);
+            }
+        }
+    }
+    set.into_iter().collect()
 }
 
 #[async_trait]
@@ -197,45 +294,91 @@ impl OutboxWriter for GarnetOutboxWriter {
         Ok(())
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
         let _ = query_id;
-        let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();
         let data_key = self.data_key();
+        let committed = self.committed_sequences().await?;
+        let overlay = self.buffer_overlay(&outbox_key)?;
+        let sequences_to_remove: Vec<String> = merge_sequences(committed, overlay.as_ref())
+            .into_iter()
+            .filter(|seq| *seq < retain_from)
+            .map(|seq| seq.to_string())
+            .collect();
+        let removed = sequences_to_remove.len();
+        self.remove_sequences(&outbox_key, &data_key, &sequences_to_remove)
+            .await?;
+        Ok(removed)
+    }
 
-        // Get total count
-        let total: usize = con
-            .zcard::<&str, usize>(&outbox_key)
-            .await
-            .map_err(IndexError::other)?;
-
-        if total <= capacity {
+    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+        let _ = query_id;
+        let outbox_key = self.outbox_key();
+        let data_key = self.data_key();
+        let committed = self.committed_sequences().await?;
+        let overlay = self.buffer_overlay(&outbox_key)?;
+        let effective = merge_sequences(committed, overlay.as_ref());
+        if effective.len() <= capacity {
             return Ok(0);
         }
-
-        let to_remove = total - capacity;
-
-        // Get the sequences to remove (lowest N)
-        let sequences_to_remove: Vec<String> = cmd("ZRANGE")
-            .arg(&outbox_key)
-            .arg(0)
-            .arg((to_remove - 1) as isize)
-            .query_async(&mut con)
-            .await
-            .map_err(IndexError::other)?;
-
-        // Remove from sorted set (by rank)
-        con.zremrangebyrank::<&str, ()>(&outbox_key, 0, (to_remove - 1) as isize)
-            .await
-            .map_err(IndexError::other)?;
-
-        // Remove data entries from hash
-        for seq_str in &sequences_to_remove {
-            con.hdel::<&str, &str, ()>(&data_key, seq_str)
-                .await
-                .map_err(IndexError::other)?;
-        }
-
+        let to_remove = effective.len() - capacity;
+        let sequences_to_remove: Vec<String> = effective
+            .into_iter()
+            .take(to_remove)
+            .map(|seq| seq.to_string())
+            .collect();
+        self.remove_sequences(&outbox_key, &data_key, &sequences_to_remove)
+            .await?;
         Ok(to_remove)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seq(n: u64) -> Vec<u8> {
+        n.to_string().into_bytes()
+    }
+
+    #[test]
+    fn merge_committed_only() {
+        assert_eq!(merge_sequences(vec![1, 3, 2], None), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn merge_adds_buffered_members() {
+        let overlay = SortedSetDeltas {
+            added: HashMap::from([(seq(4), 4.0), (seq(5), 5.0)]),
+            removed: HashSet::new(),
+            full_replace: false,
+        };
+        assert_eq!(
+            merge_sequences(vec![1, 2, 3], Some(&overlay)),
+            vec![1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn merge_full_replace_drops_committed() {
+        let overlay = SortedSetDeltas {
+            added: HashMap::from([(seq(9), 9.0)]),
+            removed: HashSet::new(),
+            full_replace: true,
+        };
+        assert_eq!(merge_sequences(vec![1, 2, 3], Some(&overlay)), vec![9]);
+    }
+
+    #[test]
+    fn merge_removed_drops_committed_and_added() {
+        let overlay = SortedSetDeltas {
+            added: HashMap::from([(seq(4), 4.0)]),
+            removed: HashSet::from([seq(1)]),
+            full_replace: false,
+        };
+        assert_eq!(
+            merge_sequences(vec![1, 2, 3], Some(&overlay)),
+            vec![2, 3, 4]
+        );
     }
 }
