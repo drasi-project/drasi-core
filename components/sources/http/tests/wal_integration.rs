@@ -216,16 +216,26 @@ async fn concurrent_http_requests_preserve_wal_order() {
             init_source_with_wal(&source, wal.clone(), source_id).await;
             source.start().await.unwrap();
             let mut receiver = subscribe_fresh(&source, source_id).await;
-            let client = Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+            let client = Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 let mut retry = tokio::time::interval(Duration::from_millis(20));
                 loop {
                     retry.tick().await;
-                    if client.get(format!("http://127.0.0.1:{port}/health")).send().await.is_ok() {
+                    if client
+                        .get(format!("http://127.0.0.1:{port}/health"))
+                        .send()
+                        .await
+                        .is_ok()
+                    {
                         break;
                     }
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
 
             let barrier = Arc::new(tokio::sync::Barrier::new(8));
             let mut producers = tokio::task::JoinSet::new();
@@ -274,13 +284,25 @@ async fn concurrent_http_requests_preserve_wal_order() {
             };
             for index in 0..total {
                 let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
-                    .await.unwrap().unwrap();
-                assert_eq!(event.sequence, index as u64 + 1, "webhook={webhook}, durable={durable}");
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    event.sequence,
+                    index as u64 + 1,
+                    "webhook={webhook}, durable={durable}"
+                );
                 if let Some(records) = &records {
                     let (sequence, change) = &records[index];
                     assert_eq!(event.sequence, *sequence);
-                    assert_eq!(event.event, drasi_lib::channels::SourceEvent::Change(change.clone()));
-                    assert_eq!(event.source_position.as_deref(), Some(sequence.to_be_bytes().as_slice()));
+                    assert_eq!(
+                        event.event,
+                        drasi_lib::channels::SourceEvent::Change(change.clone())
+                    );
+                    assert_eq!(
+                        event.source_position.as_deref(),
+                        Some(sequence.to_be_bytes().as_slice())
+                    );
                 } else {
                     assert!(event.source_position.is_none());
                 }

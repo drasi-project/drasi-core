@@ -961,7 +961,11 @@ fn connected_to_element(source_name: &str, edge: &MeshEdge, strength: f64) -> El
     }
 }
 
-async fn dispatch_generated_change(base: SourceBase, _source_id: &str, source_change: SourceChange) {
+async fn dispatch_generated_change(
+    base: SourceBase,
+    _source_id: &str,
+    source_change: SourceChange,
+) {
     if let Err(e) = base.dispatch_source_change(source_change).await {
         debug!("Failed to dispatch generated change: {e}");
     }
@@ -1105,7 +1109,12 @@ mod mesh_unit_tests {
                     };
                     barrier.wait().await;
                     if generated {
-                        dispatch_generated_change(source.base.clone_shared(), "concurrent-mock", change).await;
+                        dispatch_generated_change(
+                            source.base.clone_shared(),
+                            "concurrent-mock",
+                            change,
+                        )
+                        .await;
                     } else {
                         source.inject_event(change).await.unwrap();
                     }

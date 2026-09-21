@@ -470,7 +470,8 @@ async fn test_concurrent_writes_monotonic_sequences() {
                     .with_integer("i", i as i64)
                     .build();
                 barrier.wait().await;
-                handle.send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
+                handle
+                    .send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
                     .await
                     .unwrap();
             }
@@ -488,10 +489,20 @@ async fn test_concurrent_writes_monotonic_sequences() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.sequence, index as u64 + 1, "delivery must follow WAL order");
+        assert_eq!(
+            event.sequence,
+            index as u64 + 1,
+            "delivery must follow WAL order"
+        );
         assert_eq!(event.sequence, wal_sequence);
-        assert_eq!(event.event, drasi_lib::channels::SourceEvent::Change(change));
-        assert_eq!(event.source_position.as_deref(), Some(wal_sequence.to_be_bytes().as_slice()));
+        assert_eq!(
+            event.event,
+            drasi_lib::channels::SourceEvent::Change(change)
+        );
+        assert_eq!(
+            event.source_position.as_deref(),
+            Some(wal_sequence.to_be_bytes().as_slice())
+        );
     }
 
     let count = wal.event_count("conc-src").await.unwrap();
