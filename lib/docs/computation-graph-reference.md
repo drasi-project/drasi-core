@@ -78,6 +78,13 @@ schema and connection requirements. A factory specification adds implementation
 identity, configuration version, configuration fields and named dependencies.
 Secret fields require unresolved references, not resolved credentials.
 
+`MiddlewareTransformer` is a graph-change-to-graph-change component that reuses
+the existing query middleware runner and registry. It has one input/output port,
+supports multiple incoming connections and keeps an in-memory element view for
+state-dependent middleware. See the
+[middleware guide](computation-graph-middleware.md) for configuration, batching
+and recovery limits.
+
 A data connection names `(component, port)` at both ends, its provider and its
 `RelationshipPolicy`. A resource declaration names its role, ownership and
 binding; `provide_resource` supplies the actual object separately.
@@ -444,6 +451,7 @@ different surfaces and must not be assumed safe for public disclosure.
 | Addition and safe changes | [`addition.rs`](../src/computation/v1/graph/addition.rs), [`reconcile.rs`](../src/computation/v1/graph/reconcile.rs) |
 | Factories and export/import | [`specification.rs`](../src/computation/v1/graph/specification.rs), [`topology.rs`](../src/computation/v1/graph/topology.rs) |
 | Query execution and ordering | [`query.rs`](../src/computation/v1/query.rs), [`ranked_pipe.rs`](../src/computation/v1/ranked_pipe.rs), [`query_scheduling.rs`](../src/computation/v1/query_scheduling.rs) |
+| Standalone graph middleware | [`middleware.rs`](../src/computation/v1/middleware.rs) |
 | Instance and query task ownership | [`instance.rs`](../src/computation/instance.rs), [`scoped_graph.rs`](../src/computation/scoped_graph.rs) |
 | Existing API/plugin integration | [`compatibility`](../src/computation/compatibility), [`pipeline.rs`](../src/computation/v1/pipeline.rs), [`plugin_source.rs`](../src/computation/v1/plugin_source.rs), [`plugin_reaction.rs`](../src/computation/v1/plugin_reaction.rs) |
 | Inspection and inventory | [`entities.rs`](../src/computation/v1/entities.rs), [`inventory.rs`](../src/computation/v1/inventory.rs) |

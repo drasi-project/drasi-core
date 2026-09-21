@@ -26,8 +26,8 @@ use crate::{
 };
 
 use super::{
-    ChangeEnvelope, ChangeOperation, ChangeSet, ChangeSetId, ComponentId, ContextEntry,
-    ContextValue, ContractError, Record, RecordId, RecordImage, RecordReference,
+    ChangeEnvelope, ChangeOperation, ChangeSet, ChangeSetId, ChangeSetRef, ComponentId,
+    ContextEntry, ContextValue, ContractError, Record, RecordId, RecordImage, RecordReference,
     RecordValidationError, RecordValidator, Schema, SchemaDescriptor, SchemaId, SchemaVersion,
     StreamId, SystemMetadata, UpdateSemantics,
 };
@@ -219,6 +219,42 @@ impl GraphChangeCodec {
         Self::encode_change_with_position(change, stream, sequence, timestamp, None)
     }
 
+    /// Encode an ordered batch, including an empty progress-only batch.
+    pub fn encode_changes(
+        changes: &[SourceChange],
+        stream: StreamId,
+        sequence: u64,
+        timestamp: Option<DateTime<Utc>>,
+    ) -> Result<ChangeEnvelope, GraphCodecError> {
+        let changes = Self::encode_change_set(changes, &stream, sequence)?;
+        let id = super::emission_id(&stream, sequence)?;
+        let mut system = SystemMetadata::new(stream, sequence);
+        if let Some(timestamp) = timestamp {
+            system = system.with_timestamp(timestamp);
+        }
+        Ok(ChangeEnvelope::new(id, changes, system))
+    }
+
+    /// Emit transformed graph changes while preserving the input's annotations,
+    /// timestamp, source position and lineage. The output has its own identity.
+    pub fn derive_changes(
+        input: &ChangeEnvelope,
+        changes: &[SourceChange],
+        stream: StreamId,
+        sequence: u64,
+    ) -> Result<ChangeEnvelope, GraphCodecError> {
+        let changes = Self::encode_change_set(changes, &stream, sequence)?;
+        let id = super::emission_id(&stream, sequence)?;
+        let mut system = SystemMetadata::new(stream, sequence);
+        if let Some(timestamp) = input.system().timestamp() {
+            system = system.with_timestamp(timestamp);
+        }
+        if let Some(position) = input.system().source_position() {
+            system = system.with_source_position(position.clone());
+        }
+        Ok(input.derive(id, changes, system))
+    }
+
     fn encode_change_with_position(
         change: SourceChange,
         stream: StreamId,
@@ -226,47 +262,7 @@ impl GraphChangeCodec {
         timestamp: Option<DateTime<Utc>>,
         position: Option<Bytes>,
     ) -> Result<ChangeEnvelope, GraphCodecError> {
-        let schema = Self::schema();
-        let identity = RecordId::try_new(
-            GRAPH_IDENTITY,
-            Bytes::from(bincode::serialize(change.get_reference())?),
-        )?;
-        let image = match &change {
-            SourceChange::Insert { .. } => RecordImage::Full,
-            SourceChange::Update { .. } | SourceChange::Future { .. } => RecordImage::Patch,
-            SourceChange::Delete { .. } => RecordImage::Partial,
-        };
-        let record = Record::try_new(
-            &schema,
-            identity,
-            image,
-            Bytes::from(bincode::serialize(&change)?),
-        )?;
-        let operation = match change {
-            SourceChange::Insert { .. } => ChangeOperation::Added {
-                ordinal: 0,
-                after: record,
-            },
-            SourceChange::Update { .. } | SourceChange::Future { .. } => ChangeOperation::Updated {
-                ordinal: 0,
-                before: None,
-                after: record,
-                semantics: UpdateSemantics::Patch,
-            },
-            SourceChange::Delete { .. } => ChangeOperation::Deleted {
-                ordinal: 0,
-                identity: record.reference().clone(),
-                before: Some(record),
-            },
-        };
-        let changes = ChangeSet::try_new(
-            ChangeSetId::try_new(
-                stream.as_str(),
-                Bytes::copy_from_slice(&sequence.to_be_bytes()),
-            )?,
-            schema.descriptor().clone(),
-            vec![operation],
-        )?;
+        let changes = Self::encode_change_set(std::slice::from_ref(&change), &stream, sequence)?;
         let id = super::emission_id(&stream, sequence)?;
         let mut system = SystemMetadata::new(stream, sequence);
         if let Some(timestamp) = timestamp {
@@ -276,6 +272,63 @@ impl GraphChangeCodec {
             system = system.with_source_position(position);
         }
         Ok(ChangeEnvelope::new(id, changes, system))
+    }
+
+    fn encode_change_set(
+        changes: &[SourceChange],
+        stream: &StreamId,
+        sequence: u64,
+    ) -> Result<ChangeSetRef, GraphCodecError> {
+        let schema = Self::schema();
+        let operations = changes
+            .iter()
+            .enumerate()
+            .map(|(ordinal, change)| {
+                let ordinal = u64::try_from(ordinal).map_err(|_| GraphCodecError::Operation)?;
+                let identity = RecordId::try_new(
+                    GRAPH_IDENTITY,
+                    Bytes::from(bincode::serialize(change.get_reference())?),
+                )?;
+                let image = match change {
+                    SourceChange::Insert { .. } => RecordImage::Full,
+                    SourceChange::Update { .. } | SourceChange::Future { .. } => RecordImage::Patch,
+                    SourceChange::Delete { .. } => RecordImage::Partial,
+                };
+                let record = Record::try_new(
+                    &schema,
+                    identity,
+                    image,
+                    Bytes::from(bincode::serialize(change)?),
+                )?;
+                Ok(match change {
+                    SourceChange::Insert { .. } => ChangeOperation::Added {
+                        ordinal,
+                        after: record,
+                    },
+                    SourceChange::Update { .. } | SourceChange::Future { .. } => {
+                        ChangeOperation::Updated {
+                            ordinal,
+                            before: None,
+                            after: record,
+                            semantics: UpdateSemantics::Patch,
+                        }
+                    }
+                    SourceChange::Delete { .. } => ChangeOperation::Deleted {
+                        ordinal,
+                        identity: record.reference().clone(),
+                        before: Some(record),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, GraphCodecError>>()?;
+        Ok(ChangeSet::try_new(
+            ChangeSetId::try_new(
+                stream.as_str(),
+                Bytes::copy_from_slice(&sequence.to_be_bytes()),
+            )?,
+            schema.descriptor().clone(),
+            operations,
+        )?)
     }
 
     pub fn decode_changes(envelope: &ChangeEnvelope) -> Result<Vec<SourceChange>, GraphCodecError> {
@@ -305,6 +358,7 @@ impl GraphChangeCodec {
                     changes.push(change);
                 }
                 ChangeOperation::Updated {
+                    before,
                     after,
                     semantics: UpdateSemantics::Replace,
                     ..
@@ -312,9 +366,16 @@ impl GraphChangeCodec {
                     let SourceChange::Insert { element } = decode(after.payload())? else {
                         return Err(GraphCodecError::Operation);
                     };
-                    changes.push(SourceChange::Delete {
-                        metadata: element.get_metadata().clone(),
-                    });
+                    let mut metadata = match before {
+                        Some(before) => match decode(before.payload())? {
+                            SourceChange::Insert { element } => element.get_metadata().clone(),
+                            SourceChange::Delete { metadata } => metadata,
+                            _ => return Err(GraphCodecError::Operation),
+                        },
+                        None => element.get_metadata().clone(),
+                    };
+                    metadata.effective_from = element.get_metadata().effective_from;
+                    changes.push(SourceChange::Delete { metadata });
                     changes.push(SourceChange::Insert { element });
                 }
                 ChangeOperation::Deleted {

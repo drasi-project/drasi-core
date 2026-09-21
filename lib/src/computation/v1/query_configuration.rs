@@ -71,17 +71,8 @@ impl QueryExecutionSettings {
                 super::data::validate_identifier("join property", &key.property)?;
             }
         }
-        let mut middleware = BTreeSet::new();
-        for config in &self.middleware {
-            super::data::validate_identifier("middleware", &config.name)?;
-            super::data::validate_identifier("middleware kind", &config.kind)?;
-            if !middleware.insert(config.name.as_ref()) {
-                anyhow::bail!("duplicate middleware name");
-            }
-            if registry.is_some_and(|registry| registry.get(&config.kind).is_none()) {
-                anyhow::bail!("middleware kind {} is not registered", config.kind);
-            }
-        }
+        let middleware =
+            super::middleware::validate_middleware_configs(&self.middleware, registry)?;
         let mut sources = BTreeSet::new();
         for source in &self.sources {
             super::data::validate_identifier("source", &source.source_id)?;

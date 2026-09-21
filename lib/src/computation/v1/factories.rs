@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use super::{
     ComponentFactory, ComputationTopologyFactory, ContinuousQueryFactory, FactoryRegistry,
-    LegacyReactionFactory, LegacySourceFactory, QueryReplayFactory, QueryResultsOutletFactory,
-    ReactionPluginAdapterFactory, SourcePluginAdapterFactory, WalReplaySourceFactory,
+    LegacyReactionFactory, LegacySourceFactory, MiddlewareTransformerFactory, QueryReplayFactory,
+    QueryResultsOutletFactory, ReactionPluginAdapterFactory, SourcePluginAdapterFactory,
+    WalReplaySourceFactory,
 };
 
 impl FactoryRegistry {
@@ -25,6 +26,7 @@ impl FactoryRegistry {
     pub fn standard() -> Self {
         let factories: Vec<Arc<dyn ComponentFactory>> = vec![
             Arc::new(ContinuousQueryFactory::default()),
+            Arc::new(MiddlewareTransformerFactory::default()),
             Arc::new(LegacySourceFactory::default()),
             Arc::new(SourcePluginAdapterFactory::default()),
             Arc::new(LegacyReactionFactory::default()),

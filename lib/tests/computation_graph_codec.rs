@@ -18,8 +18,11 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use bytes::Bytes;
 use chrono::TimeZone;
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+use drasi_core::{
+    interface::FutureElementRef,
+    models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    },
 };
 use drasi_lib::{
     channels::{SourceEvent, SourceEventWrapper},
@@ -163,4 +166,179 @@ fn graph_codec_uses_owned_ingress_and_rejects_corrupt_record_images() {
         Bytes::from_static(b"not a source change")
     )
     .is_err());
+}
+
+#[test]
+fn graph_batches_preserve_operation_order_repeated_identities_and_empty_progress() {
+    let metadata = ElementMetadata {
+        reference: ElementReference::new("source", "item"),
+        labels: Arc::from([Arc::from("Item")]),
+        effective_from: 1,
+    };
+    let changes = [
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: metadata.clone(),
+                properties: ElementPropertyMap::from(serde_json::json!({"value":1})),
+            },
+        },
+        SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    effective_from: 2,
+                    ..metadata.clone()
+                },
+                properties: ElementPropertyMap::from(serde_json::json!({"value":2})),
+            },
+        },
+        SourceChange::Future {
+            future_ref: FutureElementRef {
+                element_ref: metadata.reference.clone(),
+                original_time: 2,
+                due_time: 3,
+                group_signature: 42,
+            },
+        },
+        SourceChange::Delete {
+            metadata: ElementMetadata {
+                effective_from: 4,
+                ..metadata
+            },
+        },
+    ];
+    let stream = StreamId::try_new("source/out").expect("stream");
+    let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 123).expect("time");
+    let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024).expect("limit"));
+    codec
+        .register_schema(GraphChangeCodec::schema())
+        .expect("graph schema");
+
+    for batch in [&changes[..], &[]] {
+        let envelope = GraphChangeCodec::encode_changes(batch, stream.clone(), 9, Some(timestamp))
+            .expect("batch");
+        let decoded = codec
+            .decode(&codec.encode(&envelope).expect("encode"))
+            .expect("decode envelope");
+        assert_eq!(decoded.system().stream(), &stream);
+        assert_eq!(decoded.system().sequence(), 9);
+        assert_eq!(decoded.system().timestamp(), Some(timestamp));
+        assert_eq!(
+            decoded
+                .changes()
+                .operations()
+                .iter()
+                .map(ChangeOperation::ordinal)
+                .collect::<Vec<_>>(),
+            (0..batch.len() as u64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            GraphChangeCodec::decode_changes(&decoded).expect("changes"),
+            batch
+        );
+    }
+
+    for change in &changes {
+        let single =
+            GraphChangeCodec::encode_change(change.clone(), stream.clone(), 9, Some(timestamp))
+                .expect("single");
+        let batch = GraphChangeCodec::encode_changes(
+            std::slice::from_ref(change),
+            stream.clone(),
+            9,
+            Some(timestamp),
+        )
+        .expect("single-item batch");
+        assert_eq!(
+            codec.encode(&single).expect("single encoding"),
+            codec.encode(&batch).expect("batch encoding")
+        );
+    }
+}
+
+#[test]
+fn graph_replacements_delete_the_previous_labels_at_the_new_effective_time() {
+    let previous = ElementMetadata {
+        reference: ElementReference::new("source", "parent"),
+        labels: Arc::from([Arc::from("Previous")]),
+        effective_from: 100,
+    };
+    let replacement = Element::Node {
+        metadata: ElementMetadata {
+            labels: Arc::from([Arc::from("Replacement")]),
+            effective_from: 200,
+            ..previous.clone()
+        },
+        properties: ElementPropertyMap::new(),
+    };
+    let record = |change: SourceChange| {
+        let envelope = GraphChangeCodec::encode_change(
+            change,
+            StreamId::try_new("source/out").expect("stream"),
+            1,
+            None,
+        )
+        .expect("encode record");
+        match &envelope.changes().operations()[0] {
+            ChangeOperation::Added { after, .. } => after.clone(),
+            ChangeOperation::Deleted {
+                before: Some(before),
+                ..
+            } => before.clone(),
+            _ => panic!("full or partial record"),
+        }
+    };
+    let after = record(SourceChange::Insert {
+        element: replacement.clone(),
+    });
+    let before_images = [
+        Some(record(SourceChange::Insert {
+            element: Element::Node {
+                metadata: previous.clone(),
+                properties: ElementPropertyMap::new(),
+            },
+        })),
+        Some(record(SourceChange::Delete {
+            metadata: previous.clone(),
+        })),
+        None,
+    ];
+
+    for before in before_images {
+        let expected_metadata = ElementMetadata {
+            effective_from: 200,
+            ..if before.is_some() {
+                previous.clone()
+            } else {
+                replacement.get_metadata().clone()
+            }
+        };
+        let stream = StreamId::try_new("source/out").expect("stream");
+        let changes = ChangeSet::try_new(
+            ChangeSetId::try_new("replace", Bytes::from_static(b"parent")).expect("change ID"),
+            GraphChangeCodec::schema().descriptor().clone(),
+            vec![ChangeOperation::Updated {
+                ordinal: 0,
+                before,
+                after: after.clone(),
+                semantics: UpdateSemantics::Replace,
+            }],
+        )
+        .expect("replacement");
+        let envelope = ChangeEnvelope::new(
+            emission_id(&stream, 2).expect("emission ID"),
+            changes,
+            SystemMetadata::new(stream, 2),
+        );
+        assert_eq!(
+            GraphChangeCodec::decode_changes(&envelope).expect("decode"),
+            [
+                SourceChange::Delete {
+                    metadata: expected_metadata,
+                },
+                SourceChange::Insert {
+                    element: replacement.clone(),
+                },
+            ]
+        );
+    }
 }

@@ -200,6 +200,10 @@ You can connect sources, transformers and sinks directly; a continuous query is
 not mandatory. Components declare input/output ports and the data they accept.
 The graph validates the connections before starting them.
 
+Use the [middleware transformer](computation-graph-middleware.md) to run an ordered
+sequence of existing middleware on graph changes from one or more components.
+It does not require a Continuous Query.
+
 From the drasi-core repository root:
 
 ```bash
