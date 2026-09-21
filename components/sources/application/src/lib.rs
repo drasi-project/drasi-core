@@ -177,6 +177,7 @@ pub struct ApplicationSourceHandle {
     source_id: String,
     /// Shared WAL reference — populated when the source is started with durability enabled
     wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
+    enqueue_order: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ApplicationSourceHandle {
@@ -185,6 +186,7 @@ impl ApplicationSourceHandle {
     /// If WAL durability is enabled, the event is persisted to the WAL before
     /// being acknowledged (returned Ok). This ensures the WAL-before-ACK guarantee.
     pub async fn send(&self, change: SourceChange) -> Result<()> {
+        let _enqueue_guard = self.enqueue_order.lock().await;
         // WAL append before ACK (if durability is enabled)
         let wal_seq = {
             let wal_guard = self.wal.read().await;
@@ -360,6 +362,8 @@ pub struct ApplicationSource {
     app_tx: mpsc::Sender<InternalEvent>,
     /// WAL provider for durable event persistence (shared with handles for WAL-before-ACK)
     wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
+    /// Serializes WAL append and enqueue across all source handles.
+    enqueue_order: Arc<tokio::sync::Mutex<()>>,
     /// Handle to the WAL pruning background task (if running)
     prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -402,11 +406,13 @@ impl ApplicationSource {
 
         // Shared WAL reference — populated later in start() when durability is enabled
         let shared_wal = Arc::new(tokio::sync::RwLock::new(None));
+        let enqueue_order = Arc::new(tokio::sync::Mutex::new(()));
 
         let handle = ApplicationSourceHandle {
             tx: app_tx.clone(),
             source_id: id.clone(),
             wal: shared_wal.clone(),
+            enqueue_order: enqueue_order.clone(),
         };
 
         let source = Self {
@@ -415,6 +421,7 @@ impl ApplicationSource {
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
             app_tx,
             wal: shared_wal,
+            enqueue_order,
             prune_task: tokio::sync::RwLock::new(None),
         };
 
@@ -430,6 +437,7 @@ impl ApplicationSource {
             tx: self.app_tx.clone(),
             source_id: self.base.id.clone(),
             wal: self.wal.clone(),
+            enqueue_order: self.enqueue_order.clone(),
         }
     }
 

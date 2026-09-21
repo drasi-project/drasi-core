@@ -434,8 +434,7 @@ async fn test_replay_via_subscribe() {
     source.stop().await.unwrap();
 }
 
-#[tokio::test]
-#[ignore]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_writes_monotonic_sequences() {
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
@@ -454,17 +453,24 @@ async fn test_concurrent_writes_monotonic_sequences() {
     let total_events: usize = 100;
     let tasks_count = 4;
     let events_per_task = total_events / tasks_count;
+    let barrier = Arc::new(tokio::sync::Barrier::new(tasks_count));
 
     let mut tasks = vec![];
     for task_id in 0..tasks_count {
-        let h = handle.clone();
+        let handle = if task_id % 2 == 0 {
+            handle.clone()
+        } else {
+            source.get_handle()
+        };
+        let barrier = barrier.clone();
         tasks.push(tokio::spawn(async move {
             for i in 0..events_per_task {
                 let props = PropertyMapBuilder::new()
                     .with_integer("task", task_id as i64)
                     .with_integer("i", i as i64)
                     .build();
-                h.send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
+                barrier.wait().await;
+                handle.send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
                     .await
                     .unwrap();
             }
@@ -475,23 +481,18 @@ async fn test_concurrent_writes_monotonic_sequences() {
         t.await.unwrap();
     }
 
-    // Collect all received events
-    let mut sequences = vec![];
-    for _ in 0..total_events {
+    let records = wal.read_from("conc-src", 1).await.unwrap();
+    assert_eq!(records.len(), total_events);
+    for (index, (wal_sequence, change)) in records.into_iter().enumerate() {
         let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
             .unwrap();
-        sequences.push(event.sequence);
+        assert_eq!(event.sequence, index as u64 + 1, "delivery must follow WAL order");
+        assert_eq!(event.sequence, wal_sequence);
+        assert_eq!(event.event, drasi_lib::channels::SourceEvent::Change(change));
+        assert_eq!(event.source_position.as_deref(), Some(wal_sequence.to_be_bytes().as_slice()));
     }
-
-    // Verify all sequences are unique and cover 1..=total_events
-    sequences.sort();
-    let expected: Vec<u64> = (1..=total_events as u64).collect();
-    assert_eq!(
-        sequences, expected,
-        "Sequences should be 1..={total_events} with no gaps"
-    );
 
     let count = wal.event_count("conc-src").await.unwrap();
     assert_eq!(count, total_events as u64);
