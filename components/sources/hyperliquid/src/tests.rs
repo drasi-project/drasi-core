@@ -243,17 +243,16 @@ fn test_funding_mapping() {
 /// dispatch through the same `SourceBase` via `stream::dispatch_changes`. They
 /// share one `next_sequence` counter (via `clone_shared()`), so interleaved
 /// events from the two tasks must form a **single** strictly-increasing sequence
-/// stream — no duplicates, which two independent counters would produce (issue
-/// #828). This drives two concurrent tasks directly (no WS/REST backend needed)
-/// and asserts the emitted sequences are the complete, unique set `1..=2N`.
-#[tokio::test]
+/// stream in delivery order, preventing query dedup from discarding reordered
+/// live events. This drives two concurrent tasks directly (no WS/REST backend
+/// needed) and asserts the received sequences are exactly `1..=2N`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
     use crate::stream::dispatch_changes;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
     use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     fn insert_node(source_id: &str, id: &str) -> SourceChange {
@@ -273,7 +272,8 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
     let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
     let mut rx = base.test_subscribe().await;
 
-    let per_task = 25u64;
+    let per_task = 250u64;
+    let producer_barrier = Arc::new(tokio::sync::Barrier::new(2));
 
     // Task A models the WS stream; task B models the funding poll. Both own a
     // shared handle to the same SourceBase.
@@ -281,9 +281,12 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
     let base_b = base.clone_shared();
     let sid_a = source_id.to_string();
     let sid_b = source_id.to_string();
+    let barrier_a = producer_barrier.clone();
+    let barrier_b = producer_barrier.clone();
 
     let task_a = tokio::spawn(async move {
         for i in 0..per_task {
+            barrier_a.wait().await;
             dispatch_changes(
                 &sid_a,
                 &base_a,
@@ -294,6 +297,7 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
     });
     let task_b = tokio::spawn(async move {
         for i in 0..per_task {
+            barrier_b.wait().await;
             dispatch_changes(
                 &sid_b,
                 &base_b,
@@ -307,23 +311,20 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
     task_b.await.unwrap();
 
     let total = (per_task * 2) as usize;
-    let mut sequences = BTreeSet::new();
+    let mut sequences = Vec::new();
     for _ in 0..total {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
-        let seq = event.sequence;
-        assert!(
-            sequences.insert(seq),
-            "sequence {seq} was assigned twice — the two tasks are not sharing one counter"
-        );
+        sequences.push(event.sequence);
+        assert_eq!(event.source_id, source_id);
+        assert!(event.profiling.as_ref().unwrap().source_send_ns.is_some());
     }
 
-    // The shared counter must have produced exactly the contiguous set 1..=2N.
-    let expected: BTreeSet<u64> = (1..=per_task * 2).collect();
+    let expected: Vec<u64> = (1..=per_task * 2).collect();
     assert_eq!(
         sequences, expected,
-        "concurrent tasks on one source must yield a single contiguous sequence stream"
+        "concurrent tasks must deliver every event in increasing sequence order"
     );
 }
