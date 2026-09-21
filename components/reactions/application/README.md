@@ -173,6 +173,12 @@ Each result in the `results` array is a JSON object representing a row:
 
 ## Usage Examples
 
+When a result carries profiling metadata, the reaction preserves the source/query
+timestamps and adds `reaction_receive_ns` after dequeueing and
+`reaction_complete_ns` immediately before handing it to the application channel.
+The reaction interval includes waiting for channel capacity, but not application
+processing after delivery. Results without profiling metadata remain unprofiled.
+
 ### Example 1: Basic Subscription (Recommended)
 
 The most flexible and recommended approach using subscriptions:

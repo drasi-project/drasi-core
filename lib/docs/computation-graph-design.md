@@ -115,7 +115,16 @@ simultaneously, or that each node receives a dedicated CPU thread.
 
 Peer-control handlers use a separate future set from mutable data operations.
 There are no detached per-node graph data/control workers. DrasiLib's hosting
-layer does spawn and own graph-driver tasks, and plugins may have their own
+layer spawns and owns graph-driver tasks, including one for each ordinary query's
+nested graph. Independent queries can therefore run on different Tokio workers
+instead of all being polled by the instance's single driver task. A single-thread
+Tokio runtime remains supported; no dedicated thread is created for a query.
+Within each graph, the controller still owns and polls its component futures.
+The service quiescence hook awaits the nested graph's pause before reporting the
+ordinary query as quiesced. Resuming restarts only the paused processing futures,
+not component start hooks. Cancelling a parent's wait does not detach or lose its
+nested driver: stop quiesces the graph, shutdown joins the driver before disposal,
+and dropping the owner aborts an unjoined driver. Plugins may have their own
 workers. The graph can await the plugin's stop contract, not repair an arbitrary
 plugin that leaves unmanaged workers running.
 
@@ -828,6 +837,23 @@ The matching configuration hash is published only after clearing and checkpoint
 writes succeed. A failed wipe therefore cannot make a later start resume a
 partially cleared index. Optional legacy index-clear operations retain their
 `NotSupported` handling; actual cleanup errors remain visible and retain ownership.
+
+### 8.2 Processing timestamps
+
+Profiling timestamps measure wall-clock processing, not the event time used for
+input ordering. Both engines stamp query receipt after input dequeue, so
+source-send to query-receive includes queueing and input preparation.
+`query_core_return_ns` follows the actual core call and transaction commit;
+`query_send_ns` is captured before live output publication, not after delivery.
+The query codec applies these two completion times from append-only annotations.
+Already committed outbox bytes are not rewritten: recovered disk records can
+have missing completion times, which remain unknown rather than becoming zero.
+
+The application reaction adds receipt after its dequeue and completion after
+waiting for application-channel capacity, immediately before handing over the
+result. Application processing and output logging happen later. These intervals
+can reveal queue buildup, but overlapping event latencies must not be summed and
+reported as CPU time. Use separate diagnostic runs when recording every result.
 
 ## 9. Reconciliation, replacement and cleanup
 

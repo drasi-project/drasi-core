@@ -40,6 +40,8 @@ const QUERY_METADATA: &str = "drasi.query-output.v1";
 const QUERY_SEQUENCE: &str = "drasi.query-output-sequence.v1";
 const SNAPSHOT: &str = "drasi.query-snapshot.v1";
 const GENERATION: &str = "drasi.query-generation.v1";
+const QUERY_CORE_RETURN_NS: &str = "drasi.query-core-return-ns.v1";
+const QUERY_SEND_NS: &str = "drasi.query-send-ns.v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryCodecError {
@@ -267,15 +269,60 @@ impl QueryChangeCodec {
     }
 
     pub fn metadata(envelope: &ChangeEnvelope) -> Result<QueryOutputMetadata, QueryCodecError> {
-        let entry = envelope
-            .annotations()
-            .entries()
-            .find(|entry| entry.key() == QUERY_METADATA)
-            .ok_or(QueryCodecError::InvalidRow)?;
-        let ContextValue::Bytes(bytes) = entry.value() else {
-            return Err(QueryCodecError::InvalidRow);
-        };
-        Ok(serde_json::from_slice(&bytes)?)
+        let mut core_return_ns = None;
+        let mut send_ns = None;
+        for entry in envelope.annotations().entries() {
+            match entry.key() {
+                QUERY_CORE_RETURN_NS | QUERY_SEND_NS => {
+                    let ContextValue::Unsigned(timestamp) = entry.value() else {
+                        return Err(QueryCodecError::InvalidRow);
+                    };
+                    let latest = if entry.key() == QUERY_CORE_RETURN_NS {
+                        &mut core_return_ns
+                    } else {
+                        &mut send_ns
+                    };
+                    latest.get_or_insert(timestamp);
+                }
+                QUERY_METADATA => {
+                    let ContextValue::Bytes(bytes) = entry.value() else {
+                        return Err(QueryCodecError::InvalidRow);
+                    };
+                    let mut metadata: QueryOutputMetadata = serde_json::from_slice(&bytes)?;
+                    if core_return_ns.is_some() || send_ns.is_some() {
+                        let profiling = metadata
+                            .profiling
+                            .get_or_insert_with(ProfilingMetadata::default);
+                        if let Some(timestamp) = core_return_ns {
+                            profiling.query_core_return_ns = Some(timestamp);
+                        }
+                        if let Some(timestamp) = send_ns {
+                            profiling.query_send_ns = Some(timestamp);
+                        }
+                    }
+                    // Older annotations belong to an input, not this query's output.
+                    return Ok(metadata);
+                }
+                _ => {}
+            }
+        }
+        Err(QueryCodecError::InvalidRow)
+    }
+
+    pub(crate) fn append_post_commit_profiling(
+        envelope: &mut ChangeEnvelope,
+        component: &ComponentId,
+        core_return_ns: u64,
+        send_ns: u64,
+    ) -> Result<(), QueryCodecError> {
+        for (key, timestamp) in [(QUERY_CORE_RETURN_NS, core_return_ns), (QUERY_SEND_NS, send_ns)] {
+            envelope.append_annotation(ContextEntry::try_new(
+                component.clone(),
+                key,
+                ContextValue::Unsigned(timestamp),
+            )?)?;
+        }
+        Ok(())
     }
 
     pub fn encode_evaluation(
@@ -579,5 +626,200 @@ impl RecordValidator for RowValidator {
         value_codec::decode_variables::<String>(row.values)
             .map_err(|error| RecordValidationError::new("value", error.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod profiling_tests {
+    use super::*;
+    use drasi_core::evaluation::variable_value::VariableValue;
+    use std::num::NonZeroUsize;
+
+    fn output(
+        input: Option<&ChangeEnvelope>,
+        query: &str,
+        profiling: Option<ProfilingMetadata>,
+    ) -> ChangeEnvelope {
+        QueryChangeCodec::encode_evaluation(
+            input,
+            &ComponentId::try_new(query).unwrap(),
+            SystemMetadata::new(
+                super::super::StreamId::try_new(format!("{query}/out")).unwrap(),
+                1,
+            ),
+            &[QueryPartEvaluationContext::Adding {
+                after: BTreeMap::from([("value".into(), VariableValue::from(1))]),
+                row_signature: 7,
+            }],
+            QueryOutputMetadata {
+                query_id: query.into(),
+                source_id: Some("source".into()),
+                timestamp: DateTime::from_timestamp_millis(1_000).unwrap(),
+                metadata: HashMap::from([("preserved".into(), serde_json::json!(true))]),
+                profiling,
+            },
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn metadata_bytes(envelope: &ChangeEnvelope) -> Arc<[u8]> {
+        let entry = envelope
+            .annotations()
+            .entries()
+            .find(|entry| entry.key() == QUERY_METADATA)
+            .unwrap();
+        let ContextValue::Bytes(bytes) = entry.value() else {
+            panic!("query metadata bytes");
+        };
+        bytes
+    }
+
+    #[test]
+    fn post_commit_profiling_is_additive_and_round_trips_without_rewriting_metadata() {
+        let mut expected = ProfilingMetadata {
+            source_ns: Some(11),
+            source_receive_ns: Some(12),
+            source_send_ns: Some(13),
+            query_receive_ns: Some(14),
+            query_core_call_ns: Some(15),
+            ..Default::default()
+        };
+        let mut live = output(None, "query", Some(expected.clone()));
+        let staged = live.clone();
+        let original_bytes = metadata_bytes(&staged);
+        QueryChangeCodec::append_post_commit_profiling(
+            &mut live,
+            &ComponentId::try_new("query").unwrap(),
+            16,
+            17,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&metadata_bytes(&live), &original_bytes));
+        assert!(Arc::ptr_eq(live.event(), staged.event()));
+        assert_eq!(live.annotations().len(), staged.annotations().len() + 2);
+        assert_eq!(
+            QueryChangeCodec::metadata(&staged).unwrap().profiling,
+            Some(expected.clone())
+        );
+        expected.query_core_return_ns = Some(16);
+        expected.query_send_ns = Some(17);
+        assert_eq!(
+            QueryChangeCodec::metadata(&live).unwrap().profiling,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            QueryChangeCodec::to_legacy_result(&live).unwrap().profiling,
+            Some(expected.clone())
+        );
+
+        let mut codec = super::super::EnvelopeCodec::new(NonZeroUsize::new(64 * 1024).unwrap());
+        codec.register_schema(QueryChangeCodec::schema()).unwrap();
+        let decoded = codec.decode(&codec.encode(&live).unwrap()).unwrap();
+        assert_eq!(
+            QueryChangeCodec::metadata(&decoded).unwrap().profiling,
+            Some(expected)
+        );
+        assert_eq!(metadata_bytes(&decoded), original_bytes);
+    }
+
+    #[test]
+    fn current_metadata_fences_inherited_profiling_and_newest_local_values_win() {
+        let contributor = ComponentId::try_new("upstream").unwrap();
+        let mut upstream = output(None, "upstream", None);
+        QueryChangeCodec::append_post_commit_profiling(&mut upstream, &contributor, 10, 20)
+            .unwrap();
+        upstream
+            .append_annotation(
+                ContextEntry::try_new(
+                    contributor,
+                    QUERY_SEND_NS,
+                    ContextValue::String("invalid inherited timing".into()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let mut downstream = output(Some(&upstream), "downstream", None);
+        assert!(QueryChangeCodec::metadata(&downstream)
+            .unwrap()
+            .profiling
+            .is_none());
+        let contributor = ComponentId::try_new("downstream").unwrap();
+        downstream
+            .append_annotation(
+                ContextEntry::try_new(
+                    contributor.clone(),
+                    QUERY_CORE_RETURN_NS,
+                    ContextValue::Unsigned(30),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            QueryChangeCodec::metadata(&downstream).unwrap().profiling,
+            Some(ProfilingMetadata {
+                query_core_return_ns: Some(30),
+                ..Default::default()
+            }),
+            "neither upstream send time nor invented source/start timestamps may leak"
+        );
+        QueryChangeCodec::append_post_commit_profiling(&mut downstream, &contributor, 40, 50)
+            .unwrap();
+        assert_eq!(
+            QueryChangeCodec::metadata(&downstream).unwrap().profiling,
+            Some(ProfilingMetadata {
+                query_core_return_ns: Some(40),
+                query_send_ns: Some(50),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_local_profiling_values_are_rejected() {
+        for key in [QUERY_CORE_RETURN_NS, QUERY_SEND_NS] {
+            for value in [
+                ContextValue::Signed(-1),
+                ContextValue::Signed(1),
+                ContextValue::Bool(false),
+                ContextValue::String("123".into()),
+                ContextValue::Bytes(Arc::from(&b"123"[..])),
+            ] {
+                let mut envelope = output(None, "query", None);
+                envelope
+                    .append_annotation(
+                        ContextEntry::try_new(ComponentId::try_new("query").unwrap(), key, value)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    QueryChangeCodec::metadata(&envelope),
+                    Err(QueryCodecError::InvalidRow)
+                ));
+                assert!(QueryChangeCodec::to_legacy_result(&envelope).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn historical_embedded_profiling_remains_readable_without_new_annotations() {
+        let expected = ProfilingMetadata {
+            source_receive_ns: Some(1),
+            query_receive_ns: Some(2),
+            query_core_call_ns: Some(3),
+            query_core_return_ns: Some(4),
+            query_send_ns: Some(5),
+            ..Default::default()
+        };
+        let envelope = output(None, "query", Some(expected.clone()));
+        assert_eq!(
+            QueryChangeCodec::metadata(&envelope).unwrap().profiling,
+            Some(expected)
+        );
+        assert!(QueryChangeCodec::metadata(&output(None, "query", None))
+            .unwrap()
+            .profiling
+            .is_none());
     }
 }

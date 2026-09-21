@@ -930,13 +930,16 @@ impl ContinuousQueryTransformer {
                 ProfilingMetadata::default()
             }
         });
+        // An input may carry another query's timings; this commit has not completed.
+        profiling.query_core_return_ns = None;
+        profiling.query_send_ns = None;
         profiling.query_receive_ns = Some(timestamp_ns());
         profiling.query_core_call_ns = Some(timestamp_ns());
         let hook = |results: Arc<[drasi_core::evaluation::context::QueryPartEvaluationContext]>| {
             let prepared = &prepared;
             let input = &input;
             let progress = &progress;
-            let mut profiling = profiling.clone();
+            let profiling = profiling.clone();
             async move {
                 let sequence = if results.iter().any(|result| {
                     !matches!(
@@ -949,8 +952,6 @@ impl ContinuousQueryTransformer {
                 } else {
                     0
                 };
-                profiling.query_core_return_ns = Some(timestamp_ns());
-                profiling.query_send_ns = Some(timestamp_ns());
                 let mut output = QueryChangeCodec::encode_evaluation(
                     Some(&input.envelope),
                     &self.definition.id,
@@ -1023,7 +1024,8 @@ impl ContinuousQueryTransformer {
             Err(error) => return Err(error.into()),
             Ok(_) => unreachable!(),
         }
-        let output = prepared
+        let core_return_ns = timestamp_ns();
+        let mut output = prepared
             .into_inner()
             .map_err(|_| anyhow::anyhow!("prepared output poisoned"))?;
         if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
@@ -1038,6 +1040,15 @@ impl ContinuousQueryTransformer {
                 progress.identity,
                 SourceCheckpoint::new(progress.sequence, progress.position),
             );
+        }
+        // Keep completion timings on the live branch, not in already committed outbox bytes.
+        if let Some(output) = &mut output {
+            QueryChangeCodec::append_post_commit_profiling(
+                output,
+                &self.definition.id,
+                core_return_ns,
+                timestamp_ns(),
+            )?;
         }
         self.publish(output)
     }
@@ -1686,5 +1697,302 @@ impl ComponentFactory for ContinuousQueryFactory {
             }
         }
         Ok(ConstructedComponent::query(Box::new(query)))
+    }
+}
+
+#[cfg(all(test, feature = "computation-rocksdb-tests"))]
+mod profiling_tests {
+    use super::*;
+    use drasi_core::{
+        computation::{ComputationIndexes, ComputationResource, TransactionDomain},
+        interface::{IndexSet, SessionControl},
+        models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
+    };
+    use drasi_index_rocksdb::{
+        computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
+    };
+    use std::{
+        sync::atomic::{AtomicU64, AtomicUsize},
+        time::Duration,
+    };
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct CommitGate {
+        remaining: AtomicUsize,
+        entered: Notify,
+        release: Notify,
+        gated_return_ns: AtomicU64,
+        last_return_ns: AtomicU64,
+    }
+
+    struct GatedSession {
+        inner: Arc<dyn SessionControl>,
+        gate: Arc<CommitGate>,
+    }
+
+    #[async_trait]
+    impl SessionControl for GatedSession {
+        async fn begin(&self) -> Result<(), IndexError> {
+            self.inner.begin().await
+        }
+
+        async fn commit(&self) -> Result<(), IndexError> {
+            self.inner.commit().await?;
+            if self
+                .gate
+                .remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                == Ok(1)
+            {
+                self.gate.entered.notify_one();
+                self.gate.release.notified().await;
+                self.gate
+                    .gated_return_ns
+                    .store(timestamp_ns(), Ordering::Release);
+            }
+            self.gate
+                .last_return_ns
+                .store(timestamp_ns(), Ordering::Release);
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<(), IndexError> {
+            self.inner.rollback()
+        }
+    }
+
+    struct GatedProvider {
+        inner: Arc<dyn ComputationIndexProvider>,
+        gate: Arc<CommitGate>,
+    }
+
+    #[async_trait]
+    impl ComputationIndexProvider for GatedProvider {
+        async fn create_indexes(
+            &self,
+            graph: &str,
+            query: &str,
+        ) -> Result<ComputationIndexes, IndexError> {
+            let original = self.inner.create_indexes(graph, query).await?;
+            let indexes = original.indexes();
+            let session_control: Arc<dyn SessionControl> = Arc::new(GatedSession {
+                inner: indexes.session_control.clone(),
+                gate: self.gate.clone(),
+            });
+            let domain = TransactionDomain::new(session_control.clone());
+            let wrapped = ComputationIndexes::try_new(
+                IndexSet {
+                    element_index: indexes.element_index.clone(),
+                    archive_index: indexes.archive_index.clone(),
+                    result_index: indexes.result_index.clone(),
+                    future_queue: indexes.future_queue.clone(),
+                    session_control,
+                },
+                Some(domain.clone()),
+                Some(ComputationResource::participating(
+                    original.checkpoint_store().unwrap().clone(),
+                    &domain,
+                )),
+                Some(ComputationResource::participating(
+                    original.outbox_writer().unwrap().clone(),
+                    &domain,
+                )),
+                Some(ComputationResource::participating(
+                    original.live_results_writer().unwrap().clone(),
+                    &domain,
+                )),
+            )
+            .map_err(IndexError::other)?;
+            Ok(wrapped.with_cleanup(original.cleanup().unwrap().clone()))
+        }
+
+        fn is_volatile(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn live_profiling_waits_for_commit_without_rewriting_persistent_output() {
+        for publication in [QueryPublicationMode::Atomic, QueryPublicationMode::NonAtomic] {
+            let directory = tempfile::tempdir().unwrap();
+            let backend: Arc<dyn ComputationIndexProvider> =
+                Arc::new(RocksDbComputationProvider::new(
+                    directory.path(),
+                    RocksIndexOptions::new(
+                        false,
+                        false,
+                        RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).unwrap(),
+                    ),
+                ));
+            let gate = Arc::new(CommitGate::default());
+            let definition = ContinuousQueryDefinition {
+                graph_id: "post-commit-profiling".into(),
+                id: ComponentId::try_new("query").unwrap(),
+                query: "MATCH (n:Person) RETURN n.name AS name".into(),
+                language: ComputationQueryLanguage::Cypher,
+                output_stream: StreamId::try_new("query/out").unwrap(),
+                outbox_capacity: NonZeroUsize::new(8).unwrap(),
+            };
+            let options = QueryOptions {
+                publication,
+                recovery: QueryRecoveryPolicy::Strict,
+            };
+            let mut query = ContinuousQueryTransformer::new_with_options(
+                definition.clone(),
+                Arc::new(GatedProvider {
+                    inner: backend.clone(),
+                    gate: gate.clone(),
+                }),
+                options,
+            )
+            .await
+            .unwrap();
+            query.start().await.unwrap();
+            let outbox = query
+                .query()
+                .unwrap()
+                .resources()
+                .outbox_writer()
+                .unwrap()
+                .clone();
+            let results = query.results();
+            let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024).unwrap());
+            codec.register_schema(QueryChangeCodec::schema()).unwrap();
+            let input = InputEnvelope {
+                port: PortId::try_new("in").unwrap(),
+                envelope: GraphChangeCodec::encode_source_event(
+                    Arc::new(crate::channels::SourceEventWrapper::with_sequence(
+                        "people".into(),
+                        crate::channels::SourceEvent::Change(SourceChange::Insert {
+                            element: Element::Node {
+                                metadata: ElementMetadata {
+                                    reference: ElementReference::new("people", "one"),
+                                    labels: Arc::from([Arc::from("Person")]),
+                                    effective_from: 1_000,
+                                },
+                                properties: ElementPropertyMap::from(
+                                    serde_json::json!({"name":"Alice"}),
+                                ),
+                            },
+                        }),
+                        chrono::DateTime::from_timestamp_millis(1_000).unwrap(),
+                        1,
+                        Some(ProfilingMetadata {
+                            source_ns: Some(11),
+                            source_receive_ns: Some(12),
+                            source_send_ns: Some(13),
+                            query_core_return_ns: Some(14),
+                            query_send_ns: Some(15),
+                            ..Default::default()
+                        }),
+                    )),
+                    &ComponentId::try_new("source-adapter").unwrap(),
+                    StreamId::try_new("people/out").unwrap(),
+                    100,
+                    None,
+                )
+                .unwrap(),
+            };
+            // NonAtomic first commits its pending-publication marker, then evaluation.
+            gate.remaining.store(
+                if publication == QueryPublicationMode::Atomic {
+                    1
+                } else {
+                    2
+                },
+                Ordering::Release,
+            );
+            let mut processing = Box::pin(query.transform(input));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = gate.entered.notified() => {},
+                    result = &mut processing => panic!("published before commit returned: {result:?}"),
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(results.snapshot().unwrap().as_of_sequence, 0);
+            assert!(results.replay(0).unwrap().is_empty());
+            let before_publication = outbox.read_from("query", 0).await.unwrap();
+            if publication == QueryPublicationMode::Atomic {
+                assert_eq!(before_publication.len(), 1);
+                let staged = codec.decode(&before_publication[0].1).unwrap();
+                let profiling = QueryChangeCodec::metadata(&staged)
+                    .unwrap()
+                    .profiling
+                    .unwrap();
+                assert!(profiling.query_core_return_ns.is_none());
+                assert!(profiling.query_send_ns.is_none());
+            } else {
+                assert!(before_publication.is_empty());
+            }
+
+            gate.release.notify_one();
+            let emissions = tokio::time::timeout(Duration::from_secs(5), processing)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(emissions.len(), 1);
+            let live = QueryChangeCodec::to_legacy_result(&emissions[0].envelope).unwrap();
+            let profiling = live.profiling.as_ref().unwrap();
+            let core_return = profiling.query_core_return_ns.unwrap();
+            let send = profiling.query_send_ns.unwrap();
+            assert!(core_return >= gate.gated_return_ns.load(Ordering::Acquire));
+            assert!(send >= gate.last_return_ns.load(Ordering::Acquire));
+            assert!(send >= core_return);
+            assert!(profiling.query_receive_ns.unwrap() <= profiling.query_core_call_ns.unwrap());
+            assert!(profiling.query_core_call_ns.unwrap() <= core_return);
+            assert_eq!(profiling.source_ns, Some(11));
+            assert_eq!(profiling.source_receive_ns, Some(12));
+            assert_eq!(profiling.source_send_ns, Some(13));
+
+            let persisted = outbox.read_from("query", 0).await.unwrap();
+            assert_eq!(persisted.len(), 1);
+            if publication == QueryPublicationMode::Atomic {
+                assert_eq!(
+                    persisted, before_publication,
+                    "publication must not rewrite disk"
+                );
+            }
+            let saved = codec.decode(&persisted[0].1).unwrap();
+            assert_eq!(saved.id(), emissions[0].envelope.id());
+            assert_eq!(saved.system(), emissions[0].envelope.system());
+            let saved = QueryChangeCodec::to_legacy_result(&saved).unwrap();
+            let mut expected = saved.profiling.clone().unwrap();
+            assert!(expected.query_core_return_ns.is_none());
+            assert!(expected.query_send_ns.is_none());
+            expected.query_core_return_ns = Some(core_return);
+            expected.query_send_ns = Some(send);
+            assert_eq!(profiling, &expected);
+            assert_eq!(live.results, saved.results);
+            assert_eq!(live.metadata, saved.metadata);
+            assert_eq!(live.sequence, saved.sequence);
+            assert_eq!(
+                QueryChangeCodec::metadata(&results.replay(0).unwrap()[0])
+                    .unwrap()
+                    .profiling,
+                live.profiling
+            );
+            drop(outbox);
+            query.stop().await.unwrap();
+            drop(query);
+
+            let mut recovered =
+                ContinuousQueryTransformer::new_with_options(definition, backend, options)
+                    .await
+                    .unwrap();
+            recovered.start().await.unwrap();
+            let replay = recovered.results().replay(0).unwrap();
+            assert_eq!(replay.len(), 1);
+            assert_eq!(
+                QueryChangeCodec::metadata(&replay[0]).unwrap().profiling,
+                saved.profiling,
+                "recovery preserves unknown completion times rather than fabricating them"
+            );
+            recovered.stop().await.unwrap();
+        }
     }
 }

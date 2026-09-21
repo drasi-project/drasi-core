@@ -556,6 +556,7 @@ impl RuntimeComponent for QueryInstance {
     async fn run(&self) -> anyhow::Result<()> {
         let execution = self.execution()?;
         let mut life = execution.life.lock().await;
+        life.scope.resume().await?;
         if let Some(activation) = life.activation.take() {
             let report = life
                 .scope
@@ -573,6 +574,10 @@ impl RuntimeComponent for QueryInstance {
                 result = changes.changed() => { result?; self.notify(); }
             }
         }
+    }
+    async fn quiesce(&self) -> anyhow::Result<()> {
+        let execution = self.execution()?;
+        execution.life.lock().await.scope.quiesce().await
     }
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.closed.store(true, Ordering::Release);

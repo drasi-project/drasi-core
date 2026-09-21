@@ -14,23 +14,29 @@
 
 use super::{
     instance::GraphSlot,
-    v1::{ComputationGraph, ComputationInspector, GraphControl, GraphError, GraphSelection},
+    v1::{
+        ComponentGeneration, ComponentId, ComponentLifecycle, ComputationGraph,
+        ComputationInspector, GraphControl, GraphError, GraphSelection,
+    },
 };
-use futures::future::BoxFuture;
 use std::{
+    collections::BTreeMap,
     future::Future,
     sync::{Arc, Mutex},
 };
-use tokio::sync::watch;
+use tokio::{sync::watch, task::JoinHandle};
+use tracing::Instrument;
 
-/// A nested graph's future is owned independently of the current polling call.
-/// Cancelling a service's `run()` borrow parks it; stop can still drive its
-/// controller to quiescence and shutdown can await all of its actual cleanup.
+/// Owns a nested graph's driver independently of the parent's polling task.
+/// Cancelling a `run()` borrow keeps the driver owned; stop quiesces its work,
+/// and shutdown joins the driver before disposing its graph.
 pub(crate) struct ScopedGraph {
     graph: Arc<GraphSlot>,
-    run: Option<BoxFuture<'static, anyhow::Result<()>>>,
+    run: Option<JoinHandle<anyhow::Result<()>>>,
+    cancel: watch::Sender<bool>,
     control: watch::Receiver<Option<GraphControl>>,
     inspector: ComputationInspector,
+    paused: BTreeMap<ComponentId, ComponentGeneration>,
     terminal: Option<String>,
     disposed: bool,
 }
@@ -41,18 +47,35 @@ impl ScopedGraph {
         let inspector = graph.inspector();
         let slot = Arc::new(GraphSlot(Mutex::new(Some(graph))));
         let (publish, control) = watch::channel(None);
+        let (cancel, mut cancellation) = watch::channel(false);
         let owner = slot.clone();
-        let run = Box::pin(async move {
-            let mut graph = owner.take()?;
-            let run = graph.run()?;
-            publish.send_replace(Some(run.control()));
-            run.await.map_err(Into::into)
-        });
+        let run = tokio::spawn(
+            async move {
+                let mut graph = owner.take()?;
+                let run = graph.run()?;
+                let control = run.control();
+                publish.send_replace(Some(control.clone()));
+                tokio::pin!(run);
+                tokio::select! {
+                    biased;
+                    _ = async {
+                        let _ = cancellation.wait_for(|cancelled| *cancelled).await;
+                    } => {
+                        control.cancel();
+                        run.await.map_err(Into::into)
+                    }
+                    result = &mut run => result.map_err(Into::into),
+                }
+            }
+            .instrument(tracing::Span::current()),
+        );
         Self {
             graph: slot,
             run: Some(run),
+            cancel,
             control,
             inspector,
+            paused: BTreeMap::new(),
             terminal: None,
             disposed: false,
         }
@@ -108,6 +131,7 @@ impl ScopedGraph {
             biased;
             result = &mut operation => result,
             result = run => {
+                let result = driver_result(result);
                 self.run = None;
                 self.terminal = Some(match &result { Ok(()) => "completed".into(), Err(error) => format!("{error:#}") });
                 result?;
@@ -117,16 +141,79 @@ impl ScopedGraph {
     }
 
     pub(crate) async fn run(&mut self) -> anyhow::Result<()> {
-        let result = self
-            .run
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("nested graph has ended"))?
-            .await;
+        let result = driver_result(
+            self.run
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("nested graph has ended"))?
+                .await,
+        );
         self.run = None;
         if let Err(error) = &result {
             self.terminal = Some(format!("{error:#}"));
         }
         result
+    }
+
+    pub(crate) async fn quiesce(&mut self) -> anyhow::Result<()> {
+        let control = self.published_control().await?;
+        let running: BTreeMap<_, _> = control
+            .observed()
+            .components
+            .iter()
+            .filter(|(_, node)| {
+                matches!(
+                    node.lifecycle,
+                    ComponentLifecycle::Running | ComponentLifecycle::Starting
+                )
+            })
+            .map(|(id, node)| (id.clone(), node.generation))
+            .collect();
+        let revision = control.desired_snapshot().revision;
+        self.drive(async move {
+            control
+                .quiesce_components(revision, GraphSelection::All)
+                .await?;
+            Ok(())
+        })
+        .await?;
+        self.paused.extend(running);
+        Ok(())
+    }
+
+    pub(crate) async fn resume(&mut self) -> anyhow::Result<()> {
+        if self.paused.is_empty() {
+            return Ok(());
+        }
+        let control = self.control()?;
+        let observed = control.observed();
+        let selected: Vec<_> = self
+            .paused
+            .iter()
+            .filter(|(id, generation)| {
+                observed.components.get(*id).is_some_and(|node| {
+                    node.generation == **generation
+                        && node.lifecycle == ComponentLifecycle::Quiesced
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !selected.is_empty() {
+            let revision = control.desired_snapshot().revision;
+            let report = self
+                .drive(async move {
+                    Ok(control
+                        .start_requested(revision, GraphSelection::Exact(selected))
+                        .await?)
+                })
+                .await?;
+            anyhow::ensure!(
+                report.summary == super::v1::OperationSummary::Completed,
+                "nested graph resume failed: {:?}",
+                report.components
+            );
+        }
+        self.paused.clear();
+        Ok(())
     }
 
     pub(crate) async fn stop(&mut self) -> anyhow::Result<()> {
@@ -156,6 +243,7 @@ impl ScopedGraph {
         if report.summary != super::v1::OperationSummary::Completed {
             anyhow::bail!("nested graph stop failed: {:?}", report.components);
         }
+        self.paused.clear();
         Ok(())
     }
 
@@ -163,9 +251,7 @@ impl ScopedGraph {
         if self.disposed {
             return Ok(());
         }
-        if self.control.borrow().is_none() {
-            self.run = None;
-        }
+        self.cancel.send_replace(true);
         if let Some(control) = self.control.borrow().as_ref() {
             control.cancel();
         }
@@ -196,17 +282,45 @@ impl ScopedGraph {
     }
 }
 
+fn driver_result(result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> anyhow::Result<()> {
+    result.map_err(|error| anyhow::anyhow!("nested graph driver failed: {error}"))?
+}
+
+impl Drop for ScopedGraph {
+    fn drop(&mut self) {
+        self.cancel.send_replace(true);
+        if let Some(run) = &self.run {
+            run.abort();
+            if !self.disposed {
+                log::warn!("Nested computation graph dropped without awaited shutdown; asynchronous plugin cleanup is not guaranteed");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::computation::v1::*;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     struct Service {
         descriptor: ComponentDescriptor,
         starts: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
+        running: Arc<AtomicUsize>,
+        stop_gate: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    struct Running(Arc<AtomicUsize>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     #[async_trait]
     impl ComputationComponent for Service {
@@ -219,20 +333,26 @@ mod tests {
         }
         async fn stop(&mut self) -> anyhow::Result<()> {
             self.stops.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.stop_gate {
+                gate.notified().await;
+            }
             Ok(())
         }
     }
     #[async_trait]
     impl ComputationService for Service {
         async fn run(&mut self) -> anyhow::Result<()> {
+            self.running.fetch_add(1, Ordering::SeqCst);
+            let _running = Running(self.running.clone());
             std::future::pending().await
         }
     }
 
-    #[tokio::test]
-    async fn cancelled_poll_borrow_keeps_a_nested_graph_alive_for_awaited_stop_and_restart() {
-        let starts = Arc::new(AtomicUsize::new(0));
-        let stops = Arc::new(AtomicUsize::new(0));
+    fn scope(
+        starts: Arc<AtomicUsize>,
+        stops: Arc<AtomicUsize>,
+        running: Arc<AtomicUsize>,
+    ) -> ScopedGraph {
         let graph = ComputationGraph::builder("nested")
             .service(Box::new(Service {
                 descriptor: ComponentDescriptor::try_new(
@@ -240,12 +360,32 @@ mod tests {
                     vec![],
                 )
                 .unwrap(),
-                starts: starts.clone(),
-                stops: stops.clone(),
+                starts,
+                stops,
+                running,
+                stop_gate: None,
             }))
             .build()
             .unwrap();
-        let mut scope = ScopedGraph::new(graph, Arc::from("instance"));
+        ScopedGraph::new(graph, Arc::from("instance"))
+    }
+
+    async fn wait_running(running: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while running.load(Ordering::SeqCst) != expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("driver did not reach the expected processing state");
+    }
+
+    #[tokio::test]
+    async fn cancelled_poll_borrow_keeps_a_nested_graph_alive_for_awaited_stop_and_restart() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let mut scope = scope(starts.clone(), stops.clone(), running.clone());
         let control = scope.ready().await.unwrap();
         for expected in 1..=2 {
             let request = control.clone();
@@ -268,10 +408,132 @@ mod tests {
             }
             scope.stop().await.unwrap();
             assert_eq!(stops.load(Ordering::SeqCst), expected);
+            assert_eq!(running.load(Ordering::SeqCst), 0);
         }
         scope.shutdown().await.unwrap();
         assert!(scope.run.is_none());
         assert!(scope.disposed);
         assert_eq!(stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn driver_progress_does_not_require_polling_the_parent_service() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let mut scope = scope(starts, stops.clone(), running.clone());
+        let control = scope.ready().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            control.start_components(GraphRevision(1), GraphSelection::All),
+        )
+        .await
+        .expect("nested controller still depends on the parent polling it")
+        .unwrap();
+        wait_running(&running, 1).await;
+        scope.shutdown().await.unwrap();
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_before_first_driver_poll_joins_before_disposal() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let mut scope = scope(starts.clone(), stops.clone(), Arc::new(AtomicUsize::new(0)));
+        assert!(scope.control.borrow().is_none());
+        scope.shutdown().await.unwrap();
+        assert!(scope.run.is_none());
+        assert!(scope.disposed);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_scope_aborts_its_owned_driver() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let mut scope = scope(
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            running.clone(),
+        );
+        let control = scope.ready().await.unwrap();
+        control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        wait_running(&running, 1).await;
+        drop(scope);
+        wait_running(&running, 0).await;
+    }
+
+    #[tokio::test]
+    async fn quiescence_awaits_nested_work_and_resume_does_not_restart_instances() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let mut scope = scope(starts.clone(), stops.clone(), running.clone());
+        let control = scope.ready().await.unwrap();
+        control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        wait_running(&running, 1).await;
+        for _ in 0..2 {
+            scope.quiesce().await.unwrap();
+            assert_eq!(running.load(Ordering::SeqCst), 0);
+            scope.quiesce().await.unwrap();
+            scope.resume().await.unwrap();
+            wait_running(&running, 1).await;
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            assert_eq!(stops.load(Ordering::SeqCst), 0);
+        }
+        scope.shutdown().await.unwrap();
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_shutdown_keeps_the_driver_owned_until_cleanup_finishes() {
+        let stops = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let stop_gate = Arc::new(tokio::sync::Notify::new());
+        let graph = ComputationGraph::builder("nested")
+            .service(Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(
+                    ComponentId::try_new("service").unwrap(),
+                    vec![],
+                )
+                .unwrap(),
+                starts: Arc::new(AtomicUsize::new(0)),
+                stops: stops.clone(),
+                running: running.clone(),
+                stop_gate: Some(stop_gate.clone()),
+            }))
+            .build()
+            .unwrap();
+        let mut scope = ScopedGraph::new(graph, Arc::from("instance"));
+        let control = scope.ready().await.unwrap();
+        control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        wait_running(&running, 1).await;
+        {
+            let shutdown = scope.shutdown();
+            tokio::pin!(shutdown);
+            tokio::select! {
+                result = &mut shutdown => panic!("cleanup passed its gate: {result:?}"),
+                _ = wait_running(&stops, 1) => {}
+            }
+        }
+        assert!(scope.run.is_some());
+        assert!(!scope.disposed);
+        stop_gate.notify_one();
+        scope.shutdown().await.unwrap();
+        assert!(scope.run.is_none());
+        assert!(scope.disposed);
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
     }
 }

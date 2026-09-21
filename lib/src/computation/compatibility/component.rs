@@ -35,6 +35,9 @@ pub(super) trait RuntimeComponent: Send + Sync {
     async fn start(&self) -> anyhow::Result<()>;
     async fn stop(&self) -> anyhow::Result<()>;
     async fn run(&self) -> anyhow::Result<()>;
+    async fn quiesce(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn wait_ready(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -157,6 +160,14 @@ impl ComputationComponent for Service {
 }
 #[async_trait]
 impl ComputationService for Service {
+    async fn quiesce(&mut self) -> anyhow::Result<()> {
+        self.instance
+            .component
+            .quiesce()
+            .instrument(self.instance.span.clone())
+            .await
+    }
+
     async fn run(&mut self) -> anyhow::Result<()> {
         let run = self
             .instance

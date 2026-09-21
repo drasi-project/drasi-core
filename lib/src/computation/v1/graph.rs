@@ -1518,11 +1518,15 @@ async fn run_node(
     quiesce: &mut watch::Receiver<bool>,
 ) -> GraphResult<()> {
     if let Component::Service(service) = component {
-        return tokio::select! {
+        tokio::select! {
             biased;
-            _ = cancelled(quiesce) => Ok(()),
-            result = service.run() => result.map_err(|error| component_error(node, "run service", error)),
-        };
+            _ = cancelled(quiesce) => {}
+            result = service.run() => return result.map_err(|error| component_error(node, "run service", error)),
+        }
+        return service
+            .quiesce()
+            .await
+            .map_err(|error| component_error(node, "quiesce service", error));
     }
     let wakeup = match &*component {
         Component::Transformer(transformer) | Component::Query(transformer) => {

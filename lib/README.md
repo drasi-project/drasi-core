@@ -81,6 +81,11 @@ The old managers are not used to evaluate queries. A ComponentGraph-shaped
 inspection projection preserves the ordinary public topology and event API;
 the native controller owns lifecycle decisions.
 
+Each ordinary query's graph has an owned Tokio driver, so independent queries can
+use different workers on a multi-thread runtime. Single-thread runtimes remain
+supported. Quiescence awaits the nested graph's pause; shutdown joins its driver
+before disposing query resources. Query event order is unchanged.
+
 Compatibility is an outer hosting concern. Native ordinary operations do not
 construct the legacy SourceManager, QueryManager, ReactionManager or lifecycle
 orchestrator; the legacy backend is initialized only for ComponentGraph execution

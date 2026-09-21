@@ -568,7 +568,10 @@ impl Reaction for ApplicationReaction {
                 };
 
                 // Clone to get owned QueryResult
-                let query_result = (*query_result_arc).clone();
+                let mut query_result = (*query_result_arc).clone();
+                if let Some(profiling) = &mut query_result.profiling {
+                    profiling.reaction_receive_ns = Some(drasi_lib::profiling::timestamp_ns());
+                }
 
                 // Filter results based on configured queries
                 if !query_filter.is_empty() && !query_filter.contains(&query_result.query_id) {
@@ -582,11 +585,17 @@ impl Reaction for ApplicationReaction {
                     query_result.results.len()
                 );
 
-                // Forward to application
-                if let Err(e) = app_tx.send(query_result).await {
-                    error!("Failed to send result to application: {e}");
-                    break;
+                let permit = match app_tx.reserve().await {
+                    Ok(permit) => permit,
+                    Err(e) => {
+                        error!("Failed to send result to application: {e}");
+                        break;
+                    }
+                };
+                if let Some(profiling) = &mut query_result.profiling {
+                    profiling.reaction_complete_ns = Some(drasi_lib::profiling::timestamp_ns());
                 }
+                permit.send(query_result);
             }
         });
 

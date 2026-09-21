@@ -3424,3 +3424,70 @@ async fn running_query_replacement_rebinds_consumers_without_restarting_unaffect
     assert_eq!(source_control.starts.load(Ordering::Acquire), 1);
     core.shutdown().await.unwrap();
 }
+
+async fn quiescing_ordinary_query_pauses_its_independently_driven_graph() {
+    let (source, source_control) = ControlledSource::new("source");
+    let (reaction, reaction_control, mut output) = ControlledReaction::new("reaction", &["query"]);
+    let core = builder()
+        .with_source(source)
+        .with_query(config("query", Some("source")))
+        .with_reaction(reaction)
+        .build()
+        .await
+        .unwrap();
+    core.start().await.unwrap();
+    core.start_source("source").await.unwrap();
+    core.start_query("query").await.unwrap();
+    core.start_reaction("reaction").await.unwrap();
+    insert(&core, "source").await;
+    assert_eq!(next(&mut output).await.results.len(), 1);
+
+    let runtime = core.computation_runtime.as_ref().unwrap();
+    let control = runtime.control().unwrap();
+    let query = component_handle(&core, "query", "query").await;
+    let selected = GraphSelection::Exact(vec![ComponentId::try_new("query").unwrap()]);
+    control
+        .quiesce_components(control.desired_snapshot().revision, selected)
+        .await
+        .unwrap();
+    assert_eq!(
+        query.observed().unwrap().lifecycle,
+        ComponentLifecycle::Quiesced
+    );
+    insert_person(&core, "source", "two", "Bob").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), output.recv())
+            .await
+            .is_err(),
+        "a quiesced ordinary query must not keep evaluating on its nested driver"
+    );
+    query.start().await.unwrap();
+    let instance = runtime.query("query").await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), output.recv())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "query did not resume: {error}; parent: {:?}; nested: {:?}",
+                query.observed().unwrap(),
+                instance.inspector().snapshot().observed.components
+            )
+        })
+        .unwrap();
+    assert!(matches!(&result.results[..],
+        [crate::channels::ResultDiff::Add { data, .. }]
+        if data == &serde_json::json!({"name":"Bob"})));
+    assert_eq!(source_control.starts.load(Ordering::Acquire), 1);
+    assert_eq!(source_control.subscriptions.load(Ordering::Acquire), 1);
+    assert_eq!(reaction_control.starts.load(Ordering::Acquire), 1);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_query_quiescence_current_thread() {
+    quiescing_ordinary_query_pauses_its_independently_driven_graph().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_query_quiescence_multi_thread() {
+    quiescing_ordinary_query_pauses_its_independently_driven_graph().await;
+}

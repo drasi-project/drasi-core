@@ -89,6 +89,13 @@ pub trait ComputationComponent: Send + Sync {
 #[async_trait]
 pub trait ComputationService: ComputationComponent {
     async fn run(&mut self) -> anyhow::Result<()>;
+
+    /// Called after `run()` is dropped for quiescence. Services with separately
+    /// owned workers must await their pause here and resume them on the next run.
+    /// Services whose work lives entirely in `run()` need no additional action.
+    async fn quiesce(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// A producer beside legacy Source. Its descriptor has output ports only.
