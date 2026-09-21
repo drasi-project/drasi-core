@@ -50,6 +50,7 @@ where
 {
     fn eq(&self, other: &Self) -> bool {
         self.event.timestamp() == other.event.timestamp()
+            && self.event.ordering_tie_breaker() == other.event.ordering_tie_breaker()
             && self.enqueue_order == other.enqueue_order
     }
 }
@@ -75,6 +76,12 @@ where
             .event
             .timestamp()
             .cmp(&self.event.timestamp())
+            .then_with(|| {
+                other
+                    .event
+                    .ordering_tie_breaker()
+                    .cmp(&self.event.ordering_tie_breaker())
+            })
             .then_with(|| other.enqueue_order.cmp(&self.enqueue_order))
     }
 }
@@ -132,8 +139,8 @@ impl Default for PriorityQueueMetrics {
 
 /// Thread-safe generic priority queue for ordering events by timestamp
 ///
-/// Equal timestamps retain enqueue order. The tie-breaker is shared by clones
-/// and independent of metric resets.
+/// Ranked event types break timestamp ties by their query-local source rank and
+/// source sequence. Remaining ties retain enqueue order, independently of metrics.
 ///
 /// # Backpressure and Dispatch Modes
 ///

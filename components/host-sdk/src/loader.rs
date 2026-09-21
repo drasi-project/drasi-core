@@ -72,6 +72,11 @@ pub struct LoadedPlugin {
 }
 
 impl LoadedPlugin {
+    /// The package version exported by this loaded library, not its config version.
+    pub fn plugin_version(&self) -> Option<String> {
+        crate::proxies::source::read_plugin_version(&self._library)
+    }
+
     /// Inject a config value resolver callback into this plugin.
     ///
     /// The plugin will use this callback (via `DtoMapper`) to resolve

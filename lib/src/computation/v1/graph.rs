@@ -30,8 +30,8 @@ use tokio::sync::{mpsc, watch};
 mod addition;
 mod controller;
 pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
-mod resources;
 mod registry;
+mod resources;
 pub(crate) use registry::GraphRegistrySnapshot;
 mod specification;
 mod topology;
@@ -205,6 +205,7 @@ fn validate_edge_contract(
         if !matches!(
             capability,
             PipeCapability::FifoPerStream
+                | PipeCapability::RankedEventOrder
                 | PipeCapability::Backpressure
                 | PipeCapability::DurableAcceptance
                 | PipeCapability::ExplicitAcknowledgement
@@ -1545,7 +1546,7 @@ async fn run_node(
         }
         let mut acknowledgement = None;
         let mut consumed = None;
-        let emissions = match component {
+        let mut emissions = match component {
             Component::Source(source) => {
                 match tokio::select! {
                     biased;
@@ -1688,29 +1689,48 @@ async fn run_node(
                 }
             }
         };
-        check_descriptor(component, node)?;
-        validate_emissions(node, sequences, &emissions)?;
-        for emission in emissions {
-            if !outputs.iter().any(|output| output.port == emission.port) {
-                return Err(emission_error(
-                    node,
-                    "output port has no bound relationship",
-                ));
+        loop {
+            check_descriptor(component, node)?;
+            validate_emissions(node, sequences, &emissions)?;
+            for emission in emissions {
+                if !outputs.iter().any(|output| output.port == emission.port) {
+                    return Err(emission_error(
+                        node,
+                        "output port has no bound relationship",
+                    ));
+                }
+                for (accepted_branches, output) in outputs
+                    .iter()
+                    .filter(|output| output.port == emission.port)
+                    .enumerate()
+                {
+                    output
+                        .sender
+                        .send(emission.envelope.clone())
+                        .await
+                        .map_err(|source| GraphError::Forward {
+                            edge: output.edge,
+                            accepted_branches,
+                            source: Box::new(source),
+                        })?;
+                }
             }
-            for (accepted_branches, output) in outputs
-                .iter()
-                .filter(|output| output.port == emission.port)
-                .enumerate()
-            {
-                output
-                    .sender
-                    .send(emission.envelope.clone())
-                    .await
-                    .map_err(|source| GraphError::Forward {
-                        edge: output.edge,
-                        accepted_branches,
-                        source: Box::new(source),
-                    })?;
+            let continuation = match component {
+                Component::Transformer(transformer) | Component::Query(transformer)
+                    if transformer.has_pending_emissions() =>
+                {
+                    Some(tokio::select! {
+                        biased;
+                        _ = cancelled(quiesce) => return Ok(()),
+                        result = transformer.continue_transform() =>
+                            result.map_err(|source| component_error(node, "continue transform", source))?,
+                    })
+                }
+                _ => None,
+            };
+            match continuation {
+                Some(next) => emissions = next,
+                None => break,
             }
         }
         if let Some((edge, acknowledgement)) = acknowledgement {

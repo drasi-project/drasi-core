@@ -33,6 +33,7 @@ impl FactoryRegistry {
             Arc::new(QueryResultsOutletFactory::default()),
             Arc::new(WalReplaySourceFactory::default()),
             Arc::new(ComputationTopologyFactory::default()),
+            Arc::new(super::QueryScheduledSourceFactory::default()),
         ];
         let mut registry = Self::default();
         for factory in factories {

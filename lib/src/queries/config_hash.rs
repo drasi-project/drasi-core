@@ -46,7 +46,7 @@ pub(crate) fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
 ///   - `query` text
 ///   - `query_language`
 ///   - `middleware` (order preserved — pipeline order matters)
-///   - `sources` (sorted by `source_id`; within each source, `nodes` and
+///   - `sources` (declaration order defines event rank; within each source, `nodes` and
 ///     `relations` are sorted + deduped because they are consumed as `HashSet`s
 ///     downstream in `SubscriptionSettingsBuilder`)
 ///   - `joins` (sorted by `id`; within each join, `keys` are sorted because
@@ -115,11 +115,10 @@ fn canonicalize_join(join: &QueryJoinConfig) -> JoinIdentity<'_> {
 /// Compute a deterministic hash of the identity-defining portion of a query config.
 ///
 /// The hash is stable across processes, platforms, and Rust toolchain versions,
-/// and it is invariant under cosmetic reordering of `sources`, `joins`, a
+/// and it is invariant under cosmetic reordering of `joins`, a
 /// source's `nodes` / `relations`, and a join's `keys`.
 pub fn compute_config_hash(config: &QueryConfig) -> u64 {
-    let mut sources: Vec<SourceIdentity> = config.sources.iter().map(canonicalize_source).collect();
-    sources.sort_by(|a, b| a.source_id.cmp(b.source_id));
+    let sources: Vec<SourceIdentity> = config.sources.iter().map(canonicalize_source).collect();
 
     let joins = config.joins.as_ref().map(|j| {
         let mut v: Vec<JoinIdentity> = j.iter().map(canonicalize_join).collect();
@@ -386,7 +385,9 @@ mod tests {
             },
         ];
 
-        assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
+        // Retain the pinned test identity, but source order now changes the
+        // query's event rank and is no longer a cosmetic configuration change.
+        assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
     }
 
     #[test]

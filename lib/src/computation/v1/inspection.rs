@@ -331,6 +331,7 @@ impl ComputationTopologySource {
                         DesiredPipe::Bounded { .. } => "Bounded",
                         DesiredPipe::Broadcast { .. } => "Broadcast",
                         DesiredPipe::Retained(_) => "Retained",
+                        DesiredPipe::Ranked(_) => "Ranked",
                         DesiredPipe::External { .. } => "External",
                     };
                     elements.insert(key.clone(), self.node(&key, "ComputationPipe", serde_json::json!({

@@ -403,7 +403,7 @@ and one unique stream binding per output port. Build validates the entire DAG
 before provider creation or component starts: roles, endpoints, every connected
 port, full schemas, stream identities, finite capacities, capabilities and cycles.
 Direct Source -> Sink and arbitrary acyclic transformer chains require **no
-Continuous Query**. Fanout shares payloads; fanin preserves per-stream FIFO.
+Continuous Query**. Fanout shares payloads; ordinary FIFO pipes preserve per-stream FIFO.
 One output stream cannot feed multiple input ports on the same component:
 independent queues for that stream would not preserve component-wide FIFO.
 
@@ -445,6 +445,35 @@ retained journals require exclusive binding ownership.
 For a durable commit error, inspect `SendFailure::acceptance()` before deciding
 what to retry: `Unknown` is not definite rejection. Explicit event-time input
 merging compares available stream heads without reordering any producer's stream.
+
+**Continuous-query input ordering:** ordinary queries in either execution mode,
+and queries assembled by `ComputationPipelineBuilder`, use one bounded inbox per
+query. Its order is **SourceEvent wrapper timestamp, source declaration rank,
+source sequence**. Rank is the zero-based position in that query's `sources`
+list, not a lexical source ID or a property of the shared source. The input
+wrapper timestamp is used as delivered by the source—not the element's
+`effective_from`, the adapter's receipt clock, or its native producer sequence.
+Raw source sequence/cursor/profiling metadata remains intact. Standard
+`SourceBase` dispatch stamps the source sequence before fanout and retains its
+existing per-source dispatch/timestamp policy; custom sources must supply an
+authoritative sequence rather than relying on an adapter-generated substitute.
+
+Native query inputs use `RankedInputPipeConfig` branches of a shared
+`RankedInputQueue`, explicitly negotiating `RankedEventOrder` rather than FIFO.
+The query's `priority_queue_capacity` bounds the **shared** inbox, including
+scheduled signals. Channel sources block when full; broadcast sources explicitly
+drop new arrivals when full. Other source buffers and a sender's in-flight event
+are separate from that bound.
+
+This is ordering of **currently admitted/queued events**. A quiet source is not
+awaited, and an earlier timestamp arriving after a dequeue cannot preempt that
+in-flight event. There is no event-time watermark or guarantee over unseen events.
+Scheduled `FuturesDue` signals use the future queue's due time, a rank after all
+declared sources, and their own increasing signal sequence. A selected signal
+drains the scheduled batch before the next input, as in the legacy processor;
+native continuations emit one bounded result batch at a time.
+The internal `__future_queue__` source ID is reserved and cannot be declared as
+an ordinary query source.
 
 **Graph-owned queries and legacy boundaries:** `ContinuousQueryFactory` constructs
 a Cypher or GQL transformer using an explicit `QueryIndexProviderResource`.
@@ -689,15 +718,17 @@ queue acceptance must never be advertised as completed handling. Local
 acknowledgement handles remain outside envelopes and contexts. The volatile bounded
 pipe advertises only per-stream FIFO and backpressure; stronger requirements need
 an explicitly capable provider. Cross-component transactions and exactly-once
-effects are not inferred from a pipe. Sequence is authoritative; equal/backward timestamps do not reorder
-a stream. Opaque logical IDs remain producer-owned; `emission_id` is an optional
+effects are not inferred from a pipe. FIFO pipes order by producer sequence, not
+timestamps. Explicit ranked pipes instead order queued query inputs by the key
+described above and do not advertise producer FIFO. Opaque logical IDs remain producer-owned; `emission_id` is an optional
 stream/sequence identity helper, not a global arbitrary-ID deduplication service.
 
 Explicit pipe close rejects sends and drains accepted events. Runtime cancellation
 may discard queued/in-flight events and cannot roll back effects. Sequential fanout
 is **not atomic**: failure reports prior branch acceptances, cancellation can also
 leave partial delivery, and a slow branch backpressures its producer. No failed
-branch is automatically retried. Queue capacity bounds envelopes per edge, not
+branch is automatically retried. Queue capacity bounds envelopes (shared across
+ranked branches, per edge for ordinary bounded pipes), not
 bytes, component state or transformer result vectors. See the v1 rustdocs for the
 complete lifecycle, provider and delivery contracts.
 

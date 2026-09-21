@@ -245,7 +245,9 @@ unconnected ports, missing output streams, and schema/capability mismatches.
 Incremental admission can retain incomplete nodes, but eventual connections must
 satisfy those contracts. One producer output cannot feed multiple input ports of
 the same consumer: separate queues for one stream would undermine component-wide
-FIFO ordering. Resources and components have separate identifier namespaces.
+FIFO ordering. Explicitly ranked query branches instead identify one shared
+priority-inbox resource and negotiate `RankedEventOrder`. They do not claim FIFO.
+Resources and components have separate identifier namespaces.
 
 `GraphSnapshot` also carries:
 
@@ -723,9 +725,48 @@ flowchart LR
 The data plane transports immutable change envelopes through capability-checked
 ports and graph-owned endpoints. A source supplies a producer stream; emissions
 must preserve its increasing sequence. Fanout and fanin preserve the documented
-per-stream ordering, not a global ordering or automatic subscriber isolation.
+per-stream ordering for FIFO transports, not an automatic global order or subscriber isolation.
 Acknowledged handling and durable/atomic publication require the corresponding
 pipe/sink/index capabilities; they are not inferred from a successful enqueue.
+
+#### Ranked continuous-query inputs
+
+The ordinary query adapters and `ComputationPipelineBuilder` assign source ranks
+from `QueryConfig.sources` declaration order. Legacy queries enqueue wrappers in
+one `QueryEventQueue`; native source adapters send into branches of one
+`RankedInputQueue`. Both compare the source-reported wrapper timestamp, then
+query-local rank, then authoritative raw source sequence. The native envelope's
+producer sequence remains separate. No rank is written onto a shared source, and
+neither element `effective_from` nor receipt time substitutes for wrapper time.
+Custom SourceEvent streams without a sequence fail visibly instead of acquiring
+a fabricated downstream ordering identity.
+Source declaration order now participates in the query configuration hash, so a
+rank change cannot silently reuse checkpoints from the previous ordering.
+
+The native inbox is one finite heap, not independently prefetched stream heads.
+Only the branch owning the global minimum may dequeue it. This preserves
+per-edge lifecycle/receipt ownership while allowing one query's rank to differ
+from another query over the same sources. Cancellation removes only the retiring
+branch generation's queued entries and wakes blocked senders. Channel branches
+block at the common capacity; broadcast branches use explicit drop-newest
+admission. Input can buffer during bootstrap without running query evaluation,
+but only after all source resume/reset preparation has completed for the current
+generation. The separate progress `admitting` flag is revoked on reset, stop and
+failure; partially prepared generations cannot populate the inbox.
+
+The guarantee stops at dequeue: it covers admitted events, not unseen events or
+an event already in flight. No quiet-source wait or watermark is introduced.
+The pinned main implementation at `216329f7` supplied the shared timestamp heap
+and due-time `FuturesDue` handling; its comparator did not contain source-rank or
+source-sequence ties. This change makes those requested ties explicit in both
+engines rather than inferring them from incidental task or source-ID ordering.
+
+`QueryScheduledSourceFactory` supplies due-time signals to the same native heap,
+after real sources at equal timestamps. Its queue view is weak and revoked on
+query stop, so it cannot keep index handles open. Selecting a scheduled signal
+retains main's scheduled-batch boundary. `Transformer` continuations let that
+batch emit bounded results before the next input without collecting an unbounded
+output vector or prematurely acknowledging the triggering delivery.
 
 Control notifications are separate from those queues and can progress while data
 is awaiting backpressure. Current defaults are 64 queued messages per component,

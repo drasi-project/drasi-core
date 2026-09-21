@@ -83,6 +83,9 @@ impl ContinuousQueryTransformer {
                 }
             }
         }
+        if let Some(progress) = &self.source_progress {
+            progress.admit();
+        }
         self.run_bootstrap().await
     }
 

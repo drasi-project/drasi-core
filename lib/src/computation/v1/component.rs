@@ -101,6 +101,15 @@ pub trait EnvelopeSource: ComputationComponent {
 /// A stateful transformer with declared input and output ports.
 #[async_trait]
 pub trait Transformer: ComputationComponent {
+    /// A bounded continuation of the current input. The host finishes these
+    /// emissions before accepting another input or acknowledging this one.
+    fn has_pending_emissions(&self) -> bool {
+        false
+    }
+    async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        anyhow::bail!("this transformer has no continuation")
+    }
+
     fn wakeup_source(&self) -> Option<std::sync::Arc<dyn WakeupSource>> {
         None
     }

@@ -160,6 +160,19 @@ The `OciRegistryClient` supports downloading plugins from OCI registries and opt
 7. **Proxy extraction** — wraps each `SourcePluginVtable`, `ReactionPluginVtable`, and `BootstrapPluginVtable` in their corresponding proxy types
 8. **Library retention** — the `Arc<Library>` is stored in each proxy to keep the shared library loaded for as long as any proxy is alive
 
+### Package and configuration versions
+
+`LoadedPlugin::plugin_version()` reads the package version from the retained
+library's metadata export. Runtime registration preserves it per descriptor via
+the registry's `register_*_with_package_version` methods. This is separate from
+`config_version()`, which describes the accepted configuration format.
+
+Existing registration methods remain supported and leave the package version
+unknown. Replacing a descriptor also replaces its version metadata; registering
+another kind from the same plugin ID does not rewrite earlier registrations.
+Hosts must not substitute a configuration version when the package version is
+unknown. No plugin vtable or wire-layout change is required.
+
 ### Plugin File Naming
 
 Plugin shared libraries must follow the naming convention `lib<plugin_name>.<ext>` (on Unix) or `<plugin_name>.dll` (on Windows). The loader uses glob patterns to match plugin files:

@@ -164,6 +164,17 @@ async fn scenario() {
             .summary,
         OperationSummary::Completed
     );
+    let initial_checkpoint = services
+        .state_store
+        .as_ref()
+        .expect("scoped state")
+        .get("native-output", "checkpoint:joined")
+        .await
+        .expect("checkpoint lookup")
+        .expect("fresh-start cutoff");
+    let cutoff: drasi_lib::ReactionCheckpoint =
+        bincode::deserialize(&initial_checkpoint).expect("checkpoint payload");
+    assert_eq!(cutoff.sequence, 0);
     customers_input
         .send_node_insert(
             "C1",
@@ -195,7 +206,7 @@ async fn scenario() {
         );
         assert_eq!(new.sequence, old.sequence);
     }
-    assert!(
+    assert_eq!(
         services
             .state_store
             .as_ref()
@@ -203,8 +214,9 @@ async fn scenario() {
             .get("native-output", "checkpoint:joined")
             .await
             .expect("checkpoint lookup")
-            .is_none(),
-        "accepted application deliveries must not create handled checkpoints"
+            .expect("fresh-start cutoff remains"),
+        initial_checkpoint,
+        "accepted application deliveries must not advance the fresh-start cutoff"
     );
     assert_eq!(
         catalog

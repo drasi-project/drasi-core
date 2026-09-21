@@ -24,6 +24,12 @@ use tokio::sync::{broadcast, mpsc};
 /// Trait for types that have a timestamp, required for priority queue ordering
 pub trait Timestamped {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
+
+    /// Optional query-local source rank and authoritative source sequence.
+    /// Event types without a ranked source retain FIFO timestamp ties.
+    fn ordering_tie_breaker(&self) -> Option<(usize, u64)> {
+        None
+    }
 }
 
 /// Type of Drasi component
@@ -228,7 +234,8 @@ pub struct SourceEventWrapper {
     pub profiling: Option<ProfilingMetadata>,
     /// Monotonic sequence number assigned by the framework.
     /// Used for ordering, watermarks, gap detection, and dedup.
-    /// `None` for volatile sources that don't support replay.
+    /// SourceBase stamps this before fanout, including for volatile sources.
+    /// Ranked query inputs require it; the optional field remains for ABI compatibility.
     pub sequence: Option<u64>,
     /// Opaque source position bytes for stream resumption on restart.
     /// Only the source can interpret these bytes — the framework persists

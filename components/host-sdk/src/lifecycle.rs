@@ -91,6 +91,10 @@ impl PluginLifecycleManager {
         mut loaded: LoadedPlugin,
     ) -> Vec<PluginKindEntry> {
         let mut kinds = Vec::new();
+        let package_version = loaded.plugin_version();
+        if package_version.is_none() {
+            log::warn!("Loaded plugin '{plugin_id}' has no package version metadata");
+        }
         let metadata_info = loaded.metadata_info.take();
 
         // Take ownership of proxy vecs via mem::take, so Drop finds them empty.
@@ -109,7 +113,11 @@ impl PluginLifecycleManager {
                 config_version: SourcePluginDescriptor::config_version(&source).to_string(),
                 config_schema_name: SourcePluginDescriptor::config_schema_name(&source).to_string(),
             });
-            reg.register_source_with_metadata(Arc::new(source), plugin_id);
+            reg.register_source_with_package_version(
+                Arc::new(source),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for reaction in reactions {
@@ -120,7 +128,11 @@ impl PluginLifecycleManager {
                 config_schema_name: ReactionPluginDescriptor::config_schema_name(&reaction)
                     .to_string(),
             });
-            reg.register_reaction_with_metadata(Arc::new(reaction), plugin_id);
+            reg.register_reaction_with_package_version(
+                Arc::new(reaction),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for bootstrap in bootstraps {
@@ -131,7 +143,11 @@ impl PluginLifecycleManager {
                 config_schema_name: BootstrapPluginDescriptor::config_schema_name(&bootstrap)
                     .to_string(),
             });
-            reg.register_bootstrapper_with_metadata(Arc::new(bootstrap), plugin_id);
+            reg.register_bootstrapper_with_package_version(
+                Arc::new(bootstrap),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for identity_provider in identity_providers {
@@ -147,7 +163,11 @@ impl PluginLifecycleManager {
                 )
                 .to_string(),
             });
-            reg.register_identity_provider_with_metadata(Arc::new(identity_provider), plugin_id);
+            reg.register_identity_provider_with_package_version(
+                Arc::new(identity_provider),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         for secret_store in secret_stores {
@@ -159,7 +179,11 @@ impl PluginLifecycleManager {
                 config_schema_name: SecretStorePluginDescriptor::config_schema_name(&secret_store)
                     .to_string(),
             });
-            reg.register_secret_store_with_metadata(Arc::new(secret_store), plugin_id);
+            reg.register_secret_store_with_package_version(
+                Arc::new(secret_store),
+                plugin_id,
+                package_version.as_deref(),
+            );
         }
 
         drop(reg);
@@ -180,7 +204,7 @@ impl PluginLifecycleManager {
         // Emit event
         let _ = self.event_tx.send(PluginEvent::Loaded {
             plugin_id: plugin_id.to_string(),
-            version: String::new(),
+            version: package_version.unwrap_or_default(),
             kinds: kinds.clone(),
         });
 

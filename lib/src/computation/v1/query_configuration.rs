@@ -85,6 +85,10 @@ impl QueryExecutionSettings {
         let mut sources = BTreeSet::new();
         for source in &self.sources {
             super::data::validate_identifier("source", &source.source_id)?;
+            anyhow::ensure!(
+                source.source_id != crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID,
+                "the scheduled-work source ID is reserved"
+            );
             if !sources.insert(&source.source_id) {
                 anyhow::bail!("duplicate source subscription");
             }

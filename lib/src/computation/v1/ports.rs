@@ -34,6 +34,9 @@ pub enum PortDirection {
 pub enum PipeCapability {
     /// FIFO for each logical producer stream using authoritative sequence.
     FifoPerStream,
+    /// One shared inbox orders admitted events by event time, query-local source
+    /// rank, then authoritative source sequence; this is not producer FIFO.
+    RankedEventOrder,
     /// Capacity pressure waits/rejects explicitly rather than silently dropping.
     Backpressure,
     /// Successful enqueue survives the provider's documented crash boundary.
@@ -294,7 +297,9 @@ pub fn validate_connection(
         }
     }
     validate_schema(output.schema(), input.schema())?;
-    pipe.validate(&PipeRequirements::new([PipeCapability::FifoPerStream]))?;
+    if !pipe.supported().contains(&PipeCapability::RankedEventOrder) {
+        pipe.validate(&PipeRequirements::new([PipeCapability::FifoPerStream]))?;
+    }
     pipe.validate(output.requirements())?;
     pipe.validate(input.requirements())
 }

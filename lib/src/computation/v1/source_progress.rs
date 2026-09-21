@@ -28,6 +28,9 @@ pub enum SourceProgressKey {
 #[derive(Debug, Clone, Default)]
 pub struct SourceProgressSnapshot {
     pub ready: bool,
+    /// All source resume/reset preparation completed for this generation. Live
+    /// inputs may now buffer, but evaluation still waits for bootstrap readiness.
+    pub admitting: bool,
     pub recovered: bool,
     pub bootstrap_complete: bool,
     pub persistent: bool,
@@ -88,6 +91,7 @@ impl QuerySourceProgress {
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
             state.ready = false;
+            state.admitting = false;
             state.recovered = false;
             state.failure = None;
         });
@@ -96,6 +100,7 @@ impl QuerySourceProgress {
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
             state.ready = false;
+            state.admitting = false;
             state.failure = Some(Arc::from(
                 "owning query progress is fenced after interrupted or failed processing",
             ));
@@ -103,6 +108,11 @@ impl QuerySourceProgress {
     }
     pub(super) fn publish(&self, snapshot: SourceProgressSnapshot) {
         self.state.send_replace(Arc::new(snapshot));
+    }
+    pub(super) fn admit(&self) {
+        self.state.send_modify(|state| {
+            Arc::make_mut(state).admitting = true;
+        });
     }
     pub(super) fn confirm(&self, key: SourceProgressKey, checkpoint: SourceCheckpoint) {
         self.state.send_modify(|state| {
@@ -114,3 +124,38 @@ impl QuerySourceProgress {
 /// Register this actual resource for both its owning query and compatible sources.
 /// It never registers a legacy Source position handle or controls another pipeline.
 pub struct QuerySourceProgressResource(pub Arc<QuerySourceProgress>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranked_admission_is_fenced_until_all_resume_preparation_completes() {
+        let progress =
+            QuerySourceProgress::new("graph", ComponentId::try_new("query").unwrap()).unwrap();
+        progress.publish(SourceProgressSnapshot {
+            recovered: true,
+            reset_generation: 4,
+            ..Default::default()
+        });
+        assert!(!progress.snapshot().admitting);
+        progress.admit();
+        assert!(progress.snapshot().admitting);
+        assert!(
+            !progress.snapshot().ready,
+            "admission must not bypass bootstrap"
+        );
+        progress.pending();
+        assert!(!progress.snapshot().admitting);
+        progress.publish(SourceProgressSnapshot {
+            recovered: true,
+            reset_generation: 5,
+            ..Default::default()
+        });
+        assert!(!progress.snapshot().admitting);
+        progress.admit();
+        progress.fail();
+        assert!(!progress.snapshot().admitting);
+        assert!(progress.snapshot().failure.is_some());
+    }
+}

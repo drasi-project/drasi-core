@@ -327,6 +327,8 @@ pub struct ContinuousQueryTransformer {
     checkpoint_view: Arc<RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
     output_persistence_view: Arc<RwLock<Option<bool>>>,
     publication_identity: Arc<RwLock<Option<uuid::Uuid>>>,
+    scheduling: Option<Arc<super::QuerySchedulingResource>>,
+    draining_futures: bool,
 }
 
 impl ContinuousQueryTransformer {
@@ -408,6 +410,8 @@ impl ContinuousQueryTransformer {
             checkpoint_view: Arc::new(RwLock::new(None)),
             output_persistence_view: Arc::new(RwLock::new(None)),
             publication_identity: Arc::new(RwLock::new(Some(uuid::Uuid::new_v4()))),
+            scheduling: None,
+            draining_futures: false,
         };
         if !defer_build {
             instance.build().await?;
@@ -517,6 +521,7 @@ impl ContinuousQueryTransformer {
         }
         progress.publish(SourceProgressSnapshot {
             ready,
+            admitting: ready,
             recovered: true,
             bootstrap_complete: self.bootstrap_complete.load(Ordering::Acquire),
             persistent,
@@ -1040,6 +1045,9 @@ impl ContinuousQueryTransformer {
 
 impl Drop for ContinuousQueryTransformer {
     fn drop(&mut self) {
+        if let Some(scheduling) = &self.scheduling {
+            scheduling.stopped();
+        }
         *self.checkpoint_view.write().unwrap_or_else(|error| {
             log::error!("Releasing a poisoned query checkpoint view: {error}");
             error.into_inner()
@@ -1054,6 +1062,9 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
+        if let Some(scheduling) = &self.scheduling {
+            scheduling.stopped();
+        }
         if let Some(progress) = &self.source_progress {
             progress.pending();
         }
@@ -1082,10 +1093,17 @@ impl ComputationComponent for ContinuousQueryTransformer {
             .ready = true;
         self.results.notify.notify_waiters();
         self.sync_metrics()?;
+        if let Some(scheduling) = &self.scheduling {
+            scheduling.ready(self.query()?.future_queue());
+        }
         Ok(())
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
+        self.draining_futures = false;
+        if let Some(scheduling) = &self.scheduling {
+            scheduling.stopped();
+        }
         if let Some(progress) = &self.source_progress {
             progress.pending();
         }
@@ -1114,6 +1132,10 @@ impl ComputationComponent for ContinuousQueryTransformer {
 #[async_trait]
 impl Transformer for ContinuousQueryTransformer {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+        if GraphChangeCodec::is_futures_due(&input.envelope) {
+            self.draining_futures = true;
+            return self.on_wakeup().await;
+        }
         let _timer = TransactionTimer {
             metrics: self.metrics.clone(),
             started: std::time::Instant::now(),
@@ -1129,12 +1151,33 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
+        if self.scheduling.is_some() {
+            return None;
+        }
         self.query.as_ref().map(|query| {
             Arc::new(FutureWakeup {
                 queue: query.future_queue(),
                 keep_alive: self.runtime_compatibility,
             }) as Arc<dyn WakeupSource>
         })
+    }
+
+    fn has_pending_emissions(&self) -> bool {
+        self.draining_futures
+    }
+
+    async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        if self
+            .query()?
+            .future_queue()
+            .peek_due_time()
+            .await?
+            .is_none()
+        {
+            self.draining_futures = false;
+            return Ok(Vec::new());
+        }
+        self.on_wakeup().await
     }
 
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -1303,6 +1346,15 @@ impl Default for ContinuousQueryFactory {
                     allow_additional: false,
                 },
                 dependencies: BTreeMap::from([
+                    (
+                        Arc::from("scheduling"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<super::QuerySchedulingResource>(
+                                ResourceRole::FutureQueue,
+                            )
+                        },
+                    ),
                     (
                         Arc::from("catalog"),
                         ResourceRequirement {
@@ -1588,6 +1640,16 @@ impl ComponentFactory for ContinuousQueryFactory {
             .get("runtime_compatibility")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        if context
+            .specification
+            .dependencies
+            .contains_key("scheduling")
+        {
+            query.scheduling = context
+                .resources::<super::QuerySchedulingResource>("scheduling")
+                .map_err(ComponentCreationError::terminal)?
+                .pop();
+        }
         if context.specification.dependencies.contains_key("bootstrap") {
             if let Some(bootstrap) = context
                 .resources::<QueryBootstrapResource>("bootstrap")

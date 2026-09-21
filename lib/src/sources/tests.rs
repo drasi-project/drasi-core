@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// A simple test mock source for unit testing.
 ///
@@ -40,6 +40,7 @@ pub struct TestMockSource {
     status_handle: crate::component_graph::ComponentStatusHandle,
     /// Dispatchers for sending events to subscribed queries
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    next_sequence: Mutex<u64>,
 }
 
 impl TestMockSource {
@@ -50,6 +51,7 @@ impl TestMockSource {
             auto_start: true,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            next_sequence: Mutex::new(1),
         })
     }
 
@@ -61,16 +63,26 @@ impl TestMockSource {
             auto_start,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            next_sequence: Mutex::new(1),
         })
     }
 
     /// Inject an event into all subscribed queries.
     pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
+        // Keep assignment and fanout serialized so every subscriber sees the
+        // same source-owned sequence, including concurrent injections.
+        let mut next_sequence = self.next_sequence.lock().await;
+        let sequence = *next_sequence;
+        *next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("mock source sequence exhausted"))?;
         let dispatchers = self.dispatchers.read().await;
-        let wrapper = SourceEventWrapper::new(
+        let wrapper = SourceEventWrapper::with_sequence(
             self.id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            sequence,
+            None,
         );
         let arc_wrapper = Arc::new(wrapper);
         for dispatcher in dispatchers.iter() {
@@ -132,6 +144,13 @@ impl Source for TestMockSource {
         &self,
         settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        let mut next_sequence = self.next_sequence.lock().await;
+        if let Some(resume_sequence) = settings.resume_sequence {
+            let resume_next = resume_sequence
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("mock source sequence exhausted"))?;
+            *next_sequence = (*next_sequence).max(resume_next);
+        }
         let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
         let receiver = dispatcher.create_receiver().await?;
 
@@ -355,6 +374,66 @@ impl Source for LoggingTestSource {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn injected_sequence_is_source_owned_across_fanout_restart_and_resume() {
+        use crate::config::SourceSubscriptionSettings;
+        use drasi_core::models::{ElementMetadata, ElementReference};
+
+        let source = create_test_mock_source("sequenced".into());
+        let settings = |query: &str, resume_sequence| SourceSubscriptionSettings {
+            source_id: "sequenced".into(),
+            query_id: query.into(),
+            enable_bootstrap: false,
+            nodes: Default::default(),
+            relations: Default::default(),
+            resume_from: None,
+            resume_sequence,
+            request_position_handle: false,
+        };
+        let mut first = source
+            .subscribe(settings("first", None))
+            .await
+            .unwrap()
+            .receiver;
+        let mut second = source
+            .subscribe(settings("second", None))
+            .await
+            .unwrap()
+            .receiver;
+        let change = SourceChange::Delete {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("sequenced", "node"),
+                labels: Default::default(),
+                effective_from: 1_000,
+            },
+        };
+        source.start().await.unwrap();
+        for expected in 1..=3 {
+            if expected == 3 {
+                source.stop().await.unwrap();
+                source.start().await.unwrap();
+            }
+            source.inject_event(change.clone()).await.unwrap();
+            let one = first.recv().await.unwrap();
+            let two = second.recv().await.unwrap();
+            assert_eq!(one.sequence, Some(expected));
+            assert_eq!(one.source_id, "sequenced");
+            assert_eq!(one.event, SourceEvent::Change(change.clone()));
+            assert!(Arc::ptr_eq(&one, &two));
+        }
+
+        let mut resumed = source
+            .subscribe(settings("resumed", Some(500)))
+            .await
+            .unwrap()
+            .receiver;
+        source.inject_event(change).await.unwrap();
+        for receiver in [&mut first, &mut second, &mut resumed] {
+            assert_eq!(receiver.recv().await.unwrap().sequence, Some(501));
+        }
+        source.stop().await.unwrap();
+    }
 
     #[test]
     fn test_source_supports_replay_default_true() {

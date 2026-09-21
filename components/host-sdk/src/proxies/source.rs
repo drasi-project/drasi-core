@@ -44,7 +44,7 @@ use libloading::Library;
 use super::change_receiver::{BootstrapReceiverProxy, ChangeReceiverProxy};
 use crate::state_store_bridge::StateStoreVtableBuilder;
 
-pub(super) fn read_plugin_version(library: &Library) -> Option<String> {
+pub(crate) fn read_plugin_version(library: &Library) -> Option<String> {
     // Read the existing export from the retained library, never reopening its
     // path or substituting the descriptor's unrelated configuration version.
     let metadata_fn = unsafe {

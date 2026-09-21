@@ -54,7 +54,7 @@ use crate::queries::output_state::{
     next_output_generation, reconcile_durable_output, DurableOutputInconsistency, FetchError,
     OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
 };
-use crate::queries::PriorityQueue;
+use crate::queries::priority_queue::QueryEventQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
 use crate::sources::Source;
@@ -932,7 +932,7 @@ pub struct DrasiQuery {
     // Pre-computed config hash for bootstrap APIs
     config_hash: u64,
     // Priority queue for ordered event processing
-    priority_queue: PriorityQueue,
+    priority_queue: QueryEventQueue,
     // Reference to SourceManager for direct subscription
     source_manager: Arc<SourceManager>,
     // Track subscription tasks for cleanup
@@ -974,7 +974,13 @@ impl DrasiQuery {
     ) -> Result<Self> {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
-        let priority_queue = PriorityQueue::new(priority_capacity);
+        let priority_queue = QueryEventQueue::new(
+            priority_capacity,
+            config
+                .sources
+                .iter()
+                .map(|source| source.source_id.as_str()),
+        )?;
         let outbox_capacity = config.outbox_capacity;
         let bootstrap_timeout = std::time::Duration::from_secs(config.bootstrap_timeout_secs);
         let config_hash = crate::queries::compute_config_hash(&config);
@@ -2260,6 +2266,7 @@ impl Query for DrasiQuery {
                 let query_id = self.base.config.id.clone();
                 let source_id_clone = source_id.clone();
                 let instance_id = self.instance_id.clone();
+                let forwarder_status = self.base.status_handle();
 
                 // Get source dispatch mode to determine enqueue strategy
                 let dispatch_mode = source.dispatch_mode();
@@ -2282,17 +2289,28 @@ impl Query for DrasiQuery {
                             match receiver.recv().await {
                                 Ok(arc_event) => {
                                     // Use appropriate enqueue method based on dispatch mode
-                                    if use_blocking_enqueue {
+                                    let admission = if use_blocking_enqueue {
                                         // Channel mode: Use blocking enqueue to prevent message loss
                                         // This creates backpressure when the priority queue is full
-                                        priority_queue.enqueue_wait(arc_event).await;
+                                        priority_queue.enqueue_wait(arc_event).await.map(|_| true)
                                     } else {
                                         // Broadcast mode: Use non-blocking enqueue to prevent deadlock
                                         // Messages may be dropped when priority queue is full
-                                        if !priority_queue.enqueue(arc_event).await {
+                                        priority_queue.enqueue(arc_event).await
+                                    };
+                                    match admission {
+                                        Ok(false) => {
                                             warn!(
                                                 "Query '{query_id}' priority queue at capacity, dropping event from source '{source_id_clone}' (broadcast mode)"
                                             );
+                                        }
+                                        Ok(true) => {}
+                                        Err(error) => {
+                                            forwarder_status.set_status(
+                                                ComponentStatus::Error,
+                                                Some(format!("Invalid query input ordering: {error:#}")),
+                                            ).await;
+                                            break;
                                         }
                                     }
                                 }
@@ -2733,10 +2751,19 @@ impl Query for DrasiQuery {
         // Spawn FutureQueueSource forwarder task (same pattern as other sources)
         {
             let fq_priority_queue = self.priority_queue.clone();
+            let future_status = self.base.status_handle();
             let fq_forwarder = tokio::spawn(async move {
                 let mut receiver = fq_receiver;
                 while let Ok(event) = receiver.recv().await {
-                    fq_priority_queue.enqueue_wait(event).await;
+                    if let Err(error) = fq_priority_queue.enqueue_wait(event).await {
+                        future_status
+                            .set_status(
+                                ComponentStatus::Error,
+                                Some(format!("Invalid scheduled input ordering: {error:#}")),
+                            )
+                            .await;
+                        break;
+                    }
                 }
             });
             self.subscription_tasks.write().await.push(fq_forwarder);

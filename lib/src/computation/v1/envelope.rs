@@ -124,7 +124,8 @@ impl SystemMetadata {
         }
     }
 
-    /// Observational timestamp, never a scheduling/order key.
+    /// Observational for FIFO transports. Explicit native ranked inputs may use
+    /// this as their declared event time; SourceEvent adapters preserve raw time separately.
     pub fn with_timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
         self.timestamp = Some(timestamp);
         self

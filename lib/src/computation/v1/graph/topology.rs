@@ -30,6 +30,7 @@ pub enum DesiredPipe {
         lag_policy: crate::computation::v1::BroadcastLagPolicy,
     },
     Retained(crate::computation::v1::RetainedPipeConfig),
+    Ranked(crate::computation::v1::RankedInputPipeConfig),
     External {
         binding: String,
         capabilities: Vec<PipeCapability>,
@@ -129,6 +130,7 @@ impl DesiredPipe {
     pub(super) fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
         match self {
             Self::Retained(config) => config.resource_dependencies(),
+            Self::Ranked(config) => config.resource_dependencies(),
             Self::External { resources, .. } => resources.clone(),
             Self::Bounded { .. } | Self::Broadcast { .. } => BTreeMap::new(),
         }
@@ -150,6 +152,7 @@ impl DesiredPipe {
                 lag_policy: *lag_policy,
             }),
             Self::Retained(config) => Box::new(config.clone()),
+            Self::Ranked(config) => Box::new(config.clone()),
             Self::External {
                 binding,
                 capabilities,

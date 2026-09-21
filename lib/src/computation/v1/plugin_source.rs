@@ -725,6 +725,7 @@ pub struct SourcePluginAdapter {
     subscription: Arc<LegacySourceSubscription>,
     live: Option<Box<dyn ChangeReceiver<SourceEventWrapper>>>,
     sequence: u64,
+    buffer_before_ready: bool,
 }
 impl SourcePluginAdapter {
     pub fn new(id: ComponentId, subscription: Arc<LegacySourceSubscription>) -> Self {
@@ -742,6 +743,7 @@ impl SourcePluginAdapter {
             subscription,
             live: None,
             sequence: 0,
+            buffer_before_ready: false,
         }
     }
 }
@@ -796,7 +798,7 @@ impl EnvelopeSource for SourcePluginAdapter {
                     self.subscription.clear_subscription().await?;
                     continue;
                 }
-                if !view.ready {
+                if !(view.ready || self.buffer_before_ready && view.admitting) {
                     tokio::select! {
                         error = self.subscription.host.unavailable() => { error?; unreachable!() },
                         update = self.subscription.host.read_status() => update?,
@@ -978,14 +980,24 @@ impl Default for SourcePluginAdapterFactory {
                 role: ComponentRole::Source,
                 configuration_version: 1,
                 configuration: ConfigurationSchema {
-                    fields: std::collections::BTreeMap::from([(
-                        Arc::from("stream"),
-                        ConfigurationField {
-                            value_type: ConfigurationType::String,
-                            required: true,
-                            secret: false,
-                        },
-                    )]),
+                    fields: std::collections::BTreeMap::from([
+                        (
+                            Arc::from("stream"),
+                            ConfigurationField {
+                                value_type: ConfigurationType::String,
+                                required: true,
+                                secret: false,
+                            },
+                        ),
+                        (
+                            Arc::from("buffer_before_ready"),
+                            ConfigurationField {
+                                value_type: ConfigurationType::Boolean,
+                                required: false,
+                                secret: false,
+                            },
+                        ),
+                    ]),
                     allow_additional: false,
                 },
                 dependencies: [
@@ -1142,8 +1154,13 @@ impl ComponentFactory for SourcePluginAdapterFactory {
                 "source subscription binding mismatch"
             )));
         }
-        Ok(ConstructedComponent::source(Box::new(
-            SourcePluginAdapter::new(context.component_id, subscription),
-        )))
+        let buffer_before_ready = context
+            .configuration()
+            .get("buffer_before_ready")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let mut adapter = SourcePluginAdapter::new(context.component_id, subscription);
+        adapter.buffer_before_ready = buffer_before_ready;
+        Ok(ConstructedComponent::source(Box::new(adapter)))
     }
 }

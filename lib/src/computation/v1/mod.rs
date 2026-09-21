@@ -118,13 +118,19 @@
 //! Fanout sends sequentially in edge declaration order, shares immutable payloads,
 //! and preserves branch-local context. A slow branch applies backpressure to its
 //! producer (not isolation from other branches). Fanin preserves each stream's
-//! FIFO, not a global order. [`InputMergePolicy::EventTimeAcrossStreams`] orders
+//! FIFO for FIFO transports, not a global order. [`InputMergePolicy::EventTimeAcrossStreams`] orders
 //! currently available stream heads without violating that FIFO or waiting on an
 //! unavailable source. Only actual finite exhaustion closes outgoing pipes,
 //! so filters and fanin drain naturally even if providers retained sender clones.
 //! Failed or stopped producers leave their bindings idle, not falsely exhausted.
 //! Queue capacity counts queued envelopes, not bytes, component-local state,
 //! in-flight processing, or a transform's caller-allocated result vector.
+//! Ordinary continuous-query pipelines explicitly use [`RankedInputQueue`]:
+//! one shared bounded heap ordered by wrapper event time, declaration rank and
+//! raw source sequence. Scheduled signals share that heap using their due time.
+//! [`PipeCapability::RankedEventOrder`] is distinct from producer FIFO. This
+//! orders admitted events, without waiting for quiet sources or promising a
+//! watermark over unseen events.
 //!
 //! Acceptance is not handling, acknowledgement or durability. Operational errors
 //! remain visible on their component; independent components remain activated.
@@ -161,8 +167,8 @@ mod graph_codec;
 mod legacy_index;
 mod legacy_reaction;
 mod legacy_resources;
-pub use legacy_resources::GraphResourceObserver;
 pub use legacy_index::*;
+pub use legacy_resources::GraphResourceObserver;
 pub(crate) mod plugin_services;
 pub use plugin_services::*;
 mod plugin_source;
@@ -171,6 +177,10 @@ mod plugin_reaction;
 pub use plugin_reaction::*;
 mod pipeline;
 pub use pipeline::*;
+mod ranked_pipe;
+pub use ranked_pipe::*;
+mod query_scheduling;
+pub use query_scheduling::*;
 mod legacy_source;
 mod lifecycle;
 mod pipe;

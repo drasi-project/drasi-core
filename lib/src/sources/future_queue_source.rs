@@ -15,7 +15,10 @@
 use chrono::DateTime;
 use drasi_core::interface::FutureQueue;
 use log::{debug, error, info, warn};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::SystemTime;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
@@ -51,6 +54,7 @@ pub struct FutureQueueSource {
     query_id: String,
     /// Dispatcher for sending events to subscribers
     dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    next_sequence: Arc<AtomicU64>,
 }
 
 impl FutureQueueSource {
@@ -62,6 +66,7 @@ impl FutureQueueSource {
             task_handle: Arc::new(RwLock::new(None)),
             query_id,
             dispatcher: Arc::new(RwLock::new(None)),
+            next_sequence: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -99,6 +104,7 @@ impl FutureQueueSource {
         let status_clone = self.status.clone();
         let query_id = self.query_id.clone();
         let dispatcher_clone = self.dispatcher.clone();
+        let next_sequence = self.next_sequence.clone();
 
         let span = tracing::info_span!(
             "future_queue_polling",
@@ -145,28 +151,24 @@ impl FutureQueueSource {
                     }
 
                     // Item is due — dispatch FuturesDue signal
-                    let timestamp = match i64::try_from(next_due_time) {
-                        Ok(millis) => match DateTime::from_timestamp_millis(millis) {
-                            Some(dt) => dt,
-                            None => {
-                                warn!(
-                                    "FutureQueueSource: Due time {next_due_time} is out of range, using current time"
-                                );
-                                chrono::Utc::now()
-                            }
-                        },
-                        Err(e) => {
-                            warn!(
-                                "FutureQueueSource: Failed to convert due_time {next_due_time}: {e}, using current time"
-                            );
-                            chrono::Utc::now()
-                        }
+                    let Some(timestamp) = i64::try_from(next_due_time)
+                        .ok()
+                        .and_then(DateTime::from_timestamp_millis) else {
+                        error!("FutureQueueSource: invalid due time {next_due_time}");
+                        break;
                     };
-
-                    let event_wrapper = SourceEventWrapper::new(
+                    let Ok(sequence) = next_sequence.fetch_update(
+                        Ordering::Relaxed, Ordering::Relaxed, |sequence| sequence.checked_add(1)
+                    ) else {
+                        error!("FutureQueueSource: signal sequence exhausted");
+                        break;
+                    };
+                    let event_wrapper = SourceEventWrapper::with_sequence(
                         FUTURE_QUEUE_SOURCE_ID.to_string(),
                         SourceEvent::Control(SourceControl::FuturesDue),
                         timestamp,
+                        sequence,
+                        None,
                     );
 
                     let dispatcher_guard = dispatcher_clone.read().await;
@@ -396,5 +398,40 @@ mod tests {
         assert_eq!(*status, FutureQueueSourceStatus::Running);
         drop(status);
         source.stop().await;
+    }
+
+    #[tokio::test]
+    async fn due_signals_preserve_due_time_and_advance_sequence_across_restart() {
+        let queue: Arc<dyn FutureQueue> = Arc::new(
+            drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue::new(),
+        );
+        queue
+            .push(
+                drasi_core::interface::PushType::Always,
+                0,
+                1,
+                &ElementReference::new("original", "node"),
+                1,
+                2_000,
+            )
+            .await
+            .unwrap();
+        let source = FutureQueueSource::new(queue, "scheduled-order".into());
+        let mut previous = 0;
+        for _ in 0..2 {
+            let mut receiver = source.subscribe().await.unwrap();
+            source.start().await.unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.source_id, FUTURE_QUEUE_SOURCE_ID);
+            assert_eq!(event.timestamp.timestamp_millis(), 2_000);
+            assert_eq!(event.event, SourceEvent::Control(SourceControl::FuturesDue));
+            let sequence = event.sequence.expect("scheduled source sequence");
+            assert!(sequence > previous);
+            previous = sequence;
+            source.stop().await;
+        }
     }
 }

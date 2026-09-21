@@ -74,6 +74,41 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Box<bincode
 }
 
 impl GraphChangeCodec {
+    pub(crate) fn encode_futures_due(
+        component: &ComponentId,
+        stream: StreamId,
+        sequence: u64,
+        timestamp: DateTime<Utc>,
+    ) -> Result<ChangeEnvelope, GraphCodecError> {
+        let changes = super::ChangeSet::try_new(
+            super::ChangeSetId::try_new(
+                stream.as_str(),
+                Bytes::copy_from_slice(&sequence.to_be_bytes()),
+            )?,
+            Self::schema().descriptor().clone(),
+            Vec::new(),
+        )?;
+        let mut envelope = ChangeEnvelope::new(
+            super::emission_id(&stream, sequence)?,
+            changes,
+            super::SystemMetadata::new(stream, sequence).with_timestamp(timestamp),
+        );
+        envelope.append_annotation(ContextEntry::try_new(
+            component.clone(),
+            "drasi.query.futures-due",
+            ContextValue::Bool(true),
+        )?)?;
+        Ok(envelope)
+    }
+
+    pub(crate) fn is_futures_due(envelope: &ChangeEnvelope) -> bool {
+        envelope.changes().operations().is_empty()
+            && envelope.annotations().entries().any(|entry| {
+                entry.key() == "drasi.query.futures-due"
+                    && matches!(entry.value(), ContextValue::Bool(true))
+            })
+    }
+
     pub fn schema() -> Arc<Schema> {
         static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
         SCHEMA.get_or_init(|| Arc::new(Schema::new(
@@ -129,6 +164,19 @@ impl GraphChangeCodec {
             profiling: event.profiling.clone(),
             schema: source_schema,
         };
+        if matches!(
+            &event.event,
+            crate::channels::SourceEvent::Control(crate::channels::SourceControl::FuturesDue)
+        ) {
+            let mut envelope =
+                Self::encode_futures_due(component, stream, sequence, metadata.timestamp)?;
+            envelope.append_annotation(ContextEntry::try_new(
+                component.clone(),
+                SOURCE_METADATA,
+                ContextValue::Bytes(Arc::from(serde_json::to_vec(&metadata)?)),
+            )?)?;
+            return Ok(envelope);
+        }
         let typed = match Arc::try_unwrap(event) {
             Ok(event) => {
                 typed_change::source_event_parts_to_envelope(event.into_parts(), Default::default())

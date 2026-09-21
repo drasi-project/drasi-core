@@ -350,6 +350,30 @@ impl ComputationPipelineBuilder {
                 },
             );
         for (config, (query_id, execution, settings)) in self.queries.iter().zip(prepared) {
+            let input_capacity = config
+                .priority_queue_capacity
+                .unwrap_or(self.input_capacity);
+            let input_queue_id = resource("query-inputs", &config.id)?;
+            let input_queue = RankedInputQueue::new(input_capacity)
+                .map_err(|error| invalid(error.to_string()))?;
+            let scheduling_id = resource("query-scheduling", &config.id)?;
+            let scheduling = Arc::new(QuerySchedulingResource::default());
+            builder = builder
+                .declare_resource(ResourceSpecification {
+                    id: input_queue_id.clone(),
+                    role: ResourceRole::Pipe,
+                    ownership: ResourceOwnership::Graph,
+                    binding: Arc::from(format!("query-inputs:{}", config.id)),
+                })?
+                .provide_resource(input_queue_id.clone(), input_queue.resource())?
+                .declare_resource(ResourceSpecification {
+                    id: scheduling_id.clone(),
+                    role: ResourceRole::FutureQueue,
+                    ownership: ResourceOwnership::Graph,
+                    binding: Arc::from(format!("query-scheduling:{}", config.id)),
+                })?
+                .provide_resource(scheduling_id.clone(), scheduling.resource())?;
+            let scheduled_rank = settings.len();
             if settings.is_empty() {
                 builder = builder.unbound(DesiredRelationship {
                     definition: EdgeDefinition::new(
@@ -390,7 +414,7 @@ impl ComputationPipelineBuilder {
                     ),
                 )?;
             let mut subscriptions = Vec::new();
-            for setting in settings {
+            for (source_rank, setting) in settings.into_iter().enumerate() {
                 let (host, options) = &self.sources[&setting.source_id];
                 let source_id = Self::source_component_id(&config.id, &setting.source_id)?;
                 let stream = StreamId::try_new(format!("{source_id}/out"))?;
@@ -474,10 +498,16 @@ impl ComputationPipelineBuilder {
                             completion: None,
                             implementation: source_factory.descriptor().implementation.clone(),
                             configuration_version: 1,
-                            configuration: BTreeMap::from([(
-                                Arc::from("stream"),
-                                ConfigurationValue::Literal(stream.as_str().into()),
-                            )]),
+                            configuration: BTreeMap::from([
+                                (
+                                    Arc::from("stream"),
+                                    ConfigurationValue::Literal(stream.as_str().into()),
+                                ),
+                                (
+                                    Arc::from("buffer_before_ready"),
+                                    ConfigurationValue::Literal(true.into()),
+                                ),
+                            ]),
                             dependencies,
                         },
                         source_factory.clone(),
@@ -496,10 +526,16 @@ impl ComputationPipelineBuilder {
                 builder = builder
                     .connect(
                         edge.clone(),
-                        Box::new(BoundedPipeConfig {
-                            capacity: config
-                                .priority_queue_capacity
-                                .unwrap_or(self.input_capacity),
+                        Box::new(RankedInputPipeConfig {
+                            queue: input_queue_id.clone(),
+                            capacity: input_capacity,
+                            source_rank,
+                            source_id: Some(setting.source_id.clone()),
+                            drop_when_full: host
+                                .source()
+                                .map_err(|error| invalid(error.to_string()))?
+                                .dispatch_mode()
+                                == crate::DispatchMode::Broadcast,
                         }),
                     )
                     .relationship_policy(
@@ -514,6 +550,67 @@ impl ComputationPipelineBuilder {
                     );
                 subscriptions.push(subscription);
             }
+            let scheduled = ComponentId::try_new(format!("scheduled/{}", encoded(&config.id)))?;
+            let scheduled_stream = StreamId::try_new(format!("{scheduled}/out"))?;
+            let scheduled_factory = Arc::new(QueryScheduledSourceFactory::default());
+            let scheduled_edge = EdgeDefinition::new(
+                endpoint(scheduled.clone(), "out"),
+                endpoint(query_id.clone(), "in"),
+            );
+            builder = builder
+                .component(
+                    ComponentSpecification {
+                        descriptor: ComponentDescriptor::try_new(
+                            scheduled.clone(),
+                            vec![PortDescriptor::new(
+                                PortId::try_new("out")?,
+                                PortDirection::Output,
+                                GraphChangeCodec::schema().descriptor().clone(),
+                                PipeRequirements::default(),
+                            )],
+                        )?,
+                        role: ComponentRole::Source,
+                        completion: None,
+                        implementation: scheduled_factory.descriptor().implementation.clone(),
+                        configuration_version: 1,
+                        configuration: BTreeMap::from([(
+                            Arc::from("stream"),
+                            ConfigurationValue::Literal(scheduled_stream.as_str().into()),
+                        )]),
+                        dependencies: BTreeMap::from([(
+                            Arc::from("scheduling"),
+                            vec![scheduling_id.clone()],
+                        )]),
+                    },
+                    scheduled_factory,
+                )
+                .lifecycle_policy(
+                    scheduled.clone(),
+                    LifecyclePolicy {
+                        auto_start: config.auto_start && !self.runtime_compatibility,
+                    },
+                )
+                .bind_stream(endpoint(scheduled, "out"), scheduled_stream)
+                .connect(
+                    scheduled_edge.clone(),
+                    Box::new(RankedInputPipeConfig {
+                        queue: input_queue_id,
+                        capacity: input_capacity,
+                        source_rank: scheduled_rank,
+                        source_id: None,
+                        drop_when_full: false,
+                    }),
+                )
+                .relationship_policy(
+                    scheduled_edge,
+                    RelationshipPolicy {
+                        activation: ActivationCoupling::RequiresRunning,
+                        rebind_on_consumer_replace: true,
+                        propagate_failure: true,
+                        fence_producer_on_failure: true,
+                        ..Default::default()
+                    },
+                );
             let bootstrap_id = resource("query-bootstrap", &config.id)?;
             let bootstrap = LegacySourceBootstrap::new(subscriptions);
             builder = builder
@@ -671,6 +768,7 @@ impl ComputationPipelineBuilder {
                         ]),
                         dependencies: BTreeMap::from([
                             (Arc::from("indexes"), vec![indexes_id]),
+                            (Arc::from("scheduling"), vec![scheduling_id]),
                             (Arc::from("bootstrap"), vec![bootstrap_id]),
                             (Arc::from("source_progress"), vec![progress_id]),
                             (Arc::from("middleware"), vec![middleware_id.clone()]),
