@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use drasi_query_cypher::CypherParser;
 
 use crate::{
-    evaluation::functions::FunctionRegistry,
+    evaluation::{context::QueryPartEvaluationContext, functions::FunctionRegistry},
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
         in_memory_result_index::InMemoryResultIndex,
@@ -121,7 +121,7 @@ async fn hook_failure_rolls_back_session() {
         },
     };
 
-    let failing_hook = || async {
+    let failing_hook = |_results: &[QueryPartEvaluationContext]| async {
         Err(IndexError::other(std::io::Error::other(
             "simulated checkpoint failure",
         )))
@@ -158,7 +158,7 @@ async fn hook_failure_rolls_back_session() {
         },
     };
 
-    let ok_hook = || async { Ok(()) };
+    let ok_hook = |_results: &[QueryPartEvaluationContext]| async { Ok(()) };
     let result = query
         .process_source_change_with_hook(insert3, ok_hook)
         .await;
