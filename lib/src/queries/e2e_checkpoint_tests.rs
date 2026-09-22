@@ -299,13 +299,13 @@ async fn send_event(
 
     let change = SourceChange::Insert { element };
 
-    let mut event = SourceEventWrapper::new(
+    let event = SourceEventWrapper::new(
         source_id.to_string(),
         crate::channels::events::SourceEvent::Change(change),
         chrono::Utc::now(),
-    );
-    event.sequence = Some(sequence);
-    event.source_position = Some(Bytes::from(position.to_vec()));
+        sequence,
+    )
+    .with_source_position(Bytes::from(position.to_vec()));
 
     if let Some(sender) = tx.read().await.as_ref() {
         sender.send(Arc::new(event)).await.unwrap();

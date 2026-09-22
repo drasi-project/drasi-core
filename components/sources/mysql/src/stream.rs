@@ -406,6 +406,7 @@ impl ReplicationStream {
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            self.base.next_sequence(),
         );
 
         // Attach the current replication position for checkpoint recovery
@@ -430,6 +431,7 @@ impl ReplicationStream {
                     self.source_id.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
+                    self.base.next_sequence(),
                 );
                 wrapper.set_source_position(position_bytes.clone());
                 self.base.dispatch_event(wrapper).await?;
@@ -649,8 +651,7 @@ mod tests {
                 .expect("timed out waiting for event")
                 .expect("event stream closed unexpectedly");
             assert_eq!(
-                event.sequence,
-                Some(expected_seq),
+                event.sequence, expected_seq,
                 "framework must stamp a monotonic sequence even for a native-cursor source"
             );
             assert!(
@@ -697,11 +698,7 @@ mod tests {
                 event.source_position.is_some(),
                 "commit source_position must be preserved"
             );
-            sequences.push(
-                event
-                    .sequence
-                    .expect("event must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         assert_eq!(
