@@ -8,6 +8,10 @@ use serde_json::json;
 
 #[test]
 #[ignore = "diagnostic serialization timing; not a recovery baseline"]
+#[allow(
+    clippy::print_stdout,
+    reason = "diagnostic probe emits CSV timing results"
+)]
 fn measure_outbox_encoding_cost() {
     let iterations = 100000;
     let room_before =
