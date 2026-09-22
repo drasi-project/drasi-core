@@ -39,6 +39,7 @@ use super::{
 const QUERY_METADATA: &str = "drasi.query-output.v1";
 const QUERY_SEQUENCE: &str = "drasi.query-output-sequence.v1";
 const SNAPSHOT: &str = "drasi.query-snapshot.v1";
+const PROGRESS_ONLY: &str = "drasi.query-progress-only.v1";
 const GENERATION: &str = "drasi.query-generation.v1";
 const QUERY_CORE_RETURN_NS: &str = "drasi.query-core-return-ns.v1";
 const QUERY_SEND_NS: &str = "drasi.query-send-ns.v1";
@@ -96,6 +97,11 @@ pub struct DecodedQueryRow {
 
 pub struct QueryChangeCodec;
 
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_ROW_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn namespace(query_id: &str) -> String {
     format!(
         "drasi.query-row/{}",
@@ -150,6 +156,38 @@ impl QueryChangeCodec {
             .is_some_and(|entry| entry.value() == ContextValue::Bool(true))
     }
 
+    /// Whether an envelope carries the explicit progress-only marker.
+    ///
+    /// Recovery consumers must also validate the empty change set and their
+    /// recovery-decision authorization before checkpointing it.
+    pub fn is_progress_only(envelope: &ChangeEnvelope) -> bool {
+        envelope
+            .annotations()
+            .entries()
+            .find(|entry| entry.key() == PROGRESS_ONLY)
+            .is_some_and(|entry| entry.value() == ContextValue::Bool(true))
+    }
+
+    /// Describe an explicit recovery skip without pretending to replace rows.
+    /// This is not a handled checkpoint until a recovery-aware sink accepts it.
+    pub fn progress_envelope(
+        query_id: &str,
+        query_sequence: u64,
+        generation: u64,
+        component: &ComponentId,
+        system: SystemMetadata,
+    ) -> Result<ChangeEnvelope, QueryCodecError> {
+        Self::recovery_envelope(
+            query_id,
+            query_sequence,
+            generation,
+            component,
+            system,
+            Vec::new(),
+            PROGRESS_ONLY,
+        )
+    }
+
     pub fn snapshot_envelope(
         query_id: &str,
         snapshot: &super::QuerySnapshot,
@@ -169,6 +207,26 @@ impl QueryChangeCodec {
                 after,
             })
             .collect();
+        Self::recovery_envelope(
+            query_id,
+            snapshot.as_of_sequence,
+            snapshot.generation,
+            component,
+            system,
+            operations,
+            SNAPSHOT,
+        )
+    }
+
+    fn recovery_envelope(
+        query_id: &str,
+        query_sequence: u64,
+        generation: u64,
+        component: &ComponentId,
+        system: SystemMetadata,
+        operations: Vec<ChangeOperation>,
+        marker: &str,
+    ) -> Result<ChangeEnvelope, QueryCodecError> {
         let changes = ChangeSet::try_new(
             ChangeSetId::try_new(
                 system.stream().as_str(),
@@ -194,14 +252,14 @@ impl QueryChangeCodec {
         envelope.append_annotation(ContextEntry::try_new(
             component.clone(),
             QUERY_SEQUENCE,
-            ContextValue::Unsigned(snapshot.as_of_sequence),
+            ContextValue::Unsigned(query_sequence),
         )?)?;
         envelope.append_annotation(ContextEntry::try_new(
             component.clone(),
-            SNAPSHOT,
+            marker,
             ContextValue::Bool(true),
         )?)?;
-        Self::set_generation(&mut envelope, component, snapshot.generation)?;
+        Self::set_generation(&mut envelope, component, generation)?;
         Ok(envelope)
     }
 
@@ -266,6 +324,64 @@ impl QueryChangeCodec {
             values: value_codec::decode_variables(row.values).map_err(QueryCodecError::Boundary)?,
             kind: row.kind,
         })
+    }
+
+    fn decode_snapshot_row(
+        query_id: &str,
+        record: &Record,
+    ) -> Result<DecodedQueryRow, QueryCodecError> {
+        if record.image() != RecordImage::Full
+            || record.identity().namespace() != namespace(query_id)
+        {
+            return Err(QueryCodecError::InvalidRow);
+        }
+        let row = Self::decode_row(record)?;
+        if row.query_id != query_id
+            || record.identity().value().as_ref() != row.signature.to_be_bytes()
+        {
+            return Err(QueryCodecError::InvalidRow);
+        }
+        Ok(row)
+    }
+
+    /// Validate immutable encoded rows before crossing the infallible legacy
+    /// stream boundary. Validation uses one decoded row at a time; JSON
+    /// projection remains demand-driven, including for capped consumers.
+    ///
+    /// This scans all encoded rows before exposing the iterator. It retains
+    /// those same immutable bytes and an owned query ID, so repeating the
+    /// deterministic decoder cannot introduce a new input error. An invariant
+    /// violation fails loudly rather than becoming EOF or an omitted row.
+    pub(super) fn legacy_snapshot_rows(
+        query_id: &str,
+        rows: im::HashMap<RecordId, Record>,
+    ) -> Result<impl Iterator<Item = (u64, serde_json::Value)> + Send + 'static, QueryCodecError>
+    {
+        for (identity, record) in &rows {
+            if identity != record.identity() {
+                return Err(QueryCodecError::InvalidRow);
+            }
+            Self::decode_snapshot_row(query_id, record)?;
+        }
+        let query_id = query_id.to_owned();
+        Ok(rows.into_iter().map(move |(_, record)| {
+            // The entire immutable snapshot was checked above. This is the
+            // same deterministic decoder over the same bytes, not a deferred
+            // fallible fetch that could silently truncate the public stream.
+            let row = Self::decode_snapshot_row(&query_id, &record)
+                .expect("immutable snapshot row passed preflight decoding");
+            #[cfg(test)]
+            SNAPSHOT_ROW_PROJECTIONS.with(|count| count.set(count.get() + 1));
+            (
+                row.signature,
+                typed_change::query_variables_to_json(&row.values),
+            )
+        }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn snapshot_row_projections() -> usize {
+        SNAPSHOT_ROW_PROJECTIONS.with(std::cell::Cell::get)
     }
 
     pub fn metadata(envelope: &ChangeEnvelope) -> Result<QueryOutputMetadata, QueryCodecError> {
@@ -626,6 +742,67 @@ impl RecordValidator for RowValidator {
         value_codec::decode_variables::<String>(row.values)
             .map_err(|error| RecordValidationError::new("value", error.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_envelope_tests {
+    use super::*;
+    use crate::computation::v1::{EnvelopeCodec, QuerySnapshot, StreamId};
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn progress_envelope_is_distinct_from_snapshot_and_preserves_query_position() {
+        let component = ComponentId::try_new("replay").unwrap();
+        let stream = StreamId::try_new("replay/out").unwrap();
+        let envelope = QueryChangeCodec::progress_envelope(
+            "query",
+            42,
+            9,
+            &component,
+            SystemMetadata::new(stream.clone(), 7),
+        )
+        .unwrap();
+        assert!(QueryChangeCodec::is_progress_only(&envelope));
+        assert!(!QueryChangeCodec::is_snapshot(&envelope));
+        assert!(envelope.changes().is_empty());
+        assert_eq!(
+            envelope.changes().schema(),
+            QueryChangeCodec::schema().descriptor()
+        );
+        assert_eq!(envelope.system().sequence(), 7);
+        assert_eq!(QueryChangeCodec::query_sequence(&envelope).unwrap(), 42);
+        assert_eq!(QueryChangeCodec::query_generation(&envelope).unwrap(), 9);
+        assert_eq!(
+            QueryChangeCodec::metadata(&envelope).unwrap().query_id,
+            "query"
+        );
+        assert!(QueryChangeCodec::to_legacy_result(&envelope).is_err());
+
+        let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).unwrap());
+        codec.register_schema(QueryChangeCodec::schema()).unwrap();
+        let decoded = codec.decode(&codec.encode(&envelope).unwrap()).unwrap();
+        assert!(QueryChangeCodec::is_progress_only(&decoded));
+        assert!(!QueryChangeCodec::is_snapshot(&decoded));
+        assert!(decoded.changes().is_empty());
+        assert_eq!(QueryChangeCodec::query_sequence(&decoded).unwrap(), 42);
+        assert_eq!(QueryChangeCodec::query_generation(&decoded).unwrap(), 9);
+
+        let snapshot = QueryChangeCodec::snapshot_envelope(
+            "query",
+            &QuerySnapshot {
+                rows: im::HashMap::new(),
+                as_of_sequence: 42,
+                generation: 9,
+            },
+            &component,
+            SystemMetadata::new(stream, 8),
+        )
+        .unwrap();
+        assert!(QueryChangeCodec::is_snapshot(&snapshot));
+        assert!(!QueryChangeCodec::is_progress_only(&snapshot));
+        assert_eq!(QueryChangeCodec::query_sequence(&snapshot).unwrap(), 42);
+        assert_eq!(QueryChangeCodec::query_generation(&snapshot).unwrap(), 9);
     }
 }
 

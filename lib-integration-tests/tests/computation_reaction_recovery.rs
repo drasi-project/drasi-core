@@ -517,3 +517,159 @@ async fn ordinary_multiple_query_subscriptions_keep_making_progress() {
     );
     fixture.core.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn ordinary_auto_skip_recovers_a_reconstructed_volatile_query_but_strict_rejects_it() {
+    for policy in [
+        ReactionRecoveryPolicy::Strict,
+        ReactionRecoveryPolicy::AutoSkipGap,
+    ] {
+        let root = test_root();
+        let baseline = {
+            let fixture = Fixture::new(root.path(), &[("q", QUERY, false)]).await;
+            fixture.emit("Item", "old-lifetime").await;
+            fixture.wait_sequence("q", 1).await;
+            let mut reaction = ProbeReaction::new("reaction", &["q"]);
+            reaction.policy = policy;
+            fixture.add(reaction).await;
+            fixture.core.start_reaction("reaction").await.unwrap();
+            let baseline = checkpoint(fixture.state.as_ref(), "reaction", "q")
+                .await
+                .unwrap();
+            fixture.core.shutdown().await.unwrap();
+            baseline
+        };
+        let fixture = Fixture::new(root.path(), &[("q", QUERY, false)]).await;
+        fixture.emit("Item", "new-lifetime").await;
+        fixture.wait_sequence("q", 1).await;
+        let mut reaction = ProbeReaction::new("reaction", &["q"]);
+        reaction.policy = policy;
+        let probe = reaction.probe.clone();
+        fixture.add(reaction).await;
+        let result = fixture.core.start_reaction("reaction").await;
+        if policy == ReactionRecoveryPolicy::Strict {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+            assert!(probe.accepted.lock().unwrap().is_empty());
+            fixture.emit("Item", "new-live").await;
+            wait_until(|| probe.accepted.lock().unwrap().len() == 1).await;
+            fixture.core.stop_reaction("reaction").await.unwrap();
+            fixture.core.start_reaction("reaction").await.unwrap();
+            wait_until(|| probe.accepted.lock().unwrap().len() == 2).await;
+            assert!(probe
+                .accepted
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|result| result.sequence == 2));
+            assert!(probe.snapshots.lock().unwrap().is_empty());
+        }
+        assert_eq!(
+            checkpoint(fixture.state.as_ref(), "reaction", "q").await,
+            Some(baseline),
+            "only the explicitly skipped head may be checkpointed, not later queued results"
+        );
+        fixture.core.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ordinary_auto_skip_recovers_a_query_configuration_reset_but_strict_rejects_it() {
+    for policy in [
+        ReactionRecoveryPolicy::Strict,
+        ReactionRecoveryPolicy::AutoSkipGap,
+    ] {
+        let root = test_root();
+        let fixture = Fixture::new(root.path(), &[("q", QUERY, true)]).await;
+        fixture.emit("Item", "old-config").await;
+        fixture.wait_sequence("q", 1).await;
+        let mut reaction = ProbeReaction::new("reaction", &["q"]);
+        reaction.durable = true;
+        reaction.policy = policy;
+        let probe = reaction.probe.clone();
+        fixture.add(reaction).await;
+        fixture.core.start_reaction("reaction").await.unwrap();
+        let baseline = checkpoint(fixture.state.as_ref(), "reaction", "q")
+            .await
+            .unwrap();
+        let previous = fixture
+            .core
+            .query_manager()
+            .get_query_instance("q")
+            .await
+            .unwrap()
+            .fetch_snapshot()
+            .await
+            .unwrap();
+        fixture.core.stop_reaction("reaction").await.unwrap();
+        let updated = drasi_lib::Query::cypher("q")
+            .query("MATCH (n:Item) RETURN n.value AS value, true AS updated")
+            .from_source("source")
+            .enable_bootstrap(false)
+            .auto_start(true)
+            .with_outbox_capacity(64)
+            .with_storage_backend(StorageBackendRef::Named("rocks".into()))
+            .build();
+        fixture.core.update_query("q", updated).await.unwrap();
+        tokio::time::timeout(
+            DEADLINE,
+            fixture
+                .core
+                .computation_component("q")
+                .unwrap()
+                .wait_started(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reset = fixture
+            .core
+            .query_manager()
+            .get_query_instance("q")
+            .await
+            .unwrap()
+            .fetch_snapshot()
+            .await
+            .unwrap();
+        assert!(reset.output_generation > previous.output_generation);
+        assert_ne!(reset.config_hash, previous.config_hash);
+        fixture.emit("Item", "new-config-history").await;
+        let skipped = reset.as_of_sequence + 1;
+        fixture.wait_sequence("q", skipped).await;
+
+        let result = fixture.core.start_reaction("reaction").await;
+        if policy == ReactionRecoveryPolicy::Strict {
+            assert!(result.is_err());
+            assert_eq!(
+                checkpoint(fixture.state.as_ref(), "reaction", "q").await,
+                Some(baseline)
+            );
+        } else {
+            result.unwrap();
+            assert!(probe.accepted.lock().unwrap().is_empty());
+            let seeded = checkpoint(fixture.state.as_ref(), "reaction", "q")
+                .await
+                .unwrap();
+            assert_eq!(seeded.sequence, skipped);
+            assert_eq!(seeded.config_hash, reset.config_hash);
+            fixture.emit("Item", "new-config-live").await;
+            wait_until(|| probe.accepted.lock().unwrap().len() == 1).await;
+            fixture.core.stop_reaction("reaction").await.unwrap();
+            fixture.core.start_reaction("reaction").await.unwrap();
+            wait_until(|| probe.accepted.lock().unwrap().len() == 2).await;
+            assert!(probe
+                .accepted
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|result| result.sequence == skipped + 1));
+            assert_eq!(
+                checkpoint(fixture.state.as_ref(), "reaction", "q").await,
+                Some(seeded)
+            );
+            assert!(probe.snapshots.lock().unwrap().is_empty());
+        }
+        fixture.core.shutdown().await.unwrap();
+    }
+}

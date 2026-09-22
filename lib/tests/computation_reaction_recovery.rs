@@ -105,13 +105,41 @@ fn host(
 
 #[tokio::test]
 async fn fresh_trigger_uses_the_pre_start_head_without_replaying_retained_history() {
+    for policy in [ReactionRecoveryPolicy::Strict, ReactionRecoveryPolicy::AutoSkipGap] {
+        fresh_trigger_during_start(policy, false).await;
+    }
+}
+
+#[tokio::test]
+async fn auto_skip_fresh_trigger_with_obsolete_metadata_keeps_arrivals_during_start() {
+    fresh_trigger_during_start(ReactionRecoveryPolicy::AutoSkipGap, true).await;
+}
+
+async fn fresh_trigger_during_start(policy: ReactionRecoveryPolicy, obsolete_metadata: bool) {
     for capacity in [1, 8] {
         let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
         let mut query = query(&catalog, capacity).await;
         let _old = emit(&mut query, 1, 1).await;
         let retained = emit(&mut query, 2, 2).await;
         let state = Arc::new(MemoryStateStoreProvider::new());
+        if obsolete_metadata {
+            state
+                .set(
+                    "reaction",
+                    "computation-query:71",
+                    serde_json::to_vec(&serde_json::json!({
+                        "config_hash": 0,
+                        "reset_generation": 0,
+                        "bootstrap_pending": false,
+                        "incarnation": null
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
         let mut reaction = ProbeReaction::new("reaction", &["q"]);
+        reaction.policy = policy;
         let gate = Gate::new();
         reaction.start_gate = Some(gate.clone());
         let probe = reaction.probe.clone();
@@ -541,4 +569,76 @@ async fn a_new_volatile_query_incarnation_requires_snapshot_recovery() {
     adapter.stop().await.unwrap();
     host.shutdown().await.unwrap();
     replacement.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_skip_rebases_a_checkpoint_ahead_of_output_but_strict_preserves_it() {
+    for policy in [ReactionRecoveryPolicy::Strict, ReactionRecoveryPolicy::AutoSkipGap] {
+        let catalog = QueryResultsCatalog::new("reaction-recovery").unwrap();
+        let mut query = query(&catalog, 8).await;
+        emit(&mut query, 1, 1).await;
+        let state = Arc::new(MemoryStateStoreProvider::new());
+        let mut reaction = ProbeReaction::new("reaction", &["q"]);
+        reaction.policy = policy;
+        let probe = reaction.probe.clone();
+        let (host, mut adapter) = host(reaction, &catalog, state.clone());
+        adapter.start().await.unwrap();
+        adapter.stop().await.unwrap();
+        let baseline = checkpoint(state.as_ref(), "reaction", "q").await.unwrap();
+        let ahead = drasi_lib::ReactionCheckpoint {
+            sequence: 100,
+            config_hash: baseline.config_hash,
+        };
+        state
+            .set(
+                "reaction",
+                "checkpoint:q",
+                bincode::serialize(&ahead).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let result = adapter.start().await;
+        if policy == ReactionRecoveryPolicy::Strict {
+            assert!(result.is_err());
+            assert_eq!(
+                checkpoint(state.as_ref(), "reaction", "q").await,
+                Some(ahead)
+            );
+        } else {
+            result.unwrap();
+            assert_eq!(
+                checkpoint(state.as_ref(), "reaction", "q").await,
+                Some(baseline.clone())
+            );
+            assert!(probe.accepted.lock().unwrap().is_empty());
+            adapter
+                .handle(InputEnvelope {
+                    port: port("in"),
+                    envelope: emit(&mut query, 2, 2).await,
+                })
+                .await
+                .unwrap();
+            adapter.stop().await.unwrap();
+            adapter.start().await.unwrap();
+            assert_eq!(
+                probe
+                    .accepted
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|result| result.sequence)
+                    .collect::<Vec<_>>(),
+                vec![2, 2],
+                "rebasing an explicit skip must not checkpoint later enqueue acceptance"
+            );
+            assert_eq!(
+                checkpoint(state.as_ref(), "reaction", "q").await,
+                Some(baseline)
+            );
+        }
+        adapter.stop().await.unwrap();
+        host.shutdown().await.unwrap();
+        query.stop().await.unwrap();
+    }
 }

@@ -290,7 +290,7 @@ impl ContinuousQueryTransformer {
                     let prepared = &prepared;
                     let stream = bootstrap_stream.clone();
                     async move {
-                        let output = QueryChangeCodec::encode_evaluation(
+                        let mut output = QueryChangeCodec::encode_evaluation(
                             Some(input),
                             &self.definition.id,
                             SystemMetadata::new(stream, ordinal),
@@ -304,6 +304,10 @@ impl ContinuousQueryTransformer {
                             },
                         )
                         .map_err(IndexError::other)?;
+                        if let Some(output) = &mut output {
+                            self.stamp_output_identity(output)
+                                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                        }
                         if self.output_persistent
                             && self.options.publication == QueryPublicationMode::Atomic
                         {

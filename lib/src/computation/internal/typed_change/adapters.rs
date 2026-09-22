@@ -663,7 +663,7 @@ pub(crate) fn query_result_from_envelope(
     })
 }
 
-fn query_variables_to_json(variables: &QueryVariables) -> serde_json::Value {
+pub(crate) fn query_variables_to_json(variables: &QueryVariables) -> serde_json::Value {
     serde_json::Value::Object(
         variables
             .iter()

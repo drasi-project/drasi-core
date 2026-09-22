@@ -365,10 +365,34 @@ receipt. `WalReplaySourceFactory` can resume/tail a supplied log partition and
 reports unavailable history rather than silently skipping it.
 
 `QueryReplayTransformer` joins a snapshot or retained suffix to a live stream.
-`CheckpointedSink` advances progress after actual handling or supported snapshot
-replacement. The existing Reaction adapter records in-memory accepted positions;
+It checks the query's identity as well as its sequence and output generation.
+Rebuilding an in-memory query creates a new identity; reopening the same
+persistent query retains its identity. Matching numbers alone are not enough
+to reuse a consumer checkpoint.
+Factory-created queries also include their owning instance's scope, so equal
+local query names in different instances do not share an identity. For directly
+constructed queries, give `ContinuousQueryDefinition.graph_id` a stable name
+that distinguishes the logical graph whose progress is being saved.
+
+Missing live results are recovered from retained history before later results
+are delivered. If that history is no longer available, Strict fails, AutoReset
+replaces the consumer's state from a snapshot, and AutoSkipGap deliberately skips
+the missing results. A changed query identity follows the same explicit policy;
+old results from a replaced query are not accepted as its replacement's results.
+
+`CheckpointedSink` independently checks identity and sequence continuity and
+advances progress only after successful handling or snapshot replacement.
+Accepting an explicit skip requires `allow_skipped_resets`; it is not permission
+to silently advance past an unexplained missing result.
+The existing Reaction adapter records in-memory accepted positions;
 the reaction itself is responsible for saving successfully handled progress.
 Fresh trigger reactions capture the subscription-time query head.
+
+Reaction snapshot streams retain a consistent view. They first validate encoded
+rows one at a time, without keeping a converted copy of the whole snapshot, then
+produce JSON rows as the consumer requests them. A capped consumer therefore
+avoids a complete JSON conversion, although validation still scans the snapshot.
+The non-streaming snapshot API can still allocate the complete requested snapshot.
 
 Post-commit query timestamps are appended only to live output annotations.
 `QueryChangeCodec::metadata` applies them without rewriting committed output

@@ -47,7 +47,7 @@ use crate::{
 };
 
 pub use crate::computation::internal::query_state::{
-    QueryHistoryError, QueryResults, QuerySnapshot,
+    QueryHistoryError, QueryRecoveryView, QueryResults, QuerySnapshot,
 };
 
 use super::{
@@ -116,6 +116,13 @@ impl ContinuousQueryDefinition {
             self.language,
             self.output_stream.as_str(),
         ))?))
+    }
+
+    fn configuration_hash(&self, execution: &QueryExecutionSettings) -> anyhow::Result<u64> {
+        use std::hash::Hasher;
+        let mut hasher = fnv::FnvHasher::default();
+        hasher.write(&self.configuration_bytes(execution)?);
+        Ok(hasher.finish())
     }
 }
 
@@ -327,6 +334,7 @@ pub struct ContinuousQueryTransformer {
     checkpoint_view: Arc<RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
     output_persistence_view: Arc<RwLock<Option<bool>>>,
     publication_identity: Arc<RwLock<Option<uuid::Uuid>>>,
+    recovery_scope: Arc<str>,
     scheduling: Option<Arc<super::QuerySchedulingResource>>,
     draining_futures: bool,
 }
@@ -388,6 +396,7 @@ impl ContinuousQueryTransformer {
         };
         let mut instance = Self {
             descriptor: definition.descriptor(),
+            recovery_scope: Arc::from(definition.graph_id.as_str()),
             definition,
             provider,
             query: None,
@@ -446,6 +455,39 @@ impl ContinuousQueryTransformer {
     pub fn results(&self) -> QueryResults {
         self.results.clone()
     }
+
+    /// Bind identity to an enclosing instance/storage scope before registration
+    /// or activation. Factories supply their construction scope automatically;
+    /// standalone queries otherwise use their definition's graph scope.
+    pub fn with_recovery_scope(mut self, scope: impl Into<Arc<str>>) -> anyhow::Result<Self> {
+        let scope = scope.into();
+        super::data::validate_identifier("query construction scope", &scope)?;
+        {
+            let state = self
+                .results
+                .state
+                .read()
+                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+            if self.registration.is_some()
+                || state.recovery_ready
+                || state.sequence != 0
+                || !state.rows.is_empty()
+                || self.failure.load(Ordering::Acquire)
+            {
+                anyhow::bail!(
+                    "query recovery scope must be selected before registration or activation"
+                );
+            }
+        }
+        self.recovery_scope = scope;
+        self.results
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
+            .identity = Some(self.recovery_identity()?);
+        Ok(self)
+    }
+
     pub fn with_result_catalog(
         mut self,
         catalog: &super::QueryResultsCatalog,
@@ -453,16 +495,13 @@ impl ContinuousQueryTransformer {
         if catalog.graph_id() != self.definition.graph_id {
             anyhow::bail!("query catalogue belongs to another graph");
         }
-        use std::hash::Hasher;
-        let mut hasher = fnv::FnvHasher::default();
-        hasher.write(&self.definition.configuration_bytes(&self.execution)?);
         self.metrics = catalog.configured_metrics(&self.definition.id)?;
         self.legacy_hash = catalog.configured_hash(&self.definition.id)?;
         self.registration = Some(catalog.register(
             self.definition.id.clone(),
             self.results.clone(),
             self.source_progress.clone(),
-            hasher.finish(),
+            self.definition.configuration_hash(&self.execution)?,
             self.publication_identity.clone(),
             self.checkpoint_view.clone(),
             self.output_persistence_view.clone(),
@@ -550,11 +589,16 @@ impl ContinuousQueryTransformer {
                 .is_some_and(|store| store.is_persistent())
             && resources.outbox_writer().is_some()
             && resources.live_results_writer().is_some();
-        if self.output_persistent {
-            *self
+        {
+            let mut identity = self
                 .publication_identity
                 .write()
-                .map_err(|_| anyhow::anyhow!("query output identity poisoned"))? = None;
+                .map_err(|_| anyhow::anyhow!("query output identity poisoned"))?;
+            if self.output_persistent {
+                *identity = None;
+            } else if identity.is_none() {
+                *identity = Some(uuid::Uuid::new_v4());
+            }
         }
         if !self.provider.is_volatile() && self.options.publication == QueryPublicationMode::Atomic
         {
@@ -576,6 +620,11 @@ impl ContinuousQueryTransformer {
             .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))? =
             resources.checkpoint_store().cloned();
         self.query = Some(ComputationQuery::try_build(builder, resources).await?);
+        self.results
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
+            .identity = Some(self.recovery_identity()?);
         *self
             .output_persistence_view
             .write()
@@ -588,6 +637,34 @@ impl ContinuousQueryTransformer {
         self.query
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("query requires reconstruction"))
+    }
+
+    fn recovery_identity(&self) -> anyhow::Result<super::QueryRecoveryIdentity> {
+        Ok(super::QueryRecoveryIdentity::try_new(
+            self.definition.graph_id.clone(),
+            self.definition.id.clone(),
+            self.definition.configuration_hash(&self.execution)?,
+            *self
+                .publication_identity
+                .read()
+                .map_err(|_| anyhow::anyhow!("query output identity poisoned"))?,
+        )?
+        .with_construction_scope(&self.recovery_scope)?)
+    }
+
+    fn stamp_output_identity(&self, output: &mut super::ChangeEnvelope) -> anyhow::Result<()> {
+        let state = self
+            .results
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+        let identity = state
+            .identity
+            .as_ref()
+            .ok_or(QueryHistoryError::MissingIdentity)?;
+        QueryChangeCodec::set_generation(output, &self.definition.id, state.generation)?;
+        identity.annotate(output, &self.definition.id)?;
+        Ok(())
     }
 
     async fn recover(&self) -> anyhow::Result<()> {
@@ -637,20 +714,25 @@ impl ContinuousQueryTransformer {
             .max(reset.as_ref().map_or(0, |marker| marker.generation));
         let configuration = self.definition.configuration_bytes(&self.execution)?;
         let stored = checkpoint.read_checkpoint(CONFIGURATION).await?;
+        let configuration_missing = stored.is_none();
+        let configuration_verified = stored.as_ref().is_some_and(|stored| {
+            stored.sequence == 1 && stored.source_position.as_ref() == Some(&configuration)
+        });
         if let Some(stored) = stored {
+            if stored.sequence != 1 {
+                return Err(QueryRecoveryError::Inconsistent(
+                    "unsupported query configuration record".into(),
+                )
+                .into());
+            }
             if stored.source_position.as_ref() != Some(&configuration) {
                 return Err(QueryRecoveryError::ConfigurationChanged.into());
             }
-        } else {
-            query
-                .resource_transaction(|| async {
-                    checkpoint
-                        .stage_checkpoint(CONFIGURATION, 1, Some(&configuration))
-                        .await
-                })
-                .await?;
         }
         if self.runtime_compatibility && !self.output_persistent {
+            if configuration_missing {
+                self.write_configuration(&configuration).await?;
+            }
             *self
                 .watermarks
                 .lock()
@@ -718,6 +800,7 @@ impl ContinuousQueryTransformer {
             rows.insert(row.identity().clone(), row);
         }
         let mut recovered = Vec::new();
+        let identity = self.recovery_identity()?;
         let mut previous = None;
         let mut expected = HashMap::new();
         for (position, bytes) in outbox {
@@ -727,7 +810,7 @@ impl ContinuousQueryTransformer {
                 )
                 .into());
             }
-            let envelope = self.codec.decode(&bytes)?;
+            let mut envelope = self.codec.decode(&bytes)?;
             if envelope.system().sequence() != position
                 || envelope.system().stream() != &self.definition.output_stream
                 || QueryChangeCodec::metadata(&envelope)?.query_id != self.definition.id.as_str()
@@ -736,6 +819,30 @@ impl ContinuousQueryTransformer {
                     "retained output identity differs from the query".into(),
                 )
                 .into());
+            }
+            if QueryChangeCodec::query_generation(&envelope)? != generation {
+                return Err(QueryRecoveryError::Inconsistent(
+                    "retained output belongs to another reset generation".into(),
+                )
+                .into());
+            }
+            match super::QueryRecoveryIdentity::optional_from_envelope(&envelope)? {
+                Some(stored) if stored == identity => {}
+                Some(_) => {
+                    return Err(QueryRecoveryError::Inconsistent(
+                        "retained output belongs to another producer identity".into(),
+                    )
+                    .into())
+                }
+                None if configuration_verified => {
+                    identity.annotate(&mut envelope, &self.definition.id)?;
+                }
+                None => {
+                    return Err(QueryRecoveryError::Inconsistent(
+                        "unidentified retained output has no verified owner configuration".into(),
+                    )
+                    .into())
+                }
             }
             for operation in envelope.changes().operations() {
                 match operation {
@@ -759,11 +866,16 @@ impl ContinuousQueryTransformer {
                 .into());
             }
         }
+        if configuration_missing {
+            // A failed recovery must not manufacture the owner evidence that
+            // would let the next start adopt unidentified retained output.
+            self.write_configuration(&configuration).await?;
+        }
         self.results
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .hydrate(rows, sequence, recovered, generation);
+            .hydrate(rows, sequence, recovered, generation, identity);
         let saved = checkpoint.read_all_checkpoints().await?;
         *self
             .watermarks
@@ -773,6 +885,22 @@ impl ContinuousQueryTransformer {
             .filter(|(key, _)| key.starts_with(INPUT_PREFIX))
             .map(|(key, checkpoint)| (key, checkpoint.sequence))
             .collect();
+        Ok(())
+    }
+
+    async fn write_configuration(&self, configuration: &Bytes) -> anyhow::Result<()> {
+        let query = self.query()?;
+        let checkpoint = query
+            .resources()
+            .checkpoint_store()
+            .ok_or_else(|| anyhow::anyhow!("missing query configuration store"))?;
+        query
+            .resource_transaction(|| async {
+                checkpoint
+                    .stage_checkpoint(CONFIGURATION, 1, Some(configuration))
+                    .await
+            })
+            .await?;
         Ok(())
     }
 
@@ -970,15 +1098,8 @@ impl ContinuousQueryTransformer {
                 )
                 .map_err(IndexError::other)?;
                 if let Some(output) = &mut output {
-                    QueryChangeCodec::set_generation(
-                        output,
-                        &self.definition.id,
-                        self.results
-                            .snapshot()
-                            .map_err(IndexError::other)?
-                            .generation,
-                    )
-                    .map_err(IndexError::other)?;
+                    self.stamp_output_identity(output)
+                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
                 }
                 if let Some(checkpoint) = query.resources().checkpoint_store() {
                     checkpoint
@@ -1073,6 +1194,15 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
+        {
+            let mut state = self
+                .results
+                .state
+                .write()
+                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+            state.ready = false;
+            state.recovery_ready = false;
+        }
         if let Some(scheduling) = &self.scheduling {
             scheduling.stopped();
         }
@@ -1097,11 +1227,15 @@ impl ComputationComponent for ContinuousQueryTransformer {
         self.publish_source_progress(true).await?;
         guard.complete = true;
         self.failure.store(false, Ordering::Release);
-        self.results
-            .state
-            .write()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .ready = true;
+        {
+            let mut state = self
+                .results
+                .state
+                .write()
+                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+            state.ready = true;
+            state.recovery_ready = true;
+        }
         self.results.notify.notify_waiters();
         self.sync_metrics()?;
         if let Some(scheduling) = &self.scheduling {
@@ -1257,16 +1391,9 @@ impl Transformer for ContinuousQueryTransformer {
                 )
                 .map_err(IndexError::other)?;
                 if let Some(output) = &mut output {
-                    QueryChangeCodec::set_generation(
-                        output,
-                        &owner.definition.id,
-                        owner
-                            .results
-                            .snapshot()
-                            .map_err(IndexError::other)?
-                            .generation,
-                    )
-                    .map_err(IndexError::other)?;
+                    owner
+                        .stamp_output_identity(output)
+                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
                 }
                 if owner.output_persistent {
                     if let Some(output) = &output {
@@ -1642,7 +1769,9 @@ impl ComponentFactory for ContinuousQueryFactory {
                 .unwrap_or(false),
         )
         .await
-        .map_err(ComponentCreationError::retryable)?;
+        .map_err(ComponentCreationError::retryable)?
+        .with_recovery_scope(context.instance_id.clone())
+        .map_err(ComponentCreationError::terminal)?;
         query.reset_configuration = config
             .get("reset_configuration")
             .and_then(serde_json::Value::as_bool)

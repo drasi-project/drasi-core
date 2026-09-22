@@ -189,6 +189,8 @@ mod pipe;
 mod pipe_metrics;
 mod ports;
 mod query;
+mod query_identity;
+pub use query_identity::*;
 mod query_configuration;
 pub use query_configuration::QueryMiddlewareResource as MiddlewareRegistryResource;
 pub use query_configuration::*;

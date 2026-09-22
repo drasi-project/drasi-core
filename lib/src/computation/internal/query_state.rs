@@ -20,13 +20,25 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crate::computation::v1::{ChangeEnvelope, ChangeOperation, Record, RecordId};
+use crate::computation::v1::{
+    ChangeEnvelope, ChangeOperation, QueryRecoveryIdentity, Record, RecordId,
+};
 
 #[derive(Clone)]
 pub struct QuerySnapshot {
     pub as_of_sequence: u64,
     pub generation: u64,
     pub rows: im::HashMap<RecordId, Record>,
+}
+
+/// One coherent recovery observation. Rows share the immutable snapshot tree;
+/// retained envelopes are copied only when a caller requests a replay suffix.
+#[derive(Clone)]
+pub struct QueryRecoveryView {
+    pub identity: QueryRecoveryIdentity,
+    pub snapshot: QuerySnapshot,
+    pub oldest_sequence: Option<u64>,
+    pub retained: Option<Vec<ChangeEnvelope>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +51,10 @@ pub enum QueryHistoryError {
     },
     #[error("query output state is poisoned")]
     Poisoned,
+    #[error("query output is not ready for recovery")]
+    NotReady,
+    #[error("query output has no verified producer recovery identity")]
+    MissingIdentity,
 }
 
 pub(crate) struct QueryOutputState {
@@ -47,7 +63,10 @@ pub(crate) struct QueryOutputState {
     pub(crate) outbox: VecDeque<ChangeEnvelope>,
     pub(crate) capacity: NonZeroUsize,
     pub(crate) ready: bool,
+    // A clean stop retains committed history; reconstruction/bootstrap fences it.
+    pub(crate) recovery_ready: bool,
     pub(crate) generation: u64,
+    pub(crate) identity: Option<QueryRecoveryIdentity>,
 }
 
 impl QueryOutputState {
@@ -58,7 +77,9 @@ impl QueryOutputState {
             outbox: VecDeque::new(),
             capacity,
             ready: false,
+            recovery_ready: false,
             generation: 0,
+            identity: None,
         }
     }
 
@@ -69,6 +90,12 @@ impl QueryOutputState {
     }
 
     pub(crate) fn apply(&mut self, envelope: ChangeEnvelope) -> anyhow::Result<()> {
+        if self.identity.as_ref() != Some(&QueryRecoveryIdentity::from_envelope(&envelope)?)
+            || crate::computation::v1::QueryChangeCodec::query_generation(&envelope)?
+                != self.generation
+        {
+            anyhow::bail!("committed output belongs to another producer identity or generation");
+        }
         if envelope.system().sequence() != self.next_sequence()? {
             anyhow::bail!("committed output does not match the next in-memory sequence");
         }
@@ -100,9 +127,11 @@ impl QueryOutputState {
         sequence: u64,
         outbox: Vec<ChangeEnvelope>,
         generation: u64,
+        identity: QueryRecoveryIdentity,
     ) {
         self.rows = rows;
         self.generation = generation;
+        self.identity = Some(identity);
         self.sequence = sequence;
         let skip = outbox.len().saturating_sub(self.capacity.get());
         self.outbox = outbox.into_iter().skip(skip).collect();
@@ -124,6 +153,23 @@ pub struct QueryResults {
 }
 
 impl QueryResults {
+    pub(crate) async fn wait_recovery_ready(&self) -> Result<(), QueryHistoryError> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .state
+                .read()
+                .map_err(|_| QueryHistoryError::Poisoned)?
+                .recovery_ready
+            {
+                return Ok(());
+            }
+            notified.await;
+        }
+    }
+
     pub async fn wait_ready(&self) -> Result<(), QueryHistoryError> {
         loop {
             let notified = self.notify.notified();
@@ -147,6 +193,39 @@ impl QueryResults {
             as_of_sequence: state.sequence,
             generation: state.generation,
             rows: state.rows.clone(),
+        })
+    }
+
+    pub fn recovery_view(
+        &self,
+        after: Option<u64>,
+    ) -> Result<QueryRecoveryView, QueryHistoryError> {
+        let state = self.state.read().map_err(|_| QueryHistoryError::Poisoned)?;
+        if !state.recovery_ready {
+            return Err(QueryHistoryError::NotReady);
+        }
+        Ok(QueryRecoveryView {
+            identity: state
+                .identity
+                .clone()
+                .ok_or(QueryHistoryError::MissingIdentity)?,
+            snapshot: QuerySnapshot {
+                as_of_sequence: state.sequence,
+                generation: state.generation,
+                rows: state.rows.clone(),
+            },
+            oldest_sequence: state
+                .outbox
+                .front()
+                .map(|envelope| envelope.system().sequence()),
+            retained: after.map(|after| {
+                state
+                    .outbox
+                    .iter()
+                    .filter(|envelope| envelope.system().sequence() > after)
+                    .cloned()
+                    .collect()
+            }),
         })
     }
 

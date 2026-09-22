@@ -196,6 +196,11 @@ Query policy comes from `with_recovery_policy` or the instance default.
 Reaction policy comes from its plugin/`ReactionBaseParams`; it is not set by
 `Query::with_recovery_policy`.
 
+For reactions, AutoSkipGap also applies when a query is reset or an in-memory
+query is rebuilt. It starts from the new query's current result position rather
+than rebuilding external state. That state can therefore remain incomplete or
+stale; choose AutoReset with a snapshot-capable reaction when it must be replaced.
+
 Do not treat restart as a way to reuse unrelated state under the same ID.
 Query reset/recreation identity and configuration checks protect against that.
 

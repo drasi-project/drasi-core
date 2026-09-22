@@ -367,7 +367,12 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         progress.load("query").await.expect("checkpoint"),
         Some(ConsumerCheckpoint {
             sequence: 0,
-            generation: 0
+            generation: 0,
+            identity: query
+                .results()
+                .recovery_view(None)
+                .expect("identity")
+                .identity,
         })
     );
     let live = query
@@ -405,7 +410,12 @@ async fn failed_consumer_snapshot_does_not_seed_checkpoint_and_replay_handoff_is
         progress.load("query").await.expect("checkpoint"),
         Some(ConsumerCheckpoint {
             sequence: 1,
-            generation: 0
+            generation: 0,
+            identity: query
+                .results()
+                .recovery_view(None)
+                .expect("identity")
+                .identity,
         })
     );
     assert_eq!(state.snapshots.load(Ordering::SeqCst), 1);
@@ -444,6 +454,11 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
                 ConsumerCheckpoint {
                     sequence: 1,
                     generation: 0,
+                    identity: query
+                        .results()
+                        .recovery_view(None)
+                        .expect("identity")
+                        .identity,
                 },
             )
             .await
@@ -457,14 +472,21 @@ async fn retained_history_gap_policies_are_explicit_and_do_not_persist_staged_pr
                 &output.expect("snapshot")[0].envelope
             )),
             ConsumerRecoveryPolicy::AutoSkipGap => {
-                assert_eq!(output.expect("explicit skip").len(), 2)
+                let output = output.expect("explicit skip");
+                assert_eq!(output.len(), 3);
+                assert!(QueryChangeCodec::is_progress_only(&output[0].envelope));
             }
         }
         assert_eq!(
             progress.load("query").await.expect("unmodified checkpoint"),
             Some(ConsumerCheckpoint {
                 sequence: 1,
-                generation: 0
+                generation: 0,
+                identity: query
+                    .results()
+                    .recovery_view(None)
+                    .expect("identity")
+                    .identity,
             })
         );
     }
@@ -477,6 +499,13 @@ async fn state_store_consumer_checkpoints_and_producer_sequences_survive_wrapper
     let first =
         StateStoreConsumerProgress::new("graph", "consumer", provider.clone()).expect("scope");
     let stream = StreamId::try_new("replay/out").expect("stream");
+    let identity = QueryRecoveryIdentity::try_new(
+        "graph",
+        ComponentId::try_new("query").expect("query"),
+        42,
+        None,
+    )
+    .expect("identity");
     assert_eq!(first.allocate_sequence(&stream).await.expect("sequence"), 1);
     first
         .commit_handled(
@@ -484,6 +513,7 @@ async fn state_store_consumer_checkpoints_and_producer_sequences_survive_wrapper
             ConsumerCheckpoint {
                 sequence: 7,
                 generation: 2,
+                identity: identity.clone(),
             },
         )
         .await
@@ -501,7 +531,8 @@ async fn state_store_consumer_checkpoints_and_producer_sequences_survive_wrapper
         restored.load("query").await.expect("restored progress"),
         Some(ConsumerCheckpoint {
             sequence: 7,
-            generation: 2
+            generation: 2,
+            identity,
         })
     );
 }
@@ -542,6 +573,7 @@ async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components()
         Arc::new(AtomicUsize::new(0)),
     )
     .await;
+    let results = query.results();
     let progress = Arc::new(MemoryConsumerProgress::default());
     let replay = replay(
         query.results(),
@@ -622,7 +654,8 @@ async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components()
         progress.load("query").await.expect("handled checkpoint"),
         Some(ConsumerCheckpoint {
             sequence: 1,
-            generation: 0
+            generation: 0,
+            identity: results.recovery_view(None).expect("identity").identity,
         })
     );
 }
@@ -722,7 +755,7 @@ mod persistent {
         let temp = tempfile::tempdir().expect("temp");
         let provider = provider(temp.path());
         let calls = Arc::new(AtomicUsize::new(0));
-        {
+        let old_identity = {
             let mut first = query(
                 provider.clone(),
                 "MATCH (n:Person) RETURN n.name AS name",
@@ -740,8 +773,14 @@ mod persistent {
                 .await
                 .expect("live");
             assert_eq!(output[0].envelope.system().sequence(), 1);
+            let identity = first
+                .results()
+                .recovery_view(None)
+                .expect("identity")
+                .identity;
             first.stop().await.expect("stop");
-        }
+            identity
+        };
         let text = "MATCH (n:Person) RETURN n.name AS renamed";
         {
             let mut reset = query(
@@ -771,6 +810,7 @@ mod persistent {
                     ConsumerCheckpoint {
                         sequence: 1,
                         generation: 0,
+                        identity: old_identity,
                     },
                 )
                 .await

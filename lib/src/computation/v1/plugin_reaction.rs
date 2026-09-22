@@ -122,6 +122,20 @@ pub(super) fn snapshot_response(
             .with_output_generation(view.snapshot.generation),
     )
 }
+
+fn snapshot_stream(
+    query_id: &str,
+    snapshot: QuerySnapshot,
+    config_hash: u64,
+) -> anyhow::Result<SnapshotStream> {
+    let rows = QueryChangeCodec::legacy_snapshot_rows(query_id, snapshot.rows)?;
+    Ok(SnapshotStream::from_keyed_stream(
+        tokio_stream::iter(rows),
+        snapshot.as_of_sequence,
+        config_hash,
+    ))
+}
+
 pub(super) fn outbox_response(
     view: &OutputView,
     after: u64,
@@ -205,17 +219,18 @@ impl SnapshotFetcher for Fetcher {
                     }
                 }
             })?;
-        let view = output_view(&query).map_err(|_| FetchError::NotRunning {
-            status: ComponentStatus::Error,
-        })?;
-        snapshot_response(id, &view)
-            .map(SnapshotStream::from_snapshot)
-            .map_err(|error| {
-                log::error!("Native snapshot conversion failed: {error:#}");
-                FetchError::NotRunning {
-                    status: ComponentStatus::Error,
-                }
-            })
+        let snapshot = query
+            .results
+            .snapshot()
+            .map_err(|_| FetchError::NotRunning {
+                status: ComponentStatus::Error,
+            })?;
+        snapshot_stream(id, snapshot, query.config_hash).map_err(|error| {
+            log::error!("Native snapshot conversion failed: {error:#}");
+            FetchError::NotRunning {
+                status: ComponentStatus::Error,
+            }
+        })
     }
 }
 
@@ -228,14 +243,17 @@ struct BootstrapView {
 #[async_trait]
 impl BootstrapBackend for BootstrapView {
     async fn fetch_snapshot(&self) -> std::result::Result<SnapshotStream, FetchError> {
-        snapshot_response(&self.query, &self.view)
-            .map(SnapshotStream::from_snapshot)
-            .map_err(|error| {
-                log::error!("Native bootstrap snapshot conversion failed: {error:#}");
-                FetchError::NotRunning {
-                    status: ComponentStatus::Error,
-                }
-            })
+        snapshot_stream(
+            &self.query,
+            self.view.snapshot.clone(),
+            self.view.config_hash,
+        )
+        .map_err(|error| {
+            log::error!("Native bootstrap snapshot conversion failed: {error:#}");
+            FetchError::NotRunning {
+                status: ComponentStatus::Error,
+            }
+        })
     }
     async fn fetch_outbox(&self, after: u64) -> std::result::Result<OutboxStream, FetchError> {
         outbox_response(&self.view, after).map(OutboxStream::from_outbox)
@@ -807,7 +825,24 @@ impl ReactionPluginHost {
                 continue;
             }
             if changed {
-                anyhow::bail!("{policy:?} recovery policy cannot recover a checkpoint from a different query/reset generation");
+                if policy != ReactionRecoveryPolicy::AutoSkipGap {
+                    anyhow::bail!("{policy:?} recovery policy cannot recover a checkpoint from a different query/reset generation");
+                }
+                log::warn!(
+                    "Reaction {} skips obsolete query identity or checkpoint for query {query_id} per AutoSkipGap",
+                    self.id
+                );
+                // A missing checkpoint is still a fresh trigger: do not skip
+                // arrivals after its subscription attached during start().
+                let sequence = if checkpoint.is_none() {
+                    head.sequence
+                } else {
+                    view.snapshot.as_of_sequence
+                };
+                self.seed_position(query_id, sequence, &view).await?;
+                life.accepted
+                    .insert(query_id.clone(), (view.snapshot.generation, sequence));
+                continue;
             }
             if checkpoint.is_none() {
                 // This is an explicit fresh-start cutoff, not acknowledgement of
@@ -1348,6 +1383,231 @@ impl ComponentFactory for ReactionPluginAdapterFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_core::evaluation::variable_value::VariableValue;
+    use std::num::NonZeroUsize;
+
+    fn snapshot_view(count: u64) -> OutputView {
+        let rows = (1..=count)
+            .map(|signature| {
+                let row = QueryChangeCodec::encode_row(
+                    "query",
+                    signature,
+                    &BTreeMap::from([
+                        ("value".into(), VariableValue::from(signature)),
+                        ("payload".into(), VariableValue::from("x".repeat(1024))),
+                    ]),
+                    QueryRowKind::Row,
+                    RecordImage::Full,
+                )
+                .unwrap();
+                (row.identity().clone(), row)
+            })
+            .collect();
+        OutputView {
+            snapshot: QuerySnapshot {
+                rows,
+                as_of_sequence: count + 10,
+                generation: 7,
+            },
+            retained: Vec::new(),
+            config_hash: 123,
+            incarnation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_snapshot_projects_only_capped_rows_and_keeps_captured_metadata() {
+        let mut backend = BootstrapView {
+            query: "query".into(),
+            view: snapshot_view(10_000),
+            original: None,
+            staged: Arc::new(Mutex::new(None)),
+        };
+        let before = QueryChangeCodec::snapshot_row_projections();
+        let empty_cap = backend.fetch_snapshot().await.unwrap();
+        assert!(empty_cap.collect_keyed_vec_capped(0).await.is_empty());
+        assert_eq!(QueryChangeCodec::snapshot_row_projections(), before);
+        let stream = backend.fetch_snapshot().await.unwrap();
+        assert_eq!(QueryChangeCodec::snapshot_row_projections(), before);
+        backend.view.snapshot.rows.clear();
+        backend.view.snapshot.as_of_sequence += 1;
+        backend.view.config_hash += 1;
+        assert_eq!(stream.as_of_sequence, 10_010);
+        assert_eq!(stream.config_hash, 123);
+        let rows = stream.collect_keyed_vec_capped(7).await;
+        assert_eq!(rows.len(), 7);
+        assert_eq!(QueryChangeCodec::snapshot_row_projections() - before, 7);
+        for (signature, row) in rows {
+            assert_eq!(row["value"], serde_json::json!(signature));
+            assert_eq!(row["payload"].as_str().unwrap().len(), 1024);
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_snapshot_fetcher_projects_only_demanded_rows_from_a_stable_view() {
+        let catalog = QueryResultsCatalog::new("snapshot-stream-test").unwrap();
+        let mut query = ContinuousQueryTransformer::new(
+            ContinuousQueryDefinition {
+                graph_id: "snapshot-stream-test".into(),
+                id: ComponentId::try_new("query").unwrap(),
+                query: "MATCH (n) RETURN n.value AS value".into(),
+                language: ComputationQueryLanguage::Cypher,
+                output_stream: StreamId::try_new("query/out").unwrap(),
+                outbox_capacity: NonZeroUsize::new(8).unwrap(),
+            },
+            Arc::new(drasi_core::computation::InMemoryComputationProvider),
+        )
+        .await
+        .unwrap()
+        .with_result_catalog(&catalog)
+        .unwrap();
+        query.start().await.unwrap();
+        let results = query.results();
+        let view = snapshot_view(10_000);
+        let identity = results.recovery_view(None).unwrap().identity;
+        {
+            let mut state = results.state.write().unwrap();
+            state.hydrate(
+                view.snapshot.rows,
+                view.snapshot.as_of_sequence,
+                Vec::new(),
+                view.snapshot.generation,
+                identity,
+            );
+        }
+        let expected_hash = catalog
+            .get(&ComponentId::try_new("query").unwrap())
+            .unwrap()
+            .unwrap()
+            .config_hash;
+        let fetcher = Fetcher {
+            catalog,
+            queries: BTreeSet::from(["query".into()]),
+            timeout: Duration::from_secs(1),
+        };
+        let before = QueryChangeCodec::snapshot_row_projections();
+        let stream = fetcher.fetch_snapshot("query").await.unwrap();
+        assert_eq!(QueryChangeCodec::snapshot_row_projections(), before);
+        results.state.write().unwrap().rows.clear();
+        assert_eq!(stream.as_of_sequence, 10_010);
+        assert_eq!(stream.config_hash, expected_hash);
+        let rows = stream.collect_keyed_vec_capped(3).await;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(QueryChangeCodec::snapshot_row_projections() - before, 3);
+        for (signature, row) in rows {
+            assert_eq!(row["value"], serde_json::json!(signature));
+        }
+        let foreign = QueryChangeCodec::encode_row(
+            "different-query",
+            1,
+            &BTreeMap::new(),
+            QueryRowKind::Row,
+            RecordImage::Full,
+        )
+        .unwrap();
+        results
+            .state
+            .write()
+            .unwrap()
+            .rows
+            .insert(foreign.identity().clone(), foreign);
+        assert!(matches!(
+            fetcher.fetch_snapshot("query").await,
+            Err(FetchError::NotRunning {
+                status: ComponentStatus::Error
+            })
+        ));
+        assert_eq!(QueryChangeCodec::snapshot_row_projections() - before, 3);
+        assert!(matches!(
+            fetcher.fetch_snapshot("unsubscribed").await,
+            Err(FetchError::NotRunning {
+                status: ComponentStatus::Error
+            })
+        ));
+        query.stop().await.unwrap();
+    }
+
+    struct UncheckedRowValidator;
+
+    impl RecordValidator for UncheckedRowValidator {
+        fn validate_identity(
+            &self,
+            _: &SchemaDescriptor,
+            _: &RecordId,
+        ) -> std::result::Result<(), RecordValidationError> {
+            Ok(())
+        }
+
+        fn validate(
+            &self,
+            _: &SchemaDescriptor,
+            _: &RecordId,
+            _: RecordImage,
+            _: &[u8],
+        ) -> std::result::Result<(), RecordValidationError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_preflight_rejects_bad_rows_without_hiding_or_panicking() {
+        let variables = BTreeMap::from([("value".into(), VariableValue::from(1))]);
+        let foreign = QueryChangeCodec::encode_row(
+            "different-query",
+            1,
+            &variables,
+            QueryRowKind::Row,
+            RecordImage::Full,
+        )
+        .unwrap();
+        let partial = QueryChangeCodec::encode_row(
+            "query",
+            1,
+            &variables,
+            QueryRowKind::Row,
+            RecordImage::Partial,
+        )
+        .unwrap();
+        let corrupt = Record::try_new(
+            &Schema::new(
+                QueryChangeCodec::schema().descriptor().clone(),
+                Arc::new(UncheckedRowValidator),
+            ),
+            partial.identity().clone(),
+            RecordImage::Full,
+            bytes::Bytes::from_static(b"not a query row"),
+        )
+        .unwrap();
+        for record in [foreign, partial, corrupt] {
+            let mut view = snapshot_view(0);
+            view.snapshot.rows.insert(record.identity().clone(), record);
+            let backend = BootstrapView {
+                query: "query".into(),
+                view,
+                original: None,
+                staged: Arc::new(Mutex::new(None)),
+            };
+            let before = QueryChangeCodec::snapshot_row_projections();
+            assert!(matches!(
+                backend.fetch_snapshot().await,
+                Err(FetchError::NotRunning {
+                    status: ComponentStatus::Error
+                })
+            ));
+            assert_eq!(QueryChangeCodec::snapshot_row_projections(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_snapshot_stream_preserves_metadata_without_projection() {
+        let view = snapshot_view(0);
+        let before = QueryChangeCodec::snapshot_row_projections();
+        let stream = snapshot_stream("query", view.snapshot, view.config_hash).unwrap();
+        assert_eq!(stream.as_of_sequence, 10);
+        assert_eq!(stream.config_hash, 123);
+        assert!(stream.collect_keyed_vec().await.is_empty());
+        assert_eq!(QueryChangeCodec::snapshot_row_projections(), before);
+    }
 
     #[test]
     fn outbox_head_lookup_preserves_generation_without_requiring_retained_history() {

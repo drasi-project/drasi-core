@@ -21,9 +21,10 @@ mod canonical;
 pub(crate) mod value_codec;
 
 pub(crate) use adapters::{
-    query_evaluation_to_envelope, query_result_from_envelope, source_change_from_envelope,
-    source_change_from_envelope_owned, source_event_from_envelope, source_event_parts_to_envelope,
-    source_event_to_envelope, ChangeAdapterError, QueryEnvelopeMetadata,
+    query_evaluation_to_envelope, query_result_from_envelope, query_variables_to_json,
+    source_change_from_envelope, source_change_from_envelope_owned, source_event_from_envelope,
+    source_event_parts_to_envelope, source_event_to_envelope, ChangeAdapterError,
+    QueryEnvelopeMetadata,
 };
 #[cfg(test)]
 pub(crate) use canonical::{encode_query_variables, encode_source_change};
