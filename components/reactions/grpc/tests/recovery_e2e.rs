@@ -20,6 +20,9 @@
 //! downstream server actually received**. Recovery is driven with the public
 //! `stop_reaction` / `start_reaction` lifecycle calls.
 //!
+//! Select `DRASI_TEST_EXECUTION=component` or `computation` per Cargo invocation.
+//! Native coverage requires the opt-in `computation-tests` feature.
+//!
 //! Scenarios:
 //! * `at_least_once_replays_unacked_events_after_restart` — events produced while
 //!   the reaction is stopped are replayed from the query outbox on restart, and
@@ -36,11 +39,13 @@
 
 mod mock_server;
 mod mock_source;
+#[path = "../../tests/recovery_support.rs"]
+mod recovery_support;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use drasi_lib::channels::ComponentStatus;
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query};
@@ -48,6 +53,7 @@ use drasi_reaction_grpc::GrpcReaction;
 
 use mock_server::{struct_to_json, MockServer};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
+use recovery_support::{execution_mode, outbox, wait_for_checkpoint, wait_for_outbox};
 
 const SOURCE: &str = "e2e-source";
 const QUERY: &str = "e2e-query";
@@ -78,8 +84,10 @@ async fn build_core(
         .build()
         .expect("reaction builder");
 
+    let mode = execution_mode();
     let core = Arc::new(
         DrasiLib::builder()
+            .with_execution_mode(mode)
             .with_id("e2e-core")
             .with_source(mock_source)
             .with_query(query)
@@ -88,6 +96,11 @@ async fn build_core(
             .build()
             .await
             .expect("build core"),
+    );
+    assert_eq!(
+        core.execution_mode(),
+        mode,
+        "requested engine must be built"
     );
 
     (core, handle)
@@ -118,6 +131,48 @@ async fn names_received(server: &MockServer) -> Vec<String> {
         }
     }
     names
+}
+
+async fn assert_received(core: &DrasiLib, server: &MockServer, expected: &[(u64, &str)]) {
+    let results = outbox(core, QUERY).await;
+    let batches = server.recorder.batches().await;
+    assert_eq!(
+        batches.len(),
+        expected.len(),
+        "fixed batches contain one row"
+    );
+    for (batch, (sequence, name)) in batches.iter().zip(expected) {
+        assert_eq!(batch.query_id, QUERY);
+        assert_eq!(batch.items.len(), 1);
+        let item = &batch.items[0];
+        let result = results
+            .results
+            .iter()
+            .find(|result| result.sequence == *sequence)
+            .expect("delivered sequence is retained in the outbox");
+        let [ResultDiff::Add {
+            data,
+            row_signature,
+        }] = result.results.as_slice()
+        else {
+            panic!("one added person per query result: {result:?}");
+        };
+        assert_eq!(data, &serde_json::json!({"name": name, "age": 30}));
+        assert_eq!(item.sequence, *sequence);
+        assert_eq!(item.row_signature, *row_signature);
+        assert_eq!(item.item_type, 1, "ADD");
+        assert!(item.before.is_none());
+        assert_eq!(
+            struct_to_json(item.after.as_ref().expect("added row")),
+            *data
+        );
+        let timestamp = item.timestamp.as_ref().expect("query result timestamp");
+        assert_eq!(timestamp.seconds, result.timestamp.timestamp());
+        assert_eq!(
+            timestamp.nanos,
+            result.timestamp.timestamp_subsec_nanos() as i32
+        );
+    }
 }
 
 fn sorted(mut v: Vec<String>) -> Vec<String> {
@@ -190,7 +245,7 @@ async fn at_least_once_replays_unacked_events_after_restart() {
     let store = Arc::new(MemoryStateStoreProvider::new());
     let (core, handle) = build_core(
         server.endpoint.clone(),
-        store,
+        store.clone(),
         ReactionRecoveryPolicy::Strict,
     )
     .await;
@@ -207,12 +262,15 @@ async fn at_least_once_replays_unacked_events_after_restart() {
             .await,
         2
     );
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
+    assert_received(&core, &server, &[(1, "Alice"), (2, "Bob")]).await;
 
     // Act 2: stop the reaction, then produce two more (they queue in the outbox).
     stop_reaction_and_wait(&core).await;
     insert_person(&handle, "p3", "Carol").await;
     insert_person(&handle, "p4", "Dave").await;
-    tokio::time::sleep(Duration::from_millis(500)).await; // let the query fill the outbox
+    wait_for_outbox(&core, QUERY, 4).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
     // Act 3: restart — the reaction replays the two missed events from the outbox.
     core.start_reaction(REACTION)
@@ -235,8 +293,15 @@ async fn at_least_once_replays_unacked_events_after_restart() {
         vec!["Alice", "Bob", "Carol", "Dave"],
         "all four events delivered exactly once across the restart"
     );
+    assert_received(
+        &core,
+        &server,
+        &[(1, "Alice"), (2, "Bob"), (3, "Carol"), (4, "Dave")],
+    )
+    .await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 4).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
     server.shutdown().await;
 }
 
@@ -247,7 +312,7 @@ async fn clean_restart_does_not_redeliver_acked_events() {
     let store = Arc::new(MemoryStateStoreProvider::new());
     let (core, handle) = build_core(
         server.endpoint.clone(),
-        store,
+        store.clone(),
         ReactionRecoveryPolicy::Strict,
     )
     .await;
@@ -263,6 +328,7 @@ async fn clean_restart_does_not_redeliver_acked_events() {
             .await,
         2
     );
+    let checkpoint = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
     // Restart with no new events in between.
     stop_reaction_and_wait(&core).await;
@@ -280,8 +346,13 @@ async fn clean_restart_does_not_redeliver_acked_events() {
         vec!["Alice", "Bob"],
         "a clean restart must not re-deliver acked events"
     );
+    assert_received(&core, &server, &[(1, "Alice"), (2, "Bob")]).await;
+    assert_eq!(
+        wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await,
+        checkpoint
+    );
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
     server.shutdown().await;
 }
 
@@ -294,7 +365,7 @@ async fn config_hash_preserved_across_repeated_restarts() {
     let store = Arc::new(MemoryStateStoreProvider::new());
     let (core, handle) = build_core(
         server.endpoint.clone(),
-        store,
+        store.clone(),
         ReactionRecoveryPolicy::Strict,
     )
     .await;
@@ -309,6 +380,7 @@ async fn config_hash_preserved_across_repeated_restarts() {
             .await,
         1
     );
+    let first = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
 
     // Restart #1 (after the reaction has written its first checkpoint).
     stop_reaction_and_wait(&core).await;
@@ -323,6 +395,8 @@ async fn config_hash_preserved_across_repeated_restarts() {
             .await,
         2
     );
+    let second = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
+    assert_eq!(second.config_hash, first.config_hash);
 
     // Restart #2.
     stop_reaction_and_wait(&core).await;
@@ -347,8 +421,11 @@ async fn config_hash_preserved_across_repeated_restarts() {
         vec!["Alice", "Bob", "Carol"],
         "every event delivered exactly once across two restarts"
     );
+    assert_received(&core, &server, &[(1, "Alice"), (2, "Bob"), (3, "Carol")]).await;
+    let third = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 3).await;
+    assert_eq!(third.config_hash, first.config_hash);
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
     server.shutdown().await;
 }
 
@@ -361,7 +438,7 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
     let store = Arc::new(MemoryStateStoreProvider::new());
     let (core, handle) = build_core(
         server.endpoint.clone(),
-        store,
+        store.clone(),
         ReactionRecoveryPolicy::Strict,
     )
     .await;
@@ -381,6 +458,8 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
         names_received(&server).await.is_empty(),
         "nothing should have been delivered while the downstream was down"
     );
+    wait_for_outbox(&core, QUERY, 1).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 0).await;
 
     // Recover: downstream comes back, operator restarts the reaction. A
     // fail-stopped reaction is in `Error`; `start_reaction` retries from there.
@@ -402,8 +481,10 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
         vec!["Alice"],
         "the un-acked event is replayed exactly once after recovery"
     );
+    assert_received(&core, &server, &[(1, "Alice")]).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
     server.shutdown().await;
 }
 
@@ -415,7 +496,7 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
     let store = Arc::new(MemoryStateStoreProvider::new());
     let (core, handle) = build_core(
         server.endpoint.clone(),
-        store,
+        store.clone(),
         ReactionRecoveryPolicy::AutoSkipGap,
     )
     .await;
@@ -425,8 +506,8 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
     // The downstream is down for the first event.
     server.set_failing(true);
     insert_person(&handle, "p1", "Alice").await;
-    // Give the reaction time to exhaust retries and skip the batch.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
+    assert!(names_received(&server).await.is_empty());
     assert!(
         wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(2)).await,
         "AutoSkipGap reaction must stay Running after a skipped batch"
@@ -447,7 +528,9 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
         vec!["Bob"],
         "the skipped event is dropped; later events are delivered"
     );
+    assert_received(&core, &server, &[(2, "Bob")]).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
     server.shutdown().await;
 }

@@ -356,6 +356,11 @@ publication. Recovery checks the committed sequence, retained history and
 snapshot before accepting new input. A reset-in-progress configuration marker
 prevents resuming partially cleared storage after failed cleanup.
 
+Malformed saved outputs, rows or recovery annotations are reported as inconsistent
+query state: Strict refuses startup; AutoReset can rebuild from a configured
+bootstrap. Output decoding failures retain their original cause. Output-store
+read outages are not reclassified as corruption or permission to clear state.
+
 Query output generation identifies one lifetime of the query's output. Reset
 and deletion preserve this identity information, even when rows/checkpoints are
 cleared. Stop/restart without reset preserves it. It is separate from
@@ -405,6 +410,31 @@ rows one at a time, without keeping a converted copy of the whole snapshot, then
 produce JSON rows as the consumer requests them. A capped consumer therefore
 avoids a complete JSON conversion, although validation still scans the snapshot.
 The non-streaming snapshot API can still allocate the complete requested snapshot.
+
+### Recovery conformance
+
+From the drasi-core repository root, run the same recovery scenarios under both
+engines:
+
+```bash
+for engine in component computation; do
+  DRASI_TEST_EXECUTION="$engine" cargo test --locked -p lib-integration-tests \
+    --features computation --test reaction_recovery_conformance
+  DRASI_TEST_EXECUTION="$engine" cargo test --locked \
+    -p drasi-reaction-http -p drasi-reaction-grpc \
+    --features drasi-reaction-http/computation-tests,drasi-reaction-grpc/computation-tests \
+    --test recovery_e2e
+done
+
+cargo test --locked -p lib-integration-tests --features computation-middleware-tests \
+  --test computation_middleware_durability
+```
+
+These fixtures explicitly select and verify the engine. The subprocess tests
+preserve that selection across restarts; they do not silently fall back to
+ComponentGraph. `DRASI_TEST_EXECUTION` is a test setting, not a production
+configuration option. The middleware target includes abrupt process exits before
+delivery, during partial fanout, and before/after delivery confirmation.
 
 Post-commit query timestamps are appended only to live output annotations.
 `QueryChangeCodec::metadata` applies them without rewriting committed output

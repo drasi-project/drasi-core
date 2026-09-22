@@ -1,6 +1,6 @@
 # ComponentGraph vs ComputationGraph
 
-**Updated 21 September 2026**
+**Updated 22 September 2026**
 
 Comparison of the current `agentofreality-parallel-computation-graph` branch,
 not a published release.
@@ -10,10 +10,9 @@ not a published release.
 **ComputationGraph is a working alternative with better control over components
 and more flexible processing arrangements. It is not yet a faster replacement.**
 
-The main scheduling problem identified in the earlier report has been fixed:
-independent queries now run in separate, owned tasks. Performance improved, but
-ComputationGraph still takes **23.1% longer than ComponentGraph** on the measured
-workload.
+Independent queries now run in separate, owned tasks. The last measured
+ComputationGraph run took **23.1% longer than ComponentGraph** on that workload.
+Those timings predate the recovery changes below and have not been rerun for them.
 
 Continue developing it, but keep ComponentGraph as the default for now.
 
@@ -22,13 +21,17 @@ Continue developing it, but keep ComponentGraph as the default for now.
 Both use the same underlying query-evaluation code. Both support the existing
 source, query and reaction interfaces, Cypher/GQL, joins, middleware, initial data
 loading, scheduled work and recovery where the source and storage support it.
-Changing engines does not require a new plugin interface.
+Both engines use the same plugin interface. The current SDK contract is `0.15.0`;
+locally built hosts and plugins must use matching SDK versions.
 
-Two recent improvements apply to **both engines**, not just ComputationGraph:
+These improvements apply to **both engines**, not just ComputationGraph:
 
 - Queued query inputs are ordered by source-reported event time, then source
   order in the query definition, then source-maintained sequence number. This
   does not guarantee an order over events that have not arrived.
+- Source events require a sequence number. Concurrent application, HTTP and gRPC
+  ingestion preserves saved-event order through delivery. Source bootstrappers
+  stream records rather than collecting a complete snapshot before sending it.
 - Server reports a loaded plugin's actual package version, not its
   configuration-format version.
 
@@ -38,6 +41,7 @@ Two recent improvements apply to **both engines**, not just ComputationGraph:
 |---|---|---|
 | Who manages execution | The graph records components and status; source, query and reaction managers run them. | The graph owns components and connections and decides when to create, start, stop or replace them. |
 | Processing arrangements | Built around source-to-query-to-reaction pipelines, with middleware for preprocessing. | Also supports custom transformers, sinks and services, including paths with no query. |
+| Stateful middleware recovery | Middleware inside a persistent query uses that query's saved element state. | Standalone middleware can atomically save its own element state, input position and pending output, with durable connections. |
 | Connection checks | Checks follow the established component interfaces and dependencies. | Components declare named inputs/outputs and required formats and delivery behaviour. |
 | Adding a component | Addition can wait for initialization; a failed source initialization removes its entry. | An accepted node appears first. Later initialization/startup failures stay visible on it. |
 | Readiness | Existing status and start methods. | Separate handles can wait for creation or actual readiness; accepting an addition is not readiness. |
@@ -49,7 +53,7 @@ The standard DrasiLib and Server APIs can select either engine. A DrasiLib
 instance can also host additional computation graphs alongside its existing
 ComponentGraph pipeline. Neither arrangement automatically migrates saved state.
 
-## Current performance
+## Last measured performance
 
 The latest controlled comparison used **100,000 inputs and two Building Comfort
 queries**: room results and floor aggregation. Each engine had one warm-up and
@@ -84,20 +88,42 @@ behaviour or performance in every deployment.
 
 ## Recovery and operational behaviour
 
-ComputationGraph now includes the delivery, checkpoint and persistent-storage
-fixes brought over from main. Query state and outputs can commit together with a
-supporting storage provider. Reactions save completed handling, not just queue
-acceptance. Recovery can replay available missed outputs, and old checkpoints
-cannot silently apply to a recreated query.
+The recovery audit identified real differences, not just missing tests. The
+following changes address them:
 
-Dynamically loaded sources can replay when their plugin supports it. The earlier
-report's blanket restriction is outdated.
+- A persistent query with no saved position for one source requests replay from
+  the beginning, without clearing other sources' committed state. That zero
+  position is preserved through dynamic plugin calls.
+- Reaction AutoSkipGap applies to changed/recreated queries as well as missing
+  retained results. Strict still refuses unsafe continuation; AutoReset uses a
+  supported replacement snapshot.
+- Custom replay helpers check producer identity and missing live sequences.
+  Matching query names or sequence numbers alone cannot authorize reuse of a
+  checkpoint from another instance.
+- Durable standalone middleware restores Unwind's previous elements and resends
+  unconfirmed saved output without running the middleware twice. Every outgoing
+  branch must accept durably before confirmation; full retention cannot silently
+  discard pending output. Persistent queries reject known volatile middleware.
+- Reaction snapshot streams avoid converting the whole result set to JSON.
+  Encoded rows are still validated in a constant-memory scan before rows are
+  converted on demand.
 
-Transient sources cannot resend lost data. Persistent indexes alone do not make
-query output durable. Neither engine guarantees one-time external actions.
+Query state, source checkpoints, output sequence and retained results can commit
+together with a supporting storage provider. Reactions save completed handling,
+not just queue acceptance. A crash after an external action but before its
+checkpoint can repeat that action; neither engine promises exactly-once effects.
+Corrupt saved output follows the configured recovery policy rather than failing
+with an unclassified decoding error. Output-store read outages do not authorize
+clearing state.
 
-Tests cover both modes, real components, pause/restart/shutdown, persistent
-recovery and Server integration. They do not prove equivalence in every deployment.
+Dynamically loaded sources can replay when their plugin supports it. Sources
+without replay or a retained event log cannot resend lost data. Persistent query
+indexes alone do not make query output durable.
+
+Conformance scenarios select the execution engine explicitly, including child
+processes. Coverage includes abrupt exits around reaction checkpoints and
+middleware delivery, partial fanout, saved state reopening and configured recovery
+policies. It is evidence for those paths, not proof about every third-party plugin.
 
 ## Main remaining work
 
@@ -111,23 +137,21 @@ recovery and Server integration. They do not prove equivalence in every deployme
   storage provider and connection to a supplied object.
 - **Move more deployment/cloning work into reusable library APIs** and expose
   the richer graph controls through Server.
-- **Provide an explicit migration path** before changing the default engine.
-  Selecting ComputationGraph does not transfer ComponentGraph's stored state.
 - **Decide whether all-or-nothing batch deployment is needed.**
   Additions deliberately remain visible, including failures. Saving one query's
   storage updates together does not make a whole deployment all-or-nothing.
 
 ## Versions and supporting material
 
-The assessment uses these committed revisions:
-drasi-core `a7892b00`, drasi-server `58669661`, test-infra `d3fbbbb4`.
-
-The measured runtime fix is core commit `6a6301bc`; the later commits listed above
-update documentation, not runtime behaviour. The benchmark evidence is retained
-in this workspace session's `parallel-performance-summary.json`,
+Recovery checkpoints are core `15eaaa04` (sources), `4110b3ee` (consumers) and
+`31f9b9be` (middleware). This revision adds explicit crash conformance and corrects
+saved-output corruption handling. Server remains at `58669661` and test-infra at
+`d3fbbbb4`. Migration between engines is outside this recovery work.
+The performance figures are from the earlier core commit `6a6301bc`, not these
+recovery revisions. Benchmark evidence is retained in this workspace session's `parallel-performance-summary.json`,
 `ranked-baseline/` and `parallel-query-benchmark/` records.
 
 For details, use the
-[design overview](https://github.com/drasi-project/drasi-core/blob/a7892b00440766eb9b6816ac11ba1b7fb05129ed/lib/docs/computation-graph-design.md),
-[usage guide](https://github.com/drasi-project/drasi-core/blob/a7892b00440766eb9b6816ac11ba1b7fb05129ed/lib/docs/computation-graph-usage.md)
-and [configuration reference](https://github.com/drasi-project/drasi-core/blob/a7892b00440766eb9b6816ac11ba1b7fb05129ed/lib/docs/computation-graph-configuration.md).
+[design overview](https://github.com/drasi-project/drasi-core/blob/31f9b9be535782944eaaeb222d8b83536096ab20/lib/docs/computation-graph-design.md),
+[usage guide](https://github.com/drasi-project/drasi-core/blob/31f9b9be535782944eaaeb222d8b83536096ab20/lib/docs/computation-graph-usage.md)
+and [configuration reference](https://github.com/drasi-project/drasi-core/blob/31f9b9be535782944eaaeb222d8b83536096ab20/lib/docs/computation-graph-configuration.md).

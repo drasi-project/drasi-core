@@ -18,18 +18,22 @@
 //! test re-executes the current binary as a child (`DRASI_RECOVERY_CONFORMANCE_PHASE`
 //! = `seed` then `recover`) so RocksDB/redb state is reconstructed after a real
 //! process exit. `run_phase` / `seed_phase` / `recover_phase` implement that
-//! handshake.
+//! handshake. Set `DRASI_TEST_EXECUTION=component` or `computation`; computation
+//! requires the matching Cargo feature. Every child attests its actual runtime.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use drasi_core::interface::{CreatedIndexes, IndexError};
 use drasi_index_rocksdb::RocksDbIndexProvider;
-use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff, SubscriptionResponse};
 use drasi_lib::queries::{FetchError, OutboxGap};
 use drasi_lib::reactions::BootstrapContext;
+use drasi_lib::wal::WalProvider;
 use drasi_lib::{
-    CapacityPolicy, DrasiLib, DurabilityConfig, IndexBackendPlugin, Reaction, ReactionBase,
-    ReactionBaseParams, ReactionCheckpoint, ReactionRecoveryPolicy, ReactionRuntimeContext,
-    RecoveryPolicy, StateStoreProvider, StorageBackendRef,
+    CapacityPolicy, DrasiLib, DurabilityConfig, ExecutionMode, IndexBackendPlugin, Reaction,
+    ReactionBase, ReactionBaseParams, ReactionCheckpoint, ReactionRecoveryPolicy,
+    ReactionRuntimeContext, RecoveryPolicy, Source, SourceRuntimeContext,
+    SourceSubscriptionSettings, StateStoreProvider, StorageBackendRef,
 };
 use drasi_source_application::{
     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle, PropertyMapBuilder,
@@ -42,23 +46,65 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, Weak,
+};
 use std::time::Duration;
 
 const PHASE_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_PHASE";
+const EXECUTION_ENV: &str = "DRASI_TEST_EXECUTION";
 const ROCKS_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_ROCKS_PATH";
 const STATE_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_STATE_PATH";
 const WAL_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_WAL_PATH";
 const JOURNAL_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_JOURNAL_PATH";
 const READY_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_READY_PATH";
+const INDEX_LOCATION_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_INDEX_LOCATION";
 const CRASH_AFTER_EFFECT_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_CRASH_AFTER_EFFECT_SEQ";
 const FAIL_EFFECT_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_FAIL_EFFECT_SEQ";
+const QUERY_POLICY_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_QUERY_POLICY";
+const RESET_HIGH_WATER_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_RESET_HIGH_WATER";
+const IDENTITY_CASE_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_IDENTITY_CASE";
 
 const SOURCE_ID: &str = "people-source";
+const INSTANCE_ID: &str = "reaction-recovery-conformance";
 const QUERY_ID: &str = "people-query";
 const REACTION_ID: &str = "durable-recording-reaction";
 const QUERY_TEXT: &str =
     "MATCH (p:Person) RETURN p.personId AS id, p.name AS name, p.active AS active";
+const RECONFIGURED_QUERY_TEXT: &str =
+    "MATCH (p:Person) RETURN p.personId AS id, p.name AS name, p.active AS active, true AS revision";
+
+fn parse_execution_mode(value: &str) -> Result<ExecutionMode> {
+    match value {
+        "component" => Ok(ExecutionMode::ComponentGraph),
+        #[cfg(feature = "computation")]
+        "computation" => Ok(ExecutionMode::ComputationGraph),
+        #[cfg(not(feature = "computation"))]
+        "computation" => anyhow::bail!(
+            "{EXECUTION_ENV}=computation requires --features computation; refusing legacy fallback"
+        ),
+        other => {
+            anyhow::bail!("invalid {EXECUTION_ENV}={other:?}; expected component or computation")
+        }
+    }
+}
+
+fn execution_mode() -> Result<ExecutionMode> {
+    match std::env::var(EXECUTION_ENV) {
+        Ok(value) => parse_execution_mode(&value),
+        Err(std::env::VarError::NotPresent) => Ok(ExecutionMode::ComponentGraph),
+        Err(error) => Err(error).context("read test execution mode"),
+    }
+}
+
+fn execution_name(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::ComponentGraph => "component",
+        #[cfg(feature = "computation")]
+        ExecutionMode::ComputationGraph => "computation",
+    }
+}
 
 #[derive(Clone, Debug)]
 struct FixturePaths {
@@ -67,6 +113,7 @@ struct FixturePaths {
     wal: PathBuf,
     journal: PathBuf,
     ready: PathBuf,
+    index_location: PathBuf,
 }
 
 impl FixturePaths {
@@ -77,6 +124,7 @@ impl FixturePaths {
             wal: root.join("source-wal"),
             journal: root.join("reaction-journal.jsonl"),
             ready: root.join("seed-ready.json"),
+            index_location: root.join("query-index-location.json"),
         }
     }
 
@@ -87,6 +135,7 @@ impl FixturePaths {
             wal: required_path_env(WAL_PATH_ENV)?,
             journal: required_path_env(JOURNAL_PATH_ENV)?,
             ready: required_path_env(READY_PATH_ENV)?,
+            index_location: required_path_env(INDEX_LOCATION_ENV)?,
         })
     }
 
@@ -96,7 +145,186 @@ impl FixturePaths {
             .env(STATE_PATH_ENV, &self.state)
             .env(WAL_PATH_ENV, &self.wal)
             .env(JOURNAL_PATH_ENV, &self.journal)
-            .env(READY_PATH_ENV, &self.ready);
+            .env(READY_PATH_ENV, &self.ready)
+            .env(INDEX_LOCATION_ENV, &self.index_location);
+    }
+
+    fn execution_attestation(&self, phase: &str) -> PathBuf {
+        self.ready.with_file_name(format!("execution-{phase}.json"))
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExecutionAttestation {
+    phase: String,
+    mode: String,
+    process_id: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct IndexLocation {
+    storage_scope: String,
+    query_id: String,
+    mode: String,
+}
+
+struct ObservedRocksDb {
+    inner: RocksDbIndexProvider,
+    location: PathBuf,
+    mode: ExecutionMode,
+}
+
+#[async_trait]
+impl IndexBackendPlugin for ObservedRocksDb {
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
+        self.create_scoped_indexes(query_id, query_id).await
+    }
+
+    async fn create_scoped_indexes(
+        &self,
+        storage_scope: &str,
+        query_id: &str,
+    ) -> Result<CreatedIndexes, IndexError> {
+        let indexes = self
+            .inner
+            .create_scoped_indexes(storage_scope, query_id)
+            .await?;
+        if query_id == QUERY_ID {
+            let location = IndexLocation {
+                storage_scope: storage_scope.to_string(),
+                query_id: query_id.to_string(),
+                mode: execution_name(self.mode).to_string(),
+            };
+            let bytes = serde_json::to_vec(&location).map_err(IndexError::other)?;
+            write_synced_file(&self.location, &bytes)
+                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+        }
+        Ok(indexes)
+    }
+
+    fn is_volatile(&self) -> bool {
+        self.inner.is_volatile()
+    }
+
+    fn supports_atomic_query_output(&self) -> bool {
+        self.inner.supports_atomic_query_output()
+    }
+}
+
+fn read_index_location(paths: &FixturePaths) -> Result<IndexLocation> {
+    let location: IndexLocation = serde_json::from_slice(
+        &std::fs::read(&paths.index_location).context("read observed query index location")?,
+    )
+    .context("decode observed query index location")?;
+    anyhow::ensure!(
+        location.query_id == QUERY_ID && location.mode == execution_name(execution_mode()?),
+        "query index location belongs to another query or execution mode: {location:?}"
+    );
+    Ok(location)
+}
+
+async fn open_query_indexes(paths: &FixturePaths) -> Result<CreatedIndexes> {
+    let location = read_index_location(paths)?;
+    RocksDbIndexProvider::new(&paths.rocks, false, false)
+        .create_scoped_indexes(&location.storage_scope, &location.query_id)
+        .await
+        .context("open the runtime's observed query index partition")
+}
+
+#[derive(Clone)]
+struct SourceSubscription {
+    settings: SourceSubscriptionSettings,
+    position: Option<Weak<AtomicU64>>,
+}
+
+#[derive(Default)]
+struct SourceObservations {
+    subscriptions: Mutex<Vec<SourceSubscription>>,
+}
+
+impl SourceObservations {
+    fn subscriptions(&self) -> Vec<SourceSubscription> {
+        self.subscriptions.lock().unwrap().clone()
+    }
+
+    fn confirmed_position(&self) -> Option<u64> {
+        self.subscriptions()
+            .last()
+            .and_then(|subscription| subscription.position.as_ref())
+            .and_then(Weak::upgrade)
+            .map(|position| position.load(Ordering::Acquire))
+    }
+}
+
+struct ObservedApplication {
+    inner: ApplicationSource,
+    observations: Arc<SourceObservations>,
+}
+
+#[async_trait]
+impl Source for ObservedApplication {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn type_name(&self) -> &str {
+        self.inner.type_name()
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        self.inner.properties()
+    }
+
+    fn dispatch_mode(&self) -> drasi_lib::DispatchMode {
+        self.inner.dispatch_mode()
+    }
+
+    fn supports_replay(&self) -> bool {
+        self.inner.supports_replay()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        self.inner.initialize(context).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.inner.start().await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.inner.stop().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.inner.status().await
+    }
+
+    async fn subscribe(
+        &self,
+        settings: SourceSubscriptionSettings,
+    ) -> Result<SubscriptionResponse> {
+        let response = self.inner.subscribe(settings.clone()).await?;
+        self.observations
+            .subscriptions
+            .lock()
+            .unwrap()
+            .push(SourceSubscription {
+                settings,
+                position: response.position_handle.as_ref().map(Arc::downgrade),
+            });
+        Ok(response)
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        self.inner.remove_position_handle(query_id).await;
+    }
+
+    async fn on_subscriptions_complete(&self) {
+        self.inner.on_subscriptions_complete().await;
     }
 }
 
@@ -116,6 +344,7 @@ enum JournalRecord {
     Snapshot {
         query_id: String,
         sequence: u64,
+        is_reset: bool,
         rows: Vec<serde_json::Value>,
     },
     Result {
@@ -239,7 +468,9 @@ impl Reaction for DurableRecordingReaction {
             .await;
 
         let shutdown = self.base.create_shutdown_channel().await;
-        let initial = self.base.read_all_checkpoints().await.unwrap_or_default();
+        // The host seeds/rebases checkpoints after start. Load them lazily in
+        // the standard loop, after bootstrap and its delivery gate complete.
+        let initial = HashMap::new();
         let policy = self.base.resolved_recovery_policy(self.recovery_policy);
         let base = self.base.clone_shared();
         let journal = self.journal.clone();
@@ -325,6 +556,7 @@ impl Reaction for DurableRecordingReaction {
             .append(&JournalRecord::Snapshot {
                 query_id: context.query_id.clone(),
                 sequence,
+                is_reset: context.is_reset,
                 rows,
             })
             .await?;
@@ -343,9 +575,12 @@ struct RecoveryFixture {
     core: DrasiLib,
     source: ApplicationSourceHandle,
     state_store: Arc<RedbStateStoreProvider>,
+    wal: Arc<RedbWalProvider>,
+    source_observations: Arc<SourceObservations>,
 }
 
 struct FixtureOpts {
+    query_text: &'static str,
     query_policy: RecoveryPolicy,
     include_reaction: bool,
     snapshot_on_fresh: bool,
@@ -356,6 +591,7 @@ struct FixtureOpts {
 impl Default for FixtureOpts {
     fn default() -> Self {
         Self {
+            query_text: QUERY_TEXT,
             query_policy: RecoveryPolicy::Strict,
             include_reaction: true,
             snapshot_on_fresh: true,
@@ -370,6 +606,7 @@ async fn build_fixture(paths: &FixturePaths) -> Result<RecoveryFixture> {
 }
 
 async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<RecoveryFixture> {
+    let mode = execution_mode()?;
     std::fs::create_dir_all(&paths.rocks)
         .with_context(|| format!("create RocksDB directory {}", paths.rocks.display()))?;
     std::fs::create_dir_all(&paths.wal)
@@ -388,16 +625,26 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
         }),
     };
     let (source, source_handle) = ApplicationSource::new(SOURCE_ID, source_config)?;
-    let rocks = Arc::new(RocksDbIndexProvider::new(&paths.rocks, false, false));
+    let source_observations = Arc::new(SourceObservations::default());
+    let source = ObservedApplication {
+        inner: source,
+        observations: source_observations.clone(),
+    };
+    let rocks = Arc::new(ObservedRocksDb {
+        inner: RocksDbIndexProvider::new(&paths.rocks, false, false),
+        location: paths.index_location.clone(),
+        mode,
+    });
     let state_store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
     let wal = Arc::new(RedbWalProvider::new(&paths.wal));
 
     let mut builder = DrasiLib::builder()
-        .with_id("reaction-recovery-conformance")
+        .with_id(INSTANCE_ID)
+        .with_execution_mode(mode)
         .with_source(source)
         .with_query(
             drasi_lib::Query::cypher(QUERY_ID)
-                .query(QUERY_TEXT)
+                .query(opts.query_text)
                 .from_source(SOURCE_ID)
                 .auto_start(true)
                 .enable_bootstrap(false)
@@ -408,7 +655,7 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
         )
         .with_index_provider("rocks", rocks)
         .with_state_store_provider(state_store.clone())
-        .with_wal_provider(wal);
+        .with_wal_provider(wal.clone());
 
     if opts.include_reaction {
         let reaction = DurableRecordingReaction::with_snapshot(
@@ -420,11 +667,27 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
     }
 
     let core = builder.build().await?;
+    anyhow::ensure!(
+        core.execution_mode() == mode,
+        "requested {mode:?}, constructed {:?}",
+        core.execution_mode()
+    );
+    let phase = std::env::var(PHASE_ENV).context("fixture requires a child conformance phase")?;
+    write_synced_file(
+        &paths.execution_attestation(&phase),
+        &serde_json::to_vec(&ExecutionAttestation {
+            phase,
+            mode: execution_name(core.execution_mode()).to_string(),
+            process_id: std::process::id(),
+        })?,
+    )?;
 
     Ok(RecoveryFixture {
         core,
         source: source_handle,
         state_store,
+        wal,
+        source_observations,
     })
 }
 
@@ -881,7 +1144,11 @@ async fn seed_phase(paths: &FixturePaths) -> Result<()> {
     );
 
     fixture.state_store.sync().await?;
-    assert!(paths.rocks.join(QUERY_ID).join("CURRENT").exists());
+    assert!(paths
+        .rocks
+        .join(read_index_location(paths)?.storage_scope)
+        .join("CURRENT")
+        .exists());
     assert!(paths.wal.join(format!("{SOURCE_ID}.redb")).exists());
     assert!(paths.state.exists());
     assert!(paths.journal.exists());
@@ -930,8 +1197,8 @@ async fn recover_phase(paths: &FixturePaths) -> Result<()> {
     let final_journal = wait_for_journal_sequences(&paths.journal, 4).await?;
     let final_journal = journal_emissions(&final_journal)?;
 
+    let final_checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 4).await?;
     fixture.state_store.sync().await?;
-    let final_checkpoint = read_reaction_checkpoint(fixture.state_store.as_ref()).await?;
 
     let observed = RecoveryObservation {
         checkpoint_before_start: checkpoint_before_start.sequence,
@@ -1122,6 +1389,7 @@ async fn recover_strict_fail_phase(paths: &FixturePaths) -> Result<()> {
     let _ = fixture.core.shutdown().await;
     anyhow::ensure!(
         message.contains("durable output is inconsistent")
+            || message.contains("inconsistent durable query output")
             || message.contains("outbox high-water")
             || message.contains("failed to deserialize durable outbox"),
         "query Error message did not describe durable output inconsistency: {message}"
@@ -1130,6 +1398,15 @@ async fn recover_strict_fail_phase(paths: &FixturePaths) -> Result<()> {
 }
 
 async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
+    let retained_high_water: u64 = std::env::var(RESET_HIGH_WATER_ENV)
+        .context("missing expected reset high-water mark")?
+        .parse()
+        .context("invalid expected reset high-water mark")?;
+    let reset_sequence = if execution_name(execution_mode()?) == "computation" {
+        retained_high_water
+    } else {
+        0
+    };
     let fixture = build_fixture_opts(
         paths,
         FixtureOpts {
@@ -1145,8 +1422,8 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
 
     let wiped = observe_snapshot(&fixture.core).await?;
     assert_eq!(
-        wiped.sequence, 0,
-        "AutoReset must wipe output so the snapshot sequence is 0"
+        wiped.sequence, reset_sequence,
+        "AutoReset must clear rows; native output preserves its prior sequence high-water"
     );
     assert!(
         wiped.people.is_empty(),
@@ -1155,7 +1432,10 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
     );
 
     let query = query_instance(&fixture.core).await?;
-    let outbox = query.fetch_outbox(0).await?;
+    if reset_sequence > 0 {
+        assert_outbox_gap(&fixture.core, 0, reset_sequence, reset_sequence).await?;
+    }
+    let outbox = query.fetch_outbox(reset_sequence).await?;
     assert!(
         outbox.results.is_empty(),
         "AutoReset must wipe the outbox; got sequences {:?}",
@@ -1165,23 +1445,25 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
             .map(|result| result.sequence)
             .collect::<Vec<_>>()
     );
-    assert_eq!(outbox.latest_sequence, 0);
+    assert_eq!(outbox.latest_sequence, reset_sequence);
+    assert!(query.fetch_snapshot().await?.output_generation > 0);
 
     insert_person(&fixture.source, "p5", "Eve", true).await?;
     let after = wait_for_snapshot_row(&fixture.core, &person("p5", "Eve", true)).await?;
     assert_eq!(
-        after.sequence, 1,
-        "the first result after AutoReset wipe must be sequence 1, not a reused durable key"
+        after.sequence,
+        reset_sequence + 1,
+        "the first result after AutoReset must follow the reset sequence baseline"
     );
 
-    let final_outbox = query.fetch_outbox(0).await?;
+    let final_outbox = query.fetch_outbox(reset_sequence).await?;
     assert_eq!(
         final_outbox
             .results
             .iter()
             .map(|result| result.sequence)
             .collect::<Vec<_>>(),
-        vec![1]
+        vec![reset_sequence + 1]
     );
 
     fixture.core.shutdown().await?;
@@ -1189,8 +1471,7 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
 }
 
 async fn append_outbox_ahead(paths: &FixturePaths) -> Result<()> {
-    let provider = RocksDbIndexProvider::new(&paths.rocks, false, false);
-    let created = provider.create_indexes(QUERY_ID).await?;
+    let created = open_query_indexes(paths).await?;
     let writer = created
         .outbox_writer
         .as_ref()
@@ -1200,13 +1481,11 @@ async fn append_outbox_ahead(paths: &FixturePaths) -> Result<()> {
         .await
         .context("append outbox entry ahead of stored result sequence")?;
     drop(created);
-    drop(provider);
     Ok(())
 }
 
 async fn overwrite_outbox_with_garbage(paths: &FixturePaths, sequence: u64) -> Result<()> {
-    let provider = RocksDbIndexProvider::new(&paths.rocks, false, false);
-    let created = provider.create_indexes(QUERY_ID).await?;
+    let created = open_query_indexes(paths).await?;
     let writer = created
         .outbox_writer
         .as_ref()
@@ -1216,7 +1495,6 @@ async fn overwrite_outbox_with_garbage(paths: &FixturePaths, sequence: u64) -> R
         .await
         .with_context(|| format!("overwrite outbox sequence {sequence} with garbage"))?;
     drop(created);
-    drop(provider);
     Ok(())
 }
 
@@ -1256,8 +1534,7 @@ fn overflow_fixture_opts(
 }
 
 async fn durable_outbox_sequences(paths: &FixturePaths) -> Result<Vec<u64>> {
-    let provider = RocksDbIndexProvider::new(&paths.rocks, false, false);
-    let created = provider.create_indexes(QUERY_ID).await?;
+    let created = open_query_indexes(paths).await?;
     let writer = created
         .outbox_writer
         .as_ref()
@@ -1595,6 +1872,7 @@ fn run_phase_with_env(
     paths: &FixturePaths,
     extra_env: &[(&str, &str)],
 ) -> Result<Output> {
+    let mode = execution_mode()?;
     let executable = std::env::current_exe().context("resolve current test executable")?;
     let mut command = Command::new(executable);
     command
@@ -1602,12 +1880,35 @@ fn run_phase_with_env(
         .arg("reaction_recovery_conformance_phase")
         .arg("--nocapture")
         .arg("--test-threads=1")
+        .env_remove(CRASH_AFTER_EFFECT_ENV)
+        .env_remove(FAIL_EFFECT_ENV)
+        .env_remove(QUERY_POLICY_ENV)
+        .env_remove(IDENTITY_CASE_ENV)
         .env(PHASE_ENV, phase);
     paths.apply_to(&mut command);
     for (key, value) in extra_env {
+        anyhow::ensure!(
+            *key != EXECUTION_ENV,
+            "phase overrides must not change the selected runtime"
+        );
         command.env(key, value);
     }
-    command.output().context("spawn conformance phase child")
+    command.env(EXECUTION_ENV, execution_name(mode));
+    let output = command.output().context("spawn conformance phase child")?;
+    if output.status.success() {
+        let observed: ExecutionAttestation = serde_json::from_slice(
+            &std::fs::read(paths.execution_attestation(phase))
+                .with_context(|| format!("child {phase} omitted execution-mode attestation"))?,
+        )
+        .context("decode child execution-mode attestation")?;
+        anyhow::ensure!(
+            observed.phase == phase
+                && observed.mode == execution_name(mode)
+                && observed.process_id != std::process::id(),
+            "child did not execute its requested runtime in a separate process: {observed:?}"
+        );
+    }
+    Ok(output)
 }
 
 fn child_failure(phase: &str, output: &Output) -> String {
@@ -1755,7 +2056,7 @@ async fn rocksdb_redb_corrupt_output_autoreset_wipes() -> Result<()> {
         return Err(error);
     }
 
-    let recover = run_phase("recover_autoreset", &paths)?;
+    let recover = run_phase_with_env("recover_autoreset", &paths, &[(RESET_HIGH_WATER_ENV, "99")])?;
     let failure = (!recover.status.success()).then(|| child_failure("recover_autoreset", &recover));
     let cleanup = std::fs::remove_dir_all(&root);
     if let Some(message) = failure {
@@ -1800,7 +2101,11 @@ async fn seed_trigger_fresh_phase(paths: &FixturePaths) -> Result<()> {
     assert_eq!(outbox.latest_sequence, 2);
 
     fixture.state_store.sync().await?;
-    assert!(paths.rocks.join(QUERY_ID).join("CURRENT").exists());
+    assert!(paths
+        .rocks
+        .join(read_index_location(paths)?.storage_scope)
+        .join("CURRENT")
+        .exists());
 
     let readiness = SeedReadiness {
         query_sequence: outbox.latest_sequence,
@@ -2114,6 +2419,601 @@ async fn recover_fail_effect_again_phase(paths: &FixturePaths) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct UncheckpointedReadiness {
+    generation: u64,
+    sequence: u64,
+    wal_head: u64,
+}
+
+fn uncheckpointed_policy() -> Result<RecoveryPolicy> {
+    match std::env::var(QUERY_POLICY_ENV).as_deref() {
+        Ok("strict") => Ok(RecoveryPolicy::Strict),
+        Ok("auto_reset") => Ok(RecoveryPolicy::AutoReset),
+        other => anyhow::bail!("invalid or missing {QUERY_POLICY_ENV}: {other:?}"),
+    }
+}
+
+async fn wait_for_source_position(fixture: &RecoveryFixture, sequence: u64) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.source_observations.confirmed_position() != Some(sequence) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("source did not observe committed position {sequence}"))
+}
+
+fn assert_source_resume(fixture: &RecoveryFixture, sequence: u64) -> Result<()> {
+    let subscriptions = fixture.source_observations.subscriptions();
+    anyhow::ensure!(
+        subscriptions.len() == 1,
+        "recovery must not fall back to a fresh subscription or reset; observed {} subscriptions",
+        subscriptions.len()
+    );
+    let settings = &subscriptions[0].settings;
+    assert_eq!(settings.resume_sequence, Some(sequence));
+    assert!(settings.request_position_handle);
+    assert!(!settings.enable_bootstrap);
+    if sequence == 0 {
+        assert!(settings.resume_from.is_none());
+    } else {
+        assert_eq!(
+            settings.resume_from.as_deref(),
+            Some(sequence.to_be_bytes().as_slice())
+        );
+    }
+    Ok(())
+}
+
+async fn seed_uncheckpointed_wal_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture_opts(
+        paths,
+        FixtureOpts {
+            query_policy: uncheckpointed_policy()?,
+            include_reaction: false,
+            ..Default::default()
+        },
+    )
+    .await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, SOURCE_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    let query = query_instance(&fixture.core).await?;
+    let empty = query.fetch_snapshot().await?;
+    assert!(empty.is_empty());
+    assert_eq!(empty.as_of_sequence, 0);
+    assert_eq!(
+        fixture.source_observations.confirmed_position(),
+        Some(u64::MAX),
+        "the fresh query must not have confirmed a source checkpoint"
+    );
+    drop(query);
+    fixture.core.stop_query(QUERY_ID).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Stopped).await?;
+    insert_person(&fixture.source, "p1", "Alice", true).await?;
+    insert_person(&fixture.source, "p2", "Bob", false).await?;
+    assert_eq!(fixture.wal.head_sequence(SOURCE_ID).await?, 2);
+    assert_eq!(fixture.wal.event_count(SOURCE_ID).await?, 2);
+    assert_eq!(
+        fixture
+            .wal
+            .read_from(SOURCE_ID, 1)
+            .await?
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(read_journal(&paths.journal)?.is_empty());
+    write_synced_file(
+        &paths.ready,
+        &serde_json::to_vec(&UncheckpointedReadiness {
+            generation: empty.output_generation,
+            sequence: empty.as_of_sequence,
+            wal_head: 2,
+        })?,
+    )?;
+    // Leave the source/WAL and query indexes owned by this process: no instance
+    // shutdown or destructor flush is allowed to stand in for crash recovery.
+    std::process::exit(0);
+}
+
+async fn recover_uncheckpointed_wal_phase(paths: &FixturePaths) -> Result<()> {
+    let before: UncheckpointedReadiness = serde_json::from_slice(&std::fs::read(&paths.ready)?)?;
+    let fixture = build_fixture_opts(
+        paths,
+        FixtureOpts {
+            query_policy: uncheckpointed_policy()?,
+            include_reaction: false,
+            ..Default::default()
+        },
+    )
+    .await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    let replayed = wait_for_snapshot_row(&fixture.core, &person("p2", "Bob", false)).await?;
+    assert_eq!(
+        replayed,
+        SnapshotObservation {
+            sequence: before.sequence + before.wal_head,
+            people: vec![person("p1", "Alice", true), person("p2", "Bob", false)],
+        }
+    );
+    let query = query_instance(&fixture.core).await?;
+    assert_eq!(
+        query.fetch_snapshot().await?.output_generation,
+        before.generation,
+        "a missing checkpoint with retained inputs must not cause an unnecessary reset"
+    );
+    assert_source_resume(&fixture, 0)?;
+    wait_for_source_position(&fixture, 2).await?;
+    assert_eq!(
+        outbox_emissions(&query.fetch_outbox(0).await?.results)?,
+        vec![
+            add_emission(1, "p1", "Alice", true),
+            add_emission(2, "p2", "Bob", false),
+        ]
+    );
+    fixture
+        .core
+        .add_reaction(DurableRecordingReaction::trigger(
+            paths.journal.clone(),
+            ReactionRecoveryPolicy::Strict,
+        ))
+        .await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+    assert_eq!(
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 2)
+            .await?
+            .sequence,
+        2
+    );
+    assert!(read_journal(&paths.journal)?.is_empty());
+    insert_person(&fixture.source, "p3", "Carol", true).await?;
+    let records = wait_for_journal_sequences(&paths.journal, 1).await?;
+    assert_eq!(
+        journal_emissions(&records)?,
+        vec![add_emission(3, "p3", "Carol", true)]
+    );
+    assert_eq!(
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 3)
+            .await?
+            .sequence,
+        3
+    );
+    wait_for_source_position(&fixture, 3).await?;
+    fixture.state_store.sync().await?;
+    std::process::exit(0);
+}
+
+async fn reopen_checkpointed_wal_phase(paths: &FixturePaths) -> Result<()> {
+    let before: UncheckpointedReadiness = serde_json::from_slice(&std::fs::read(&paths.ready)?)?;
+    let fixture = build_fixture_opts(
+        paths,
+        FixtureOpts {
+            query_policy: uncheckpointed_policy()?,
+            snapshot_on_fresh: false,
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        read_reaction_checkpoint(fixture.state_store.as_ref())
+            .await?
+            .sequence,
+        3
+    );
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+    assert_source_resume(&fixture, 3)?;
+    let query = query_instance(&fixture.core).await?;
+    let restored = query.fetch_snapshot().await?;
+    assert_eq!(restored.output_generation, before.generation);
+    assert_eq!(restored.as_of_sequence, 3);
+    assert_eq!(
+        sorted_people(&restored.to_vec())?,
+        vec![
+            person("p1", "Alice", true),
+            person("p2", "Bob", false),
+            person("p3", "Carol", true),
+        ]
+    );
+    assert_eq!(journal_sequences(&read_journal(&paths.journal)?), vec![3]);
+    insert_person(&fixture.source, "p4", "Dave", false).await?;
+    let records = wait_for_journal_sequences(&paths.journal, 2).await?;
+    assert_eq!(
+        journal_emissions(&records)?,
+        vec![
+            add_emission(3, "p3", "Carol", true),
+            add_emission(4, "p4", "Dave", false),
+        ],
+        "a reconstructed source must allocate the next sequence and not replay acknowledged effects"
+    );
+    assert_eq!(
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 4)
+            .await?
+            .sequence,
+        4
+    );
+    wait_for_source_position(&fixture, 4).await?;
+    assert_eq!(
+        outbox_emissions(&query.fetch_outbox(0).await?.results)?,
+        vec![
+            add_emission(1, "p1", "Alice", true),
+            add_emission(2, "p2", "Bob", false),
+            add_emission(3, "p3", "Carol", true),
+            add_emission(4, "p4", "Dave", false),
+        ]
+    );
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
+fn require_phase(phase: &str, paths: &FixturePaths, extra_env: &[(&str, &str)]) -> Result<()> {
+    let output = run_phase_with_env(phase, paths, extra_env)?;
+    anyhow::ensure!(output.status.success(), "{}", child_failure(phase, &output));
+    Ok(())
+}
+
+async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
+    let root = test_root()?;
+    let paths = FixturePaths::under(&root);
+    let extra_env = [(QUERY_POLICY_ENV, policy)];
+    let result = async {
+        require_phase("seed_uncheckpointed_wal", &paths, &extra_env)?;
+        {
+            let indexes = open_query_indexes(&paths).await?;
+            let store = indexes
+                .checkpoint_store
+                .context("missing checkpoint store")?;
+            let checkpoints = store.read_all_checkpoints().await?;
+            // Native internal query markers use the reserved NUL namespace;
+            // neither runtime may have a per-source cursor in this fixture.
+            assert!(
+                checkpoints.keys().all(|key| key.starts_with('\0')),
+                "seed process unexpectedly persisted source progress: {checkpoints:?}"
+            );
+            assert_eq!(store.read_result_sequence(QUERY_ID).await?.unwrap_or(0), 0);
+        }
+        require_phase("recover_uncheckpointed_wal", &paths, &extra_env)?;
+        {
+            let indexes = open_query_indexes(&paths).await?;
+            let store = indexes
+                .checkpoint_store
+                .context("missing checkpoint store")?;
+            let checkpoints = store.read_all_checkpoints().await?;
+            let source_progress: Vec<_> = checkpoints
+                .iter()
+                .filter(|(key, _)| !key.starts_with('\0'))
+                .collect();
+            assert_eq!(source_progress.len(), 1);
+            assert_eq!(source_progress[0].1.sequence, 3);
+            assert_eq!(
+                source_progress[0].1.source_position.as_deref(),
+                Some(3u64.to_be_bytes().as_slice())
+            );
+            assert_eq!(store.read_result_sequence(QUERY_ID).await?, Some(3));
+        }
+        require_phase("reopen_checkpointed_wal", &paths, &extra_env)
+    }
+    .await;
+    let cleanup = std::fs::remove_dir_all(&root);
+    result?;
+    cleanup.context("remove uncheckpointed reconstruction fixture")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_uncheckpointed_wal_strict_process_reconstruction() -> Result<()> {
+    run_uncheckpointed_reconstruction("strict").await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_uncheckpointed_wal_autoreset_process_reconstruction() -> Result<()> {
+    run_uncheckpointed_reconstruction("auto_reset").await
+}
+
+#[derive(Clone, Copy)]
+enum IdentityChange {
+    Reconfigure,
+    Delete,
+}
+
+impl IdentityChange {
+    fn from_env() -> Result<Self> {
+        match std::env::var(IDENTITY_CASE_ENV).as_deref() {
+            Ok("reconfigure") => Ok(Self::Reconfigure),
+            Ok("delete") => Ok(Self::Delete),
+            other => anyhow::bail!("invalid or missing {IDENTITY_CASE_ENV}: {other:?}"),
+        }
+    }
+
+    fn query_text(self) -> &'static str {
+        match self {
+            Self::Reconfigure => RECONFIGURED_QUERY_TEXT,
+            Self::Delete => QUERY_TEXT,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct IdentityReadiness {
+    old_sequence: u64,
+    old_config_hash: u64,
+    old_generation: u64,
+    sequence: u64,
+    config_hash: u64,
+    generation: u64,
+}
+
+fn read_identity_readiness(paths: &FixturePaths) -> Result<IdentityReadiness> {
+    serde_json::from_slice(&std::fs::read(&paths.ready)?).context("read identity recovery marker")
+}
+
+fn identity_fixture_opts(policy: ReactionRecoveryPolicy) -> Result<FixtureOpts> {
+    Ok(FixtureOpts {
+        query_text: IdentityChange::from_env()?.query_text(),
+        reaction_policy: policy,
+        ..Default::default()
+    })
+}
+
+async fn seed_query_identity_change_phase(paths: &FixturePaths) -> Result<()> {
+    let change = IdentityChange::from_env()?;
+    let fixture = build_fixture(paths).await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+    insert_person(&fixture.source, "p1", "Alice", true).await?;
+    let checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 1).await?;
+    wait_for_source_position(&fixture, 1).await?;
+    let old = query_instance(&fixture.core)
+        .await?
+        .fetch_snapshot()
+        .await?;
+    assert_eq!(old.as_of_sequence, 1);
+    assert_eq!(
+        sorted_people(&old.to_vec())?,
+        vec![person("p1", "Alice", true)]
+    );
+    fixture.core.remove_reaction(REACTION_ID, false).await?;
+
+    let replacement = drasi_lib::Query::cypher(QUERY_ID)
+        .query(change.query_text())
+        .from_source(SOURCE_ID)
+        .auto_start(true)
+        .enable_bootstrap(false)
+        .with_outbox_capacity(32)
+        .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+        .with_recovery_policy(RecoveryPolicy::Strict)
+        .build();
+    match change {
+        IdentityChange::Reconfigure => {
+            fixture.core.update_query(QUERY_ID, replacement).await?;
+        }
+        IdentityChange::Delete => {
+            fixture.core.remove_query(QUERY_ID).await?;
+            fixture.core.add_query(replacement).await?;
+        }
+    }
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    let query = query_instance(&fixture.core).await?;
+    let reset = query.fetch_snapshot().await?;
+    assert!(
+        reset.is_empty(),
+        "identity change must discard old live rows"
+    );
+    assert!(reset.output_generation > old.output_generation);
+    insert_person(&fixture.source, "p2", "Bob", false).await?;
+    let new = wait_for_snapshot_row(&fixture.core, &person("p2", "Bob", false)).await?;
+    assert_eq!(new.sequence, reset.as_of_sequence + 1);
+    assert_eq!(new.people, vec![person("p2", "Bob", false)]);
+    wait_for_source_position(&fixture, 2).await?;
+    let snapshot = query.fetch_snapshot().await?;
+    let checkpoint_hash = if fixture.core.execution_mode() == ExecutionMode::ComponentGraph {
+        drasi_lib::queries::output_epoch_hash(snapshot.config_hash, snapshot.output_generation)
+    } else {
+        // Native reactions persist the config hash directly and fence the
+        // output generation in their separate recovery metadata.
+        snapshot.config_hash
+    };
+    if matches!(change, IdentityChange::Reconfigure) {
+        assert_ne!(snapshot.config_hash, old.config_hash);
+        assert!(snapshot
+            .to_vec()
+            .iter()
+            .all(|row| row["revision"] == serde_json::json!(true)));
+    }
+    assert_eq!(
+        read_reaction_checkpoint(fixture.state_store.as_ref()).await?,
+        checkpoint,
+        "removal without cleanup must preserve the obsolete reaction cursor for the restart test"
+    );
+    assert_eq!(
+        journal_emissions(&read_journal(&paths.journal)?)?,
+        vec![add_emission(1, "p1", "Alice", true)]
+    );
+    fixture.state_store.sync().await?;
+    write_synced_file(
+        &paths.ready,
+        &serde_json::to_vec(&IdentityReadiness {
+            old_sequence: checkpoint.sequence,
+            old_config_hash: checkpoint.config_hash,
+            old_generation: old.output_generation,
+            sequence: snapshot.as_of_sequence,
+            config_hash: checkpoint_hash,
+            generation: snapshot.output_generation,
+        })?,
+    )?;
+    std::process::exit(0);
+}
+
+async fn recover_query_identity_strict_phase(paths: &FixturePaths) -> Result<()> {
+    let before = read_identity_readiness(paths)?;
+    let fixture = build_fixture_opts(
+        paths,
+        identity_fixture_opts(ReactionRecoveryPolicy::Strict)?,
+    )
+    .await?;
+    let _ = fixture.core.start().await;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Error).await?;
+    let snapshot = query_instance(&fixture.core)
+        .await?
+        .fetch_snapshot()
+        .await?;
+    assert_eq!(snapshot.as_of_sequence, before.sequence);
+    assert_eq!(snapshot.output_generation, before.generation);
+    assert!(snapshot.output_generation > before.old_generation);
+    assert_eq!(
+        sorted_people(&snapshot.to_vec())?,
+        vec![person("p2", "Bob", false)]
+    );
+    let checkpoint = read_reaction_checkpoint(fixture.state_store.as_ref()).await?;
+    assert_eq!(checkpoint.sequence, before.old_sequence);
+    assert_eq!(checkpoint.config_hash, before.old_config_hash);
+    assert_eq!(
+        journal_emissions(&read_journal(&paths.journal)?)?,
+        vec![add_emission(1, "p1", "Alice", true)]
+    );
+    let _ = fixture.core.shutdown().await;
+    Ok(())
+}
+
+async fn recover_query_identity_autoreset_phase(paths: &FixturePaths) -> Result<()> {
+    let before = read_identity_readiness(paths)?;
+    let fixture = build_fixture_opts(
+        paths,
+        identity_fixture_opts(ReactionRecoveryPolicy::AutoReset)?,
+    )
+    .await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+    let checkpoint =
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), before.sequence).await?;
+    assert_eq!(checkpoint.sequence, before.sequence);
+    assert_eq!(checkpoint.config_hash, before.config_hash);
+    let records = read_journal(&paths.journal)?;
+    let resets: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::Snapshot {
+                sequence,
+                is_reset: true,
+                rows,
+                ..
+            } => Some((*sequence, rows)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        resets.len(),
+        1,
+        "changed output identity requires one snapshot reset"
+    );
+    assert_eq!(resets[0].0, before.sequence);
+    assert_eq!(
+        sorted_people(resets[0].1)?,
+        vec![person("p2", "Bob", false)]
+    );
+    let query = query_instance(&fixture.core).await?;
+    assert_eq!(
+        query.fetch_snapshot().await?.output_generation,
+        before.generation
+    );
+    insert_person(&fixture.source, "p3", "Carol", true).await?;
+    let records = wait_for_journal_sequences(&paths.journal, 2).await?;
+    assert_eq!(
+        journal_emissions(&records)?,
+        vec![
+            add_emission(1, "p1", "Alice", true),
+            add_emission(before.sequence + 1, "p3", "Carol", true),
+        ]
+    );
+    let completed =
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), before.sequence + 1).await?;
+    assert_eq!(completed.sequence, before.sequence + 1);
+    assert_eq!(completed.config_hash, before.config_hash);
+    wait_for_source_position(&fixture, 3).await?;
+    fixture.state_store.sync().await?;
+    std::process::exit(0);
+}
+
+async fn reopen_query_identity_phase(paths: &FixturePaths) -> Result<()> {
+    let before = read_identity_readiness(paths)?;
+    let fixture = build_fixture_opts(
+        paths,
+        identity_fixture_opts(ReactionRecoveryPolicy::Strict)?,
+    )
+    .await?;
+    let checkpoint = read_reaction_checkpoint(fixture.state_store.as_ref()).await?;
+    assert_eq!(checkpoint.sequence, before.sequence + 1);
+    assert_eq!(checkpoint.config_hash, before.config_hash);
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+    assert_source_resume(&fixture, 3)?;
+    let query = query_instance(&fixture.core).await?;
+    let snapshot = query.fetch_snapshot().await?;
+    assert_eq!(snapshot.output_generation, before.generation);
+    assert_eq!(snapshot.as_of_sequence, before.sequence + 1);
+    assert_eq!(
+        sorted_people(&snapshot.to_vec())?,
+        vec![person("p2", "Bob", false), person("p3", "Carol", true)]
+    );
+    insert_person(&fixture.source, "p4", "Dave", false).await?;
+    let records = wait_for_journal_sequences(&paths.journal, 3).await?;
+    assert_eq!(
+        journal_emissions(&records)?,
+        vec![
+            add_emission(1, "p1", "Alice", true),
+            add_emission(before.sequence + 1, "p3", "Carol", true),
+            add_emission(before.sequence + 2, "p4", "Dave", false),
+        ]
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, JournalRecord::Snapshot { is_reset: true, .. }))
+            .count(),
+        1,
+        "the successfully checkpointed replacement must not reset again on another process restart"
+    );
+    let final_checkpoint =
+        wait_for_checkpoint_sequence(fixture.state_store.as_ref(), before.sequence + 2).await?;
+    assert_eq!(final_checkpoint.sequence, before.sequence + 2);
+    assert_eq!(final_checkpoint.config_hash, before.config_hash);
+    wait_for_source_position(&fixture, 4).await?;
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
+async fn run_identity_reconstruction(change: &str) -> Result<()> {
+    let root = test_root()?;
+    let paths = FixturePaths::under(&root);
+    let extra_env = [(IDENTITY_CASE_ENV, change)];
+    let result = (|| {
+        require_phase("seed_query_identity_change", &paths, &extra_env)?;
+        require_phase("recover_query_identity_strict", &paths, &extra_env)?;
+        require_phase("recover_query_identity_autoreset", &paths, &extra_env)?;
+        require_phase("reopen_query_identity", &paths, &extra_env)
+    })();
+    let cleanup = std::fs::remove_dir_all(&root);
+    result?;
+    cleanup.context("remove query-identity reconstruction fixture")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_configuration_identity_process_reconstruction() -> Result<()> {
+    run_identity_reconstruction("reconfigure").await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_deleted_query_identity_process_reconstruction() -> Result<()> {
+    run_identity_reconstruction("delete").await
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn rocksdb_redb_crash_after_effect_before_checkpoint() -> Result<()> {
     if std::env::var_os(PHASE_ENV).is_some() {
@@ -2308,7 +3208,7 @@ async fn rocksdb_redb_corrupt_outbox_payload_autoreset_wipes() -> Result<()> {
         return Err(error);
     }
 
-    let recover = run_phase("recover_autoreset", &paths)?;
+    let recover = run_phase_with_env("recover_autoreset", &paths, &[(RESET_HIGH_WATER_ENV, "3")])?;
     let failure = (!recover.status.success()).then(|| child_failure("recover_autoreset", &recover));
     let cleanup = std::fs::remove_dir_all(&root);
     if let Some(message) = failure {
@@ -2376,58 +3276,70 @@ async fn rocksdb_redb_overflow_gap_autoskip() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn reaction_recovery_conformance_phase() -> Result<()> {
-    match std::env::var(PHASE_ENV) {
-        Ok(phase) if phase == "seed" => seed_phase(&FixturePaths::from_env()?).await,
-        Ok(phase) if phase == "recover" => recover_phase(&FixturePaths::from_env()?).await,
-        Ok(phase) if phase == "seed_hwm" => seed_hwm_phase(&FixturePaths::from_env()?).await,
-        Ok(phase) if phase == "recover_hwm" => recover_hwm_phase(&FixturePaths::from_env()?).await,
-        Ok(phase) if phase == "recover_strict_fail" => {
-            recover_strict_fail_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_autoreset" => {
-            recover_autoreset_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "seed_trigger_fresh" => {
-            seed_trigger_fresh_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_trigger_fresh" => {
-            recover_trigger_fresh_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "seed_crash_after_effect" => {
-            seed_crash_after_effect_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_crash_after_effect" => {
-            recover_crash_after_effect_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "seed_crash_after_checkpoint" => {
-            seed_crash_after_checkpoint_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_crash_after_checkpoint" => {
-            recover_crash_after_checkpoint_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "seed_fail_effect" => {
-            seed_fail_effect_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_fail_effect" => {
-            recover_fail_effect_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_fail_effect_again" => {
-            recover_fail_effect_again_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "seed_overflow" => {
-            seed_overflow_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_overflow_strict" => {
-            recover_overflow_strict_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_overflow_autoreset" => {
-            recover_overflow_autoreset_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(phase) if phase == "recover_overflow_autoskip" => {
-            recover_overflow_autoskip_phase(&FixturePaths::from_env()?).await
-        }
-        Ok(other) => anyhow::bail!("unknown conformance phase '{other}'"),
-        Err(std::env::VarError::NotPresent) => Ok(()),
-        Err(error) => Err(error).context("read conformance phase environment variable"),
-    }
+    execution_mode()?;
+    let phase = match std::env::var(PHASE_ENV) {
+        Ok(phase) => phase,
+        Err(std::env::VarError::NotPresent) => return Ok(()),
+        Err(error) => return Err(error).context("read conformance phase environment variable"),
+    };
+    let paths = FixturePaths::from_env()?;
+    // Keep the many independently large lifecycle futures off the test
+    // thread's stack without changing its current-thread runtime flavor.
+    let operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> =
+        match phase.as_str() {
+            "seed" => Box::pin(seed_phase(&paths)),
+            "recover" => Box::pin(recover_phase(&paths)),
+            "seed_hwm" => Box::pin(seed_hwm_phase(&paths)),
+            "recover_hwm" => Box::pin(recover_hwm_phase(&paths)),
+            "recover_strict_fail" => Box::pin(recover_strict_fail_phase(&paths)),
+            "recover_autoreset" => Box::pin(recover_autoreset_phase(&paths)),
+            "seed_trigger_fresh" => Box::pin(seed_trigger_fresh_phase(&paths)),
+            "recover_trigger_fresh" => Box::pin(recover_trigger_fresh_phase(&paths)),
+            "seed_crash_after_effect" => Box::pin(seed_crash_after_effect_phase(&paths)),
+            "recover_crash_after_effect" => Box::pin(recover_crash_after_effect_phase(&paths)),
+            "seed_crash_after_checkpoint" => Box::pin(seed_crash_after_checkpoint_phase(&paths)),
+            "recover_crash_after_checkpoint" => {
+                Box::pin(recover_crash_after_checkpoint_phase(&paths))
+            }
+            "seed_fail_effect" => Box::pin(seed_fail_effect_phase(&paths)),
+            "recover_fail_effect" => Box::pin(recover_fail_effect_phase(&paths)),
+            "recover_fail_effect_again" => Box::pin(recover_fail_effect_again_phase(&paths)),
+            "seed_uncheckpointed_wal" => Box::pin(seed_uncheckpointed_wal_phase(&paths)),
+            "recover_uncheckpointed_wal" => Box::pin(recover_uncheckpointed_wal_phase(&paths)),
+            "reopen_checkpointed_wal" => Box::pin(reopen_checkpointed_wal_phase(&paths)),
+            "seed_query_identity_change" => Box::pin(seed_query_identity_change_phase(&paths)),
+            "recover_query_identity_strict" => {
+                Box::pin(recover_query_identity_strict_phase(&paths))
+            }
+            "recover_query_identity_autoreset" => {
+                Box::pin(recover_query_identity_autoreset_phase(&paths))
+            }
+            "reopen_query_identity" => Box::pin(reopen_query_identity_phase(&paths)),
+            "seed_overflow" => Box::pin(seed_overflow_phase(&paths)),
+            "recover_overflow_strict" => Box::pin(recover_overflow_strict_phase(&paths)),
+            "recover_overflow_autoreset" => Box::pin(recover_overflow_autoreset_phase(&paths)),
+            "recover_overflow_autoskip" => Box::pin(recover_overflow_autoskip_phase(&paths)),
+            other => anyhow::bail!("unknown conformance phase '{other}'"),
+        };
+    operation.await
+}
+
+#[test]
+fn execution_mode_selection_is_explicit() {
+    assert_eq!(
+        parse_execution_mode("component").unwrap(),
+        ExecutionMode::ComponentGraph
+    );
+    assert!(parse_execution_mode("unknown").is_err());
+    assert!(parse_execution_mode("").is_err());
+    #[cfg(feature = "computation")]
+    assert_eq!(
+        parse_execution_mode("computation").unwrap(),
+        ExecutionMode::ComputationGraph
+    );
+    #[cfg(not(feature = "computation"))]
+    assert!(parse_execution_mode("computation")
+        .unwrap_err()
+        .to_string()
+        .contains("requires --features computation"));
 }

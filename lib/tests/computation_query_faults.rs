@@ -52,6 +52,7 @@ enum Fault {
     PendingClear,
     BootstrapComplete,
     LiveRows,
+    ReadLiveRows,
     Commit,
     CommittedThenWait,
 }
@@ -180,6 +181,9 @@ impl LiveResultsWriter for Live {
         self.inner.apply_mutations(id, rows).await
     }
     async fn read_snapshot(&self, id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        if self.fault.take(Fault::ReadLiveRows) {
+            return Err(IndexError::IOError);
+        }
         self.inner.read_snapshot(id).await
     }
     async fn clear(&self, id: &str) -> Result<(), IndexError> {
@@ -540,6 +544,63 @@ impl ComputationBootstrapProvider for Bootstrap {
             }],
         })
     }
+}
+
+#[tokio::test]
+async fn recovery_io_failure_does_not_authorize_auto_reset_of_committed_state() {
+    struct NoBootstrap;
+    #[async_trait]
+    impl ComputationBootstrapProvider for NoBootstrap {
+        async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+            panic!("a storage read outage must not trigger destructive bootstrap")
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("temp");
+    let base = provider(temp.path());
+    {
+        let mut first = ContinuousQueryTransformer::new(definition(false), base.clone())
+            .await
+            .expect("query");
+        first.start().await.expect("start");
+        first.transform(input(1)).await.expect("committed input");
+        first.stop().await.expect("stop");
+    }
+    let fault = Injection::new(Fault::ReadLiveRows);
+    {
+        let mut unavailable = ContinuousQueryTransformer::new_with_options(
+            definition(false),
+            Arc::new(Provider {
+                inner: base.clone(),
+                fault: fault.clone(),
+            }),
+            QueryOptions {
+                recovery: QueryRecoveryPolicy::AutoReset,
+                publication: QueryPublicationMode::Atomic,
+            },
+        )
+        .await
+        .expect("reopen")
+        .with_bootstrap(Arc::new(NoBootstrap));
+        fault.armed.store(true, Ordering::Release);
+        let error = unavailable.start().await.expect_err("storage outage");
+        assert!(matches!(
+            error.downcast_ref::<IndexError>(),
+            Some(IndexError::IOError)
+        ));
+        assert!(error.downcast_ref::<QueryRecoveryError>().is_none());
+        unavailable.stop().await.expect("cleanup");
+    }
+    let mut recovered = ContinuousQueryTransformer::new(definition(false), base)
+        .await
+        .expect("reopen after outage");
+    recovered.start().await.expect("committed state retained");
+    let snapshot = recovered.results().snapshot().expect("snapshot");
+    assert_eq!(snapshot.as_of_sequence, 1);
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.generation, 0);
+    assert_eq!(recovered.results().replay(0).expect("outbox").len(), 1);
+    recovered.stop().await.expect("stop");
 }
 
 #[tokio::test]

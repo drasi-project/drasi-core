@@ -24,6 +24,7 @@ use std::{
     },
 };
 
+use anyhow::Context;
 use async_trait::async_trait;
 use bincode::Options;
 use bytes::Bytes;
@@ -791,7 +792,12 @@ impl ContinuousQueryTransformer {
                 RecordId::try_new(namespace, Bytes::copy_from_slice(&signature.to_be_bytes()))?,
                 RecordImage::Full,
                 Bytes::from(bytes),
-            )?;
+            )
+            .with_context(|| {
+                QueryRecoveryError::Inconsistent(format!(
+                    "failed to deserialize durable live row {signature}"
+                ))
+            })?;
             rows.insert(row.identity().clone(), row);
         }
         let mut recovered = Vec::new();
@@ -805,23 +811,43 @@ impl ContinuousQueryTransformer {
                 )
                 .into());
             }
-            let mut envelope = self.codec.decode(&bytes)?;
+            let mut envelope = self.codec.decode(&bytes).with_context(|| {
+                QueryRecoveryError::Inconsistent(format!(
+                    "failed to deserialize durable outbox entry {position}"
+                ))
+            })?;
+            let metadata = QueryChangeCodec::metadata(&envelope).with_context(|| {
+                QueryRecoveryError::Inconsistent(format!(
+                    "invalid durable outbox metadata at {position}"
+                ))
+            })?;
             if envelope.system().sequence() != position
                 || envelope.system().stream() != &self.definition.output_stream
-                || QueryChangeCodec::metadata(&envelope)?.query_id != self.definition.id.as_str()
+                || metadata.query_id != self.definition.id.as_str()
             {
                 return Err(QueryRecoveryError::Inconsistent(
                     "retained output identity differs from the query".into(),
                 )
                 .into());
             }
-            if QueryChangeCodec::query_generation(&envelope)? != generation {
+            if QueryChangeCodec::query_generation(&envelope).with_context(|| {
+                QueryRecoveryError::Inconsistent(format!(
+                    "invalid durable outbox generation at {position}"
+                ))
+            })? != generation
+            {
                 return Err(QueryRecoveryError::Inconsistent(
                     "retained output belongs to another reset generation".into(),
                 )
                 .into());
             }
-            match super::QueryRecoveryIdentity::optional_from_envelope(&envelope)? {
+            match super::QueryRecoveryIdentity::optional_from_envelope(&envelope).with_context(
+                || {
+                    QueryRecoveryError::Inconsistent(format!(
+                        "invalid durable outbox producer identity at {position}"
+                    ))
+                },
+            )? {
                 Some(stored) if stored == identity => {}
                 Some(_) => {
                     return Err(QueryRecoveryError::Inconsistent(

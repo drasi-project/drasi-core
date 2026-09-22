@@ -14,7 +14,7 @@
 
 #![cfg(feature = "computation-middleware-tests")]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     SourceMiddlewareConfig,
@@ -26,7 +26,7 @@ use drasi_lib::{
     computation::v1::*,
     DrasiLib,
 };
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{io::Write, num::NonZeroUsize, process::Stdio, sync::Arc, time::Duration};
 
 fn definition() -> Result<MiddlewareTransformerDefinition> {
     Ok(MiddlewareTransformerDefinition {
@@ -100,13 +100,20 @@ fn source_input(sequence: u64, update: bool, raw_metadata: bool) -> Result<Input
 }
 
 async fn persistent_query(path: &std::path::Path) -> Result<ContinuousQueryTransformer> {
+    persistent_query_named(path, "query").await
+}
+
+async fn persistent_query_named(
+    path: &std::path::Path,
+    id: &str,
+) -> Result<ContinuousQueryTransformer> {
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "middleware-durability".into(),
-            id: ComponentId::try_new("query")?,
+            id: ComponentId::try_new(id)?,
             query: "MATCH (n:Child) RETURN n.id AS id".into(),
             language: ComputationQueryLanguage::Cypher,
-            output_stream: StreamId::try_new("query/out")?,
+            output_stream: StreamId::try_new(format!("{id}/out"))?,
             outbox_capacity: NonZeroUsize::new(8).expect("capacity"),
         },
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(path, false, false))),
@@ -293,5 +300,143 @@ async fn full_middleware_retention_preserves_input_for_retry_after_durable_confi
     middleware.stop().await?;
     query.stop().await?;
     registry_owner.shutdown().await?;
+    Ok(())
+}
+
+const CRASH_EXIT: i32 = 73;
+
+#[tokio::test]
+#[ignore = "subprocess worker invoked by durable middleware crash scenarios"]
+async fn middleware_recovery_crash_worker() -> Result<()> {
+    let root = std::path::PathBuf::from(std::env::var("DRASI_MIDDLEWARE_CRASH_ROOT")?);
+    let phase = std::env::var("DRASI_MIDDLEWARE_CRASH_PHASE")?;
+    let boundary = std::env::var("DRASI_MIDDLEWARE_CRASH_BOUNDARY")?;
+    let raw_metadata = std::env::var("DRASI_MIDDLEWARE_CRASH_RAW")? == "true";
+    let registry_owner = DrasiLib::builder().build().await?;
+    let mut middleware = durable_middleware(
+        &root.join("middleware"),
+        registry_owner.middleware_registry(),
+        8,
+    )
+    .await?;
+    let mut first = persistent_query_named(&root.join("first"), "first").await?;
+    let mut second = persistent_query_named(&root.join("second"), "second").await?;
+    let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("limit"));
+    codec.register_schema(GraphChangeCodec::schema())?;
+
+    if phase == "seed" {
+        let output = middleware
+            .transform(source_input(1, false, raw_metadata)?)
+            .await?;
+        assert_eq!(output.len(), 1);
+        let mut saved = std::fs::File::create(root.join("initial-envelope.bin"))?;
+        saved.write_all(&codec.encode(&output[0].envelope)?)?;
+        saved.sync_all()?;
+        if boundary != "before-delivery" {
+            deliver(&mut first, &output).await?;
+            assert_eq!(child_ids(&first)?, ["a", "b"]);
+        }
+        if matches!(boundary.as_str(), "after-delivery" | "after-confirmation") {
+            deliver(&mut second, &output).await?;
+            assert_eq!(child_ids(&second)?, ["a", "b"]);
+        }
+        if boundary == "after-confirmation" {
+            middleware.delivery_completed(&output).await?;
+        }
+        // Intentionally bypass all component stops and destructors.
+        std::process::exit(CRASH_EXIT);
+    }
+
+    anyhow::ensure!(phase == "recover", "unknown crash worker phase");
+    let original = codec.decode(&std::fs::read(root.join("initial-envelope.bin"))?)?;
+    if boundary == "after-confirmation" {
+        assert!(!middleware.has_pending_emissions());
+    } else {
+        assert!(middleware.has_pending_emissions());
+        let replay = middleware.on_wakeup().await?;
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].envelope.changes().id(), original.changes().id());
+        assert!(replay[0].envelope.system().sequence() > original.system().sequence());
+        assert_eq!(
+            GraphProducerProgress::from_envelope(&replay[0].envelope)?,
+            GraphProducerProgress::from_envelope(&original)?,
+        );
+        assert_eq!(
+            deliver(&mut first, &replay).await?,
+            usize::from(boundary == "before-delivery"),
+        );
+        assert_eq!(
+            deliver(&mut second, &replay).await?,
+            usize::from(boundary != "after-delivery"),
+        );
+        middleware.delivery_completed(&replay).await?;
+    }
+    assert_eq!(child_ids(&first)?, ["a", "b"]);
+    assert_eq!(child_ids(&second)?, ["a", "b"]);
+
+    let update = middleware
+        .transform(source_input(2, true, raw_metadata)?)
+        .await?;
+    assert_eq!(
+        GraphProducerProgress::from_envelope(&update[0].envelope)?
+            .expect("logical progress")
+            .sequence(),
+        2
+    );
+    deliver(&mut first, &update).await?;
+    deliver(&mut second, &update).await?;
+    middleware.delivery_completed(&update).await?;
+    assert_eq!(child_ids(&first)?, ["a"]);
+    assert_eq!(child_ids(&second)?, ["a"]);
+    middleware.stop().await?;
+    first.stop().await?;
+    second.stop().await?;
+    registry_owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn abrupt_process_exit_recovers_state_delivery_and_partial_fanout() -> Result<()> {
+    let executable = std::env::current_exe()?;
+    for raw_metadata in [false, true] {
+        for boundary in [
+            "before-delivery",
+            "partial-fanout",
+            "after-delivery",
+            "after-confirmation",
+        ] {
+            let directory = tempfile::tempdir()?;
+            for phase in ["seed", "recover"] {
+                let child = tokio::process::Command::new(&executable)
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "middleware_recovery_crash_worker",
+                        "--nocapture",
+                    ])
+                    .env("DRASI_MIDDLEWARE_CRASH_ROOT", directory.path())
+                    .env("DRASI_MIDDLEWARE_CRASH_PHASE", phase)
+                    .env("DRASI_MIDDLEWARE_CRASH_BOUNDARY", boundary)
+                    .env("DRASI_MIDDLEWARE_CRASH_RAW", raw_metadata.to_string())
+                    .env("RUST_LOG", "error")
+                    .kill_on_drop(true)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?;
+                let output =
+                    tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+                        .await
+                        .with_context(|| format!("{phase}/{boundary} worker timed out"))??;
+                let expected = if phase == "seed" { CRASH_EXIT } else { 0 };
+                anyhow::ensure!(
+                    output.status.code() == Some(expected),
+                    "{phase}/{boundary}, raw={raw_metadata}: expected exit {expected}, got {}; stdout={}; stderr={}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+        }
+    }
     Ok(())
 }

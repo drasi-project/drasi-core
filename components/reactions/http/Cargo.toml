@@ -50,6 +50,7 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
 [dev-dependencies]
+bincode = "1.3"
 # TODO(#574): Revisit this test-only workspace dependency when the HTTP
 # reaction is made buildable outside the drasi-core workspace.
 drasi-core.workspace = true
@@ -60,3 +61,5 @@ env_logger = "0.11"
 [features]
 # default = []
 dynamic-plugin = []
+# Opt-in native runtime coverage for integration tests, not a production default.
+computation-tests = ["drasi-lib/computation"]

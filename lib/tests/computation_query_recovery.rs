@@ -679,6 +679,168 @@ mod persistent {
     }
 
     #[tokio::test]
+    async fn corrupt_persisted_output_is_explicit_under_strict_and_resettable_under_auto_reset() {
+        use drasi_core::interface::RowMutation;
+
+        for corrupt in ["outbox", "snapshot", "metadata", "generation", "identity"] {
+            let temp = tempfile::tempdir().expect("temp");
+            let provider = provider(temp.path());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let text = "MATCH (n:Person) RETURN n.name AS name";
+            {
+                let mut first = query(
+                    provider.clone(),
+                    text,
+                    QueryRecoveryPolicy::Strict,
+                    false,
+                    calls.clone(),
+                )
+                .await;
+                first.start().await.expect("bootstrap");
+                first
+                    .transform(InputEnvelope {
+                        port: PortId::try_new("in").expect("port"),
+                        envelope: envelope(2, "Alicia", true),
+                    })
+                    .await
+                    .expect("committed output");
+                first.stop().await.expect("stop");
+            }
+            {
+                let resources = provider
+                    .create_indexes("recovery", "query")
+                    .await
+                    .expect("resources");
+                let outbox = resources.outbox_writer().expect("outbox");
+                let live = resources.live_results_writer().expect("live rows");
+                let retained = outbox.read_from("query", 0).await.expect("history");
+                let stored_rows = live.read_snapshot("query").await.expect("snapshot");
+                assert_eq!(retained.len(), 1);
+                assert_eq!(stored_rows.len(), 1);
+                resources
+                    .indexes()
+                    .session_control
+                    .begin()
+                    .await
+                    .expect("begin");
+                if corrupt == "snapshot" {
+                    live.apply_mutations(
+                        "query",
+                        &[RowMutation {
+                            row_signature: stored_rows[0].0,
+                            data: Some(b"corrupt-snapshot"),
+                        }],
+                    )
+                    .await
+                    .expect("corrupt row");
+                } else {
+                    let bytes = if corrupt == "outbox" {
+                        bytes::Bytes::from_static(b"corrupt-outbox")
+                    } else {
+                        let mut codec =
+                            EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("limit"));
+                        codec
+                            .register_schema(QueryChangeCodec::schema())
+                            .expect("schema");
+                        let mut output = codec.decode(&retained[0].1).expect("valid original");
+                        let key = match corrupt {
+                            "metadata" => "drasi.query-output.v1",
+                            "generation" => "drasi.query-generation.v1",
+                            "identity" => "drasi.query-recovery-identity.v1",
+                            _ => unreachable!(),
+                        };
+                        output
+                            .append_annotation(
+                                ContextEntry::try_new(
+                                    ComponentId::try_new("query").expect("id"),
+                                    key,
+                                    ContextValue::Bool(true),
+                                )
+                                .expect("annotation"),
+                            )
+                            .expect("append");
+                        codec
+                            .encode(&output)
+                            .expect("envelope with invalid query annotation")
+                    };
+                    outbox
+                        .append("query", retained[0].0, &bytes)
+                        .await
+                        .expect("corrupt output");
+                }
+                resources
+                    .indexes()
+                    .session_control
+                    .commit()
+                    .await
+                    .expect("commit corruption");
+                resources
+                    .cleanup()
+                    .expect("owner")
+                    .shutdown()
+                    .await
+                    .expect("close");
+            }
+            {
+                let mut strict = query(
+                    provider.clone(),
+                    text,
+                    QueryRecoveryPolicy::Strict,
+                    false,
+                    calls.clone(),
+                )
+                .await;
+                let error = strict.start().await.expect_err(corrupt);
+                assert!(
+                    matches!(
+                        error.downcast_ref::<QueryRecoveryError>(),
+                        Some(QueryRecoveryError::Inconsistent(_))
+                    ),
+                    "{corrupt}: {error:#}"
+                );
+                assert!(error
+                    .to_string()
+                    .contains("inconsistent durable query output"));
+                assert!(
+                    error.chain().count() > 1,
+                    "the original decoding cause must be retained"
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    1,
+                    "Strict does not bootstrap away corruption"
+                );
+                strict.stop().await.expect("stop failed recovery");
+            }
+            let mut reset = query(
+                provider,
+                text,
+                QueryRecoveryPolicy::AutoReset,
+                false,
+                calls.clone(),
+            )
+            .await;
+            reset.start().await.expect(corrupt);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            let snapshot = reset.results().snapshot().expect("rebuilt snapshot");
+            assert_eq!(
+                snapshot.as_of_sequence, 1,
+                "do not reuse committed output numbers"
+            );
+            assert_eq!(snapshot.rows.len(), 1);
+            assert!(snapshot.generation > 0);
+            assert_eq!(
+                QueryChangeCodec::decode_row(snapshot.rows.values().next().expect("row"))
+                    .expect("row")
+                    .values
+                    .get("name"),
+                Some(&drasi_core::evaluation::variable_value::VariableValue::from("Alice")),
+            );
+            reset.stop().await.expect("stop reset");
+        }
+    }
+
+    #[tokio::test]
     async fn interrupted_bootstrap_stays_visible_until_explicit_reset_rebuilds_it() {
         let temp = tempfile::tempdir().expect("temp");
         let provider = provider(temp.path());

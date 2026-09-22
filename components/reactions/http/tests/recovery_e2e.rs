@@ -20,6 +20,9 @@
 //! downstream server actually received**. Recovery is driven with the public
 //! `stop_reaction` / `start_reaction` lifecycle calls.
 //!
+//! Select `DRASI_TEST_EXECUTION=component` or `computation` per Cargo invocation.
+//! Native coverage requires the opt-in `computation-tests` feature.
+//!
 //! Scenarios:
 //! * `at_least_once_replays_unacked_events_after_restart` — events produced while
 //!   the reaction is stopped are replayed from the query outbox on restart, and
@@ -39,11 +42,13 @@
 
 mod mock_server;
 mod mock_source;
+#[path = "../../tests/recovery_support.rs"]
+mod recovery_support;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use drasi_lib::channels::ComponentStatus;
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query};
@@ -51,6 +56,8 @@ use drasi_reaction_http::{AdaptiveBatchConfig, HttpReaction};
 use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use recovery_support::{execution_mode, outbox, wait_for_checkpoint, wait_for_outbox};
 
 const SOURCE: &str = "e2e-source";
 const QUERY: &str = "e2e-query";
@@ -90,8 +97,10 @@ async fn build_core(
     }
     let reaction = builder.build().expect("reaction builder");
 
+    let mode = execution_mode();
     let core = Arc::new(
         DrasiLib::builder()
+            .with_execution_mode(mode)
             .with_id("e2e-core")
             .with_source(mock_source)
             .with_query(query)
@@ -100,6 +109,11 @@ async fn build_core(
             .build()
             .await
             .expect("build core"),
+    );
+    assert_eq!(
+        core.execution_mode(),
+        mode,
+        "requested engine must be built"
     );
 
     (core, handle)
@@ -145,14 +159,44 @@ fn extract_names(body: &Value, out: &mut Vec<String>) {
 /// Every person name the downstream has received so far (one per delivered row),
 /// in arrival order. Duplicates show up as repeats.
 async fn names_received(server: &MockServer) -> Vec<String> {
-    let reqs = server.received_requests().await.unwrap_or_default();
+    let reqs = server.received_requests().await.expect("recorded requests");
     let mut names = Vec::new();
     for req in reqs {
-        if let Ok(body) = serde_json::from_slice::<Value>(&req.body) {
-            extract_names(&body, &mut names);
-        }
+        let body = serde_json::from_slice::<Value>(&req.body).expect("HTTP result JSON");
+        extract_names(&body, &mut names);
     }
     names
+}
+
+async fn assert_received(core: &DrasiLib, server: &MockServer, expected: &[(u64, &str)]) {
+    let results = outbox(core, QUERY).await;
+    let mut changes = Vec::new();
+    for request in server.received_requests().await.expect("recorded requests") {
+        let body: Value = serde_json::from_slice(&request.body).expect("HTTP result JSON");
+        if let Some(batch) = body.get("batch") {
+            changes.extend(batch.as_array().expect("batch array").iter().cloned());
+        } else {
+            changes.push(body);
+        }
+    }
+    assert_eq!(changes.len(), expected.len());
+    for (change, (sequence, name)) in changes.iter().zip(expected) {
+        let result = results
+            .results
+            .iter()
+            .find(|result| result.sequence == *sequence)
+            .expect("delivered sequence is retained in the outbox");
+        let [ResultDiff::Add { data, .. }] = result.results.as_slice() else {
+            panic!("one added person per query result: {result:?}");
+        };
+        assert_eq!(data, &serde_json::json!({"name": name, "age": 30}));
+        assert_eq!(change["queryId"], QUERY);
+        assert_eq!(change["sequenceId"], *sequence);
+        assert_eq!(change["operation"], "ADD");
+        assert_eq!(change["after"], *data);
+        assert!(change.get("before").is_none());
+        assert_eq!(change["timestamp"], result.timestamp.to_rfc3339());
+    }
 }
 
 fn sorted(mut v: Vec<String>) -> Vec<String> {
@@ -235,8 +279,13 @@ async fn at_least_once_replays_unacked_events_after_restart() {
     let server = mock_server::start().await;
     respond_with(&server, "/changes/e2e-query", 200).await;
     let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) =
-        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, false).await;
+    let (core, handle) = build_core(
+        server.uri(),
+        store.clone(),
+        ReactionRecoveryPolicy::Strict,
+        false,
+    )
+    .await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -247,12 +296,15 @@ async fn at_least_once_replays_unacked_events_after_restart() {
         wait_for_name_count(&server, 2, Duration::from_secs(10)).await,
         2
     );
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
+    assert_received(&core, &server, &[(1, "Alice"), (2, "Bob")]).await;
 
     // Stop the reaction, then produce two more (they queue in the outbox).
     stop_reaction_and_wait(&core).await;
     insert_person(&handle, "p3", "Carol").await;
     insert_person(&handle, "p4", "Dave").await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_outbox(&core, QUERY, 4).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
     // Restart — the reaction replays the two missed events from the outbox.
     core.start_reaction(REACTION)
@@ -270,8 +322,15 @@ async fn at_least_once_replays_unacked_events_after_restart() {
         vec!["Alice", "Bob", "Carol", "Dave"],
         "all four events delivered exactly once across the restart"
     );
+    assert_received(
+        &core,
+        &server,
+        &[(1, "Alice"), (2, "Bob"), (3, "Carol"), (4, "Dave")],
+    )
+    .await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 4).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
 }
 
 /// A restart with nothing missed must not re-deliver already-acked events.
@@ -280,8 +339,13 @@ async fn clean_restart_does_not_redeliver_acked_events() {
     let server = mock_server::start().await;
     respond_with(&server, "/changes/e2e-query", 200).await;
     let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) =
-        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, false).await;
+    let (core, handle) = build_core(
+        server.uri(),
+        store.clone(),
+        ReactionRecoveryPolicy::Strict,
+        false,
+    )
+    .await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -291,6 +355,7 @@ async fn clean_restart_does_not_redeliver_acked_events() {
         wait_for_name_count(&server, 2, Duration::from_secs(10)).await,
         2
     );
+    let checkpoint = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
     stop_reaction_and_wait(&core).await;
     core.start_reaction(REACTION)
@@ -307,8 +372,13 @@ async fn clean_restart_does_not_redeliver_acked_events() {
         vec!["Alice", "Bob"],
         "a clean restart must not re-deliver acked events"
     );
+    assert_received(&core, &server, &[(1, "Alice"), (2, "Bob")]).await;
+    assert_eq!(
+        wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await,
+        checkpoint
+    );
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
 }
 
 /// A permanently-rejected (poison) event is dropped **and its sequence is
@@ -324,8 +394,13 @@ async fn permanent_4xx_event_is_dropped_and_not_replayed_after_restart() {
         .mount(&server)
         .await;
     let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) =
-        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, false).await;
+    let (core, handle) = build_core(
+        server.uri(),
+        store.clone(),
+        ReactionRecoveryPolicy::Strict,
+        false,
+    )
+    .await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -337,6 +412,8 @@ async fn permanent_4xx_event_is_dropped_and_not_replayed_after_restart() {
         1,
         "Alice's request reached the server (and was 404'd)"
     );
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
+    assert_received(&core, &server, &[(1, "Alice")]).await;
     assert!(
         wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(2)).await,
         "a permanent 4xx must not fail-stop the reaction (it is dropped as poison)"
@@ -364,8 +441,10 @@ async fn permanent_4xx_event_is_dropped_and_not_replayed_after_restart() {
         vec!["Bob"],
         "the dropped event's sequence was checkpointed, so Alice is not replayed"
     );
+    assert_received(&core, &server, &[(2, "Bob")]).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
 }
 
 /// Repeated restarts must not trigger a false `config_hash` mismatch (which
@@ -376,8 +455,13 @@ async fn config_hash_preserved_across_repeated_restarts() {
     let server = mock_server::start().await;
     respond_with(&server, "/changes/e2e-query", 200).await;
     let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) =
-        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, false).await;
+    let (core, handle) = build_core(
+        server.uri(),
+        store.clone(),
+        ReactionRecoveryPolicy::Strict,
+        false,
+    )
+    .await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -386,6 +470,7 @@ async fn config_hash_preserved_across_repeated_restarts() {
         wait_for_name_count(&server, 1, Duration::from_secs(10)).await,
         1
     );
+    let first = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
 
     stop_reaction_and_wait(&core).await;
     core.start_reaction(REACTION)
@@ -396,6 +481,8 @@ async fn config_hash_preserved_across_repeated_restarts() {
         wait_for_name_count(&server, 2, Duration::from_secs(10)).await,
         2
     );
+    let second = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
+    assert_eq!(second.config_hash, first.config_hash);
 
     stop_reaction_and_wait(&core).await;
     core.start_reaction(REACTION)
@@ -416,8 +503,11 @@ async fn config_hash_preserved_across_repeated_restarts() {
         vec!["Alice", "Bob", "Carol"],
         "every event delivered exactly once across two restarts"
     );
+    assert_received(&core, &server, &[(1, "Alice"), (2, "Bob"), (3, "Carol")]).await;
+    let third = wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 3).await;
+    assert_eq!(third.config_hash, first.config_hash);
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
 }
 
 /// Under the default Strict policy a sustained 5xx outage drives the reaction to
@@ -428,8 +518,13 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
     let server = mock_server::start().await;
     respond_with(&server, "/changes/e2e-query", 503).await; // downstream is down
     let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) =
-        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, false).await;
+    let (core, handle) = build_core(
+        server.uri(),
+        store.clone(),
+        ReactionRecoveryPolicy::Strict,
+        false,
+    )
+    .await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -439,6 +534,8 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
         wait_for_reaction_status(&core, ComponentStatus::Error, Duration::from_secs(15)).await,
         "Strict reaction must fail-stop on a sustained delivery failure"
     );
+    wait_for_outbox(&core, QUERY, 1).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 0).await;
 
     // Recover: downstream comes back (this also clears the failed-attempt log),
     // operator restarts the reaction (valid Error → Starting transition).
@@ -456,8 +553,10 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
         vec!["Alice"],
         "the un-acked event is replayed exactly once after recovery"
     );
+    assert_received(&core, &server, &[(1, "Alice")]).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
 }
 
 /// Under AutoSkipGap a sustained outage is skipped (favoring uptime) and the
@@ -469,7 +568,7 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
     let store = Arc::new(MemoryStateStoreProvider::new());
     let (core, handle) = build_core(
         server.uri(),
-        store,
+        store.clone(),
         ReactionRecoveryPolicy::AutoSkipGap,
         false,
     )
@@ -478,7 +577,13 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     insert_person(&handle, "p1", "Alice").await;
-    tokio::time::sleep(Duration::from_secs(2)).await; // let retries exhaust + skip
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
+    let failed_attempts = names_received(&server).await;
+    assert!(
+        !failed_attempts.is_empty(),
+        "the failed delivery was attempted"
+    );
+    assert!(failed_attempts.iter().all(|name| name == "Alice"));
     assert!(
         wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(2)).await,
         "AutoSkipGap reaction must stay Running after a skipped event"
@@ -496,8 +601,10 @@ async fn auto_skip_gap_keeps_running_and_skips_failed_batch() {
         vec!["Bob"],
         "the skipped event is dropped; later events are delivered"
     );
+    assert_received(&core, &server, &[(2, "Bob")]).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
 }
 
 /// In adaptive (batched) mode a permanent 4xx is a poison batch: it is dropped,
@@ -507,14 +614,20 @@ async fn adaptive_permanent_4xx_is_dropped_and_reaction_keeps_running() {
     let server = mock_server::start().await;
     respond_with(&server, "/batch", 400).await; // permanent client error
     let store = Arc::new(MemoryStateStoreProvider::new());
-    let (core, handle) =
-        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, true).await;
+    let (core, handle) = build_core(
+        server.uri(),
+        store.clone(),
+        ReactionRecoveryPolicy::Strict,
+        true,
+    )
+    .await;
     core.start().await.expect("start core");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // The first batch is rejected with a 4xx — dropped as poison, not retried.
     insert_person(&handle, "p1", "Alice").await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 1).await;
+    assert_received(&core, &server, &[(1, "Alice")]).await;
     assert!(
         wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(2)).await,
         "a permanent 4xx must not fail-stop the reaction"
@@ -532,6 +645,17 @@ async fn adaptive_permanent_4xx_is_dropped_and_reaction_keeps_running() {
         vec!["Bob"],
         "the poison batch is dropped; later batches are delivered"
     );
+    assert_received(&core, &server, &[(2, "Bob")]).await;
+    wait_for_checkpoint(&core, store.as_ref(), REACTION, QUERY, 2).await;
+    stop_reaction_and_wait(&core).await;
+    core.start_reaction(REACTION)
+        .await
+        .expect("restart adaptive reaction");
+    assert!(
+        wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(5)).await
+    );
+    assert_no_extra_deliveries(&server, 1, Duration::from_millis(500)).await;
+    assert_received(&core, &server, &[(2, "Bob")]).await;
 
-    core.stop().await.expect("stop core");
+    core.shutdown().await.expect("shutdown core");
 }

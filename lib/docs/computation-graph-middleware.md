@@ -228,7 +228,11 @@ Durable mode requires:
   alone is not enough. Use a `RetainedPipeConfig` with an `IndexedEnvelopeStore`
   and a separate persistent index bundle for each connection.
 - The same graph/component identity, output stream and configuration when
-  reopening existing state. Changed ownership or configuration is rejected.
+  reopening existing state, including retention capacity. Changed ownership or
+  configuration is rejected.
+- Restart-stable input stream IDs and sequence numbers when the producer sends
+  generic graph events without raw source metadata. Middleware cannot recover a
+  producer that silently resets those identities.
 
 The graph enforces these connection requirements. It confirms a middleware
 output only after every outgoing branch has accepted it durably. This does not
@@ -240,6 +244,9 @@ that already-committed input. This covers both lost delivery and lost delivery
 acknowledgements. Replay precedes new input, and preserves the saved batch's
 identity while assigning a new delivery number. Downstream queries use the saved
 middleware output position to avoid applying that batch twice.
+If a repeated input's confirmed output has already left the middleware's retained
+history, it can produce no new output: the durable outgoing connections already
+own any remaining delivery. This is not permission to discard unconfirmed output.
 
 `outbox_capacity` counts input batches, including empty filtered batches. Pending
 output is never evicted just to make room. Direct calls return
