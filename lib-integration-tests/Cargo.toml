@@ -13,6 +13,7 @@ computation = [
     "drasi-index-rocksdb/computation",
     "drasi-index-garnet/computation",
 ]
+computation-middleware-tests = ["computation", "drasi-lib/middleware-unwind"]
 
 [dependencies]
 # Test dependencies only - this crate has no library code

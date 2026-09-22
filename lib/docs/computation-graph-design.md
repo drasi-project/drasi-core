@@ -146,6 +146,12 @@ With a storage provider that supports atomic query output, index changes,
 source checkpoints, output sequence, retained outputs and current rows commit
 together. Only committed results become visible.
 
+The middleware transformer also has a durable mode. It saves previous elements,
+input progress and pending transformed output together, then uses durable output
+connections. After a restart it resends unconfirmed output instead of running
+stateful middleware twice. A persistent query rejects known memory-only
+middleware output; query storage cannot repair lost transformer state.
+
 Persistent indexes alone do not make query output durable. A reaction that saves
 progress needs both persistent reaction state and persistent output from its
 queries. The reaction records completed handling, not merely queue acceptance.

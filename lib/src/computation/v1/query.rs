@@ -218,12 +218,22 @@ impl Drop for TransactionTimer {
 }
 
 struct InputProgress {
-    key: String,
-    sequence: u64,
-    position: Option<Bytes>,
+    graph: super::producer_progress::GraphInputProgress,
     source_id: String,
     profiling: Option<ProfilingMetadata>,
-    identity: SourceProgressKey,
+}
+
+impl std::ops::Deref for InputProgress {
+    type Target = super::producer_progress::GraphInputProgress;
+    fn deref(&self) -> &Self::Target {
+        &self.graph
+    }
+}
+
+impl std::ops::DerefMut for InputProgress {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.graph
+    }
 }
 
 fn input_progress(input: &super::ChangeEnvelope) -> anyhow::Result<InputProgress> {
@@ -232,27 +242,8 @@ fn input_progress(input: &super::ChangeEnvelope) -> anyhow::Result<InputProgress
         .as_ref()
         .map(|metadata| metadata.source_id.clone())
         .unwrap_or_else(|| input.system().stream().as_str().to_owned());
-    let stable_source = raw.as_ref().and_then(|metadata| metadata.sequence);
     Ok(InputProgress {
-        identity: if stable_source.is_some() {
-            SourceProgressKey::Source(source_id.clone())
-        } else {
-            SourceProgressKey::Stream(input.system().stream().clone())
-        },
-        key: progress_key(
-            input.system().stream().as_str(),
-            stable_source.map(|_| source_id.as_str()),
-        ),
-        sequence: stable_source.unwrap_or_else(|| input.system().sequence()),
-        position: raw
-            .as_ref()
-            .and_then(|metadata| {
-                metadata
-                    .source_position
-                    .as_ref()
-                    .map(|bytes| Bytes::copy_from_slice(bytes))
-            })
-            .or_else(|| input.system().source_position().cloned()),
+        graph: super::producer_progress::GraphInputProgress::from_envelope(input)?,
         source_id,
         profiling: raw.and_then(|metadata| metadata.profiling),
     })
@@ -518,6 +509,10 @@ impl ContinuousQueryTransformer {
         mut self,
         progress: Arc<QuerySourceProgress>,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !progress.replay_only(),
+            "query cannot own middleware's replay-only source progress"
+        );
         if progress.graph_id() != self.definition.graph_id
             || progress.query_id() != &self.definition.id
         {
@@ -1024,6 +1019,17 @@ impl ContinuousQueryTransformer {
         }
         let query = self.query()?;
         let mut progress = input_progress(&input.envelope)?;
+        let saved = if let Some(checkpoint) = query.resources().checkpoint_store() {
+            progress
+                .graph
+                .validate(
+                    checkpoint.as_ref(),
+                    !self.provider.is_volatile() && checkpoint.is_persistent(),
+                )
+                .await?
+        } else {
+            None
+        };
         if self
             .watermarks
             .lock()
@@ -1033,8 +1039,7 @@ impl ContinuousQueryTransformer {
         {
             return Ok(Vec::new());
         }
-        if let Some(checkpoint) = query.resources().checkpoint_store() {
-            let saved = checkpoint.read_checkpoint(&progress.key).await?;
+        if query.resources().checkpoint_store().is_some() {
             if saved
                 .as_ref()
                 .is_some_and(|saved| saved.sequence >= progress.sequence)
@@ -1102,13 +1107,7 @@ impl ContinuousQueryTransformer {
                         .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
                 }
                 if let Some(checkpoint) = query.resources().checkpoint_store() {
-                    checkpoint
-                        .stage_checkpoint(
-                            &progress.key,
-                            progress.sequence,
-                            progress.position.as_ref(),
-                        )
-                        .await?;
+                    progress.graph.stage(checkpoint.as_ref()).await?;
                     if let Some(output) = &output {
                         if self.output_persistent {
                             if self.options.publication == QueryPublicationMode::Atomic {
@@ -1155,11 +1154,11 @@ impl ContinuousQueryTransformer {
         self.watermarks
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
-            .insert(progress.key, progress.sequence);
+            .insert(progress.graph.key.clone(), progress.sequence);
         if let Some(confirmation) = &self.source_progress {
             confirmation.confirm(
-                progress.identity,
-                SourceCheckpoint::new(progress.sequence, progress.position),
+                progress.graph.identity.clone(),
+                SourceCheckpoint::new(progress.sequence, progress.graph.position),
             );
         }
         // Keep completion timings on the live branch, not in already committed outbox bytes.
@@ -1277,7 +1276,17 @@ impl ComputationComponent for ContinuousQueryTransformer {
 #[async_trait]
 impl Transformer for ContinuousQueryTransformer {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
-        if GraphChangeCodec::is_futures_due(&input.envelope) {
+        let futures_due = GraphChangeCodec::is_futures_due(&input.envelope);
+        let progress = if futures_due {
+            super::GraphProducerProgress::from_envelope(&input.envelope)?
+        } else {
+            None
+        };
+        if futures_due
+            && progress.as_ref().map_or(true, |progress| {
+                !progress.identity().persistent() && self.provider.is_volatile()
+            })
+        {
             self.draining_futures = true;
             return self.on_wakeup().await;
         }
@@ -1290,7 +1299,14 @@ impl Transformer for ContinuousQueryTransformer {
             complete: false,
             progress: self.source_progress.clone(),
         };
-        let result = self.process(input).await;
+        let mut result = self.process(input).await;
+        if futures_due && result.is_ok() {
+            // The empty batch commits the middleware's logical input progress.
+            // Due work already belongs to the query's durable future queue, so
+            // an interruption between this checkpoint and draining is replayable.
+            self.draining_futures = true;
+            result = self.on_wakeup().await;
+        }
         guard.complete = result.is_ok();
         result
     }
@@ -1312,16 +1328,6 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
-        if self
-            .query()?
-            .future_queue()
-            .peek_due_time()
-            .await?
-            .is_none()
-        {
-            self.draining_futures = false;
-            return Ok(Vec::new());
-        }
         self.on_wakeup().await
     }
 
@@ -1338,6 +1344,19 @@ impl Transformer for ContinuousQueryTransformer {
             complete: false,
             progress: self.source_progress.clone(),
         };
+        let now = u64::try_from(Utc::now().timestamp_millis())
+            .map_err(|_| anyhow::anyhow!("clock before epoch"))?;
+        if self
+            .query()?
+            .future_queue()
+            .peek_due_time()
+            .await?
+            .map_or(true, |due| due > now)
+        {
+            self.draining_futures = false;
+            guard.complete = true;
+            return Ok(Vec::new());
+        }
         let query = self.query()?;
         self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);

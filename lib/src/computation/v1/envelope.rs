@@ -244,6 +244,21 @@ pub struct ChangeEnvelope {
 pub type Envelope = ChangeEnvelope;
 
 impl ChangeEnvelope {
+    /// Replay committed logical content without changing its provenance.
+    pub(super) fn reemit(&self, sequence: u64) -> Result<Self> {
+        let mut system = self.system().as_ref().clone();
+        system.sequence = sequence;
+        Ok(Self {
+            event: Arc::new(ChangeEvent {
+                id: super::emission_id(system.stream(), sequence)?,
+                changes: self.changes().clone(),
+                system: Arc::new(system),
+                lineage: self.lineage().cloned(),
+            }),
+            context: self.context.clone(),
+        })
+    }
+
     pub(super) fn context_identity(&self) -> u64 {
         computation_bridge::context_identity(&self.context.inner)
     }

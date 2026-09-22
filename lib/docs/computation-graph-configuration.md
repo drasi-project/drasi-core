@@ -175,16 +175,21 @@ For persistence, supply a compatible index provider and select it with
 `StorageBackendRef::Named(name)` or a supported inline backend specification.
 See [storage backend configuration](../README.md#storage-backends).
 
-Before relying on restart recovery, check all three:
+Before relying on restart recovery, check all four:
 
 1. Every source feeding a persistent query supports replay from saved progress.
-2. The query's backend persists the required checkpoints, rows and output history.
-3. A durable reaction has persistent state and receives persistent query outputs.
+2. Stateful middleware uses durable mode and the required durable output connections.
+3. The query's backend persists the required checkpoints, rows and output history.
+4. A durable reaction has persistent state and receives persistent query outputs.
 
-Persistent indexes without persistent output history do not satisfy item 2.
+Persistent query indexes alone do not make query output durable.
 A provider's `supports_atomic_query_output()` opt-in determines whether index,
 checkpoint and output writes can share one transaction. A configuration flag
 cannot make an unsupported provider atomic.
+
+See the [middleware guide](computation-graph-middleware.md#durable-state-and-delivery)
+for persistent transformer storage and connection requirements. Durable middleware
+uses replay-only source subscriptions; it is not a replacement for query bootstrap.
 
 | Policy | Query source recovery | Reaction output recovery |
 |---|---|---|

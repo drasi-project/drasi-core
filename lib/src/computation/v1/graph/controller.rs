@@ -1298,6 +1298,13 @@ impl Operations {
         let resources = graph.resource_handles.clone();
         let scope = graph.execution_scope.clone();
         let graph_id = graph.snapshot.id.clone();
+        let downstream: Vec<_> = graph
+            .snapshot
+            .edges
+            .iter()
+            .filter(|edge| edge.definition.from.component == slot.id)
+            .map(|edge| edge.definition.to.component.clone())
+            .collect();
         let (quiesce, mut quiescence) = watch::channel(false);
         let span = tracing::info_span!("computation_component",
             instance_id = %graph.execution_scope,
@@ -1388,6 +1395,7 @@ impl Operations {
                 }
                 Operation::Start => {
                     check_descriptor(&lease.component, &node)?;
+                    super::validate_source_progress(&lease.component, &graph_id, &downstream)?;
                     lease.attempted = true;
                     lease
                         .component
@@ -1411,6 +1419,10 @@ impl Operations {
                         inputs,
                         outputs,
                         &mut quiescence,
+                        super::SourceRouting {
+                            graph_id: &graph_id,
+                            downstream: &downstream,
+                        },
                     )
                     .await
                 }

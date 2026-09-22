@@ -23,10 +23,10 @@ use std::{
 use crate::{
     computation::{
         AtomicResultTransaction, ComputationFutureResult, ComputationIndexes,
-        ComputationQueryError, ComputationResourceCleanup, Result,
+        ComputationQueryError, Result,
     },
     evaluation::{context::QueryPartEvaluationContext, EvaluationError},
-    interface::{FutureQueue, IndexError, SessionControl},
+    interface::{FutureQueue, IndexError},
     models::SourceChange,
     query::QueryBuilder,
 };
@@ -43,26 +43,6 @@ pub struct ComputationQuery {
     resources: ComputationIndexes,
     recovery_required: AtomicBool,
     atomic_output: bool,
-}
-
-struct PendingEvaluation<'a> {
-    recovery_required: &'a AtomicBool,
-    session: Arc<dyn SessionControl>,
-    cleanup: Option<&'a Arc<dyn ComputationResourceCleanup>>,
-    completed: bool,
-}
-
-impl Drop for PendingEvaluation<'_> {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.recovery_required.store(true, Ordering::Release);
-            if let Some(cleanup) = self.cleanup {
-                cleanup.cancel();
-            } else if let Err(error) = self.session.rollback() {
-                log::error!("Cancelled computation session rollback failed: {error}");
-            }
-        }
-    }
 }
 
 impl ComputationQuery {
@@ -156,51 +136,13 @@ impl ComputationQuery {
 
     async fn in_operation<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
         let _lock = self.inner.change_lock.lock().await;
-        if self.recovery_required() {
-            return Err(ComputationQueryError::RecoveryRequired);
-        }
-        let mut pending = PendingEvaluation {
-            recovery_required: &self.recovery_required,
-            session: self.inner.session_control.clone(),
-            cleanup: self.resources.cleanup(),
-            completed: false,
-        };
-        let result = match self.inner.session_control.begin().await {
-            Ok(()) => match operation.await {
-                Ok(value) => match self.inner.session_control.commit().await {
-                    Ok(()) => Ok(value),
-                    Err(error) => {
-                        self.recovery_required.store(true, Ordering::Release);
-                        Err(self.rollback_failure(error.into()))
-                    }
-                },
-                Err(error) => {
-                    if !self.atomic_output {
-                        self.recovery_required.store(true, Ordering::Release);
-                    }
-                    Err(self.rollback_failure(error))
-                }
-            },
-            Err(error) => {
-                self.recovery_required.store(true, Ordering::Release);
-                Err(self.rollback_failure(error.into()))
-            }
-        };
-        pending.completed = true;
-        result
-    }
-
-    fn rollback_failure(&self, failure: ComputationQueryError) -> ComputationQueryError {
-        match self.inner.session_control.rollback() {
-            Ok(()) => failure,
-            Err(rollback) => {
-                self.recovery_required.store(true, Ordering::Release);
-                ComputationQueryError::Rollback {
-                    failure: Box::new(failure),
-                    rollback,
-                }
-            }
-        }
+        crate::computation::operation::in_operation(
+            &self.resources,
+            &self.recovery_required,
+            self.atomic_output,
+            operation,
+        )
+        .await
     }
 
     async fn evaluate_source_change(

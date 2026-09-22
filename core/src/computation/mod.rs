@@ -21,13 +21,17 @@
 //! [`ComputationQuery::shutdown`] after cancelling/awaiting the operation to join
 //! registered provider work before recovering a replacement. Dropping an object
 //! cannot substitute for its provider's asynchronous cleanup.
+//! [`ComputationTransaction`] provides the same serialized transaction and
+//! cancellation boundary for stateful components that do not run a query.
 
 mod indexes;
 mod io_scope;
+pub(crate) mod operation;
 mod scoped_index;
 pub use io_scope::{
     BlockingFailures as ComputationIoFailures, BlockingScope as ComputationIoScope,
 };
+pub use operation::ComputationTransaction;
 pub use scoped_index::ScopedIndex;
 mod transaction;
 

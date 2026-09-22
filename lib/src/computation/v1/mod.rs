@@ -144,6 +144,10 @@
 //! transactions and exactly-once external effects are not inferred from these
 //! profiles. [`ContinuousQueryTransformer`] owns query evaluation/publication and
 //! scheduled work; [`LegacyReactionSink`] remains acceptance-only.
+//! [`MiddlewareTransformer::new_durable`] adds restart-safe graph-change
+//! middleware using an atomic persistent index bundle and lossless durable
+//! outgoing pipes. [`GraphProducerProgress`] separates logical replay identity
+//! from fresh transport emissions and preserved raw source provenance.
 
 pub use super::instance::{
     ComputationCleanupError, ComputationHandle, ComputationInfo, ComputationOptions,
@@ -185,9 +189,13 @@ mod legacy_source;
 mod lifecycle;
 mod middleware;
 pub use middleware::*;
+mod middleware_recovery;
+pub use middleware_recovery::{DurableMiddlewareOptions, MiddlewareRecoveryError};
 mod pipe;
 mod pipe_metrics;
 mod ports;
+mod producer_progress;
+pub use producer_progress::{GraphProducerIdentity, GraphProducerProgress};
 mod query;
 mod query_identity;
 pub use query_identity::*;

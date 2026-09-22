@@ -118,7 +118,16 @@ impl ComputationComponent for WalReplaySource {
                 .checkpoints
                 .get(&SourceProgressKey::Source(self.resource.partition.clone()))
             {
+                if progress.replay_only() && self.resume > checkpoint.sequence {
+                    anyhow::bail!(
+                        "WAL resume position exceeds middleware's committed recovery boundary"
+                    );
+                }
                 self.cursor = self.cursor.max(checkpoint.sequence);
+            } else if progress.replay_only() && self.resume != 0 {
+                anyhow::bail!(
+                    "WAL resume position exceeds an uninitialized middleware recovery boundary"
+                );
             }
         }
         self.read().await
@@ -131,6 +140,10 @@ impl ComputationComponent for WalReplaySource {
 
 #[async_trait]
 impl EnvelopeSource for WalReplaySource {
+    fn recovery_progress(&self) -> Option<Arc<QuerySourceProgress>> {
+        self.progress.clone()
+    }
+
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         loop {
             if let Some((sequence, change)) = self.pending.pop_front() {

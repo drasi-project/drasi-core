@@ -85,6 +85,10 @@ let transformer =
     MiddlewareTransformer::new(definition, drasi.middleware_registry())?;
 ```
 
+This constructor keeps state in memory. Use the durable constructor below when
+the pipeline must recover after a process restart. Persistent queries reject
+known volatile middleware output rather than treating that pipeline as recoverable.
+
 For a node with `encoded: "eyJ2YWx1ZSI6NDJ9"`, this adds decoded JSON text,
 a parsed object and a top-level `value: 42`. Reversing the sequence does not
 produce the same result: parsing needs the decoder's output first.
@@ -99,6 +103,9 @@ and invalid middleware configurations return errors.
 The transformer has an input named `in` and an output named `out`.
 Multiple producers can connect to `in`. Bind `out` to the same stream ID used
 in its definition.
+
+The following example uses memory-only middleware and connections. Durable
+middleware has stronger connection requirements, described below.
 
 This graph fragment assumes `producer_a`, `producer_b` and `consumer` are already
 constructed boxed graph components with matching ports and graph-change formats:
@@ -167,10 +174,11 @@ All seven existing kinds operate on this graph-change format:
 ordered graph changes. `unwind` is not stateless: it reads previous parent
 elements to determine which child records must be deleted.
 
-The transformer therefore keeps previous emitted elements in an owned in-memory
-index. Patch updates merge missing properties when updating this saved view, as
-the query does after middleware processing. Middleware-specific skip/fail
-settings and patch semantics remain those of the existing implementations.
+The transformer therefore keeps previous emitted elements in an owned index:
+in memory with `new`, or in persistent storage with `new_durable`. Patch updates
+merge missing properties when updating this saved view, as the query does after
+middleware processing. Middleware-specific skip/fail settings and patch
+semantics remain those of the existing implementations.
 See the [middleware reference](../../middleware/README.md) for their configurations.
 
 For Unwind, include the current selected array in parent updates. The existing
@@ -185,10 +193,81 @@ configuration. Two Unwind steps can expand nested arrays when the second step
 matches the child labels produced by the first. Their derived changes retain
 the middleware's order, including child changes before their parent.
 
+## Durable state and delivery
+
+Use `new_durable` with a persistent `ComputationIndexProvider`. The provider must
+commit element changes, input progress and saved outputs together. An in-memory,
+incomplete or non-atomic provider is rejected; there is no fallback to memory.
+
+Replace the earlier constructor with:
+
+```rust,ignore
+use std::num::NonZeroUsize;
+use drasi_lib::computation::v1::DurableMiddlewareOptions;
+
+let transformer = MiddlewareTransformer::new_durable(
+    definition,
+    drasi.middleware_registry(),
+    provider, // Arc<dyn ComputationIndexProvider> backed by persistent storage
+    DurableMiddlewareOptions {
+        graph_id: "normalization".into(),
+        outbox_capacity: NonZeroUsize::new(1024).expect("positive capacity"),
+    },
+).await?;
+```
+
+An existing persistent index plugin can be supplied through
+`LegacyIndexProviderAdapter`. Use an isolated provider scope for each logical
+graph; the middleware exclusively owns its returned index bundle.
+
+Durable mode requires:
+
+- Input connections that preserve each stream's order and apply backpressure.
+- **Every output connection** to provide durable acceptance, replay, explicit
+  acknowledgement, backpressure and per-stream ordering. A `BoundedPipeConfig`
+  alone is not enough. Use a `RetainedPipeConfig` with an `IndexedEnvelopeStore`
+  and a separate persistent index bundle for each connection.
+- The same graph/component identity, output stream and configuration when
+  reopening existing state. Changed ownership or configuration is rejected.
+
+The graph enforces these connection requirements. It confirms a middleware
+output only after every outgoing branch has accepted it durably. This does not
+mean that every reaction has finished its external action.
+
+On restart, middleware restores its previous elements and replays saved output
+whose delivery was not confirmed. It does **not** run the middleware again on
+that already-committed input. This covers both lost delivery and lost delivery
+acknowledgements. Replay precedes new input, and preserves the saved batch's
+identity while assigning a new delivery number. Downstream queries use the saved
+middleware output position to avoid applying that batch twice.
+
+`outbox_capacity` counts input batches, including empty filtered batches. Pending
+output is never evicted just to make room. Direct calls return
+`MiddlewareRecoveryError::RetentionExhausted` when unconfirmed output fills the
+limit; deliver and confirm it before retrying the input.
+
+For replay-capable source adapters, bind a `QuerySourceProgress` resource owned
+by the middleware through `with_source_progress`. Those sources must resume from
+the middleware's committed input, not from a downstream query's different
+positions. Configure these adapters with `enable_bootstrap=false`: this is a
+replay-only streaming path, not a middleware bootstrap/reset API. The graph
+rejects a source checkpoint binding that bypasses its immediate consumer.
+
+When calling the transformer directly instead of through the graph, drain
+`on_wakeup`/`continue_transform` output before new input and call
+`delivery_completed(&outputs)` only after **all** branches accept durably.
+The graph driver performs these steps automatically.
+
+The [durability tests](../../lib-integration-tests/tests/computation_middleware_durability.rs)
+show real storage reopening and Unwind cleanup. The
+[recovery tests](../tests/computation_middleware_recovery.rs) include complete
+durable graph construction, fanout, source replay and injected storage failures.
+
 ## Event behaviour and limits
 
-- One input event produces one output event containing all expanded changes.
-  Expansion does not split one source sequence across several output events.
+- Each new input produces one saved batch containing all expanded changes.
+  Expansion does not split one source sequence across several output events;
+  recovery can deliver that same batch again.
 - If all changes are filtered out, the output is an empty change batch. This lets
   downstream queries record input progress without inventing a data change.
 - The input event is not modified. Its annotations, source metadata, profiling,
@@ -212,10 +291,11 @@ processing can leave incomplete internal work, so that transformer instance
 requires reconstruction rather than pretending it can safely continue.
 Use a middleware's supported skip policy when bad records should not stop processing.
 
-The saved index is **not durable**. Reconstructing the component requires rebuilding
-the state needed by middleware such as Unwind. Use a fresh output stream when
-reconstruction starts its sequence from zero. A persistent downstream query
-does not make this transformer's private state persistent.
+With `new`, the saved index is **not durable**. Rebuilding that volatile component
+loses its state and counter; a persistent downstream query does not repair that.
+With `new_durable`, the index, progress and output are restored from storage.
+Durability covers the supplied index and emitted changes, not private mutable
+state or external side effects inside custom middleware.
 
 Queue limits count events, not expanded records or bytes. A middleware that
 expands a very large array can still allocate a large result batch.
@@ -232,11 +312,23 @@ Its configuration fields are `stream` (string), `middleware` (array) and
 `pipeline` (array). The [factory test](../tests/computation_middleware_factory.rs)
 shows the complete resource declaration and graph.
 
+For durable mode, use
+`definition.durable_specification(registry_id, indexes_id, options)`.
+It adds `durability` configuration and an `indexes` dependency containing a
+`QueryIndexProviderResource`. An optional `source_progress` dependency can contain
+the middleware's `QuerySourceProgressResource`.
+
 From the drasi-core repository root:
 
 ```bash
 cargo test --locked -p drasi-lib --features computation,middleware-all \
   --test computation_middleware --test computation_middleware_factory
+
+cargo test --locked -p drasi-lib --features computation-rocksdb-tests,middleware-all \
+  --test computation_middleware_recovery
+
+cargo test --locked -p lib-integration-tests --features computation-middleware-tests \
+  --test computation_middleware_durability
 ```
 
 `middleware-all` includes jq and uses the system jq library. It does not require

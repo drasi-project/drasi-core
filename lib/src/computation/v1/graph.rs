@@ -673,6 +673,13 @@ impl ComputationGraphBuilder {
             }
         }
         for (index, component) in self.components.iter().enumerate() {
+            let downstream: Vec<_> = self
+                .edges
+                .iter()
+                .filter(|(edge, _)| &edge.from.component == component.descriptor().id())
+                .map(|(edge, _)| edge.to.component.clone())
+                .collect();
+            validate_source_progress(component, &self.id, &downstream)?;
             if let Component::Deferred {
                 specification,
                 factory,
@@ -1498,6 +1505,26 @@ fn check_descriptor(component: &Component, node: &NodeSnapshot) -> GraphResult<(
     Ok(())
 }
 
+fn validate_source_progress(
+    component: &Component,
+    graph_id: &str,
+    downstream: &[ComponentId],
+) -> GraphResult<()> {
+    let Component::Source(source) = component else {
+        return Ok(());
+    };
+    if let Some(progress) = source.recovery_progress() {
+        if progress.graph_id() != graph_id
+            || downstream.iter().any(|id| id != progress.component_id())
+        {
+            return Err(topology(
+                "source recovery progress must belong to its immediate consumer on every branch",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn event_time_selection(
     times: impl Iterator<Item = Option<chrono::DateTime<chrono::Utc>>>,
 ) -> usize {
@@ -1509,6 +1536,11 @@ fn event_time_selection(
         .unwrap_or(0)
 }
 
+struct SourceRouting<'a> {
+    graph_id: &'a str,
+    downstream: &'a [ComponentId],
+}
+
 async fn run_node(
     component: &mut Component,
     node: &NodeSnapshot,
@@ -1516,7 +1548,9 @@ async fn run_node(
     inputs: &mut [Incoming],
     outputs: &[Outgoing],
     quiesce: &mut watch::Receiver<bool>,
+    routing: SourceRouting<'_>,
 ) -> GraphResult<()> {
+    validate_source_progress(component, routing.graph_id, routing.downstream)?;
     if let Component::Service(service) = component {
         tokio::select! {
             biased;
@@ -1696,7 +1730,7 @@ async fn run_node(
         loop {
             check_descriptor(component, node)?;
             validate_emissions(node, sequences, &emissions)?;
-            for emission in emissions {
+            for emission in &emissions {
                 if !outputs.iter().any(|output| output.port == emission.port) {
                     return Err(emission_error(
                         node,
@@ -1718,6 +1752,15 @@ async fn run_node(
                             source: Box::new(source),
                         })?;
                 }
+            }
+            match component {
+                Component::Transformer(transformer) | Component::Query(transformer) => {
+                    transformer
+                        .delivery_completed(&emissions)
+                        .await
+                        .map_err(|source| component_error(node, "complete delivery", source))?;
+                }
+                _ => {}
             }
             let continuation = match component {
                 Component::Transformer(transformer) | Component::Query(transformer)

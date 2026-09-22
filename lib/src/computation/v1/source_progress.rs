@@ -14,7 +14,13 @@
 
 use super::{ComponentId, StreamId};
 use drasi_core::interface::SourceCheckpoint;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,8 +29,9 @@ pub enum SourceProgressKey {
     Stream(StreamId),
 }
 
-/// A read-only view of an owning query's committed input progress. Persistence
-/// comes from that query's actual checkpoint provider, not from this watch channel.
+/// A read-only view of an owning query or durable middleware's committed input
+/// progress. Persistence comes from that component's actual checkpoint provider,
+/// not from this watch channel. Bind a source to its immediate recovery boundary.
 #[derive(Debug, Clone, Default)]
 pub struct SourceProgressSnapshot {
     pub ready: bool,
@@ -43,6 +50,7 @@ pub struct QuerySourceProgress {
     graph_id: Arc<str>,
     query_id: ComponentId,
     state: watch::Sender<Arc<SourceProgressSnapshot>>,
+    replay_only: AtomicBool,
 }
 
 impl QuerySourceProgress {
@@ -53,6 +61,7 @@ impl QuerySourceProgress {
             graph_id,
             query_id,
             state: watch::channel(Arc::new(SourceProgressSnapshot::default())).0,
+            replay_only: AtomicBool::new(false),
         })
     }
     pub fn graph_id(&self) -> &str {
@@ -60,6 +69,17 @@ impl QuerySourceProgress {
     }
     pub fn query_id(&self) -> &ComponentId {
         &self.query_id
+    }
+    /// Generalized owner name; `query_id` remains for source adapter compatibility.
+    pub fn component_id(&self) -> &ComponentId {
+        &self.query_id
+    }
+    /// Middleware owns streaming recovery, not a query's bootstrap/reset protocol.
+    pub fn replay_only(&self) -> bool {
+        self.replay_only.load(Ordering::Acquire)
+    }
+    pub(super) fn require_stream_replay(&self) {
+        self.replay_only.store(true, Ordering::Release);
     }
     pub fn snapshot(&self) -> Arc<SourceProgressSnapshot> {
         self.state.borrow().clone()
@@ -102,7 +122,7 @@ impl QuerySourceProgress {
             state.ready = false;
             state.admitting = false;
             state.failure = Some(Arc::from(
-                "owning query progress is fenced after interrupted or failed processing",
+                "owning component progress is fenced after interrupted or failed processing",
             ));
         });
     }
@@ -121,7 +141,7 @@ impl QuerySourceProgress {
     }
 }
 
-/// Register this actual resource for both its owning query and compatible sources.
+/// Register this actual resource for its owning query/durable middleware and sources.
 /// It never registers a legacy Source position handle or controls another pipeline.
 pub struct QuerySourceProgressResource(pub Arc<QuerySourceProgress>);
 

@@ -80,8 +80,9 @@ Secret fields require unresolved references, not resolved credentials.
 
 `MiddlewareTransformer` is a graph-change-to-graph-change component that reuses
 the existing query middleware runner and registry. It has one input/output port,
-supports multiple incoming connections and keeps an in-memory element view for
-state-dependent middleware. See the
+supports multiple incoming connections and keeps previous emitted elements for
+state-dependent middleware. Choose memory-only state with `new` or atomic
+persistent state and saved output with `new_durable`. See the
 [middleware guide](computation-graph-middleware.md) for configuration, batching
 and recovery limits.
 
@@ -360,9 +361,20 @@ and deletion preserve this identity information, even when rows/checkpoints are
 cleared. Stop/restart without reset preserves it. It is separate from
 `ComponentGeneration`.
 
-`QuerySourceProgressResource` reports committed raw source progress, not adapter
-receipt. `WalReplaySourceFactory` can resume/tail a supplied log partition and
+`QuerySourceProgressResource` reports its owning component's committed input
+progress, not adapter receipt. That can be an original source's position or a
+preceding durable transformer's saved output position. Sources must bind it to
+their immediate consumer; the graph rejects bindings that bypass an intervening
+component. `WalReplaySourceFactory` can resume/tail a supplied log partition and
 reports unavailable history rather than silently skipping it.
+
+Durable middleware saves its element state, input position and transformed output
+together. The driver calls `Transformer::delivery_completed` only after every
+outgoing branch accepts the output; this also applies to wakeups and
+continuations. Durable middleware requires durable, replayable output connections
+and cannot discard unconfirmed output when its retention limit is reached.
+Replaying saved output uses new delivery numbers but preserves the batch identity
+and saved middleware position used by downstream queries.
 
 `QueryReplayTransformer` joins a snapshot or retained suffix to a live stream.
 It checks the query's identity as well as its sequence and output generation.

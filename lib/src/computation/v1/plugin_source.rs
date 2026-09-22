@@ -566,6 +566,20 @@ impl LegacySourceSubscription {
                 }
                 let recoverable =
                     source.supports_replay() && (self.host.owned || self.options.borrowed_recovery);
+                if self.progress.as_ref().is_some_and(|progress| progress.replay_only()) {
+                    anyhow::ensure!(
+                        !self.options.enable_bootstrap,
+                        "durable middleware requires a streaming subscription with enable_bootstrap=false; query bootstrap cannot initialize middleware state"
+                    );
+                    anyhow::ensure!(
+                        recoverable,
+                        "durable middleware source recovery requires a replay-capable owned or explicitly recoverable borrowed source"
+                    );
+                    anyhow::ensure!(
+                        saved.as_ref().map_or(true, |saved| saved.source_position.is_some()),
+                        "durable middleware source checkpoint has no replay cursor"
+                    );
+                }
                 // A completed streaming-only startup may have no source checkpoint
                 // because no input has committed yet. Preserve that distinction from
                 // a committed checkpoint whose replay position is missing.
@@ -784,6 +798,10 @@ impl ComputationComponent for SourcePluginAdapter {
 }
 #[async_trait]
 impl EnvelopeSource for SourcePluginAdapter {
+    fn recovery_progress(&self) -> Option<Arc<QuerySourceProgress>> {
+        self.subscription.progress.clone()
+    }
+
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         let mut progress = self
             .subscription

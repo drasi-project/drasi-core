@@ -52,10 +52,10 @@ impl<T: ?Sized> ComputationResource<T> {
     }
 }
 
-/// One graph-owned query's indexes and explicit output resources.
+/// One graph-owned stateful component's indexes and explicit output resources.
 ///
-/// The bundle is consumed when constructing its query. Its index fields cannot
-/// subsequently be replaced behind an already validated transaction.
+/// A query or [`super::ComputationTransaction`] consumes the bundle. Its index
+/// fields cannot subsequently be replaced behind an already validated transaction.
 pub struct ComputationIndexes {
     set: IndexSet,
     domain: Option<TransactionDomain>,
@@ -158,7 +158,9 @@ impl ComputationIndexes {
 /// this interface or to support atomic computation output.
 #[async_trait]
 pub trait ComputationIndexProvider: Send + Sync {
-    /// Construct isolated resources for one query in the supplied graph scope.
+    /// Construct isolated resources for one component in the supplied graph scope.
+    /// `query_id` is the historical parameter name; non-query stateful components
+    /// also use their component ID here and exclusively own the returned bundle.
     async fn create_indexes(
         &self,
         graph_id: &str,

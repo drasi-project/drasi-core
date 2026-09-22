@@ -303,3 +303,95 @@ async fn rollback_failure_retains_both_errors_and_fences_the_query() {
     assert_eq!(rollback, IndexError::IOError);
     assert!(query.recovery_required());
 }
+
+fn transaction_resources(session: Arc<dyn SessionControl>) -> ComputationIndexes {
+    use crate::in_memory_index::{
+        in_memory_checkpoint_store::InMemoryCheckpointStore,
+        in_memory_live_results_writer::InMemoryLiveResultsWriter,
+        in_memory_outbox_writer::InMemoryOutboxWriter,
+    };
+    let domain = TransactionDomain::new(session.clone());
+    // No data writes: these fixtures exercise operation/cleanup ownership only.
+    ComputationIndexes::try_new(
+        memory_indexes(session),
+        Some(domain.clone()),
+        Some(ComputationResource::participating(
+            Arc::new(InMemoryCheckpointStore::new()),
+            &domain,
+        )),
+        Some(ComputationResource::participating(
+            Arc::new(InMemoryOutboxWriter::new()),
+            &domain,
+        )),
+        Some(ComputationResource::participating(
+            Arc::new(InMemoryLiveResultsWriter::new()),
+            &domain,
+        )),
+    )
+    .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resource_transaction_cancellation_joins_provider_io_before_rollback() {
+    let session = Arc::new(RecordingSession::default());
+    let work = Arc::new(ComputationIoScope::default());
+    let transaction = ComputationTransaction::try_new(
+        transaction_resources(session.clone()).with_cleanup(work.clone()),
+    )
+    .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut operation = Box::pin(transaction.run(async {
+        work.run(move || {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(IndexError::other)?;
+            Ok(())
+        })
+        .await?;
+        Ok(())
+    }));
+    tokio::select! {
+        result = &mut operation => panic!("I/O should still be pending: {result:?}"),
+        result = entered_rx => result.unwrap(),
+    }
+    assert!(matches!(
+        transaction.shutdown().await,
+        Err(ComputationQueryError::OperationInProgress)
+    ));
+    drop(operation);
+    assert!(transaction.recovery_required());
+    assert_eq!(*session.0.lock().unwrap(), ["begin"]);
+    let mut shutdown = Box::pin(transaction.shutdown());
+    assert!(futures::poll!(&mut shutdown).is_pending());
+    drop(shutdown);
+    assert_eq!(*session.0.lock().unwrap(), ["begin"]);
+    release_tx.send(()).unwrap();
+    transaction.shutdown().await.unwrap();
+    assert_eq!(*session.0.lock().unwrap(), ["begin", "rollback"]);
+    assert!(matches!(
+        transaction.run(async { Ok(()) }).await,
+        Err(ComputationQueryError::RecoveryRequired)
+    ));
+}
+
+#[tokio::test]
+async fn resource_transaction_rolls_back_before_an_atomic_retry_without_an_evaluator() {
+    let session = Arc::new(RecordingSession::default());
+    let transaction =
+        ComputationTransaction::try_new(transaction_resources(session.clone())).unwrap();
+    let result: Result<()> = transaction
+        .run(async { Err(IndexError::IOError.into()) })
+        .await;
+    assert!(matches!(
+        result,
+        Err(ComputationQueryError::Index(IndexError::IOError))
+    ));
+    assert!(!transaction.recovery_required());
+    assert_eq!(transaction.run(async { Ok(42) }).await.unwrap(), 42);
+    assert_eq!(
+        *session.0.lock().unwrap(),
+        ["begin", "rollback", "begin", "commit"]
+    );
+}

@@ -101,6 +101,13 @@ pub trait ComputationService: ComputationComponent {
 /// A producer beside legacy Source. Its descriptor has output ports only.
 #[async_trait]
 pub trait EnvelopeSource: ComputationComponent {
+    /// The immediate consumer whose committed input permits this source to
+    /// resume/prune history. The host rejects routing through another component
+    /// (or fanout to another boundary) while using this consumer's checkpoint.
+    fn recovery_progress(&self) -> Option<std::sync::Arc<super::QuerySourceProgress>> {
+        None
+    }
+
     /// Wait for the next event; None means exhausted, never temporarily idle.
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>>;
 }
@@ -108,6 +115,17 @@ pub trait EnvelopeSource: ComputationComponent {
 /// A stateful transformer with declared input and output ports.
 #[async_trait]
 pub trait Transformer: ComputationComponent {
+    /// Called only after every outgoing branch accepted every envelope in this
+    /// batch. A transformer relying on durable acceptance must require it on its
+    /// output ports. This is not downstream handling or external-effect completion.
+    ///
+    /// The host also calls this for wakeups and continuations, before continuing
+    /// or acknowledging the input. Failure/cancellation must retain recoverable
+    /// pending output; the host never claims that an interrupted hook succeeded.
+    async fn delivery_completed(&mut self, _outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// A bounded continuation of the current input. The host finishes these
     /// emissions before accepting another input or acknowledging this one.
     fn has_pending_emissions(&self) -> bool {
@@ -127,8 +145,9 @@ pub trait Transformer: ComputationComponent {
     /// preserve input context and lineage, with this producer's output sequence.
     ///
     /// Success means local transformation completed, not that outputs have been
-    /// enqueued/handled or the input acknowledged. Cancellation/error can leave
-    /// component-local state changed; atomic staging/recovery is deferred.
+    /// enqueued/handled or the input acknowledged. The host calls
+    /// `delivery_completed` after all branches accept. Cancellation/error can
+    /// leave state changed; atomic staging/recovery remains component-specific.
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>>;
 }
 
