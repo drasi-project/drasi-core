@@ -26,6 +26,12 @@ The SSE Reaction component exposes Drasi continuous query results to web clients
 - Live query result updates for continuous queries
 - Push-based notifications for data changes
 
+## Lifecycle
+
+`start()` binds the configured host and port before reporting `Running` or returning success. If binding fails, it returns an error and reports `Error` without starting background tasks. Calling `start()` on an already-started reaction returns an error without replacing the running server; call `stop()` before starting it again.
+
+`stop()` waits for the heartbeat and HTTP server tasks to terminate and releases the listening socket before returning, so the configured port can be reused immediately. It is safe to call before startup or repeatedly. Unexpected background-task failures are reported as shutdown errors after the remaining tasks have been cleaned up.
+
 ## Configuration
 
 The SSE Reaction can be configured using either the builder pattern (recommended) or the config struct approach.
