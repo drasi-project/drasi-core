@@ -131,14 +131,15 @@ impl MockSource {
                 let mut profiling = ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                let wrapper = SourceEventWrapper::with_profiling(
+                let draft = SourceEventWrapper::with_profiling(
                     source_name.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
                     profiling,
+                    base.next_sequence(),
                 );
 
-                let _ = base.dispatch_event(wrapper).await;
+                let _ = base.dispatch_event(draft).await;
             }
         });
 

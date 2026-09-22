@@ -53,6 +53,7 @@ mod tests {
             source_id.to_string(),
             SourceEvent::Change(change),
             timestamp,
+            1,
         ))
     }
 
