@@ -2991,7 +2991,9 @@ impl Query for DrasiQuery {
 
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
-                            let arc_event = Arc::unwrap_or_clone(arc_event).into_event();
+                            let arc_event = Arc::try_unwrap(arc_event)
+                                .unwrap_or_else(|entry| (*entry).clone())
+                                .into_event();
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
                             let parts =
                                 match SourceEventWrapper::try_unwrap_arc(arc_event) {

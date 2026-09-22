@@ -220,7 +220,9 @@ mod tests {
 
         let first = queue.try_dequeue().await.unwrap();
         assert!(Arc::ptr_eq(
-            &Arc::unwrap_or_clone(first).into_event(),
+            &Arc::try_unwrap(first)
+                .unwrap_or_else(|entry| (*entry).clone())
+                .into_event(),
             &real_event
         ));
         for sequence in [1, 2] {
