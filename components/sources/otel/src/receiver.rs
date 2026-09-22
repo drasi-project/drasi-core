@@ -220,9 +220,9 @@ impl OtelRuntime {
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            wal_seq.unwrap_or_else(|| self.base.next_sequence()),
         );
         if let Some(seq) = wal_seq {
-            wrapper.sequence = Some(seq);
             wrapper.set_source_position(bytes::Bytes::copy_from_slice(&seq.to_be_bytes()));
         }
         self.base

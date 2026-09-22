@@ -55,9 +55,7 @@ async fn next_sequence(rx: &mut Box<dyn ChangeReceiver<SourceEventWrapper>>) -> 
         .await
         .expect("timed out waiting for event")
         .expect("event stream closed unexpectedly");
-    event
-        .sequence
-        .expect("every dispatched event must carry a framework sequence")
+    event.sequence
 }
 
 #[tokio::test]
