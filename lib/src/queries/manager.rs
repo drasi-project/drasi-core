@@ -207,6 +207,10 @@ mod tests {
 pub trait Query: Send + Sync {
     /// Start the query - subscribes to sources and begins processing events
     async fn start(&self) -> Result<()>;
+    /// Stop the query and release its active subscriptions and processing tasks.
+    ///
+    /// Failed starts and processing errors can leave resources behind, so this
+    /// must also clean up queries in `Error`. An already stopped query is a no-op.
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
@@ -3152,21 +3156,26 @@ impl Query for DrasiQuery {
     }
 
     async fn stop(&self) -> Result<()> {
+        let status = self.base.get_status().await;
+        if status == ComponentStatus::Stopped {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            matches!(
+                status,
+                ComponentStatus::Running
+                    | ComponentStatus::Starting
+                    | ComponentStatus::Stopping
+                    | ComponentStatus::Error
+            ),
+            "Cannot stop query '{}' while it is {status:?}",
+            self.base.config.id
+        );
+
         log_component_stop("Query", &self.base.config.id);
 
-        // Set Stopping on the local status handle. The manager has already validated
-        // and applied the Stopping transition on the graph via validate_and_transition().
-        // This local update is needed because the event processing loop checks the
-        // handle's local status to decide when to exit.
-        //
-        // INVARIANT: The graph must already be in Stopping state before this point.
-        debug_assert!(
-            matches!(
-                self.base.status_handle().get_status().await,
-                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Stopping
-            ),
-            "DrasiQuery::stop() called but local handle is not in expected pre-stop state"
-        );
+        // Error is not a quiescent state: failed queries need the same resource
+        // cleanup as running queries before they can report Stopped.
         self.base
             .set_status(
                 ComponentStatus::Stopping,
@@ -3503,7 +3512,8 @@ impl QueryManager {
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
     }
 
-    /// Stop a running query by ID, unsubscribing it from sources and halting event processing.
+    /// Stop a running, starting, or failed query by ID, releasing its active
+    /// subscriptions and processing tasks.
     ///
     /// # Errors
     /// Returns an error if the query is not found or the stop transition fails.
