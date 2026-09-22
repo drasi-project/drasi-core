@@ -142,7 +142,7 @@ impl EnvelopeSource for WalReplaySource {
                     source_id: self.resource.partition.clone(),
                     event: SourceEvent::Change(change),
                     timestamp,
-                    sequence: Some(sequence),
+                    sequence,
                     source_position: Some(Bytes::copy_from_slice(&sequence.to_be_bytes())),
                     profiling: None,
                 });

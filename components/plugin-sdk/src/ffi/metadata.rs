@@ -50,7 +50,11 @@ use super::types::FfiStr;
 ///   which raise their sequence counter above it for restart monotonicity
 ///   (#827). This changes the subscribe call contract, so old plugins must be
 ///   rejected by the loader's major.minor check.
-pub const FFI_SDK_VERSION: &str = "0.14.0";
+/// - `0.15.0`: source-event MessagePack payloads require a source-local `u64`
+///   sequence. Missing or null sequences from older plugins are no longer valid.
+///   `SourceVtable::subscribe_fn` also gained `has_resume_sequence` so replay
+///   from sequence zero is not confused with an absent resume request.
+pub const FFI_SDK_VERSION: &str = "0.15.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

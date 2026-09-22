@@ -47,6 +47,8 @@ pub(crate) enum ChangeAdapterError {
     WrongSchema { expected: &'static str },
     #[error("graph envelope must contain exactly one supported source change")]
     InvalidGraphEnvelope,
+    #[error("graph envelope is missing its source sequence")]
+    MissingSourceSequence,
     #[error("query envelope is missing its query identity")]
     MissingQueryId,
     #[error("query envelope is missing its result sequence")]
@@ -110,7 +112,7 @@ pub(crate) fn source_event_to_envelope(
         change.clone(),
         wrapper.timestamp,
         wrapper.profiling.clone(),
-        wrapper.sequence,
+        Some(wrapper.sequence),
         wrapper.source_position.clone(),
         extensions,
     )
@@ -137,7 +139,7 @@ pub(crate) fn source_event_parts_to_envelope(
         change,
         timestamp,
         profiling,
-        sequence,
+        Some(sequence),
         source_position,
         extensions,
     )
@@ -241,7 +243,9 @@ pub(crate) fn source_event_from_envelope(
         event: SourceEvent::Change(change),
         timestamp: system.timestamp(),
         profiling: system.profiling().cloned(),
-        sequence: system.sequence(),
+        sequence: system
+            .sequence()
+            .ok_or(ChangeAdapterError::MissingSourceSequence)?,
         source_position: system.source_position().cloned(),
     })
 }

@@ -180,7 +180,7 @@ pub struct SourceSubscriptionSettings {
     /// Contains the opaque position bytes that the source interprets to seek its change stream.
     /// Only meaningful when the source returns `supports_replay() == true`.
     pub resume_from: Option<Bytes>,
-    /// If set, the last framework-assigned monotonic `sequence` the subscribing query
+    /// If set, the last source-local monotonic `sequence` the subscribing query
     /// durably checkpointed for this source. On resubscribe the source raises its
     /// per-source sequence counter to at least `resume_sequence + 1` (via `fetch_max`,
     /// never lowering it), so filled-in sequences after a restart stay strictly above
@@ -193,6 +193,10 @@ pub struct SourceSubscriptionSettings {
     /// grpc, application) are unaffected: their WAL-head restore (`set_next_sequence`)
     /// already advances the counter directly, and whichever floor — WAL-head restore or
     /// this field — is higher wins.
+    ///
+    /// For WAL-backed sources, `Some(0)` also requests replay from the beginning
+    /// when a recovering query has not checkpointed this source yet. It must
+    /// remain distinct from `None`, including across plugin FFI.
     pub resume_sequence: Option<u64>,
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.

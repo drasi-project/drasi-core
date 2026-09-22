@@ -1060,6 +1060,7 @@ async fn insert_person(core: &DrasiLib, source: &str, id: &str, name: &str) {
             },
         }),
         chrono::Utc::now(),
+        base.next_sequence(),
     ))
     .await
     .unwrap();

@@ -134,6 +134,12 @@ pub extern "C" fn drasi_plugin_init() -> *mut FfiPluginRegistration
 | `target_triple` | Exact match | **REJECT** | Cannot load x86_64 `.so` on aarch64 |
 | `plugin_version` | Log only | **INFO** | Plugin's own version — no compatibility constraint |
 
+The current SDK contract is `0.15.0`: serialized source events must include a
+sequence number. Source subscriptions also preserve an explicit request to replay
+from sequence zero. Hosts reject older SDK versions rather than losing these
+recovery fields. Rebuild local plugins from the same checkout as the host after
+upgrading; a plugin's package version is separate from this contract.
+
 ## FFI Boundary Design
 
 ### Serialized Payload Pattern

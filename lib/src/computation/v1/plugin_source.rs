@@ -350,7 +350,9 @@ pub struct SourceSubscriptionOptions {
     /// Keep false unless that plugin supports isolated additional subscriptions.
     #[serde(default)]
     pub borrowed_recovery: bool,
-    /// Broadcast delivery is explicitly lossy before this adapter's output pipe.
+    /// Permit lossy Broadcast transport without disabling a source's declared
+    /// replay capability. Resume requests and unavailable-position errors still
+    /// follow the query's recovery policy; replay does not make transport lossless.
     #[serde(default)]
     pub allow_broadcast_loss: bool,
     #[serde(default = "bootstrap_timeout")]
@@ -562,17 +564,24 @@ impl LegacySourceSubscription {
                         "source reconstruction changed to an undeclared lossy dispatch mode"
                     );
                 }
-                let recoverable = source.supports_replay()
-                    && source.dispatch_mode() == crate::DispatchMode::Channel
-                    && (self.host.owned || self.options.borrowed_recovery);
+                let recoverable =
+                    source.supports_replay() && (self.host.owned || self.options.borrowed_recovery);
+                // A completed streaming-only startup may have no source checkpoint
+                // because no input has committed yet. Preserve that distinction from
+                // a committed checkpoint whose replay position is missing.
+                let replay_from_start = view.persistent
+                    && view.bootstrap_complete
+                    && !self.options.enable_bootstrap
+                    && saved.is_none();
                 if !view.ready
                     && view.persistent
                     && view.bootstrap_complete
                     && (!recoverable
-                        || saved
-                            .as_ref()
-                            .and_then(|saved| saved.source_position.as_ref())
-                            .is_none())
+                        || !replay_from_start
+                            && saved
+                                .as_ref()
+                                .and_then(|saved| saved.source_position.as_ref())
+                                .is_none())
                 {
                     self.reset(&view, false).await?;
                     continue;
@@ -590,10 +599,14 @@ impl LegacySourceSubscription {
                     } else {
                         None
                     },
-                    // A sequence floor is not positional replay. Recreated
-                    // volatile sources must not reuse committed raw sequences.
+                    // Keep volatile sequence floors. For an uncheckpointed durable
+                    // stream, zero is the existing replay-from-start request, not
+                    // an invented source-native position.
                     resume_sequence: if self.host.owned || self.options.borrowed_recovery {
-                        saved.as_ref().map(|saved| saved.sequence)
+                        saved
+                            .as_ref()
+                            .map(|saved| saved.sequence)
+                            .or_else(|| replay_from_start.then_some(0))
                     } else {
                         None
                     },
@@ -825,17 +838,6 @@ impl EnvelopeSource for SourcePluginAdapter {
             ) {
                 log::trace!("Ignoring legacy subscription control on native data input");
                 continue;
-            }
-            if self
-                .subscription
-                .state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
-                .position
-                .is_some()
-                && event.sequence.is_none()
-            {
-                anyhow::bail!("position-tracked source omitted its authoritative sequence");
             }
             let sequence = self
                 .sequence

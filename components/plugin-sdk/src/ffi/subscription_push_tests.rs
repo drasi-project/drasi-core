@@ -105,6 +105,7 @@ fn assert_push_backpressure_does_not_starve_runtime(bootstrap: bool, shutdown_ru
                 "source".into(),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
+                1,
             )))
             .unwrap();
     }

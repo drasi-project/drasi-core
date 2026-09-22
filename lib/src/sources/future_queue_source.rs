@@ -54,6 +54,9 @@ pub struct FutureQueueSource {
     query_id: String,
     /// Dispatcher for sending events to subscribers
     dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    /// Monotonic sequence counter for the control events this source emits.
+    /// `FuturesDue` signals bypass `SourceBase`, so this source stamps them
+    /// itself to satisfy the mandatory-sequence contract.
     next_sequence: Arc<AtomicU64>,
 }
 
@@ -163,12 +166,11 @@ impl FutureQueueSource {
                         error!("FutureQueueSource: signal sequence exhausted");
                         break;
                     };
-                    let event_wrapper = SourceEventWrapper::with_sequence(
+                    let event_wrapper = SourceEventWrapper::new(
                         FUTURE_QUEUE_SOURCE_ID.to_string(),
                         SourceEvent::Control(SourceControl::FuturesDue),
                         timestamp,
                         sequence,
-                        None,
                     );
 
                     let dispatcher_guard = dispatcher_clone.read().await;
@@ -428,7 +430,7 @@ mod tests {
             assert_eq!(event.source_id, FUTURE_QUEUE_SOURCE_ID);
             assert_eq!(event.timestamp.timestamp_millis(), 2_000);
             assert_eq!(event.event, SourceEvent::Control(SourceControl::FuturesDue));
-            let sequence = event.sequence.expect("scheduled source sequence");
+            let sequence = event.sequence;
             assert!(sequence > previous);
             previous = sequence;
             source.stop().await;

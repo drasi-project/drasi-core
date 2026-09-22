@@ -68,15 +68,10 @@ fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
     }
 }
 
-/// Decode the `resume_sequence` FFI parameter into `Option<u64>`.
-///
-/// `0` is the sentinel for "no checkpointed sequence" (real framework sequences
-/// start at 1), so it maps to `None`; any non-zero value is the checkpointed
-/// sequence and maps to `Some(n)`. Shared by both source vtable builders so the
-/// sentinel convention is defined in exactly one place.
+/// Preserve an explicit replay-from-zero request separately from no request.
 #[inline]
-fn decode_resume_sequence(resume_sequence: u64) -> Option<u64> {
-    (resume_sequence != 0).then_some(resume_sequence)
+fn decode_resume_sequence(resume_sequence: u64, has_resume_sequence: bool) -> Option<u64> {
+    has_resume_sequence.then_some(resume_sequence)
 }
 
 /// Serialize an FFI event payload (`SourceEventPayload` / `BootstrapEventPayload`)
@@ -785,6 +780,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_len: u32,
         request_position_handle: bool,
         resume_sequence: u64,
+        has_resume_sequence: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -809,11 +805,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
-        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
-        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
-        // and a floor derived from 0 would be 1 (the default) anyway, so treating
-        // it as absent is a no-op — the sentinel is safe either way.
-        let resume_sequence = decode_resume_sequence(resume_sequence);
+        let resume_sequence = decode_resume_sequence(resume_sequence, has_resume_sequence);
 
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
@@ -1183,6 +1175,7 @@ pub fn build_source_vtable_from_boxed(
         resume_from_len: u32,
         request_position_handle: bool,
         resume_sequence: u64,
+        has_resume_sequence: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -1207,11 +1200,7 @@ pub fn build_source_vtable_from_boxed(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
-        // 0 is the sentinel for "no checkpointed sequence" (see decode_resume_sequence).
-        // Real sequences start at 1, so 0 never collides with a genuine checkpoint;
-        // and a floor derived from 0 would be 1 (the default) anyway, so treating
-        // it as absent is a no-op — the sentinel is safe either way.
-        let resume_sequence = decode_resume_sequence(resume_sequence);
+        let resume_sequence = decode_resume_sequence(resume_sequence, has_resume_sequence);
 
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
@@ -3233,8 +3222,7 @@ fn wrap_subscription_response(
                 }
 
                 rt_handle.spawn(async move {
-                    let sentinel_guard =
-                        Arc::new(BootstrapSentinelOnDrop { ctx_raw, callback });
+                    let sentinel_guard = Arc::new(BootstrapSentinelOnDrop { ctx_raw, callback });
                     let mut rx = receiver.inner.lock().await;
                     // Pin the Notified future for cancel-safe shutdown
                     // (same rationale as change receiver forwarder).
@@ -3949,11 +3937,11 @@ mod snapshot_stream_tests {
     }
 
     #[test]
-    fn decode_resume_sequence_maps_zero_sentinel_to_none() {
-        // 0 is the "absent" sentinel; every non-zero value decodes to Some(n).
-        assert_eq!(decode_resume_sequence(0), None);
-        assert_eq!(decode_resume_sequence(1), Some(1));
-        assert_eq!(decode_resume_sequence(42), Some(42));
-        assert_eq!(decode_resume_sequence(u64::MAX), Some(u64::MAX));
+    fn decode_resume_sequence_preserves_replay_from_zero() {
+        assert_eq!(decode_resume_sequence(0, false), None);
+        assert_eq!(decode_resume_sequence(0, true), Some(0));
+        assert_eq!(decode_resume_sequence(1, true), Some(1));
+        assert_eq!(decode_resume_sequence(42, true), Some(42));
+        assert_eq!(decode_resume_sequence(u64::MAX, true), Some(u64::MAX));
     }
 }

@@ -67,7 +67,7 @@ fn legacy_graph_codec_preserves_all_raw_metadata_and_typed_float_datetime_values
         source_id: "legacy-source".into(),
         event: SourceEvent::Change(change.clone()),
         timestamp,
-        sequence: Some(42),
+        sequence: 42,
         source_position: Some(Bytes::from_static(&[0xff, 0, 1])),
         profiling: Some(ProfilingMetadata {
             source_ns: Some(10),
@@ -145,6 +145,7 @@ fn graph_codec_uses_owned_ingress_and_rejects_corrupt_record_images() {
         "source".into(),
         SourceEvent::Change(change.clone()),
         chrono::Utc::now(),
+        1,
     ));
     let envelope = GraphChangeCodec::encode_source_event(
         event,
@@ -154,6 +155,13 @@ fn graph_codec_uses_owned_ingress_and_rejects_corrupt_record_images() {
         None,
     )
     .expect("owned ingress");
+    assert_eq!(
+        GraphChangeCodec::source_metadata(&envelope)
+            .expect("source metadata")
+            .expect("raw metadata present")
+            .sequence,
+        Some(1)
+    );
     assert_eq!(
         GraphChangeCodec::decode_changes(&envelope).expect("decode"),
         [change]

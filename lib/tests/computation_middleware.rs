@@ -207,7 +207,7 @@ fn event(producer: &str, sequence: u64, change: SourceChange) -> ChangeEnvelope 
         source_id: format!("raw-{producer}"),
         event: SourceEvent::Change(change),
         timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 123_456_789).expect("timestamp"),
-        sequence: Some(sequence + 1000),
+        sequence: sequence + 1000,
         source_position: Some(Bytes::from_static(&[0xff, 0, 7])),
         profiling: Some(ProfilingMetadata {
             source_ns: Some(11),

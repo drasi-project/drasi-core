@@ -375,12 +375,6 @@ impl Source for SourceProxy {
             None => (std::ptr::null(), 0u32),
         };
 
-        // Pass resume_sequence across FFI. 0 is the sentinel for None; real
-        // sequences start at 1 (the framework counter starts at 1), so 0 never
-        // collides with a genuine checkpoint — and a floor derived from 0 would
-        // be 1 (the default) anyway, making the sentinel a no-op either way.
-        // Lets out-of-process sources raise their sequence counter for restart
-        // monotonicity.
         let resume_sequence = settings.resume_sequence.unwrap_or(0);
 
         let resp_ptr = (self.vtable.subscribe_fn)(
@@ -394,6 +388,7 @@ impl Source for SourceProxy {
             resume_from_len,
             settings.request_position_handle,
             resume_sequence,
+            settings.resume_sequence.is_some(),
         );
 
         if resp_ptr.is_null() {
@@ -1149,7 +1144,7 @@ pub(super) mod resource_observer_tests {
             return unsafe { copy_plugin_version(std::ptr::null()) };
         };
         let metadata = PluginMetadata {
-            sdk_version: FfiStr::from_str("0.14.0"),
+            sdk_version: FfiStr::from_str(drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION),
             core_version: FfiStr::from_str("8.0.0"),
             lib_version: FfiStr::from_str("9.0.0"),
             plugin_version: FfiStr::from_str(version),
@@ -1160,7 +1155,9 @@ pub(super) mod resource_observer_tests {
         unsafe { copy_plugin_version(&metadata) }
     }
 
-    struct OriginSource(String);
+    type ResumeRequests = Arc<std::sync::Mutex<Vec<Option<u64>>>>;
+
+    struct OriginSource(String, Option<ResumeRequests>);
 
     #[async_trait]
     impl Source for OriginSource {
@@ -1187,8 +1184,11 @@ pub(super) mod resource_observer_tests {
         }
         async fn subscribe(
             &self,
-            _settings: SourceSubscriptionSettings,
+            settings: SourceSubscriptionSettings,
         ) -> anyhow::Result<SubscriptionResponse> {
+            if let Some(requests) = &self.1 {
+                requests.lock().unwrap().push(settings.resume_sequence);
+            }
             anyhow::bail!("not used by origin tests")
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -1218,7 +1218,7 @@ pub(super) mod resource_observer_tests {
             _config: &serde_json::Value,
             _auto_start: bool,
         ) -> anyhow::Result<Box<dyn Source>> {
-            Ok(Box::new(OriginSource(id.into())))
+            Ok(Box::new(OriginSource(id.into(), None)))
         }
     }
 
@@ -1289,9 +1289,50 @@ pub(super) mod resource_observer_tests {
     }
 
     #[tokio::test]
+    async fn resume_from_zero_survives_both_source_ffi_builders() {
+        for boxed in [false, true] {
+            let requests: ResumeRequests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let source = OriginSource("source".into(), Some(requests.clone()));
+            let vtable = if boxed {
+                drasi_plugin_sdk::ffi::build_source_vtable_from_boxed(
+                    Box::new(source),
+                    test_executor,
+                    |_, _, _| {},
+                    test_runtime,
+                )
+            } else {
+                drasi_plugin_sdk::ffi::build_source_vtable(
+                    source,
+                    test_executor,
+                    |_, _, _| {},
+                    test_runtime,
+                )
+            };
+            let proxy = SourceProxy::new(vtable, test_library());
+            let expected = [None, Some(0), Some(1), Some(42), Some(u64::MAX)];
+            for resume_sequence in expected {
+                let result = proxy
+                    .subscribe(SourceSubscriptionSettings {
+                        source_id: "source".into(),
+                        query_id: "query".into(),
+                        enable_bootstrap: false,
+                        nodes: Default::default(),
+                        relations: Default::default(),
+                        resume_from: None,
+                        resume_sequence,
+                        request_position_handle: false,
+                    })
+                    .await;
+                assert!(result.is_err(), "the fixture records without delivering");
+            }
+            assert_eq!(*requests.lock().unwrap(), expected, "boxed={boxed}");
+        }
+    }
+
+    #[tokio::test]
     async fn directly_constructed_source_has_no_inferred_origin() {
         let vtable = drasi_plugin_sdk::ffi::build_source_vtable(
-            OriginSource("source".into()),
+            OriginSource("source".into(), None),
             test_executor,
             |_, _, _| {},
             test_runtime,

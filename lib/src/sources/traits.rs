@@ -318,12 +318,8 @@ pub trait Source: Send + Sync {
     ///
     /// The default is a no-op for sources that do not manage position handles.
     ///
-    /// **Note:** This method has no FFI vtable entry yet. `SourceProxy`
-    /// overrides it with an explicit no-op + log message, and overrides
-    /// `supports_replay()` to return `false` so the orchestration layer
-    /// does not expect plugin sources to support position handles. A future
-    /// FFI SDK update (see issue #371) will add the vtable entry so plugin
-    /// sources can participate in position-handle cleanup.
+    /// Dynamically loaded sources use the same cleanup contract: `SourceProxy`
+    /// forwards this call through the source FFI vtable.
     async fn remove_position_handle(&self, _query_id: &str) {}
 
     /// Signal that the initial batch of query subscriptions is complete.

@@ -155,7 +155,7 @@ impl GraphChangeCodec {
         let metadata = LegacySourceMetadata {
             version: 1,
             source_id: event.source_id.clone(),
-            sequence: event.sequence,
+            sequence: Some(event.sequence),
             source_position: event
                 .source_position
                 .as_ref()

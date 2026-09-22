@@ -457,7 +457,7 @@ async fn source_framework_sequence_is_shared_before_fanout_and_preserves_resume_
     let source = SourceBase::new(SourceBaseParams::new("shared")).unwrap();
     let mut first = source.try_test_subscribe().await.unwrap();
     let mut second = source.try_test_subscribe().await.unwrap();
-    let event = || {
+    let event = |sequence| {
         SourceEventWrapper::with_profiling(
             "shared".into(),
             SourceEvent::Change(SourceChange::Insert {
@@ -475,13 +475,17 @@ async fn source_framework_sequence_is_shared_before_fanout_and_preserves_resume_
                 source_ns: Some(777),
                 ..Default::default()
             },
+            sequence,
         )
     };
     for expected in [1, 2] {
-        source.dispatch_event(event()).await.unwrap();
+        source
+            .dispatch_event(event(source.next_sequence()))
+            .await
+            .unwrap();
         let one = first.recv().await.unwrap();
         let two = second.recv().await.unwrap();
-        assert_eq!(one.sequence, Some(expected));
+        assert_eq!(one.sequence, expected);
         assert_eq!(two.sequence, one.sequence);
         assert_eq!(one.timestamp, two.timestamp);
         assert_eq!(one.profiling, two.profiling);
@@ -505,17 +509,21 @@ async fn source_framework_sequence_is_shared_before_fanout_and_preserves_resume_
         .await
         .unwrap();
     let mut resumed = response.receiver;
-    source.dispatch_event(event()).await.unwrap();
+    source
+        .dispatch_event(event(source.next_sequence()))
+        .await
+        .unwrap();
     for receiver in [&mut first, &mut second, &mut resumed] {
-        assert_eq!(receiver.recv().await.unwrap().sequence, Some(501));
+        assert_eq!(receiver.recv().await.unwrap().sequence, 501);
     }
-    let mut replayed = event();
-    replayed.sequence = Some(900);
-    source.dispatch_event(replayed).await.unwrap();
+    source.dispatch_event(event(900)).await.unwrap();
     source.set_next_sequence(1);
-    source.dispatch_event(event()).await.unwrap();
+    source
+        .dispatch_event(event(source.next_sequence()))
+        .await
+        .unwrap();
     for receiver in [&mut first, &mut second, &mut resumed] {
-        assert_eq!(receiver.recv().await.unwrap().sequence, Some(900));
-        assert_eq!(receiver.recv().await.unwrap().sequence, Some(901));
+        assert_eq!(receiver.recv().await.unwrap().sequence, 900);
+        assert_eq!(receiver.recv().await.unwrap().sequence, 901);
     }
 }

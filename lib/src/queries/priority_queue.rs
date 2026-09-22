@@ -94,12 +94,7 @@ impl QueryEventQueue {
             .ranks
             .get(&event.source_id)
             .ok_or_else(|| anyhow::anyhow!("undeclared query source '{}'", event.source_id))?;
-        let sequence = event.sequence.ok_or_else(|| {
-            anyhow::anyhow!(
-                "source '{}' omitted its authoritative event sequence",
-                event.source_id
-            )
-        })?;
+        let sequence = event.sequence;
         Ok(Some(Arc::new(RankedSourceEvent {
             event,
             rank,
@@ -162,6 +157,7 @@ mod tests {
             source_id.to_string(),
             SourceEvent::Change(change),
             timestamp,
+            1,
         ))
     }
 
@@ -277,7 +273,7 @@ mod tests {
         .into_iter()
         .map(|(source, sequence, time)| {
             let mut event = create_test_event(source, time);
-            Arc::make_mut(&mut event).sequence = Some(sequence);
+            Arc::make_mut(&mut event).sequence = sequence;
             event
         })
         .collect();
@@ -296,17 +292,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ranked_query_inputs_reject_ambiguous_rank_or_missing_sequence() {
+    async fn ranked_query_inputs_require_unique_declared_sources() {
         let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
         assert!(QueryEventQueue::new(0, ["source"]).is_err());
         assert!(QueryEventQueue::new(1, ["source", "source"]).is_err());
         assert!(QueryEventQueue::new(1, [future]).is_err());
         let queue = QueryEventQueue::new(1, ["source"]).unwrap();
-        let error = queue
+        assert!(queue
             .enqueue(create_test_event("source", Utc::now()))
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("authoritative event sequence"));
+            .unwrap());
+        assert_eq!(queue.dequeue().await.sequence, 1);
         let error = queue
             .enqueue(create_test_event("unknown", Utc::now()))
             .await

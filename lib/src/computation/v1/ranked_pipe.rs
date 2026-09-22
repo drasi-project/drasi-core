@@ -591,7 +591,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(metadata.source_id, expected.source_id);
-                assert_eq!(metadata.sequence, expected.sequence);
+                assert_eq!(metadata.sequence, Some(expected.sequence));
                 assert_eq!(metadata.timestamp, expected.timestamp);
                 assert_eq!(metadata.profiling, expected.profiling);
                 assert_eq!(
@@ -685,6 +685,8 @@ mod tests {
 
     #[tokio::test]
     async fn lossy_admission_and_missing_source_sequence_are_explicit() {
+        use crate::computation::v1::{ChangeEnvelope, ComponentId, ContextEntry, ContextValue};
+
         let id = ResourceId::try_new("inbox").unwrap();
         let queue = RankedInputQueue::new(1).unwrap();
         let resources = BTreeMap::from([(id.clone(), queue.resource())]);
@@ -702,12 +704,27 @@ mod tests {
             .unwrap();
         assert_eq!(queue.state.lock().unwrap().heap.len(), 1);
         assert_eq!(pipe.control.metrics().unwrap().discarded, 1);
-        let mut missing = (*event("source", 3, 1000)).clone();
-        missing.sequence = None;
-        let error = sender
-            .send(encode(Arc::new(missing), 12))
-            .await
-            .unwrap_err();
+        let original = encode(event("source", 3, 1000), 12);
+        let mut metadata = GraphChangeCodec::source_metadata(&original)
+            .unwrap()
+            .unwrap();
+        metadata.sequence = None;
+        let mut missing = ChangeEnvelope::new(
+            original.id().clone(),
+            original.changes().clone(),
+            original.system().as_ref().clone(),
+        );
+        missing
+            .append_annotation(
+                ContextEntry::try_new(
+                    ComponentId::try_new("source").unwrap(),
+                    "drasi.legacy-source.v1",
+                    ContextValue::Bytes(serde_json::to_vec(&metadata).unwrap().into()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let error = sender.send(missing).await.unwrap_err();
         assert!(format!("{error:#}").contains("authoritative event sequence"));
     }
 

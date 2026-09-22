@@ -203,32 +203,41 @@ impl drasi_lib::Source for TrackedApplication {
     }
     async fn subscribe(
         &self,
-        settings: drasi_lib::SourceSubscriptionSettings,
+        mut settings: drasi_lib::SourceSubscriptionSettings,
     ) -> anyhow::Result<drasi_lib::channels::SubscriptionResponse> {
         self.subscriptions
             .lock()
             .expect("subscriptions")
             .push(settings.clone());
-        let control = drasi_lib::channels::SourceEventWrapper {
-            source_id: self.source.id().to_owned(),
-            event: drasi_lib::channels::SourceEvent::Control(
-                drasi_lib::channels::SourceControl::Subscription {
-                    query_id: settings.query_id.clone(),
-                    query_node_id: "subscription".into(),
-                    node_labels: vec![],
-                    rel_labels: vec![],
-                    operation: drasi_lib::channels::ControlOperation::Insert,
-                },
-            ),
-            timestamp: chrono::Utc::now(),
-            profiling: None,
-            sequence: None,
-            source_position: None,
+        let control = if self.subscription_control {
+            let sequence = settings
+                .resume_sequence
+                .unwrap_or(0)
+                .checked_add(1)
+                .expect("subscription control sequence");
+            // Reserve the control's sequence before the application allocates live data.
+            settings.resume_sequence = Some(sequence);
+            Some(Arc::new(drasi_lib::channels::SourceEventWrapper::new(
+                self.source.id().to_owned(),
+                drasi_lib::channels::SourceEvent::Control(
+                    drasi_lib::channels::SourceControl::Subscription {
+                        query_id: settings.query_id.clone(),
+                        query_node_id: "subscription".into(),
+                        node_labels: vec![],
+                        rel_labels: vec![],
+                        operation: drasi_lib::channels::ControlOperation::Insert,
+                    },
+                ),
+                chrono::Utc::now(),
+                sequence,
+            )))
+        } else {
+            None
         };
         let mut response = self.source.subscribe(settings).await?;
-        if self.subscription_control {
+        if let Some(control) = control {
             response.receiver = Box::new(ControlBeforeData {
-                control: Some(Arc::new(control)),
+                control: Some(control),
                 receiver: response.receiver,
             });
         }
@@ -748,12 +757,23 @@ async fn volatile_restart(subscription_control: bool) {
                 .expect("input");
             let event = results.recv().await.expect("new data is not deduplicated");
             assert_eq!(event.system().sequence(), sequence);
+            let raw_sequence = sequence + if subscription_control { epoch + 1 } else { 0 };
+            assert_eq!(
+                GraphChangeCodec::source_metadata(&event)
+                    .expect("source metadata")
+                    .expect("raw metadata present")
+                    .sequence,
+                Some(raw_sequence)
+            );
         }
         handle.stop().await.expect("stop");
     }
     let settings = factory.subscriptions.lock().expect("subscriptions").clone();
     assert_eq!(settings.len(), 2);
-    assert_eq!(settings[1].resume_sequence, Some(2));
+    assert_eq!(
+        settings[1].resume_sequence,
+        Some(if subscription_control { 3 } else { 2 })
+    );
     assert!(
         settings[1].resume_from.is_none(),
         "raising a sequence floor is not positional replay"
