@@ -33,7 +33,7 @@ use mysql_common::uuid::Uuid;
 use tokio::sync::RwLock;
 
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::{SourceEvent, SourceEventDraft};
+use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
 use drasi_mysql_common::connect_with_ssl_mode;
 
@@ -402,10 +402,11 @@ impl ReplicationStream {
             return Ok(());
         }
 
-        let mut wrapper = SourceEventDraft::new(
+        let mut wrapper = SourceEventWrapper::new(
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            self.base.next_sequence(),
         );
 
         // Attach the current replication position for checkpoint recovery
@@ -426,10 +427,11 @@ impl ReplicationStream {
         if let Some(changes) = self.pending_changes.take() {
             let position_bytes = self.position_bytes_with_timestamp(header.timestamp() as u64);
             for change in changes {
-                let mut wrapper = SourceEventDraft::new(
+                let mut wrapper = SourceEventWrapper::new(
                     self.source_id.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
+                    self.base.next_sequence(),
                 );
                 wrapper.set_source_position(position_bytes.clone());
                 self.base.dispatch_event(wrapper).await?;

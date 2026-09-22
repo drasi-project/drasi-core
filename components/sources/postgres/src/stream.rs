@@ -28,7 +28,7 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::{PostgresSourceConfig, ReplayState};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventDraft};
+use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
 use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::SourceBase;
 
@@ -757,17 +757,17 @@ impl ReplicationStream {
         let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-        let mut wrapper = SourceEventDraft::with_profiling(
+        let mut wrapper = SourceEventWrapper::with_profiling(
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             profiling,
+            self.base.next_sequence(),
         );
 
         // Attach the opaque source_position bytes for checkpoint/recovery and replay dedup
         wrapper.set_source_position(position);
 
-        // Use dispatch_event() which stamps the monotonic sequence
         if let Err(e) = self.base.dispatch_event(wrapper).await {
             debug!(
                 "[{}] Failed to dispatch change (no subscribers): {}",

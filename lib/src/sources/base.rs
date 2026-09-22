@@ -176,15 +176,15 @@ pub struct SourceBase {
     /// it to all dispatchers in this vector.
     ///
     /// Intentionally `pub(crate)`: source authors must **not** dispatch through
-    /// the raw dispatcher list, because that bypasses the framework's monotonic
-    /// sequence stamping and `source_position` validation. Dispatch via
+    /// the raw dispatcher list, because that bypasses timestamp ordering,
+    /// sequence-floor tracking and `source_position` validation. Dispatch via
     /// [`dispatch_event`](Self::dispatch_event),
     /// [`dispatch_events_batch`](Self::dispatch_events_batch), or
     /// [`dispatch_source_change`](Self::dispatch_source_change) — and use
     /// [`clone_shared`](Self::clone_shared) to move an owned `SourceBase` into a
     /// background task.
     pub(crate) dispatchers:
-        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<StampedSourceEvent> + Send + Sync>>>>,
+        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
     /// State store provider (extracted from context for convenience)
@@ -209,17 +209,12 @@ pub struct SourceBase {
     /// `request_position_handle == true`.
     position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
     /// Monotonically increasing counter for assigning event sequences.
-    /// The framework stamps every dispatched event with this sequence.
+    /// Used when a source does not supply its own sequence number.
     next_sequence: Arc<AtomicU64>,
-    /// Serializes the *sequence-assignment → timestamp-normalization → enqueue*
-    /// window per source so that events reach subscribers in the same order as
-    /// their assigned sequence numbers.
-    ///
-    /// Without this, two concurrent `dispatch_event` / `dispatch_events_batch`
-    /// calls can assign sequences in one order but reach the query-side
-    /// priority queue in the opposite order. `SequenceDedup` then treats the
-    /// later-delivered, lower-numbered event as an already-processed replay and
-    /// silently drops it (issue #640).
+    /// Serializes timestamp normalization and enqueue per source. Convenience
+    /// dispatch methods also allocate their sequence under this lock (#640).
+    /// Explicit-wrapper producers must serialize allocation and dispatch
+    /// themselves so `SequenceDedup` does not discard reordered live events.
     ///
     /// The guarded value is the last timestamp stamped on a dispatched event.
     /// Each event's timestamp is clamped to at least the previous timestamp to
@@ -332,13 +327,13 @@ impl SourceBase {
         let dispatch_buffer_capacity = params.dispatch_buffer_capacity.unwrap_or(1000);
 
         // Set up initial dispatchers based on dispatch mode
-        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<StampedSourceEvent> + Send + Sync>> =
+        let mut dispatchers: Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>> =
             Vec::new();
 
         if dispatch_mode == DispatchMode::Broadcast {
             // For broadcast mode, create a single broadcast dispatcher
             let dispatcher =
-                BroadcastChangeDispatcher::<StampedSourceEvent>::new(dispatch_buffer_capacity);
+                BroadcastChangeDispatcher::<SourceEventWrapper>::new(dispatch_buffer_capacity);
             dispatchers.push(Box::new(dispatcher));
         }
         // For channel mode, dispatchers will be created on-demand when subscribing
@@ -603,6 +598,15 @@ impl SourceBase {
         map.clear();
     }
 
+    /// Allocate the next source-local sequence number, starting at one.
+    ///
+    /// Sources without their own monotonic sequence can use this when building
+    /// an event. Serialize allocation and dispatch together across producers;
+    /// allocating a number alone does not reserve its place in dispatch order.
+    pub fn next_sequence(&self) -> u64 {
+        self.next_sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// The single choke point that advances the per-source sequence counter,
     /// owning the restart-monotonicity invariant for all callers.
     ///
@@ -761,8 +765,8 @@ impl SourceBase {
     /// This is a helper method that can be used by sources with custom subscribe logic.
     pub async fn create_streaming_receiver(
         &self,
-    ) -> Result<Box<dyn ChangeReceiver<StampedSourceEvent>>> {
-        let receiver: Box<dyn ChangeReceiver<StampedSourceEvent>> = match self.dispatch_mode {
+    ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
+        let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match self.dispatch_mode {
             DispatchMode::Broadcast => {
                 // For broadcast mode, use the single dispatcher
                 let dispatchers = self.dispatchers.read().await;
@@ -774,7 +778,7 @@ impl SourceBase {
             }
             DispatchMode::Channel => {
                 // For channel mode, create a new dispatcher for this subscription
-                let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(
+                let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(
                     self.dispatch_buffer_capacity,
                 );
                 let receiver = dispatcher.create_receiver().await?;
@@ -1044,7 +1048,7 @@ impl SourceBase {
 
         // Create dedicated channel for this subscriber
         let dispatcher = crate::channels::dispatcher::ChannelChangeDispatcher::<
-            crate::channels::events::StampedSourceEvent,
+            crate::channels::events::SourceEventWrapper,
         >::new(self.dispatch_buffer_capacity);
         let live_receiver = dispatcher.create_receiver().await?;
 
@@ -1074,11 +1078,11 @@ impl SourceBase {
 
         // Build replay events (already stamped with their WAL sequence)
         let replay_wrappers: std::collections::VecDeque<
-            std::sync::Arc<crate::channels::events::StampedSourceEvent>,
+            std::sync::Arc<crate::channels::events::SourceEventWrapper>,
         > = replay_events
             .into_iter()
             .map(|(seq, change)| {
-                std::sync::Arc::new(crate::channels::events::StampedSourceEvent {
+                std::sync::Arc::new(crate::channels::events::SourceEventWrapper {
                     source_id: self.id.clone(),
                     event: crate::channels::events::SourceEvent::Change(change),
                     timestamp: chrono::Utc::now(),
@@ -1100,7 +1104,7 @@ impl SourceBase {
 
         // Composite receiver: replay first, then live
         let composite: Box<
-            dyn crate::channels::ChangeReceiver<crate::channels::events::StampedSourceEvent>,
+            dyn crate::channels::ChangeReceiver<crate::channels::events::SourceEventWrapper>,
         > = Box::new(ReplayThenLiveReceiver::new(replay_wrappers, live_receiver));
 
         // Position handle — initialize to the resume sequence so a resuming
@@ -1269,24 +1273,24 @@ impl SourceBase {
     ///
     /// This method handles the common pattern of:
     /// - Creating profiling metadata with timestamp
-    /// - Wrapping the change in a [`SourceEventDraft`]
-    /// - Dispatching to all subscribers (which stamps the sequence)
+    /// - Wrapping the change in a [`SourceEventWrapper`] with an allocated sequence
+    /// - Dispatching to all subscribers in sequence order
     /// - Handling the no-subscriber case gracefully
     pub async fn dispatch_source_change(&self, change: SourceChange) -> Result<()> {
         // Create profiling metadata
         let mut profiling = profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(profiling::timestamp_ns());
 
-        // Create the unstamped draft
-        let draft = SourceEventDraft::with_profiling(
+        let last_dispatch_ts = self.dispatch_order.lock().await;
+        let wrapper = SourceEventWrapper::with_profiling(
             self.id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             profiling,
+            self.next_sequence(),
         );
 
-        // Dispatch event
-        self.dispatch_event(draft).await
+        self.dispatch_event_ordered(wrapper, last_dispatch_ts).await
     }
 
     /// Maximum allowed size for source position bytes (64KB).
@@ -1297,7 +1301,7 @@ impl SourceBase {
     /// Return `candidate` clamped to at least `*last`, updating `*last`.
     ///
     /// Called while holding the `dispatch_order` lock, so per-source dispatch
-    /// timestamps stay nondecreasing in sequence order even after clock rollback.
+    /// timestamps stay nondecreasing in dispatch order even after clock rollback.
     /// Equal timestamps are preserved; the priority queue's composite key uses
     /// sequence to break same-source timestamp ties (#640).
     fn next_monotonic_timestamp(
@@ -1309,19 +1313,26 @@ impl SourceBase {
         next
     }
 
-    /// Dispatch a [`SourceEventDraft`] to all subscribers, stamping it with a
-    /// framework-assigned monotonic sequence.
+    /// Dispatch an event without changing its sequence number.
     ///
-    /// This is the sole bridge from an unstamped, source-authored draft to a
-    /// downstream [`StampedSourceEvent`]. It handles Arc-wrapping for zero-copy
-    /// sharing and logs when there are no subscribers. If the draft supplies its
-    /// own `supplied_sequence` (the WAL fast-path), that value is used and the
-    /// counter is advanced past it; otherwise the framework assigns the next
-    /// sequence. Either way the resulting event always carries a sequence.
-    pub async fn dispatch_event(&self, draft: SourceEventDraft) -> Result<()> {
+    /// The allocator is advanced past the supplied sequence. Sources must
+    /// serialize sequence allocation and dispatch across concurrent producers
+    /// so live events arrive in increasing sequence order. For data changes
+    /// needing automatic allocation, [`Self::dispatch_source_change`] handles
+    /// both operations under the dispatch-order lock.
+    pub async fn dispatch_event(&self, wrapper: SourceEventWrapper) -> Result<()> {
+        let last_dispatch_ts = self.dispatch_order.lock().await;
+        self.dispatch_event_ordered(wrapper, last_dispatch_ts).await
+    }
+
+    async fn dispatch_event_ordered(
+        &self,
+        mut wrapper: SourceEventWrapper,
+        mut last_dispatch_ts: tokio::sync::MutexGuard<'_, chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
         // Warn about oversized source positions; the checkpoint layer will
         // enforce the limit and preserve the last good position.
-        if let Some(ref pos) = draft.source_position {
+        if let Some(ref pos) = wrapper.source_position {
             if pos.len() > Self::MAX_SOURCE_POSITION_BYTES {
                 warn!(
                     "[{}] Source position is large ({} bytes > {} limit); \
@@ -1333,25 +1344,7 @@ impl SourceBase {
             }
         }
 
-        // Serialize the sequence-assignment → timestamp-normalization → enqueue
-        // window per source. Holding this guard across the dispatch loop
-        // guarantees the event with sequence N is fully enqueued before N+1 is
-        // assigned, so concurrent dispatches reach subscribers in sequence order
-        // and SequenceDedup never mistakes a reordered event for a replay (#640).
-        let mut last_dispatch_ts = self.dispatch_order.lock().await;
-
-        // Framework assigns the monotonic sequence (honor a source-supplied one).
-        let sequence = if let Some(seq) = draft.supplied_sequence {
-            // Source-supplied (WAL fast-path) — advance counter to stay monotonic
-            self.next_sequence
-                .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
-            seq
-        } else {
-            self.next_sequence.fetch_add(1, Ordering::Relaxed)
-        };
-
-        // Stamp the draft into a downstream event.
-        let mut wrapper = StampedSourceEvent::stamp(draft, sequence);
+        self.set_next_sequence(wrapper.sequence);
 
         // Clamp clock rollback; the composite queue key breaks ties by sequence.
         wrapper.timestamp =
@@ -1432,8 +1425,10 @@ impl SourceBase {
     /// the entire batch. This is more efficient than calling
     /// [`dispatch_event()`](Self::dispatch_event) per-event when the source
     /// processes multiple rows per poll cycle.
-    pub async fn dispatch_events_batch(&self, drafts: Vec<SourceEventDraft>) -> Result<()> {
-        if drafts.is_empty() {
+    /// Sequences are preserved. Allocate and dispatch each batch in source
+    /// order, serializing producers just as for [`Self::dispatch_event`].
+    pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
+        if events.is_empty() {
             return Ok(());
         }
 
@@ -1445,8 +1440,8 @@ impl SourceBase {
         let dispatchers = self.dispatchers.read().await;
         let comparator = self.position_comparator.read().await;
 
-        for draft in drafts {
-            if let Some(ref pos) = draft.source_position {
+        for mut wrapper in events {
+            if let Some(ref pos) = wrapper.source_position {
                 if pos.len() > Self::MAX_SOURCE_POSITION_BYTES {
                     warn!(
                         "[{}] Source position is large ({} bytes > {} limit); \
@@ -1458,17 +1453,7 @@ impl SourceBase {
                 }
             }
 
-            // Framework assigns the monotonic sequence (honor a source-supplied one).
-            let sequence = if let Some(seq) = draft.supplied_sequence {
-                self.next_sequence
-                    .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
-                seq
-            } else {
-                self.next_sequence.fetch_add(1, Ordering::Relaxed)
-            };
-
-            // Stamp the draft into a downstream event.
-            let mut wrapper = StampedSourceEvent::stamp(draft, sequence);
+            self.set_next_sequence(wrapper.sequence);
 
             // Clamp clock rollback; the composite queue key breaks ties by sequence.
             wrapper.timestamp =
@@ -1547,12 +1532,14 @@ impl SourceBase {
 
     /// Broadcast SourceControl events
     pub async fn broadcast_control(&self, control: SourceControl) -> Result<()> {
-        let draft = SourceEventDraft::new(
+        let last_dispatch_ts = self.dispatch_order.lock().await;
+        let wrapper = SourceEventWrapper::new(
             self.id.clone(),
             SourceEvent::Control(control),
             chrono::Utc::now(),
+            self.next_sequence(),
         );
-        self.dispatch_event(draft).await
+        self.dispatch_event_ordered(wrapper, last_dispatch_ts).await
     }
 
     /// Create a test subscription to this source (async, fallible)
@@ -1569,7 +1556,7 @@ impl SourceBase {
     /// or an error if the receiver cannot be created.
     pub async fn try_test_subscribe(
         &self,
-    ) -> anyhow::Result<Box<dyn ChangeReceiver<StampedSourceEvent>>> {
+    ) -> anyhow::Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
         self.create_streaming_receiver().await
     }
 
@@ -1580,7 +1567,7 @@ impl SourceBase {
     ///
     /// # Panics
     /// Panics if the receiver cannot be created.
-    pub async fn test_subscribe(&self) -> Box<dyn ChangeReceiver<StampedSourceEvent>> {
+    pub async fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
         self.try_test_subscribe()
             .await
             .expect("Failed to create test subscription receiver")
@@ -2195,7 +2182,8 @@ mod tests {
     // dispatch_events_batch tests
     // =========================================================================
 
-    fn make_event(source_id: &str, position: Option<&[u8]>) -> SourceEventDraft {
+    fn make_event(base: &SourceBase, position: Option<&[u8]>) -> SourceEventWrapper {
+        let source_id = base.get_id();
         let change = drasi_core::models::SourceChange::Insert {
             element: drasi_core::models::Element::Node {
                 metadata: drasi_core::models::ElementMetadata {
@@ -2206,10 +2194,11 @@ mod tests {
                 properties: drasi_core::models::ElementPropertyMap::new(),
             },
         };
-        let mut draft = SourceEventDraft::new(
+        let mut draft = SourceEventWrapper::new(
             source_id.to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            base.next_sequence(),
         );
         draft.source_position = position.map(|p| bytes::Bytes::from(p.to_vec()));
         draft
@@ -2223,7 +2212,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_events_batch_stamps_monotonic_sequences() {
+    async fn supplied_sequence_is_preserved_and_advances_allocator() {
+        for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
+            let base = SourceBase::new(
+                SourceBaseParams::new("supplied-sequence").with_dispatch_mode(mode),
+            )
+            .unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+            let mut event = make_event(&base, Some(b"position-42"));
+            event.sequence = 42;
+            let mut profiling = profiling::ProfilingMetadata::new();
+            profiling.source_send_ns = Some(123);
+            event.profiling = Some(profiling);
+            let expected_change = event.event.clone();
+
+            base.dispatch_event(event).await.unwrap();
+
+            let received = receiver.recv().await.unwrap();
+            assert_eq!(received.sequence, 42);
+            assert_eq!(received.event, expected_change);
+            assert_eq!(
+                received.source_position.as_deref(),
+                Some(b"position-42".as_slice())
+            );
+            assert_eq!(
+                received.profiling.as_ref().unwrap().source_send_ns,
+                Some(123)
+            );
+            assert_eq!(base.clone_shared().next_sequence(), 43);
+
+            let mut replay = make_event(&base, None);
+            replay.sequence = 7;
+            base.dispatch_event(replay).await.unwrap();
+            assert_eq!(receiver.recv().await.unwrap().sequence, 7);
+            assert_eq!(base.next_sequence(), 45);
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_preserves_supplied_sequences_and_generated_sequence_floor() {
+        for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
+            let base =
+                SourceBase::new(SourceBaseParams::new("supplied-batch").with_dispatch_mode(mode))
+                    .unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+            let mut first = make_event(&base, Some(b"first"));
+            first.sequence = 100;
+            let mut second = make_event(&base, Some(b"second"));
+            second.sequence = 150;
+
+            base.dispatch_events_batch(vec![first, second])
+                .await
+                .unwrap();
+            assert_eq!(receiver.recv().await.unwrap().sequence, 100);
+            assert_eq!(receiver.recv().await.unwrap().sequence, 150);
+
+            let generated = make_event(&base, Some(b"generated"));
+            assert_eq!(generated.sequence, 151);
+            base.dispatch_event(generated).await.unwrap();
+            assert_eq!(receiver.recv().await.unwrap().sequence, 151);
+            assert_eq!(base.next_sequence(), 152);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_events_batch_preserves_allocated_sequences() {
         let params = SourceBaseParams::new("batch-seq").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
@@ -2231,9 +2284,9 @@ mod tests {
         let mut receiver = base.create_streaming_receiver().await.unwrap();
 
         let events = vec![
-            make_event("batch-seq", Some(b"\x01")),
-            make_event("batch-seq", Some(b"\x02")),
-            make_event("batch-seq", Some(b"\x03")),
+            make_event(&base, Some(b"\x01")),
+            make_event(&base, Some(b"\x02")),
+            make_event(&base, Some(b"\x03")),
         ];
 
         base.dispatch_events_batch(events).await.unwrap();
@@ -2256,57 +2309,50 @@ mod tests {
 
         let mut last = chrono::DateTime::<Utc>::MIN_UTC;
 
-        let timestamp = Utc::now();
-        assert_eq!(
-            SourceBase::next_monotonic_timestamp(&mut last, timestamp),
-            timestamp
-        );
-        assert_eq!(last, timestamp);
-        assert_eq!(
-            SourceBase::next_monotonic_timestamp(&mut last, timestamp),
-            timestamp,
-            "equal timestamps must be preserved"
-        );
-        assert_eq!(
-            SourceBase::next_monotonic_timestamp(&mut last, timestamp - Duration::seconds(5)),
-            timestamp,
-            "clock rollback must clamp to the last timestamp"
-        );
-        assert_eq!(last, timestamp);
+        let t1 = Utc::now();
+        let r1 = SourceBase::next_monotonic_timestamp(&mut last, t1);
+        assert_eq!(r1, t1, "a candidate ahead of `last` is used verbatim");
+        assert_eq!(last, t1);
 
-        let later = timestamp + Duration::seconds(5);
-        assert_eq!(
-            SourceBase::next_monotonic_timestamp(&mut last, later),
-            later
-        );
-        assert_eq!(last, later);
+        let r2 = SourceBase::next_monotonic_timestamp(&mut last, t1);
+        assert_eq!(r2, t1, "equal timestamps must be preserved");
+
+        let earlier = t1 - Duration::seconds(5);
+        let r3 = SourceBase::next_monotonic_timestamp(&mut last, earlier);
+        assert_eq!(r3, r2, "clock rollback must clamp to the last timestamp");
+
+        // A genuinely later candidate is used as-is.
+        let much_later = t1 + Duration::seconds(5);
+        let r4 = SourceBase::next_monotonic_timestamp(&mut last, much_later);
+        assert_eq!(r4, much_later);
+        assert!(r4 > r3);
     }
 
     #[tokio::test]
     async fn dispatch_preserves_timestamp_ties_and_queue_sequence_order() {
         for batch_dispatch in [false, true] {
-            let source_id = "timestamp-ties";
-            let params = SourceBaseParams::new(source_id).with_dispatch_mode(DispatchMode::Channel);
+            let params =
+                SourceBaseParams::new("timestamp-ties").with_dispatch_mode(DispatchMode::Channel);
             let base = SourceBase::new(params).unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
             let timestamp = chrono::Utc::now();
             let later = timestamp + chrono::Duration::seconds(5);
             let timestamps =
                 [timestamp, timestamp, timestamp - chrono::Duration::seconds(5), later];
-            let drafts: Vec<_> = timestamps
+            let wrappers: Vec<_> = timestamps
                 .into_iter()
                 .map(|candidate| {
-                    let mut draft = make_event(source_id, None);
-                    draft.timestamp = candidate;
-                    draft
+                    let mut wrapper = make_event(&base, None);
+                    wrapper.timestamp = candidate;
+                    wrapper
                 })
                 .collect();
 
             if batch_dispatch {
-                base.dispatch_events_batch(drafts).await.unwrap();
+                base.dispatch_events_batch(wrappers).await.unwrap();
             } else {
-                for draft in drafts {
-                    base.dispatch_event(draft).await.unwrap();
+                for wrapper in wrappers {
+                    base.dispatch_event(wrapper).await.unwrap();
                 }
             }
 
@@ -2435,7 +2481,7 @@ mod tests {
         const EVENTS_PER_BATCH: u64 = 3;
         const TRIALS: usize = 20;
 
-        let make_batch = || {
+        let make_batch = |base: &SourceBase| {
             (0..EVENTS_PER_BATCH)
                 .map(|_| {
                     let change = drasi_core::models::SourceChange::Insert {
@@ -2451,10 +2497,11 @@ mod tests {
                             properties: drasi_core::models::ElementPropertyMap::new(),
                         },
                     };
-                    SourceEventDraft::new(
+                    SourceEventWrapper::new(
                         "concurrent-batch-src".to_string(),
                         SourceEvent::Change(change),
                         chrono::Utc::now(),
+                        base.next_sequence(),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2466,11 +2513,14 @@ mod tests {
             let base = SourceBase::new(params).unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
 
+            let producer_order = Arc::new(tokio::sync::Mutex::new(()));
             let mut handles = Vec::new();
             for _ in 0..BATCHES_PER_TRIAL {
                 let dispatch_base = base.clone_shared();
-                let batch = make_batch();
+                let producer_order = producer_order.clone();
                 handles.push(tokio::spawn(async move {
+                    let _guard = producer_order.lock().await;
+                    let batch = make_batch(&dispatch_base);
                     dispatch_base.dispatch_events_batch(batch).await.unwrap();
                 }));
             }
@@ -2523,10 +2573,7 @@ mod tests {
         let mut rx1 = base.create_streaming_receiver().await.unwrap();
         let mut rx2 = base.create_streaming_receiver().await.unwrap();
 
-        let events = vec![
-            make_event("batch-fanout", Some(b"\x01")),
-            make_event("batch-fanout", Some(b"\x02")),
-        ];
+        let events = vec![make_event(&base, Some(b"\x01")), make_event(&base, Some(b"\x02"))];
 
         base.dispatch_events_batch(events).await.unwrap();
 
@@ -2550,7 +2597,7 @@ mod tests {
 
         // Create an event with a position larger than MAX_SOURCE_POSITION_BYTES
         let big_pos = vec![0xAA; SourceBase::MAX_SOURCE_POSITION_BYTES + 1];
-        let events = vec![make_event("batch-oversize", Some(&big_pos))];
+        let events = vec![make_event(&base, Some(&big_pos))];
 
         // Should succeed (warn but not error)
         base.dispatch_events_batch(events).await.unwrap();
@@ -2586,7 +2633,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Dispatch event at position [0x00, 0x03] — before rx1's resume
-        let event = make_event("pos-filter", Some(&[0x00, 0x03]));
+        let event = make_event(&base, Some(&[0x00, 0x03]));
         base.dispatch_event(event).await.unwrap();
 
         // rx2 should receive it (no filter)
@@ -2617,7 +2664,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event at [0x00, 0x06] — past resume
-        let event = make_event("pos-filter2", Some(&[0x00, 0x06]));
+        let event = make_event(&base, Some(&[0x00, 0x06]));
         base.dispatch_event(event).await.unwrap();
 
         let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx1.recv())
@@ -2646,7 +2693,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x03]));
 
         // First event at [0x00, 0x04] — past resume, advances high-water mark
-        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x04])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x04])))
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
@@ -2662,7 +2709,7 @@ mod tests {
         }
 
         // Subsequent event at LOWER position should be suppressed (rewind protection)
-        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x01])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x01])))
             .await
             .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
@@ -2672,7 +2719,7 @@ mod tests {
         );
 
         // Event at HIGHER position should flow through
-        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x06])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x06])))
             .await
             .unwrap();
         let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -2702,7 +2749,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event at exactly [0x00, 0x05] — should be suppressed
-        base.dispatch_event(make_event("pos-equal", Some(&[0x00, 0x05])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x05])))
             .await
             .unwrap();
 
@@ -2729,7 +2776,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event at [0x00, 0x03] — normally suppressed, but no comparator
-        base.dispatch_event(make_event("no-cmp", Some(&[0x00, 0x03])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x03])))
             .await
             .unwrap();
 
@@ -2762,9 +2809,9 @@ mod tests {
         }
 
         let events = vec![
-            make_event("pos-batch", Some(&[0x00, 0x01])), // before both
-            make_event("pos-batch", Some(&[0x00, 0x03])), // past rx2, before rx1
-            make_event("pos-batch", Some(&[0x00, 0x06])), // past both
+            make_event(&base, Some(&[0x00, 0x01])), // before both
+            make_event(&base, Some(&[0x00, 0x03])), // past rx2, before rx1
+            make_event(&base, Some(&[0x00, 0x06])), // past both
         ];
         base.dispatch_events_batch(events).await.unwrap();
 
@@ -2818,9 +2865,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event with no source_position
-        base.dispatch_event(make_event("pos-none", None))
-            .await
-            .unwrap();
+        base.dispatch_event(make_event(&base, None)).await.unwrap();
 
         let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
@@ -2840,7 +2885,7 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         let lsn: u64 = 0x1234;
-        base.dispatch_event(make_event("spm-1", Some(&lsn.to_be_bytes())))
+        base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
             .await
             .unwrap();
 
@@ -2857,9 +2902,7 @@ mod tests {
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
-        base.dispatch_event(make_event("spm-none", None))
-            .await
-            .unwrap();
+        base.dispatch_event(make_event(&base, None)).await.unwrap();
 
         let map = base.sequence_position_map.read().await;
         assert!(map.is_empty());
@@ -2876,7 +2919,7 @@ mod tests {
 
         // Dispatch 3 events with known LSNs
         for lsn in [100u64, 200, 300] {
-            base.dispatch_event(make_event("cssp-1", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -2915,7 +2958,7 @@ mod tests {
 
         // Dispatch 3 events
         for lsn in [100u64, 200, 300] {
-            base.dispatch_event(make_event("cssp-2q", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -2938,7 +2981,7 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         for lsn in [10u64, 20, 30, 40, 50] {
-            base.dispatch_event(make_event("prune-1", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -2959,7 +3002,7 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         for lsn in [10u64, 20] {
-            base.dispatch_event(make_event("prune-all", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -3030,9 +3073,9 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         let events = vec![
-            make_event("spm-batch", Some(&100u64.to_be_bytes())),
-            make_event("spm-batch", Some(&200u64.to_be_bytes())),
-            make_event("spm-batch", None), // no position
+            make_event(&base, Some(&100u64.to_be_bytes())),
+            make_event(&base, Some(&200u64.to_be_bytes())),
+            make_event(&base, None), // no position
         ];
 
         base.dispatch_events_batch(events).await.unwrap();
@@ -3063,13 +3106,13 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x10]));
 
         // Source dispatches events at [0x20] and [0x30] — both past A's resume
-        base.dispatch_event(make_event("rewind", Some(&[0x20])))
+        base.dispatch_event(make_event(&base, Some(&[0x20])))
             .await
             .unwrap();
         let ev = rx_a.recv().await.unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
 
-        base.dispatch_event(make_event("rewind", Some(&[0x30])))
+        base.dispatch_event(make_event(&base, Some(&[0x30])))
             .await
             .unwrap();
         let ev = rx_a.recv().await.unwrap();
@@ -3085,7 +3128,7 @@ mod tests {
         // Source REWINDS — replays from [0x20] again
         // A should NOT see these (high-water is at [0x30])
         // B should see [0x20] (past its resume_from [0x10])
-        base.dispatch_event(make_event("rewind", Some(&[0x20])))
+        base.dispatch_event(make_event(&base, Some(&[0x20])))
             .await
             .unwrap();
 
@@ -3104,7 +3147,7 @@ mod tests {
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
 
         // Replay [0x30] — A should NOT see it, B should
-        base.dispatch_event(make_event("rewind", Some(&[0x30])))
+        base.dispatch_event(make_event(&base, Some(&[0x30])))
             .await
             .unwrap();
 
@@ -3121,7 +3164,7 @@ mod tests {
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x30]);
 
         // New event [0x40] — BOTH should see it
-        base.dispatch_event(make_event("rewind", Some(&[0x40])))
+        base.dispatch_event(make_event(&base, Some(&[0x40])))
             .await
             .unwrap();
 
@@ -3151,7 +3194,7 @@ mod tests {
         // No resume_from set
 
         // Dispatch event — should be delivered (no filter)
-        base.dispatch_event(make_event("hwm-new", Some(&[0x10])))
+        base.dispatch_event(make_event(&base, Some(&[0x10])))
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
@@ -3167,7 +3210,7 @@ mod tests {
         }
 
         // Rewind: event at [0x05] should be suppressed
-        base.dispatch_event(make_event("hwm-new", Some(&[0x05])))
+        base.dispatch_event(make_event(&base, Some(&[0x05])))
             .await
             .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
@@ -3192,7 +3235,7 @@ mod tests {
         // Lifecycle 1: a subscriber processes an event and gets a high-water
         // mark at [0x30] on dispatcher index 0.
         let mut rx = base.create_streaming_receiver().await.unwrap();
-        base.dispatch_event(make_event("clear-hwm", Some(&[0x30])))
+        base.dispatch_event(make_event(&base, Some(&[0x30])))
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
@@ -3217,7 +3260,7 @@ mod tests {
         // the reset, the stale [0x30] mark would suppress an earlier replayed
         // event at [0x20]; with the reset it must be delivered.
         let mut rx2 = base.create_streaming_receiver().await.unwrap();
-        base.dispatch_event(make_event("clear-hwm", Some(&[0x20])))
+        base.dispatch_event(make_event(&base, Some(&[0x20])))
             .await
             .unwrap();
         let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
@@ -3261,7 +3304,7 @@ mod tests {
             .unwrap();
 
         // Next dispatched event is stamped with the floor N+1 = 501, not 1.
-        base.dispatch_event(make_event("resume-seq", Some(&[0xAB])))
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
             .await
             .unwrap();
         let map = base.sequence_position_map.read().await;
@@ -3296,7 +3339,7 @@ mod tests {
             .await
             .unwrap();
 
-        base.dispatch_event(make_event("resume-max", Some(&[0xAB])))
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
             .await
             .unwrap();
         let map = base.sequence_position_map.read().await;
@@ -3319,7 +3362,7 @@ mod tests {
             .await
             .unwrap();
 
-        base.dispatch_event(make_event("resume-none", Some(&[0xAB])))
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
             .await
             .unwrap();
         let map = base.sequence_position_map.read().await;
@@ -3344,7 +3387,7 @@ mod tests {
         // A subsequent lower restore must be ignored (fetch_max).
         base.set_next_sequence(100);
 
-        base.dispatch_event(make_event("set-seq-max", Some(&[0xAB])))
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
             .await
             .unwrap();
         let map = base.sequence_position_map.read().await;
@@ -3370,7 +3413,7 @@ mod tests {
         base_a.set_next_sequence(300); // floor 301
         base_a.raise_sequence_floor(&resume_seq_settings("order-a", "q", Some(599))); // floor 600
         base_a
-            .dispatch_event(make_event("order-a", Some(&[0x01])))
+            .dispatch_event(make_event(&base_a, Some(&[0x01])))
             .await
             .unwrap();
         assert!(
@@ -3387,7 +3430,7 @@ mod tests {
         base_b.raise_sequence_floor(&resume_seq_settings("order-b", "q", Some(599))); // floor 600
         base_b.set_next_sequence(300); // floor 301 — must be ignored
         base_b
-            .dispatch_event(make_event("order-b", Some(&[0x01])))
+            .dispatch_event(make_event(&base_b, Some(&[0x01])))
             .await
             .unwrap();
         assert!(
@@ -3466,7 +3509,7 @@ mod tests {
         .await
         .unwrap();
 
-        base.dispatch_event(make_event("replay-floor", Some(&[0xCD])))
+        base.dispatch_event(make_event(&base, Some(&[0xCD])))
             .await
             .unwrap();
         let map = base.sequence_position_map.read().await;
@@ -3508,7 +3551,7 @@ mod tests {
 
         // The source omits its own sequence; SourceBase fills one in on dispatch.
         for _ in 0..3 {
-            base.dispatch_event(make_event(source_id, Some(&[0x01])))
+            base.dispatch_event(make_event(&base, Some(&[0x01])))
                 .await
                 .unwrap();
             let ev = rx.recv().await.unwrap();

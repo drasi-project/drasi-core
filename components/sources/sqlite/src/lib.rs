@@ -41,7 +41,7 @@ pub use thread::SqliteParam;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventDraft, SubscriptionResponse};
+use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper, SubscriptionResponse};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::Source;
 use std::collections::HashMap;
@@ -364,11 +364,12 @@ impl Source for SqliteSource {
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let wrapper = SourceEventDraft::with_profiling(
+                    let wrapper = SourceEventWrapper::with_profiling(
                         source_id.clone(),
                         SourceEvent::Change(change),
                         chrono::Utc::now(),
                         profiling,
+                        base.next_sequence(),
                     );
                     if let Err(err) = base.dispatch_event(wrapper).await {
                         log::debug!("failed dispatching sqlite change for '{source_id}': {err}");

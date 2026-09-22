@@ -20,10 +20,15 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use drasi_lib::channels::ChangeReceiver;
+use async_trait::async_trait;
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
+use drasi_lib::channels::{BootstrapEventSender, ChangeReceiver};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
@@ -104,7 +109,7 @@ fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSu
 async fn subscribe_fresh(
     source: &ApplicationSource,
     source_id: &str,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source
         .subscribe(fresh_settings(source_id, "test-query"))
         .await
@@ -117,7 +122,7 @@ async fn subscribe_with_resume(
     source: &ApplicationSource,
     source_id: &str,
     resume_seq: u64,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
     let resp = source
         .subscribe(resume_settings(source_id, "test-query-resume", resume_seq))
         .await
@@ -429,8 +434,7 @@ async fn test_replay_via_subscribe() {
     source.stop().await.unwrap();
 }
 
-#[tokio::test]
-#[ignore]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_writes_monotonic_sequences() {
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
@@ -449,17 +453,25 @@ async fn test_concurrent_writes_monotonic_sequences() {
     let total_events: usize = 100;
     let tasks_count = 4;
     let events_per_task = total_events / tasks_count;
+    let barrier = Arc::new(tokio::sync::Barrier::new(tasks_count));
 
     let mut tasks = vec![];
     for task_id in 0..tasks_count {
-        let h = handle.clone();
+        let handle = if task_id % 2 == 0 {
+            handle.clone()
+        } else {
+            source.get_handle()
+        };
+        let barrier = barrier.clone();
         tasks.push(tokio::spawn(async move {
             for i in 0..events_per_task {
                 let props = PropertyMapBuilder::new()
                     .with_integer("task", task_id as i64)
                     .with_integer("i", i as i64)
                     .build();
-                h.send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
+                barrier.wait().await;
+                handle
+                    .send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
                     .await
                     .unwrap();
             }
@@ -470,23 +482,28 @@ async fn test_concurrent_writes_monotonic_sequences() {
         t.await.unwrap();
     }
 
-    // Collect all received events
-    let mut sequences = vec![];
-    for _ in 0..total_events {
+    let records = wal.read_from("conc-src", 1).await.unwrap();
+    assert_eq!(records.len(), total_events);
+    for (index, (wal_sequence, change)) in records.into_iter().enumerate() {
         let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
             .unwrap();
-        sequences.push(event.sequence);
+        assert_eq!(
+            event.sequence,
+            index as u64 + 1,
+            "delivery must follow WAL order"
+        );
+        assert_eq!(event.sequence, wal_sequence);
+        assert_eq!(
+            event.event,
+            drasi_lib::channels::SourceEvent::Change(change)
+        );
+        assert_eq!(
+            event.source_position.as_deref(),
+            Some(wal_sequence.to_be_bytes().as_slice())
+        );
     }
-
-    // Verify all sequences are unique and cover 1..=total_events
-    sequences.sort();
-    let expected: Vec<u64> = (1..=total_events as u64).collect();
-    assert_eq!(
-        sequences, expected,
-        "Sequences should be 1..={total_events} with no gaps"
-    );
 
     let count = wal.event_count("conc-src").await.unwrap();
     assert_eq!(count, total_events as u64);
@@ -691,6 +708,62 @@ async fn test_sequence_stamped_without_durability() {
             event.sequence, expected_seq,
             "event {expected_seq} should carry a framework sequence with durability off"
         );
+    }
+
+    source.stop().await.unwrap();
+}
+
+struct RecordingBootstrapProvider {
+    called: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl BootstrapProvider for RecordingBootstrapProvider {
+    async fn bootstrap(
+        &self,
+        _request: BootstrapRequest,
+        _context: &BootstrapContext,
+        _event_tx: BootstrapEventSender,
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> anyhow::Result<BootstrapResult> {
+        self.called.store(true, Ordering::SeqCst);
+        Ok(BootstrapResult::default())
+    }
+}
+
+/// Fresh WAL-enabled subscribe with bootstrap requested must still invoke the
+/// provider instead of always taking `subscribe_with_replay`.
+#[tokio::test]
+async fn test_wal_enabled_fresh_subscribe_still_bootstraps() {
+    let config = app_config(Some(durability_config(
+        true,
+        10_000,
+        CapacityPolicy::RejectIncoming,
+    )));
+    let (source, _handle) = ApplicationSource::new("bootstrap-src", config).unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(tmp.path()));
+    init_source_with_wal(&source, wal, "bootstrap-src").await;
+    source.start().await.unwrap();
+
+    let called = Arc::new(AtomicBool::new(false));
+    source
+        .set_bootstrap_provider(Box::new(RecordingBootstrapProvider {
+            called: called.clone(),
+        }))
+        .await;
+
+    let mut settings = fresh_settings("bootstrap-src", "bootstrap-query");
+    settings.enable_bootstrap = true;
+    source.subscribe(settings).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !called.load(Ordering::SeqCst) {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("bootstrap provider was not invoked for a fresh WAL-enabled subscribe");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     source.stop().await.unwrap();

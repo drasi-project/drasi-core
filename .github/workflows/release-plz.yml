@@ -71,6 +71,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # On release PR merge OR force_publish: Publish crates to crates.io and create git tags
+      - name: Validate package visibility access
+        if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
+        run: .github/scripts/package-visibility.sh check drasi-plugin-directory
+
       - name: Clear cargo registry index cache
         if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
         run: rm -rf ~/.cargo/registry/index/github.com-*/ || true
@@ -121,4 +127,5 @@ jobs:
     with:
       sign: true
       dry_run: false
-    secrets: inherit
+    secrets:
+      PACKAGES_ADMIN_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}

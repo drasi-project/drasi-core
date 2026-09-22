@@ -820,14 +820,14 @@ mod dispatch_mode_tests {
         assert_eq!(config.sources[0].source_id, "orders");
         assert_eq!(config.sources[1].source_id, "customers");
 
-                let serialized = serde_yaml::to_string(&config).unwrap();
-                let round_trip: QueryConfig = serde_yaml::from_str(&serialized).unwrap();
-                assert_eq!(round_trip.sources[0].source_id, "orders");
-                assert_eq!(round_trip.sources[1].source_id, "customers");
-                let sources = serde_json::to_value(&config.sources).unwrap();
-                for source in sources.as_array().unwrap() {
-                        assert!(source.get("priority").is_none());
-                }
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        let round_trip: QueryConfig = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(round_trip.sources[0].source_id, "orders");
+        assert_eq!(round_trip.sources[1].source_id, "customers");
+        let sources = serde_json::to_value(&config.sources).unwrap();
+        for source in sources.as_array().unwrap() {
+            assert!(source.get("priority").is_none());
+        }
     }
 
     #[test]

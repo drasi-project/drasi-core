@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, tungstenite};
 use url::Url;
 
-use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventDraft};
+use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
 use drasi_lib::profiling::{timestamp_ns, ProfilingMetadata};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
@@ -248,11 +248,12 @@ async fn dispatch_change(
     let mut profiling = ProfilingMetadata::new();
     profiling.source_send_ns = Some(timestamp_ns());
 
-    let wrapper = SourceEventDraft::with_profiling(
+    let wrapper = SourceEventWrapper::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(change),
         chrono::Utc::now(),
         profiling,
+        base.next_sequence(),
     );
 
     base.dispatch_event(wrapper).await

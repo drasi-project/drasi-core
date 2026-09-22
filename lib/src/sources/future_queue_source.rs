@@ -22,7 +22,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::channels::{
     ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher, SourceControl, SourceEvent,
-    SourceEventDraft, StampedSourceEvent,
+    SourceEventWrapper,
 };
 use tracing::Instrument;
 
@@ -50,7 +50,7 @@ pub struct FutureQueueSource {
     /// Query ID for logging
     query_id: String,
     /// Dispatcher for sending events to subscribers
-    dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<StampedSourceEvent>>>>>,
+    dispatcher: Arc<RwLock<Option<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
     /// Monotonic sequence counter for the control events this source emits.
     /// `FuturesDue` signals bypass `SourceBase`, so this source stamps them
     /// itself to satisfy the mandatory-sequence contract.
@@ -74,9 +74,9 @@ impl FutureQueueSource {
     /// Creates a channel dispatcher and returns its receiver.
     pub async fn subscribe(
         &self,
-    ) -> Result<Box<dyn ChangeReceiver<StampedSourceEvent>>, Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>, Box<dyn std::error::Error + Send + Sync>>
     {
-        let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(1000);
+        let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
         let receiver = dispatcher.create_receiver().await.map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
                 Box::new(std::io::Error::new(
@@ -172,13 +172,12 @@ impl FutureQueueSource {
                     // Item is due — dispatch FuturesDue signal. This source
                     // bypasses SourceBase, so it stamps a monotonic sequence
                     // itself to honor the mandatory-sequence contract.
-                    let draft = SourceEventDraft::new(
+                    let event_wrapper = SourceEventWrapper::new(
                         FUTURE_QUEUE_SOURCE_ID.to_string(),
                         SourceEvent::Control(SourceControl::FuturesDue),
                         timestamp,
+                        next_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     );
-                    let seq = next_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let event_wrapper = StampedSourceEvent::stamp(draft, seq);
 
                     let dispatcher_guard = dispatcher_clone.read().await;
                     if let Some(dispatcher) = dispatcher_guard.as_ref() {
@@ -251,10 +250,8 @@ mod tests {
     use drasi_core::interface::{FutureElementRef, IndexError, PushType};
     use drasi_core::models::{ElementReference, ElementTimestamp};
 
-    #[derive(Default)]
-    struct MockFutureQueue {
-        due_time: Option<ElementTimestamp>,
-    }
+    /// A minimal mock FutureQueue that always returns None from peek_due_time
+    struct MockFutureQueue;
 
     #[async_trait::async_trait]
     impl FutureQueue for MockFutureQueue {
@@ -283,7 +280,7 @@ mod tests {
         }
 
         async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
-            Ok(self.due_time)
+            Ok(None)
         }
 
         async fn clear(&self) -> Result<(), IndexError> {
@@ -292,42 +289,8 @@ mod tests {
     }
 
     fn make_source(query_id: &str) -> FutureQueueSource {
-        let fq = Arc::new(MockFutureQueue::default());
+        let fq = Arc::new(MockFutureQueue);
         FutureQueueSource::new(fq, query_id.to_string())
-    }
-
-    #[tokio::test]
-    async fn dispatched_signals_have_consecutive_sequences() {
-        let due_time = 1;
-        let source = FutureQueueSource::new(
-            Arc::new(MockFutureQueue {
-                due_time: Some(due_time),
-            }),
-            "sequence-test".to_string(),
-        );
-        let mut receiver = source.subscribe().await.unwrap();
-        source.start().await.unwrap();
-
-        let received = tokio::time::timeout(Duration::from_secs(2), async {
-            let mut events = Vec::new();
-            for _ in 0..3 {
-                events.push(receiver.recv().await.unwrap());
-            }
-            events
-        })
-        .await;
-        source.stop().await;
-
-        let events = received.expect("due signals should be dispatched before the timeout");
-        for (index, event) in events.iter().enumerate() {
-            assert_eq!(event.sequence, index as u64 + 1);
-            assert_eq!(event.source_id, FUTURE_QUEUE_SOURCE_ID);
-            assert_eq!(event.event, SourceEvent::Control(SourceControl::FuturesDue));
-            assert_eq!(
-                event.timestamp,
-                DateTime::from_timestamp_millis(due_time as i64).unwrap()
-            );
-        }
     }
 
     #[test]

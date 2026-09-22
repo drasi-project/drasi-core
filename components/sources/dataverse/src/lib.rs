@@ -85,7 +85,7 @@ use std::time::Duration;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use drasi_lib::channels::{ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft};
+use drasi_lib::channels::{ComponentStatus, DispatchMode};
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
@@ -447,7 +447,7 @@ impl DataverseSource {
     }
 
     /// Convert and dispatch a batch of Dataverse changes through the owned
-    /// `SourceBase` so the framework stamps a monotonic `sequence` on each event
+    /// `SourceBase` to allocate a monotonic `sequence` for each event
     /// (issue #828).
     async fn dispatch_changes(
         source_id: &str,
@@ -458,17 +458,7 @@ impl DataverseSource {
         for change in changes {
             let source_change = Self::convert_to_source_change(source_id, change);
 
-            let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-            profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-            let wrapper = SourceEventDraft::with_profiling(
-                source_id.to_string(),
-                SourceEvent::Change(source_change),
-                chrono::Utc::now(),
-                profiling,
-            );
-
-            if let Err(e) = base.dispatch_event(wrapper).await {
+            if let Err(e) = base.dispatch_source_change(source_change).await {
                 log::error!("[{source_id}] Failed to dispatch change for {entity_name}: {e}");
             }
         }
@@ -1492,7 +1482,7 @@ mod tests {
         }
 
         /// Every change routed through the entity-worker dispatch path
-        /// (`dispatch_changes` → `SourceBase::dispatch_event`) must carry a
+        /// (`dispatch_changes` → `SourceBase::dispatch_source_change`) must carry a
         /// framework-assigned, strictly increasing `sequence` (issue #828).
         /// Dataverse has no durability, so before migrating from the unstamped
         /// `dispatch_from_task` helper these events had `sequence = None`. This
@@ -1542,6 +1532,49 @@ mod tests {
                 vec![1, 2, 3],
                 "delta changes must carry unique, strictly increasing sequences"
             );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_entity_workers_deliver_in_sequence_order() {
+        use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+
+        let source_id = "concurrent-entities";
+        let base = SourceBase::new(SourceBaseParams::new(source_id)).unwrap();
+        let mut receiver = base.test_subscribe().await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut workers = tokio::task::JoinSet::new();
+        for entity in ["account", "contact"] {
+            let base = base.clone_shared();
+            let barrier = barrier.clone();
+            workers.spawn(async move {
+                for index in 0..250 {
+                    barrier.wait().await;
+                    DataverseSource::dispatch_changes(
+                        source_id,
+                        entity,
+                        &base,
+                        &[DataverseChange::NewOrUpdated {
+                            id: format!("{entity}-{index}"),
+                            entity_name: entity.to_string(),
+                            attributes: serde_json::Map::new(),
+                        }],
+                    )
+                    .await;
+                }
+            });
+        }
+        for expected in 1..=500 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.sequence, expected);
+            assert_eq!(event.source_id, source_id);
+            assert!(event.profiling.as_ref().unwrap().source_send_ns.is_some());
+        }
+        while let Some(result) = workers.join_next().await {
+            result.unwrap();
         }
     }
 

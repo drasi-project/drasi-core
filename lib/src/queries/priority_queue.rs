@@ -14,7 +14,7 @@
 
 //! Query-local source ranking on top of the generic priority queue.
 
-use crate::channels::events::StampedSourceEvent;
+use crate::channels::events::SourceEventWrapper;
 use crate::channels::priority_queue::QueueOrder;
 use std::sync::Arc;
 
@@ -30,25 +30,25 @@ use std::sync::Arc;
 /// Construction requires a rank; unranked source events cannot enter the query queue.
 #[derive(Debug, Clone)]
 pub struct RankedSourceEvent {
-    inner: Arc<StampedSourceEvent>,
+    inner: Arc<SourceEventWrapper>,
     source_rank: u32,
 }
 
 impl RankedSourceEvent {
-    pub fn new(event: Arc<StampedSourceEvent>, source_rank: u32) -> Self {
+    pub fn new(event: Arc<SourceEventWrapper>, source_rank: u32) -> Self {
         Self {
             inner: event,
             source_rank,
         }
     }
 
-    pub fn into_event(self) -> Arc<StampedSourceEvent> {
+    pub fn into_event(self) -> Arc<SourceEventWrapper> {
         self.inner
     }
 }
 
 impl std::ops::Deref for RankedSourceEvent {
-    type Target = StampedSourceEvent;
+    type Target = SourceEventWrapper;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -66,11 +66,11 @@ impl QueueOrder for RankedSourceEvent {
 /// Priority queue accepting only explicitly ranked source events.
 ///
 /// ```compile_fail
-/// use drasi_lib::channels::events::StampedSourceEvent;
+/// use drasi_lib::channels::events::SourceEventWrapper;
 /// use drasi_lib::queries::priority_queue::PriorityQueue;
 /// use std::sync::Arc;
 ///
-/// async fn enqueue_without_rank(queue: &PriorityQueue, event: Arc<StampedSourceEvent>) {
+/// async fn enqueue_without_rank(queue: &PriorityQueue, event: Arc<SourceEventWrapper>) {
 ///     queue.enqueue(event).await;
 /// }
 /// ```
@@ -82,7 +82,7 @@ pub use crate::channels::priority_queue::PriorityQueueMetrics;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::events::{SourceEvent, SourceEventDraft, StampedSourceEvent};
+    use crate::channels::events::{SourceEvent, SourceEventWrapper};
     use chrono::Utc;
     use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
     use std::sync::Arc;
@@ -90,15 +90,15 @@ mod tests {
     fn create_test_event(
         source_id: &str,
         timestamp: chrono::DateTime<Utc>,
-    ) -> Arc<StampedSourceEvent> {
-        create_test_event_seq(source_id, timestamp, 0)
+    ) -> Arc<SourceEventWrapper> {
+        create_test_event_seq(source_id, timestamp, 1)
     }
 
     fn create_test_event_seq(
         source_id: &str,
         timestamp: chrono::DateTime<Utc>,
         sequence: u64,
-    ) -> Arc<StampedSourceEvent> {
+    ) -> Arc<SourceEventWrapper> {
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -110,12 +110,10 @@ mod tests {
             },
         };
 
-        Arc::new(StampedSourceEvent::stamp(
-            SourceEventDraft::new(
-                source_id.to_string(),
-                SourceEvent::Change(change),
-                timestamp,
-            ),
+        Arc::new(SourceEventWrapper::new(
+            source_id.to_string(),
+            SourceEvent::Change(change),
+            timestamp,
             sequence,
         ))
     }
@@ -206,12 +204,10 @@ mod tests {
         let timestamp = Utc::now();
         let real_event = create_test_event_seq("source", timestamp, 99);
         for sequence in [2, 1] {
-            let signal = Arc::new(StampedSourceEvent::stamp(
-                SourceEventDraft::new(
-                    FUTURE_QUEUE_SOURCE_ID.to_string(),
-                    SourceEvent::Control(SourceControl::FuturesDue),
-                    timestamp,
-                ),
+            let signal = Arc::new(SourceEventWrapper::new(
+                FUTURE_QUEUE_SOURCE_ID.to_string(),
+                SourceEvent::Control(SourceControl::FuturesDue),
+                timestamp,
                 sequence,
             ));
             queue

@@ -88,13 +88,11 @@ mod tests {
         };
 
         let change = SourceChange::Insert { element };
-        let wrapper = StampedSourceEvent::stamp(
-            SourceEventDraft::new(
-                "test-source".to_string(),
-                SourceEvent::Change(change),
-                chrono::Utc::now(),
-            ),
-            0,
+        let wrapper = SourceEventWrapper::new(
+            "test-source".to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+            1,
         );
 
         assert_eq!(wrapper.source_id, "test-source");

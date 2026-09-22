@@ -175,8 +175,8 @@ use tokio::task::JoinHandle;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{
-    ComponentStatus, ControlOperation, DispatchMode, SourceControl, SourceEvent, SourceEventDraft,
-    SubscriptionResponse,
+    ComponentStatus, ControlOperation, DispatchMode, SourceControl, SourceEvent,
+    SourceEventWrapper, SubscriptionResponse,
 };
 use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -828,11 +828,12 @@ impl PlatformSource {
                                                                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                                                                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                                                                    let wrapper = SourceEventDraft::with_profiling(
+                                                                    let wrapper = SourceEventWrapper::with_profiling(
                                                                         source_id.clone(),
                                                                         SourceEvent::Control(control_event),
                                                                         chrono::Utc::now(),
                                                                         profiling,
+                                                                        base.next_sequence(),
                                                                     );
 
                                                                     // Dispatch via helper
@@ -883,11 +884,12 @@ impl PlatformSource {
                                                                     profiling.reactivator_end_ns =
                                                                         item.reactivator_end_ns;
 
-                                                                    let wrapper = SourceEventDraft::with_profiling(
+                                                                    let wrapper = SourceEventWrapper::with_profiling(
                                                                         source_id.clone(),
                                                                         SourceEvent::Change(item.source_change),
                                                                         chrono::Utc::now(),
                                                                         profiling,
+                                                                        base.next_sequence(),
                                                                     );
 
                                                                     // Dispatch via helper
@@ -1170,7 +1172,7 @@ impl PlatformSource {
     /// This method delegates to SourceBase and is provided for convenience in tests.
     pub async fn test_subscribe(
         &self,
-    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::StampedSourceEvent>> {
+    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
         self.base.test_subscribe().await
     }
 }
