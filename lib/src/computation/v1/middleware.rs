@@ -33,7 +33,7 @@ use drasi_core::{
 };
 use tokio::sync::Notify;
 
-use super::middleware_recovery::MiddlewareStore;
+use super::middleware_recovery::TransformStore as MiddlewareStore;
 use super::{
     ComponentCreationError, ComponentDescriptor, ComponentFactory, ComponentId, ComponentRole,
     ComponentSpecification, ComputationComponent, ConfigurationField, ConfigurationSchema,
@@ -619,6 +619,45 @@ fn retryable_result(result: &anyhow::Result<Vec<OutputEnvelope>>) -> bool {
 /// optionally exposes the middleware's own committed input boundary.
 pub struct MiddlewareTransformerFactory {
     descriptor: FactoryDescriptor,
+}
+
+#[async_trait]
+impl super::TransactionalTransformer for MiddlewareTransformer {
+    fn transaction_input_schema(&self) -> Arc<super::Schema> {
+        GraphChangeCodec::schema()
+    }
+
+    fn transaction_output_schema(&self) -> Arc<super::Schema> {
+        GraphChangeCodec::schema()
+    }
+
+    async fn transform_in_transaction(
+        &self,
+        input: super::ChangeEnvelope,
+        context: &super::TransactionContext<'_>,
+    ) -> anyhow::Result<super::ChangeEnvelope> {
+        anyhow::ensure!(
+            self.durable.is_none() && !self.running && !self.failed.load(Ordering::Acquire),
+            "transactional middleware must be a fresh non-running participant"
+        );
+        let mut changes = Vec::new();
+        for change in GraphChangeCodec::decode_changes(&input)? {
+            let output = self
+                .pipeline
+                .process_with_index(change, context.middleware_index())
+                .await?;
+            remember(context.middleware_index(), &output).await?;
+            changes.extend(output);
+        }
+        context.validate()?;
+        let batch = GraphChangeCodec::encode_changes(
+            &changes,
+            self.definition.output_stream.clone(),
+            input.system().sequence(),
+            input.system().timestamp(),
+        )?;
+        context.derive(&input, batch.changes().clone())
+    }
 }
 
 impl Default for MiddlewareTransformerFactory {

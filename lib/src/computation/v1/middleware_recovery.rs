@@ -14,6 +14,7 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    future::Future,
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -29,8 +30,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     producer_progress::{GraphInputProgress, INPUT_OWNER_PREFIX},
-    ChangeEnvelope, EnvelopeCodec, GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress,
-    MiddlewareTransformerDefinition, OutputEnvelope, SourceProgressKey, SourceProgressSnapshot,
+    ChangeEnvelope, ComponentId, EnvelopeCodec, GraphChangeCodec, GraphProducerIdentity,
+    GraphProducerProgress, MiddlewareTransformerDefinition, OutputEnvelope, Schema,
+    SourceProgressKey, SourceProgressSnapshot, StreamId,
 };
 
 const CONFIGURATION: &str = "\0computation:middleware-configuration:v1";
@@ -39,6 +41,7 @@ const EMISSION: &str = "\0computation:middleware-emission:v1";
 const CONFIRMED: &str = "\0computation:middleware-confirmed:v1";
 const JOURNAL: &str = "computation:middleware-output:v1";
 const INPUT_OUTPUT_PREFIX: &str = "\0computation:middleware-input-output:v1:";
+const QUERY_INPUT_OWNER_PREFIX: &str = "\0computation:transform-query-input:v1:";
 const MAX_ENVELOPE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Durable middleware owns an isolated atomic bundle within this graph scope.
@@ -68,6 +71,29 @@ struct Configuration {
     identity: GraphProducerIdentity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryInputOwner {
+    version: u32,
+    identity: super::QueryRecoveryIdentity,
+    generation: u64,
+}
+
+impl QueryInputOwner {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.version == 1,
+            "unsupported query input identity version"
+        );
+        self.identity.validate()?;
+        anyhow::ensure!(
+            self.identity.incarnation().is_none(),
+            "transaction processing cannot recover through a volatile query"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InputReceipt {
@@ -75,6 +101,8 @@ struct InputReceipt {
     sequence: u64,
     position: Option<Vec<u8>>,
     changes: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    envelope: Option<Vec<u8>>,
 }
 
 impl InputReceipt {
@@ -89,18 +117,42 @@ impl InputReceipt {
             sequence: progress.sequence,
             position: progress.position.as_ref().map(|position| position.to_vec()),
             changes,
+            envelope: None,
         })
     }
 
-    fn matches(
-        &self,
+    fn from_envelope(
         progress: &GraphInputProgress,
-        changes: &[SourceChange],
-    ) -> anyhow::Result<bool> {
-        Ok(self.key == progress.key
-            && self.sequence == progress.sequence
-            && self.position.as_deref() == progress.position.as_deref()
-            && rmp_serde::from_slice::<Vec<SourceChange>>(&self.changes)? == changes)
+        input: &ChangeEnvelope,
+        codec: &EnvelopeCodec,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            key: progress.key.clone(),
+            sequence: progress.sequence,
+            position: progress.position.as_ref().map(|position| position.to_vec()),
+            changes: Vec::new(),
+            envelope: Some(codec.encode(input)?.to_vec()),
+        })
+    }
+
+    fn matches(&self, candidate: &Self, codec: &EnvelopeCodec) -> anyhow::Result<bool> {
+        if self.key != candidate.key
+            || self.sequence != candidate.sequence
+            || self.position != candidate.position
+        {
+            return Ok(false);
+        }
+        match (&self.envelope, &candidate.envelope) {
+            (Some(previous), Some(current)) => {
+                let previous = codec.decode(previous)?;
+                let current = codec.decode(current)?;
+                Ok(previous.changes().schema() == current.changes().schema()
+                    && previous.changes().operations() == current.changes().operations())
+            }
+            (None, None) => Ok(rmp_serde::from_slice::<Vec<SourceChange>>(&self.changes)?
+                == rmp_serde::from_slice::<Vec<SourceChange>>(&candidate.changes)?),
+            _ => Ok(false),
+        }
     }
 }
 
@@ -127,11 +179,15 @@ struct Recovered {
     checkpoints: BTreeMap<SourceProgressKey, SourceCheckpoint>,
 }
 
-pub(super) struct MiddlewareStore {
+/// Shared commit/replay ownership for durable middleware and transactional sequences.
+/// Existing middleware journal keys and record encodings remain readable.
+pub(super) struct TransformStore {
     pub transaction: ComputationTransaction,
     options: DurableMiddlewareOptions,
     scope: String,
-    definition: MiddlewareTransformerDefinition,
+    id: ComponentId,
+    output_stream: StreamId,
+    output_schema: Arc<Schema>,
     configuration: serde_json::Value,
     codec: EnvelopeCodec,
     state: Option<Recovered>,
@@ -141,7 +197,7 @@ fn index_error(error: anyhow::Error) -> IndexError {
     IndexError::Other(error.into_boxed_dyn_error())
 }
 
-impl MiddlewareStore {
+impl TransformStore {
     pub fn new(
         indexes: ComputationIndexes,
         definition: &MiddlewareTransformerDefinition,
@@ -172,13 +228,53 @@ impl MiddlewareStore {
             &definition.middleware,
             &definition.pipeline,
         ))?;
+        Self::configured(
+            indexes,
+            definition.id.clone(),
+            definition.output_stream.clone(),
+            options,
+            scope,
+            configuration,
+            GraphChangeCodec::schema(),
+            vec![GraphChangeCodec::schema()],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn configured(
+        indexes: ComputationIndexes,
+        id: ComponentId,
+        output_stream: StreamId,
+        options: DurableMiddlewareOptions,
+        scope: String,
+        configuration: serde_json::Value,
+        output_schema: Arc<Schema>,
+        schemas: Vec<Arc<Schema>>,
+    ) -> anyhow::Result<Self> {
+        super::data::validate_identifier("transformer graph", &options.graph_id)?;
+        super::data::validate_identifier("transformer construction scope", &scope)?;
+        indexes.atomic_result_transaction()?;
+        anyhow::ensure!(
+            indexes.cleanup().is_some(),
+            "durable transformer requires a cleanup owner"
+        );
+        anyhow::ensure!(
+            indexes
+                .checkpoint_store()
+                .is_some_and(|store| store.is_persistent()),
+            "durable transformer requires persistent transactional storage"
+        );
         let mut codec = EnvelopeCodec::new(NonZeroUsize::new(MAX_ENVELOPE_BYTES).expect("limit"));
-        codec.register_schema(GraphChangeCodec::schema())?;
+        for schema in schemas {
+            codec.register_schema(schema)?;
+        }
         Ok(Self {
             transaction: ComputationTransaction::try_new(indexes)?,
             options,
             scope,
-            definition: definition.clone(),
+            id,
+            output_stream,
+            output_schema,
             configuration,
             codec,
             state: None,
@@ -250,8 +346,8 @@ impl MiddlewareStore {
                 || config.definition != self.configuration
                 || config.identity.construction_scope() != self.scope
                 || config.identity.graph_id() != self.options.graph_id
-                || config.identity.component_id() != &self.definition.id
-                || config.identity.stream() != &self.definition.output_stream
+                || config.identity.component_id() != &self.id
+                || config.identity.stream() != &self.output_stream
                 || !config.identity.persistent()
             {
                 return Err(MiddlewareRecoveryError::ConfigurationChanged.into());
@@ -275,17 +371,14 @@ impl MiddlewareStore {
                     && entries.is_empty()
                     && checkpoint.read_config_hash().await?.is_none()
                     && checkpoint
-                        .read_result_sequence(self.definition.id.as_str())
+                        .read_result_sequence(self.id.as_str())
                         .await?
                         .is_none()
-                    && outbox
-                        .read_from(self.definition.id.as_str(), 0)
-                        .await?
-                        .is_empty()
+                    && outbox.read_from(self.id.as_str(), 0).await?.is_empty()
                     && resources
                         .live_results_writer()
                         .expect("validated projection")
-                        .read_snapshot(self.definition.id.as_str())
+                        .read_snapshot(self.id.as_str())
                         .await?
                         .is_empty(),
                 "refusing to adopt unowned or another component's index storage"
@@ -293,8 +386,8 @@ impl MiddlewareStore {
             let identity = GraphProducerIdentity::new(
                 self.scope.clone(),
                 self.options.graph_id.clone(),
-                self.definition.id.clone(),
-                self.definition.output_stream.clone(),
+                self.id.clone(),
+                self.output_stream.clone(),
                 true,
             )?;
             let bytes = Bytes::from(serde_json::to_vec(&Configuration {
@@ -335,10 +428,7 @@ impl MiddlewareStore {
                     && previous_emission
                         .map_or(true, |previous| envelope.system().sequence() > previous)
                     && envelope.id()
-                        == &super::emission_id(
-                            &self.definition.output_stream,
-                            envelope.system().sequence()
-                        )?
+                        == &super::emission_id(&self.output_stream, envelope.system().sequence())?
                     && envelope.lineage().is_some()
                     && logical_sequence <= head
                     && previous.map_or(
@@ -355,7 +445,15 @@ impl MiddlewareStore {
                 input.sequence >= record.input.sequence,
                 "middleware output is ahead of committed input"
             );
-            let _: Vec<SourceChange> = rmp_serde::from_slice(&record.input.changes)?;
+            if let Some(input) = &record.input.envelope {
+                self.codec.decode(input)?;
+            } else {
+                let _: Vec<SourceChange> = rmp_serde::from_slice(&record.input.changes)?;
+            }
+            super::data::validate_schema(
+                self.output_schema.descriptor(),
+                envelope.changes().schema(),
+            )?;
             retained.push_back(RetainedOutput {
                 input: record.input,
                 logical_sequence,
@@ -420,6 +518,21 @@ impl MiddlewareStore {
                         && saved.contains_key(input),
                     "middleware input owner does not match its committed stream"
                 );
+            } else if let Some(input) = key.strip_prefix(QUERY_INPUT_OWNER_PREFIX) {
+                let owner: QueryInputOwner = serde_json::from_slice(
+                    checkpoint
+                        .source_position
+                        .as_deref()
+                        .filter(|_| checkpoint.sequence == 1)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("invalid transactional query input owner")
+                        })?,
+                )?;
+                owner.validate()?;
+                anyhow::ensure!(
+                    saved.contains_key(input),
+                    "query input owner has no committed position"
+                );
             } else {
                 anyhow::ensure!(
                     [CONFIGURATION, HEAD, EMISSION, CONFIRMED].contains(&key.as_str())
@@ -476,6 +589,85 @@ impl MiddlewareStore {
         pipeline: &SourceMiddlewarePipeline,
     ) -> anyhow::Result<Option<ChangeEnvelope>> {
         let progress = GraphInputProgress::from_envelope(input)?;
+        let receipt = InputReceipt::new(&progress, &changes)?;
+        let stream = self.output_stream.clone();
+        self.process_with(progress, receipt, None, |elements, emission| async move {
+            let mut output = Vec::new();
+            for change in changes {
+                let transformed = pipeline.process(change, elements.clone()).await?;
+                super::middleware::remember(elements.as_ref(), &transformed).await?;
+                output.extend(transformed);
+            }
+            Ok(GraphChangeCodec::derive_changes(
+                input, &output, stream, emission,
+            )?)
+        })
+        .await
+    }
+
+    pub async fn process_envelope<F, Fut>(
+        &mut self,
+        input: &ChangeEnvelope,
+        transform: F,
+    ) -> anyhow::Result<Option<ChangeEnvelope>>
+    where
+        F: FnOnce(Arc<dyn ElementIndex>, u64) -> Fut + Send,
+        Fut: Future<Output = anyhow::Result<ChangeEnvelope>> + Send,
+    {
+        let query_input =
+            input.changes().schema() == super::QueryChangeCodec::schema().descriptor();
+        let immediate_producer = if query_input {
+            GraphProducerProgress::from_query_envelope(input)?
+        } else {
+            GraphProducerProgress::from_envelope(input)?
+        };
+        let (progress, owner) = if immediate_producer.is_some() {
+            (GraphInputProgress::from_envelope(input)?, None)
+        } else if query_input {
+            anyhow::ensure!(
+                !super::QueryChangeCodec::is_snapshot(input) && !super::QueryChangeCodec::is_progress_only(input),
+                "transaction query inputs must be ordinary result events, not snapshot/skip decisions"
+            );
+            let owner = QueryInputOwner {
+                version: 1,
+                identity: super::QueryRecoveryIdentity::from_envelope(input)?,
+                generation: super::QueryChangeCodec::query_generation(input)?,
+            };
+            owner.validate()?;
+            anyhow::ensure!(
+                super::QueryChangeCodec::metadata(input)?.query_id == owner.identity.query_id(),
+                "query input metadata does not match its producer identity"
+            );
+            (
+                GraphInputProgress::from_stream(
+                    input,
+                    super::QueryChangeCodec::query_sequence(input)?,
+                ),
+                Some(owner),
+            )
+        } else if input.changes().schema() == GraphChangeCodec::schema().descriptor() {
+            (GraphInputProgress::from_envelope(input)?, None)
+        } else {
+            (
+                GraphInputProgress::from_stream(input, input.system().sequence()),
+                None,
+            )
+        };
+        let receipt = InputReceipt::from_envelope(&progress, input, &self.codec)?;
+        self.process_with(progress, receipt, owner, transform).await
+    }
+
+    async fn process_with<F, Fut>(
+        &mut self,
+        progress: GraphInputProgress,
+        receipt: InputReceipt,
+        query_owner: Option<QueryInputOwner>,
+        transform: F,
+    ) -> anyhow::Result<Option<ChangeEnvelope>>
+    where
+        F: FnOnce(Arc<dyn ElementIndex>, u64) -> Fut + Send,
+        Fut: Future<Output = anyhow::Result<ChangeEnvelope>> + Send,
+    {
         anyhow::ensure!(
             progress.position.as_ref().map_or(true, |position| {
                 position.len() <= crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES
@@ -488,12 +680,49 @@ impl MiddlewareStore {
             .checkpoint_store()
             .expect("checkpoint");
         let saved = progress.validate(checkpoint.as_ref(), true).await?;
+        let owner_key = format!("{QUERY_INPUT_OWNER_PREFIX}{}", progress.key);
+        let previous_owner = checkpoint.read_checkpoint(&owner_key).await?;
+        match (&query_owner, previous_owner) {
+            (Some(current), Some(previous)) => {
+                let previous: QueryInputOwner = serde_json::from_slice(
+                    previous
+                        .source_position
+                        .as_deref()
+                        .filter(|_| previous.sequence == 1)
+                        .ok_or_else(|| anyhow::anyhow!("invalid saved query input owner"))?,
+                )?;
+                previous.validate()?;
+                anyhow::ensure!(
+                    &previous == current,
+                    "query input identity or reset generation changed"
+                );
+            }
+            (Some(_), None) => anyhow::ensure!(
+                saved.is_none(),
+                "query input has no verified prior identity"
+            ),
+            (None, Some(_)) => anyhow::bail!("input omitted its saved query identity"),
+            (None, None) => {}
+        }
+        if query_owner.is_some()
+            && saved
+                .as_ref()
+                .map_or(true, |saved| progress.sequence > saved.sequence)
+        {
+            anyhow::ensure!(
+                saved
+                    .as_ref()
+                    .map_or(Some(1), |saved| saved.sequence.checked_add(1))
+                    == Some(progress.sequence),
+                "transaction query input has a missing result; replay it before continuing"
+            );
+        }
         if saved.is_some_and(|saved| saved.sequence >= progress.sequence) {
             if let Some(entry) = self.state()?.retained.iter().find(|entry| {
                 entry.input.key == progress.key && entry.input.sequence == progress.sequence
             }) {
                 anyhow::ensure!(
-                    entry.input.matches(&progress, &changes)?,
+                    entry.input.matches(&receipt, &self.codec)?,
                     "replayed middleware input changed its committed contents or position"
                 );
                 return self.replay(entry.logical_sequence).await.map(Some);
@@ -517,24 +746,22 @@ impl MiddlewareStore {
         if retain_from.saturating_sub(1) > state.confirmed {
             return Err(MiddlewareRecoveryError::RetentionExhausted.into());
         }
-        let receipt = InputReceipt::new(&progress, &changes)?;
         let elements = self.elements();
         let envelope = self
             .transaction
             .run(async {
                 let prepared: anyhow::Result<ChangeEnvelope> = async {
-                    let mut output = Vec::new();
-                    for change in changes {
-                        let transformed = pipeline.process(change, elements.clone()).await?;
-                        super::middleware::remember(elements.as_ref(), &transformed).await?;
-                        output.extend(transformed);
-                    }
-                    let mut envelope = GraphChangeCodec::derive_changes(
-                        input,
-                        &output,
-                        self.definition.output_stream.clone(),
-                        emission,
+                    let mut envelope = transform(elements, emission).await?;
+                    super::data::validate_schema(
+                        self.output_schema.descriptor(),
+                        envelope.changes().schema(),
                     )?;
+                    anyhow::ensure!(
+                        envelope.system().stream() == &self.output_stream
+                            && envelope.system().sequence() == emission
+                            && envelope.id() == &super::emission_id(&self.output_stream, emission)?,
+                        "transaction output does not match its reserved emission"
+                    );
                     GraphProducerProgress::annotate(
                         &mut envelope,
                         &state.identity,
@@ -552,6 +779,12 @@ impl MiddlewareStore {
                         .append_and_trim(JOURNAL, logical_sequence, &bytes, retain_from)
                         .await?;
                     progress.stage(checkpoint.as_ref()).await?;
+                    if let Some(owner) = &query_owner {
+                        let bytes = Bytes::from(serde_json::to_vec(owner)?);
+                        checkpoint
+                            .stage_checkpoint(&owner_key, 1, Some(&bytes))
+                            .await?;
+                    }
                     checkpoint
                         .stage_checkpoint(
                             &format!("{INPUT_OUTPUT_PREFIX}{}", progress.key),

@@ -191,6 +191,13 @@ See the [middleware guide](computation-graph-middleware.md#durable-state-and-del
 for persistent transformer storage and connection requirements. Durable middleware
 uses replay-only source subscriptions; it is not a replacement for query bootstrap.
 
+For a [transactional sequence](computation-graph-transactions.md), configure
+`TransactionTransformerDefinition.steps` and supply one atomic persistent index
+provider for the whole container. Step IDs select separate storage areas within
+that provider's transaction. Register implementations through
+`TransactionalTransformerRegistry`; ordinary transformer factories are not
+implicitly eligible.
+
 | Policy | Query source recovery | Reaction output recovery |
 |---|---|---|
 | `Strict` (`strict`) | Fail when saved progress cannot be honoured | Fail when missing output cannot be recovered |

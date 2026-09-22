@@ -18,6 +18,11 @@ Each producer must expose a graph-change output port. It can be a source or
 another transformer. Query-result rows and custom record formats are rejected
 as incompatible; they are not silently converted into graph nodes.
 
+Middleware can also be a step inside a
+[TransactionTransformer](computation-graph-transactions.md). In that mode its
+previous-element state is supplied by the container, and its writes commit with
+all the other steps rather than in a separate middleware transaction.
+
 ## Configure a sequence
 
 Enable `computation` and the middleware features you use. For example:

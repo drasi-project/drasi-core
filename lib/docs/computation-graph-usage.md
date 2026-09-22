@@ -204,6 +204,11 @@ Use the [middleware transformer](computation-graph-middleware.md) to run an orde
 sequence of existing middleware on graph changes from one or more components.
 It does not require a Continuous Query.
 
+Use a [transaction transformer](computation-graph-transactions.md) when a linear
+sequence of participating transformers must commit together. The sequence is
+configured inside one component; there are no internal pipes. Ordinary
+transformers remain independently usable and are not automatically participants.
+
 From the drasi-core repository root:
 
 ```bash

@@ -86,6 +86,13 @@ persistent state and saved output with `new_durable`. See the
 [middleware guide](computation-graph-middleware.md) for configuration, batching
 and recovery limits.
 
+`TransactionTransformer` runs a configured linear sequence whose implementations
+also implement `TransactionalTransformer`. It owns the shared transaction and
+saved output; each step receives a borrowed `TransactionContext` with isolated
+state. It does not create a nested graph or schedule child nodes. See the
+[transaction guide](computation-graph-transactions.md) for participation,
+configuration and recovery requirements.
+
 A data connection names `(component, port)` at both ends, its provider and its
 `RelationshipPolicy`. A resource declaration names its role, ownership and
 binding; `provide_resource` supplies the actual object separately.

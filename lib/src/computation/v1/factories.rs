@@ -18,7 +18,7 @@ use super::{
     ComponentFactory, ComputationTopologyFactory, ContinuousQueryFactory, FactoryRegistry,
     LegacyReactionFactory, LegacySourceFactory, MiddlewareTransformerFactory, QueryReplayFactory,
     QueryResultsOutletFactory, ReactionPluginAdapterFactory, SourcePluginAdapterFactory,
-    WalReplaySourceFactory,
+    TransactionTransformerFactory, WalReplaySourceFactory,
 };
 
 impl FactoryRegistry {
@@ -27,6 +27,7 @@ impl FactoryRegistry {
         let factories: Vec<Arc<dyn ComponentFactory>> = vec![
             Arc::new(ContinuousQueryFactory::default()),
             Arc::new(MiddlewareTransformerFactory::default()),
+            Arc::new(TransactionTransformerFactory::default()),
             Arc::new(LegacySourceFactory::default()),
             Arc::new(SourcePluginAdapterFactory::default()),
             Arc::new(LegacyReactionFactory::default()),

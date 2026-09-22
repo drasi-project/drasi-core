@@ -106,16 +106,23 @@ impl SourceMiddlewarePipeline {
         source_change: SourceChange,
         element_index: Arc<dyn ElementIndex>,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        self.process_with_index(source_change, element_index.as_ref())
+            .await
+    }
+
+    /// Use a borrowed index supplied by an outer transaction owner.
+    pub async fn process_with_index(
+        &self,
+        source_change: SourceChange,
+        element_index: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
         let mut source_changes = vec![source_change];
 
         for middleware in &self.pipeline {
             let mut new_source_changes = Vec::new();
             for source_change in source_changes {
-                new_source_changes.append(
-                    &mut middleware
-                        .process(source_change, element_index.as_ref())
-                        .await?,
-                );
+                new_source_changes
+                    .append(&mut middleware.process(source_change, element_index).await?);
             }
 
             source_changes = new_source_changes;

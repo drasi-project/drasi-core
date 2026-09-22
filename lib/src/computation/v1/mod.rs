@@ -148,6 +148,9 @@
 //! middleware using an atomic persistent index bundle and lossless durable
 //! outgoing pipes. [`GraphProducerProgress`] separates logical replay identity
 //! from fresh transport emissions and preserved raw source provenance.
+//! [`TransactionTransformer`] runs a configured linear sequence of opt-in
+//! [`TransactionalTransformer`] implementations in one shared storage transaction,
+//! with isolated step state and no internal pipes or independently scheduled nodes.
 
 pub use super::instance::{
     ComputationCleanupError, ComputationHandle, ComputationInfo, ComputationOptions,
@@ -191,6 +194,10 @@ mod middleware;
 pub use middleware::*;
 mod middleware_recovery;
 pub use middleware_recovery::{DurableMiddlewareOptions, MiddlewareRecoveryError};
+mod transaction_state;
+pub use transaction_state::TransactionContext;
+mod transaction_transformer;
+pub use transaction_transformer::*;
 mod pipe;
 mod pipe_metrics;
 mod ports;

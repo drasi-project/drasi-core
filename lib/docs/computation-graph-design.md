@@ -162,8 +162,12 @@ reactions start from their subscription point rather than replaying old outputs.
 Reset and deletion preserve enough query identity to reject checkpoints from an
 unrelated earlier use of the same query ID.
 
-These are query/storage guarantees, **not one transaction covering an entire
-pipeline or an external system's side effects**.
+These guarantees do not automatically combine independent components into one
+transaction. A [TransactionTransformer](computation-graph-transactions.md) can
+explicitly group a linear sequence of opt-in transformers under one commit.
+Its steps have isolated areas in the same transactional storage and exchange
+events directly, without pipes. Sources, reactions and external side effects
+remain outside that boundary.
 
 ## Changes, removal and cleanup
 

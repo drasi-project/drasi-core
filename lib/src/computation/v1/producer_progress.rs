@@ -129,6 +129,16 @@ impl GraphProducerProgress {
     }
 
     pub fn from_envelope(envelope: &ChangeEnvelope) -> anyhow::Result<Option<Self>> {
+        Self::read(envelope, false)
+    }
+
+    /// Query results retain input annotations as history. Only a marker for the
+    /// current stream supersedes the query's own recovery identity.
+    pub(super) fn from_query_envelope(envelope: &ChangeEnvelope) -> anyhow::Result<Option<Self>> {
+        Self::read(envelope, true)
+    }
+
+    fn read(envelope: &ChangeEnvelope, allow_query_ancestor: bool) -> anyhow::Result<Option<Self>> {
         let Some(entry) = envelope
             .annotations()
             .entries()
@@ -146,9 +156,14 @@ impl GraphProducerProgress {
         );
         progress.identity.validate()?;
         anyhow::ensure!(
-            progress.sequence > 0
-                && progress.identity.stream == *envelope.system().stream()
-                && progress.identity.component_id.as_str() == entry.contributor(),
+            progress.sequence > 0 && progress.identity.component_id.as_str() == entry.contributor(),
+            "graph producer progress does not identify the immediate producer"
+        );
+        if allow_query_ancestor && progress.identity.stream != *envelope.system().stream() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            progress.identity.stream == *envelope.system().stream(),
             "graph producer progress does not identify the immediate producer"
         );
         Ok(Some(progress))
@@ -166,6 +181,19 @@ pub(super) struct GraphInputProgress {
 }
 
 impl GraphInputProgress {
+    pub(super) fn from_stream(input: &ChangeEnvelope, sequence: u64) -> Self {
+        let stream = input.system().stream().clone();
+        Self {
+            key: super::query::progress_key(stream.as_str(), None),
+            identity: SourceProgressKey::Stream(stream.clone()),
+            stream,
+            sequence,
+            position: input.system().source_position().cloned(),
+            producer: None,
+            volatile_producer: false,
+        }
+    }
+
     pub fn from_envelope(input: &ChangeEnvelope) -> anyhow::Result<Self> {
         let producer = GraphProducerProgress::from_envelope(input)?;
         if let Some(progress) = producer
