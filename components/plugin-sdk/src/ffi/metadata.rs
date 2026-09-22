@@ -50,7 +50,11 @@ use super::types::FfiStr;
 ///   which raise their sequence counter above it for restart monotonicity
 ///   (#827). This changes the subscribe call contract, so old plugins must be
 ///   rejected by the loader's major.minor check.
-pub const FFI_SDK_VERSION: &str = "0.14.0";
+/// - `0.15.0`: `SourceVtable` gained `on_subscriptions_complete_fn` so the host
+///   lifecycle can notify dynamic sources after startup query subscriptions
+///   have registered. The callback returns `FfiResult`, preserving source
+///   failures across the ABI boundary (#774).
+pub const FFI_SDK_VERSION: &str = "0.15.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

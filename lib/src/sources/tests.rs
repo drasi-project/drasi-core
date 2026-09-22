@@ -26,6 +26,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -40,6 +41,10 @@ pub struct TestMockSource {
     status_handle: crate::component_graph::ComponentStatusHandle,
     /// Dispatchers for sending events to subscribed queries
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    subscription_count: Arc<AtomicUsize>,
+    subscriptions_complete_count: Arc<AtomicUsize>,
+    subscriptions_at_completion: Arc<AtomicUsize>,
+    subscriptions_complete_error: Option<String>,
 }
 
 impl TestMockSource {
@@ -50,6 +55,10 @@ impl TestMockSource {
             auto_start: true,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            subscription_count: Arc::new(AtomicUsize::new(0)),
+            subscriptions_complete_count: Arc::new(AtomicUsize::new(0)),
+            subscriptions_at_completion: Arc::new(AtomicUsize::new(0)),
+            subscriptions_complete_error: None,
         })
     }
 
@@ -61,7 +70,28 @@ impl TestMockSource {
             auto_start,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            subscription_count: Arc::new(AtomicUsize::new(0)),
+            subscriptions_complete_count: Arc::new(AtomicUsize::new(0)),
+            subscriptions_at_completion: Arc::new(AtomicUsize::new(0)),
+            subscriptions_complete_error: None,
         })
+    }
+
+    pub fn with_subscriptions_complete_error(mut self, error: impl Into<String>) -> Self {
+        self.subscriptions_complete_error = Some(error.into());
+        self
+    }
+
+    pub fn subscription_count(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.subscription_count)
+    }
+
+    pub fn subscriptions_complete_count(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.subscriptions_complete_count)
+    }
+
+    pub fn subscriptions_at_completion(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.subscriptions_at_completion)
     }
 
     /// Inject an event into all subscribed queries.
@@ -132,6 +162,7 @@ impl Source for TestMockSource {
         &self,
         settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        self.subscription_count.fetch_add(1, Ordering::SeqCst);
         let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
         let receiver = dispatcher.create_receiver().await?;
 
@@ -153,6 +184,19 @@ impl Source for TestMockSource {
 
     async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
         self.status_handle.wire(context.update_tx.clone()).await;
+    }
+
+    async fn on_subscriptions_complete(&self) -> Result<()> {
+        self.subscriptions_at_completion.store(
+            self.subscription_count.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+        self.subscriptions_complete_count
+            .fetch_add(1, Ordering::SeqCst);
+        match &self.subscriptions_complete_error {
+            Some(error) => Err(anyhow::anyhow!(error.clone())),
+            None => Ok(()),
+        }
     }
 }
 

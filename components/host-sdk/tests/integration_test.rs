@@ -537,6 +537,82 @@ async fn test_mock_source_start_stop_lifecycle() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn test_dynamic_source_receives_one_subscriptions_complete_callback() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    const MARKER_ENV: &str = "DRASI_MOCK_SUBSCRIPTIONS_COMPLETE_MARKER";
+    let marker = tempfile::NamedTempFile::new().expect("callback marker file");
+    std::env::set_var(MARKER_ENV, marker.path());
+    let _env_guard = EnvGuard(MARKER_ENV);
+
+    let path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+    let source_id = "subscriptions-complete-ffi-source";
+    let source = plugin.source_plugins[0]
+        .create_source(
+            source_id,
+            &serde_json::json!({
+                "dataType": { "type": "generic" },
+                "intervalMs": 60000
+            }),
+            true,
+        )
+        .await
+        .expect("Should create mock source");
+
+    let core = drasi_lib::DrasiLib::builder()
+        .with_id("subscriptions-complete-ffi-test")
+        .with_source(source)
+        .with_query(
+            drasi_lib::Query::cypher("subscriptions-complete-query-1")
+                .query("MATCH (n) RETURN n")
+                .from_source(source_id)
+                .enable_bootstrap(false)
+                .build(),
+        )
+        .with_query(
+            drasi_lib::Query::cypher("subscriptions-complete-query-2")
+                .query("MATCH (n) RETURN n")
+                .from_source(source_id)
+                .enable_bootstrap(false)
+                .build(),
+        )
+        .build()
+        .await
+        .expect("Should build DrasiLib");
+
+    core.start().await.expect("Should start DrasiLib");
+
+    let marker_contents =
+        std::fs::read_to_string(marker.path()).expect("read callback marker file");
+    let callbacks: Vec<_> = marker_contents.lines().collect();
+    assert_eq!(
+        callbacks,
+        vec![source_id],
+        "dynamic source callback must run exactly once after both queries subscribe"
+    );
+
+    core.stop().await.expect("Should stop DrasiLib");
+}
+
 // ============================================================================
 // Multiple Instance Tests
 // ============================================================================

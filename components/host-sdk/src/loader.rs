@@ -350,9 +350,7 @@ pub fn load_plugin_from_path(
     // safely read the trailing fields.
     let identity_provider_vtables: Option<
         Vec<drasi_plugin_sdk::ffi::IdentityProviderPluginVtable>,
-    > = if plugin_sdk_version
-        .as_deref()
-        .and_then(parse_semver)
+    > = if parse_semver(&plugin_sdk_version)
         .map(|v| v >= MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS)
         .unwrap_or(false)
         && !registration.identity_provider_plugins.is_null()
@@ -387,16 +385,15 @@ pub fn load_plugin_from_path(
     // NOTE: `set_log_level` is a trailing field appended for SDK 0.12.0; gate
     // access on the plugin's reported `sdk_version` like the identity fields
     // above, since reading it from an older (smaller) layout is UB.
-    let set_log_level_fn: Option<extern "C" fn(FfiLogLevelFilter)> = if plugin_sdk_version
-        .as_deref()
-        .and_then(parse_semver)
-        .map(|v| v >= MIN_SDK_VERSION_WITH_SET_LOG_LEVEL)
-        .unwrap_or(false)
-    {
-        Some(registration.set_log_level)
-    } else {
-        None
-    };
+    let set_log_level_fn: Option<extern "C" fn(FfiLogLevelFilter)> =
+        if parse_semver(&plugin_sdk_version)
+            .map(|v| v >= MIN_SDK_VERSION_WITH_SET_LOG_LEVEL)
+            .unwrap_or(false)
+        {
+            Some(registration.set_log_level)
+        } else {
+            None
+        };
 
     // Report the host's effective log level so the plugin can drop
     // filtered-out records before formatting or crossing the FFI.
@@ -497,67 +494,59 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     Some((v.major as u32, v.minor as u32, v.patch as u32))
 }
 
+fn validate_sdk_compatibility(plugin_version: &str, host_version: &str) -> anyhow::Result<()> {
+    let plugin = parse_semver(plugin_version)
+        .ok_or_else(|| anyhow::anyhow!("invalid plugin SDK version '{plugin_version}'"))?;
+    let host = parse_semver(host_version)
+        .ok_or_else(|| anyhow::anyhow!("invalid host SDK version '{host_version}'"))?;
+
+    if (plugin.0, plugin.1) != (host.0, host.1) {
+        anyhow::bail!(
+            "SDK version mismatch: plugin={plugin_version}, host={host_version}. \
+             Major.minor versions must match ({}.{} != {}.{}).",
+            plugin.0,
+            plugin.1,
+            host.0,
+            host.1,
+        );
+    }
+
+    Ok(())
+}
+
 /// Validate plugin metadata against the host SDK version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
 /// For cdylib plugins, we check major.minor compatibility (patch differences are OK).
 ///
-/// On success returns the plugin's reported `sdk_version` string (if metadata
-/// was present), so callers can gate access to ABI fields introduced in a
-/// later SDK revision.
-fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option<String>> {
+/// On success returns the plugin's reported `sdk_version` string so callers can
+/// gate access to ABI fields introduced in a later SDK revision.
+fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<String> {
     let meta_fn = unsafe {
-        match lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata") {
-            Ok(f) => f,
-            Err(_) => {
-                log::warn!(
-                    "Plugin '{}' does not export drasi_plugin_metadata — skipping version check",
+        lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata")
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Plugin '{}' does not export drasi_plugin_metadata; \
+                     ABI compatibility cannot be verified",
                     path.display()
-                );
-                return Ok(None);
-            }
-        }
+                )
+            })?
     };
 
     let meta_ptr = unsafe { meta_fn() };
     if meta_ptr.is_null() {
-        log::warn!(
-            "Plugin '{}' returned null metadata — skipping version check",
+        anyhow::bail!(
+            "Plugin '{}' returned null metadata; ABI compatibility cannot be verified",
             path.display()
         );
-        return Ok(None);
     }
 
     let meta = unsafe { &*meta_ptr };
     let plugin_sdk_version = unsafe { meta.sdk_version.to_string() };
     let host_sdk_version = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
 
-    // Check major.minor compatibility
-    let plugin_parts: Vec<&str> = plugin_sdk_version.split('.').collect();
-    let host_parts: Vec<&str> = host_sdk_version.split('.').collect();
-
-    let plugin_major_minor = format!(
-        "{}.{}",
-        plugin_parts.first().unwrap_or(&"0"),
-        plugin_parts.get(1).unwrap_or(&"0")
-    );
-    let host_major_minor = format!(
-        "{}.{}",
-        host_parts.first().unwrap_or(&"0"),
-        host_parts.get(1).unwrap_or(&"0")
-    );
-
-    if plugin_major_minor != host_major_minor {
-        anyhow::bail!(
-            "Plugin '{}' SDK version mismatch: plugin={}, host={}. \
-             Major.minor versions must match ({} != {}).",
-            path.display(),
-            plugin_sdk_version,
-            host_sdk_version,
-            plugin_major_minor,
-            host_major_minor,
-        );
-    }
+    validate_sdk_compatibility(&plugin_sdk_version, host_sdk_version)
+        .map_err(|error| anyhow::anyhow!("Plugin '{}': {error}", path.display()))?;
 
     // Check target triple compatibility
     let plugin_target = unsafe { meta.target_triple.to_string() };
@@ -579,7 +568,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
         plugin_target
     );
 
-    Ok(Some(plugin_sdk_version))
+    Ok(plugin_sdk_version)
 }
 
 /// Scan the plugin directory and group files by plugin base name.
@@ -1183,5 +1172,22 @@ mod tests {
         // Above the threshold
         assert!(parse_semver("0.6.1").unwrap() > MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
         assert!(parse_semver("1.0.0").unwrap() > MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
+    }
+
+    #[test]
+    fn test_sdk_compatibility_rejects_pre_callback_vtable() {
+        let error = validate_sdk_compatibility("0.14.9", "0.15.0").unwrap_err();
+        assert!(error.to_string().contains("0.14 != 0.15"));
+    }
+
+    #[test]
+    fn test_sdk_compatibility_accepts_patch_difference() {
+        validate_sdk_compatibility("0.15.9", "0.15.0").unwrap();
+    }
+
+    #[test]
+    fn test_sdk_compatibility_rejects_malformed_version() {
+        let error = validate_sdk_compatibility("legacy", "0.15.0").unwrap_err();
+        assert!(error.to_string().contains("invalid plugin SDK version"));
     }
 }
