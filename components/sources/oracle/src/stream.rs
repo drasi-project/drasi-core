@@ -188,6 +188,7 @@ async fn dispatch_batch(
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
                 profiling,
+                base.next_sequence(),
             );
             wrapper.source_position = Some(position_bytes.clone());
             wrapper

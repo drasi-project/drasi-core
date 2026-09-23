@@ -402,11 +402,7 @@ async fn test_dispatch_changes_stamps_monotonic_sequence() {
             .expect("timed out waiting for dispatched event")
             .expect("event stream closed unexpectedly");
         if matches!(event.event, SourceEvent::Change(_)) {
-            sequences.push(
-                event
-                    .sequence
-                    .expect("dispatched change must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
     }
 

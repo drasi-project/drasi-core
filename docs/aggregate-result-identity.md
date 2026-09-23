@@ -114,23 +114,22 @@ Each restored run passes all seven new regressions: three engine tests, two
 public API tests, and two persistent-output tests. Broader suite and CI results
 are recorded on #810 separately from this focused failure proof.
 
-## Linked codec dependency and combined validation
+## Dependency integration history (2026-09-18)
 
-The upper #810 branch now includes a normal merge of the existing
+At `211d0f2a79aa2ad0f7cb841937f52013fe95ded6`, the upper #810 branch included a
+normal merge of the existing
 [#909](https://github.com/drasi-project/drasi-core/pull/909) at
 `6455dd3e4e1f8b969b9957aa042c22061cdb8a0b`, preserving both PR histories. That lower
-commit includes current main `ead4279cc4ad847c875dc3ebebb1a54fe3b13de4` and the
-named-field outbox writer correction for #908. Its staging, hydration, atomicity,
-reader, and nine codec/reopen regression cases are inherited, not copied or
-reimplemented in the upper layer.
+commit included then-current main `ead4279cc4ad847c875dc3ebebb1a54fe3b13de4` and
+the named-field outbox writer correction for #908. Its staging, hydration,
+atomicity, reader, and nine codec/reopen regression cases were inherited, not
+copied or reimplemented in the upper layer.
 
-Because #909 is fork-based, this is a **linked dependent-PR chain, not a native
-GitHub stack**. #810 targets the upstream auxiliary branch
-`agentofreality/core-909-base`, which must equal the exact lower PR head above.
-If #909 changes, its owner/coordinator must explicitly synchronize the mirror,
-then reconcile and revalidate #810. Retarget #810 to `main` only after an eventual
-user-authorized lower merge and a fresh ancestry/check preflight. Neither PR is
-merged or published by this integration.
+Because #909 was fork-based, this was a **linked dependent-PR chain, not a native
+GitHub stack**. #810 then targeted the upstream auxiliary branch
+`agentofreality/core-909-base` at that exact lower head. The mirror is now retained
+only as historical provenance; it is not advanced, deleted, or used as the base
+for the post-merge reconciliation below. No native stack registration was made.
 
 The prior [required CI failure](https://github.com/drasi-project/drasi-core/actions/runs/35390267902)
 on the old #810 head was real: main's hydration exposed unreadable compact
@@ -139,11 +138,11 @@ snapshot assertion. An ordinary non-aggregate update also reproduced that
 failure independently on unchanged main. It is distinct from #680's incorrect
 group identity.
 
-On the actual combined upper branch, the formerly failing two persistent
-aggregate tests and the lower ordinary-update reopen test pass. Temporarily
-reversing only the inherited named writer to `rmp_serde::to_vec` makes all three
-fail at durable outbox sequence 2; restoring the lower writer byte-for-byte makes
-the identical command pass:
+On that combined branch, the formerly failing two persistent aggregate tests
+and the lower ordinary-update reopen test passed. Temporarily reversing only
+the inherited named writer to `rmp_serde::to_vec` made all three fail at durable
+outbox sequence 2; restoring the lower writer byte-for-byte made the identical
+command pass:
 
 ```sh
 cargo test -p drasi-lib --lib -- aggregate_snapshot_tests \
@@ -166,10 +165,56 @@ records together, fresh reopen, sequence continuation, and visible Strict failur
 without deleting malformed legacy records. No assertions or recovery policies
 are relaxed. Full local and exact-head remote results are recorded on #810.
 
-The existing test, lint, FFI, audit, deny, and coverage workflows explicitly
-include this one mirror base, preserving their other filters and gates. A
-post-retarget push must run fresh checks; old `main`-base checks do not establish
-the upper layer's CI. Coverage keeps its existing draft-PR skip condition.
+That layer added six exact mirror-base workflow filters. Its successful
+[mirror-base Rust run](https://github.com/drasi-project/drasi-core/actions/runs/35403891956)
+is historical evidence, not proof for a later main-based integration.
+
+## Reconciliation after #909 merged (2026-09-23)
+
+#909 merged into `main` at **`b1f3b3c19d4f06baf7ede3a9d27accc215f2f009`**, with
+final contributor head `f9d5143fd8e940edfac3b21e9a65cf76703dae8e`. The merged tree
+matches that final contributor tree; the original `6455dd3` snapshot is not a
+substitute for it.
+
+#810 integrates that exact main by a normal merge, preserving its existing
+history and aggregate corrections, and targets `main` directly. The incoming
+named writer, reader, atomic staging/hydration, streaming bootstrap (#749),
+mandatory source-event sequences (#858), and package-visibility checks (#863)
+are retained. The only source-level reconciliation above main is in the
+aggregate test helper: it passes its real sequence to `SourceEventWrapper::new`
+and preserves the same source-position bytes. The lower reopen test uses its
+final #909 sequence argument. No test, checkpoint behavior, or Strict recovery
+assertion is dropped.
+
+The six obsolete mirror-only CI filter additions are removed, leaving the
+workflows byte-for-byte equal to this main, including the new mocked
+`package-visibility.test.sh` gate and all existing main/push/security/coverage
+conditions. No protection or skip condition is weakened.
+
+Fresh local validation of the reconciled source passed:
+
+| Gate | Result |
+| --- | --- |
+| Aggregate/codec selectors, default and parallel solvers | 18 passed each |
+| Complete core/library suites, default and parallel solvers | 761 core unit, 947 library unit, 35 integration, and 98 doctests passed each; 56 existing ignored |
+| `cargo test --locked --workspace --exclude drasi-host-sdk` | 4,828 passed, 262 existing ignored |
+| `make test-host-sdk` with locally built test plugins | 50 passed, 6 existing ignored |
+| `make clippy` and strict parallel-solver core/library Clippy | Passed |
+| Parallel-solver shared in-memory scenarios | 74 passed |
+| Stable/nightly formatting, typos, dependency-cycle and mocked visibility/retry gates | Passed |
+| Existing main audit/deny policy | Passed; 18 allowed audit warnings, no new suppressions |
+
+Builds used only this worktree's artifacts with two compiler jobs; full workspace
+tests used two test threads. Existing package versions, sources, checksums, and
+dependency edges were preserved except the two edges added by incoming main's
+MSSQL/Oracle bootstrap manifests. No dependency refresh was performed. The
+initial `--locked` rejection of those missing edges and its offline reconciliation
+are recorded in the PR evidence.
+
+Exact main-based remote CI head/base/tree and outcomes are recorded on #810
+separately from these local results. Neither the old mirror's green CI nor the
+server diagnostic below substitutes for fresh checks. This reconciliation does
+not merge #810 or publish a release.
 
 ## Persisted-state migration boundary
 
@@ -211,15 +256,16 @@ named records remain readable together. See
 for the inherited codec boundary. Do not silently discard records, downgrade
 Strict, or clear only the outbox/output to manufacture a passing migration.
 
-## Consumption and isolated server evidence
+## Historical server diagnostic and source-consumption boundary
 
 The combined branch inherits `drasi-core 0.5.9` and `drasi-lib 0.9.2` manifests
-from main; the corrections are unreleased source, so a crate version alone does
-not identify them. The recorded
-server baseline is `drasi-server 0.2.1` at
+from main. The aggregate identity correction remains PR source, so a crate
+version alone does not identify it. The following diagnostic records the
+2026-09-18 server baseline, not the current development stack:
+`drasi-server 0.2.1` at
 `a2b648062a4c55e036d68b6f26bf73b4e773bcf1`, locked to `drasi-lib 0.8.9`,
 `drasi-core 0.5.8`, and SDK crate `0.10.0`, with signed plugins using FFI ABI
-`0.11.0`. This workspace's SDK crate is `0.11.1` and its independent
+`0.11.0`. This workspace's SDK crate is `0.11.2` and its independent
 `FFI_SDK_VERSION` is `0.14.0`. A wholesale workspace/SDK upgrade is **not**
 compatible with those existing plugin binaries.
 
@@ -243,8 +289,20 @@ every recorded summary REST response. Reported SHA-256 values:
 That pass verifies only the **fresh-state core-only overlay**, not latest-main
 persistence, a released crate/plugin combination, or the default
 [drasi-project/drasi-server#201](https://github.com/drasi-project/drasi-server/pull/201)
-runtime. This upper integration changes no server dependency, plugin, query,
-React consumer, release, or publication. The default server foundation and React
-stack are not declared unblocked; any authorized default-runtime adoption still
-needs its own exact-build SQL/CDC + REST/SSE/UI gate with singleton and
-2000 -> 2050 -> 2150 assertions unchanged.
+runtime. Statements that the default server foundation and React stack were
+blocked belong to that historical baseline; this document does not determine
+the current server stack's status.
+
+Before the 2026-09-23 core reconciliation, the server owner/coordinator preserved
+the selected **`211d0f2a79aa2ad0f7cb841937f52013fe95ded6`** source and tree
+`a57386ecd0b200631059fcffd8a61bf036f4febb` in a separate persistent detached
+checkout. The shared server source link continues to consume that exact snapshot,
+not this moving PR branch. Its selected core/AST/Cypher development override,
+registry library/SDK dependencies, server pins, manifests, lockfiles, binaries,
+and running demo are not changed by this core task.
+
+Updating #810 is **core PR validation, not server-adoption proof**. Consuming its
+newer source requires a separate user decision and exact-build compatibility
+validation. No server dependency/plugin/ABI, React layer, release, or publication
+change is made here, and no claim of newly unblocking server work follows from
+the core checks.

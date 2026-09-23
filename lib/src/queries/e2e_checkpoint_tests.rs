@@ -299,13 +299,13 @@ async fn send_event(
 
     let change = SourceChange::Insert { element };
 
-    let mut event = SourceEventWrapper::new(
+    let event = SourceEventWrapper::new(
         source_id.to_string(),
         crate::channels::events::SourceEvent::Change(change),
         chrono::Utc::now(),
-    );
-    event.sequence = Some(sequence);
-    event.source_position = Some(Bytes::from(position.to_vec()));
+        sequence,
+    )
+    .with_source_position(Bytes::from(position.to_vec()));
 
     if let Some(sender) = tx.read().await.as_ref() {
         sender.send(Arc::new(event)).await.unwrap();
@@ -397,8 +397,8 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy
                 },
             }),
             chrono::Utc::now(),
+            2,
         );
-        event.sequence = Some(2);
         event.source_position = Some(Bytes::from_static(b"pos-2"));
         event_tx
             .read()
@@ -1049,13 +1049,13 @@ mod aggregate_snapshot_tests {
         }
 
         async fn send(&mut self, change: SourceChange, sequence: u64) -> Vec<ResultDiff> {
-            let mut event = SourceEventWrapper::new(
+            let event = SourceEventWrapper::new(
                 SOURCE.to_string(),
                 crate::channels::SourceEvent::Change(change),
                 chrono::Utc::now(),
-            );
-            event.sequence = Some(sequence);
-            event.source_position = Some(Bytes::copy_from_slice(&sequence.to_be_bytes()));
+                sequence,
+            )
+            .with_source_position(Bytes::copy_from_slice(&sequence.to_be_bytes()));
             let sender = self.event_tx.read().await.as_ref().unwrap().clone();
             sender.send(Arc::new(event)).await.unwrap();
             timeout(TIMEOUT, self.subscription.receiver.recv())

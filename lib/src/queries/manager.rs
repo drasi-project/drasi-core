@@ -3174,16 +3174,6 @@ impl Query for DrasiQuery {
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
 
-                            // Dedup: skip events already processed for this source
-                            if dedup.should_skip(&source_id, sequence) {
-                                debug!(
-                                    "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
-                                    seq = sequence.unwrap_or(0),
-                                    cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
-                                );
-                                continue;
-                            }
-
                             match event {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
                                     // Drain all due futures atomically within sessions
@@ -3249,6 +3239,15 @@ impl Query for DrasiQuery {
                                     continue;
                                 }
                                 SourceEvent::Change(source_change) => {
+                                    if dedup.should_skip(&source_id, sequence) {
+                                        debug!(
+                                            "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
+                                            seq = sequence,
+                                            cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
+                                        );
+                                        continue;
+                                    }
+
                                     let mut profiling =
                                         profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
                                     profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
@@ -3272,18 +3271,16 @@ impl Query for DrasiQuery {
                                     let hook = move |results: &[QueryPartEvaluationContext]| {
                                         let diffs = evaluation_contexts_to_diffs(results);
                                         async move {
-                                            if let Some(seq) = sequence {
-                                                // Enforce position size limit at checkpoint time:
-                                                // oversized positions are skipped to preserve the
-                                                // last known good position in the store.
-                                                let pos_ref = match &cp_position {
-                                                    Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
-                                                    _ => None,
-                                                };
-                                                cp_store
-                                                    .stage_checkpoint(&cp_source_id, seq, pos_ref)
-                                                    .await?;
-                                            }
+                                            // Enforce position size limit at checkpoint time:
+                                            // oversized positions are skipped to preserve the
+                                            // last known good position in the store.
+                                            let pos_ref = match &cp_position {
+                                                Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
+                                                _ => None,
+                                            };
+                                            cp_store
+                                                .stage_checkpoint(&cp_source_id, sequence, pos_ref)
+                                                .await?;
                                             let staged = stage_durable_query_output(
                                                 &diffs,
                                                 &source_id_for_stage,
@@ -3307,12 +3304,10 @@ impl Query for DrasiQuery {
                                             profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
 
                                             // Advance dedup and notify source on successful commit
-                                            if let Some(seq) = sequence {
-                                                dedup.advance(&source_id, seq);
+                                            dedup.advance(&source_id, sequence);
 
-                                                if let Some(handle) = position_handles_for_processor.get(&source_id) {
-                                                    handle.store(seq, std::sync::atomic::Ordering::Release);
-                                                }
+                                            if let Some(handle) = position_handles_for_processor.get(&source_id) {
+                                                handle.store(sequence, std::sync::atomic::Ordering::Release);
                                             }
 
                                             if !results.is_empty() {

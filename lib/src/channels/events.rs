@@ -218,27 +218,83 @@ pub enum SourceEvent {
     Control(SourceControl),
 }
 
-/// Wrapper for source events with metadata
+/// Source event envelope with a required source-local sequence number.
+///
+/// Sources may supply their own monotonically increasing sequence or allocate
+/// one with [`SourceBase::next_sequence`]. The type guarantees that a sequence
+/// is present, not that its value was assigned by the framework.
+///
+/// [`SourceBase::next_sequence`]: crate::sources::base::SourceBase::next_sequence
 #[derive(Debug, Clone)]
 pub struct SourceEventWrapper {
     pub source_id: String,
     pub event: SourceEvent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Optional profiling metadata for performance tracking
+    /// Optional profiling metadata for performance tracking.
     pub profiling: Option<ProfilingMetadata>,
-    /// Monotonic sequence number assigned by the framework.
-    /// Used for ordering, watermarks, gap detection, and dedup.
-    /// `None` for volatile sources that don't support replay.
-    pub sequence: Option<u64>,
     /// Opaque source position bytes for stream resumption on restart.
     /// Only the source can interpret these bytes — the framework persists
-    /// them alongside the sequence and returns them on restart via
-    /// subscribe(resume_from: ...).
-    /// `None` for volatile sources that don't support replay.
+    /// them alongside the assigned sequence and returns them on restart via
+    /// `subscribe(resume_from: ...)`. `None` for volatile sources that don't
+    /// support replay.
     pub source_position: Option<Bytes>,
+    /// Source-local sequence used for watermarks, gap detection, and dedup.
+    /// Live events must be dispatched in increasing sequence order, starting
+    /// at one. Replay preserves the original sequence.
+    pub sequence: u64,
 }
 
-/// Decomposed parts of a [`SourceEventWrapper`], returned by [`SourceEventWrapper::into_parts()`].
+impl SourceEventWrapper {
+    /// Create an event with an explicit sequence and without profiling.
+    pub fn new(
+        source_id: String,
+        event: SourceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            source_id,
+            event,
+            timestamp,
+            profiling: None,
+            source_position: None,
+            sequence,
+        }
+    }
+
+    /// Create an event with an explicit sequence and profiling metadata.
+    pub fn with_profiling(
+        source_id: String,
+        event: SourceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        profiling: ProfilingMetadata,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            source_id,
+            event,
+            timestamp,
+            profiling: Some(profiling),
+            source_position: None,
+            sequence,
+        }
+    }
+
+    /// Attach the opaque source position bytes for stream resumption.
+    #[must_use]
+    pub fn with_source_position(mut self, position: Bytes) -> Self {
+        self.source_position = Some(position);
+        self
+    }
+
+    /// Set the opaque source position bytes for stream resumption in place.
+    pub fn set_source_position(&mut self, position: Bytes) {
+        self.source_position = Some(position);
+    }
+}
+
+/// Decomposed parts of a [`SourceEventWrapper`], returned by
+/// [`SourceEventWrapper::into_parts()`].
 ///
 /// Using a named struct instead of a tuple makes call sites resilient to
 /// field reordering and easier to evolve with new fields.
@@ -248,70 +304,33 @@ pub struct SourceEventParts {
     pub event: SourceEvent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub profiling: Option<ProfilingMetadata>,
-    pub sequence: Option<u64>,
+    pub sequence: u64,
     pub source_position: Option<Bytes>,
 }
 
 impl SourceEventWrapper {
-    /// Create a new SourceEventWrapper without profiling
-    pub fn new(
+    /// Reconstruct an event from serialized plugin FFI payload parts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_ffi_parts(
         source_id: String,
         event: SourceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Self {
-        Self {
-            source_id,
-            event,
-            timestamp,
-            profiling: None,
-            sequence: None,
-            source_position: None,
-        }
-    }
-
-    /// Create a new SourceEventWrapper with profiling metadata
-    pub fn with_profiling(
-        source_id: String,
-        event: SourceEvent,
-        timestamp: chrono::DateTime<chrono::Utc>,
-        profiling: ProfilingMetadata,
-    ) -> Self {
-        Self {
-            source_id,
-            event,
-            timestamp,
-            profiling: Some(profiling),
-            sequence: None,
-            source_position: None,
-        }
-    }
-
-    /// Create a new SourceEventWrapper with a sequence number (and optional profiling)
-    pub fn with_sequence(
-        source_id: String,
-        event: SourceEvent,
-        timestamp: chrono::DateTime<chrono::Utc>,
-        sequence: u64,
         profiling: Option<ProfilingMetadata>,
+        sequence: u64,
+        source_position: Option<Bytes>,
     ) -> Self {
         Self {
             source_id,
             event,
             timestamp,
             profiling,
-            sequence: Some(sequence),
-            source_position: None,
+            sequence,
+            source_position,
         }
     }
 
-    /// Set the opaque source position bytes for stream resumption.
-    /// Only called by source plugins to attach their native position token.
-    pub fn set_source_position(&mut self, position: Bytes) {
-        self.source_position = Some(position);
-    }
-
-    /// Consume this wrapper and return its components as a named struct.
-    /// This enables zero-copy extraction when the wrapper has sole ownership.
+    /// Consume this event and return its components as a named struct.
+    /// This enables zero-copy extraction when the event has sole ownership.
     pub fn into_parts(self) -> SourceEventParts {
         SourceEventParts {
             source_id: self.source_id,
@@ -323,14 +342,14 @@ impl SourceEventWrapper {
         }
     }
 
-    /// Try to extract components from an Arc<SourceEventWrapper>.
+    /// Try to extract components from an `Arc<SourceEventWrapper>`.
     /// Uses Arc::try_unwrap to avoid cloning when we have sole ownership.
     /// Returns Ok with owned components if sole owner, Err with Arc back if shared.
     ///
     /// This enables zero-copy in Channel dispatch mode (single consumer per event)
     /// while still working correctly in Broadcast mode (cloning required).
     pub fn try_unwrap_arc(arc_self: Arc<Self>) -> Result<SourceEventParts, Arc<Self>> {
-        Arc::try_unwrap(arc_self).map(|wrapper| wrapper.into_parts())
+        Arc::try_unwrap(arc_self).map(|event| event.into_parts())
     }
 }
 
@@ -632,31 +651,30 @@ mod tests {
         SourceChange::Insert { element }
     }
 
-    #[test]
-    fn test_source_event_wrapper_into_parts() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
+    fn stamped(source_id: &str, sequence: u64) -> SourceEventWrapper {
+        SourceEventWrapper::new(
+            source_id.to_string(),
+            SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
-        );
+            sequence,
+        )
+    }
 
-        let parts = wrapper.into_parts();
+    #[test]
+    fn test_stamped_event_into_parts() {
+        let event = stamped("test-source", 7);
+
+        let parts = event.into_parts();
 
         assert_eq!(parts.source_id, "test-source");
         assert!(matches!(parts.event, SourceEvent::Change(_)));
         assert!(parts.profiling.is_none());
+        assert_eq!(parts.sequence, 7);
     }
 
     #[test]
     fn test_try_unwrap_arc_sole_owner() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-        );
-        let arc = Arc::new(wrapper);
+        let arc = Arc::new(stamped("test-source", 1));
 
         // With sole ownership, try_unwrap_arc should succeed
         let result = SourceEventWrapper::try_unwrap_arc(arc);
@@ -669,13 +687,7 @@ mod tests {
 
     #[test]
     fn test_try_unwrap_arc_shared() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-        );
-        let arc = Arc::new(wrapper);
+        let arc = Arc::new(stamped("test-source", 1));
         let _arc2 = arc.clone(); // Create another reference
 
         // With shared ownership, try_unwrap_arc should fail and return the Arc
@@ -690,13 +702,7 @@ mod tests {
     #[test]
     fn test_zero_copy_extraction_path() {
         // Simulate the zero-copy extraction path used in query processing
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
-            "test-source".to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-        );
-        let arc = Arc::new(wrapper);
+        let arc = Arc::new(stamped("test-source", 3));
 
         // This is the zero-copy path - when we have sole ownership
         let parts = match SourceEventWrapper::try_unwrap_arc(arc) {
@@ -725,31 +731,49 @@ mod tests {
     }
 
     #[test]
-    fn test_source_event_wrapper_with_sequence() {
-        let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::with_sequence(
+    fn test_constructor_preserves_sequence() {
+        let event = SourceEventWrapper::new(
             "test-source".to_string(),
-            SourceEvent::Change(change),
+            SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
             42,
-            None,
         );
-        assert_eq!(wrapper.sequence, Some(42));
-        assert!(wrapper.profiling.is_none());
+        assert_eq!(event.sequence, 42);
+        assert!(event.profiling.is_none());
 
-        let parts = wrapper.into_parts();
-        assert_eq!(parts.sequence, Some(42));
+        let parts = event.into_parts();
+        assert_eq!(parts.sequence, 42);
     }
 
     #[test]
-    fn test_source_event_wrapper_new_has_no_sequence() {
-        let change = create_test_source_change();
+    fn test_wrapper_has_no_source_position_by_default() {
         let wrapper = SourceEventWrapper::new(
             "test-source".to_string(),
-            SourceEvent::Change(change),
+            SourceEvent::Change(create_test_source_change()),
             chrono::Utc::now(),
+            1,
         );
-        assert!(wrapper.sequence.is_none());
+        assert_eq!(wrapper.sequence, 1);
+        assert!(wrapper.source_position.is_none());
+    }
+
+    #[test]
+    fn test_profiled_wrapper_preserves_sequence_and_position() {
+        let mut profiling = ProfilingMetadata::new();
+        profiling.source_send_ns = Some(123);
+        let wrapper = SourceEventWrapper::with_profiling(
+            "test-source".to_string(),
+            SourceEvent::Change(create_test_source_change()),
+            chrono::Utc::now(),
+            profiling,
+            42,
+        )
+        .with_source_position(Bytes::from_static(b"position"));
+
+        let parts = wrapper.into_parts();
+        assert_eq!(parts.sequence, 42);
+        assert_eq!(parts.source_position, Some(Bytes::from_static(b"position")));
+        assert_eq!(parts.profiling.unwrap().source_send_ns, Some(123));
     }
 
     #[test]
