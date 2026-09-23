@@ -106,6 +106,39 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[tokio::test]
+    async fn test_subscribe_rejects_incomplete_row_position() {
+        let source = MySqlSourceBuilder::new("mysql-invalid-resume")
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
+        let token = serde_json::json!({
+            "binlog_file": "mysql-bin.000001",
+            "binlog_position": 200,
+            "gtid_set": null,
+            "last_processed_timestamp": 100,
+            "row_offset": 1
+        });
+        let result = source
+            .subscribe(drasi_lib::config::SourceSubscriptionSettings {
+                source_id: source.id().to_string(),
+                query_id: "query".to_string(),
+                enable_bootstrap: false,
+                nodes: Default::default(),
+                relations: Default::default(),
+                resume_from: Some(bytes::Bytes::from(serde_json::to_vec(&token).unwrap())),
+                resume_sequence: None,
+                request_position_handle: false,
+            })
+            .await;
+        let error = result
+            .err()
+            .expect("incomplete row cursors must not fall back");
+        assert!(format!("{error:#}").contains("Incomplete MySQL row position"));
+        assert!(source.subscriber_resume_positions.read().await.is_empty());
+    }
+
     mod lifecycle {
         use super::*;
         use bytes::Bytes;
@@ -260,12 +293,7 @@ mod tests {
         use crate::types::{MySqlPositionComparator, ReplicationState};
 
         fn make_position(file: &str, pos: u32, gtid: Option<&str>, ts: u64) -> Bytes {
-            let state = ReplicationState {
-                binlog_file: file.to_string(),
-                binlog_position: pos,
-                gtid_set: gtid.map(|s| s.to_string()),
-                last_processed_timestamp: ts,
-            };
+            let state = ReplicationState::new(file, pos, gtid.map(str::to_string), ts);
             state.to_position_bytes()
         }
 
@@ -294,19 +322,95 @@ mod tests {
         }
 
         #[test]
-        fn test_higher_timestamp_is_after() {
+        fn test_bootstrap_boundary_uses_native_cursor_not_timestamp() {
             let comparator = MySqlPositionComparator;
-            let resume = make_position("mysql-bin.000001", 100, None, 1000);
-            let event = make_position("mysql-bin.000001", 50, None, 2000);
-            assert!(comparator.position_reached(&event, &resume));
+            let boundary = make_position("mysql-bin.000001", 200, None, 0);
+            let event = make_position("mysql-bin.000001", 200, None, 2000);
+            assert!(
+                !comparator.position_reached(&event, &boundary),
+                "a completed snapshot cursor must suppress the same committed transaction"
+            );
         }
 
         #[test]
-        fn test_lower_timestamp_is_not_after() {
+        fn test_row_offsets_and_completed_boundary_are_strictly_ordered() {
+            let comparator = MySqlPositionComparator;
+            let position = ReplicationState::new("mysql-bin.000001", 200, None, 100);
+            let first = position
+                .clone()
+                .with_transaction_row(100, 0)
+                .unwrap()
+                .to_position_bytes();
+            let second = position
+                .with_transaction_row(100, 1)
+                .unwrap()
+                .to_position_bytes();
+            let completed = make_position("mysql-bin.000001", 200, None, 0);
+
+            assert!(comparator.position_reached(&second, &first));
+            assert!(!comparator.position_reached(&first, &second));
+            assert!(!comparator.position_reached(&second, &second));
+            assert!(!comparator.position_reached(&first, &completed));
+            assert!(!comparator.position_reached(&second, &completed));
+            assert!(comparator.position_reached(&completed, &second));
+            assert!(comparator
+                .position_reached(&make_position("mysql-bin.000002", 4, None, 0), &completed));
+        }
+
+        #[test]
+        fn test_current_boundary_token_has_no_row_fields() {
+            let bytes = make_position("mysql-bin.000001", 200, Some("uuid:1-7"), 0);
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(json.get("row_offset").is_none());
+            assert!(json.get("transaction_start_position").is_none());
+            let state = crate::types::decode_position(&bytes).unwrap();
+            assert_eq!(state.row_offset, None);
+            assert_eq!(state.transaction_start_position, None);
+        }
+
+        #[test]
+        fn test_malformed_row_positions_are_rejected() {
+            let valid = serde_json::json!({
+                "binlog_file": "mysql-bin.000001",
+                "binlog_position": 200,
+                "gtid_set": null,
+                "last_processed_timestamp": 100,
+                "transaction_start_position": 100,
+                "row_offset": 1
+            });
+            for field in ["row_offset", "transaction_start_position"] {
+                let mut value = valid.clone();
+                value.as_object_mut().unwrap().remove(field);
+                assert!(
+                    crate::types::decode_position(&serde_json::to_vec(&value).unwrap()).is_err()
+                );
+            }
+            for start in [0, 3, 200, 201] {
+                let mut value = valid.clone();
+                value["transaction_start_position"] = serde_json::json!(start);
+                assert!(
+                    crate::types::decode_position(&serde_json::to_vec(&value).unwrap()).is_err()
+                );
+            }
+            let mut value = valid;
+            value["binlog_file"] = serde_json::json!("");
+            assert!(crate::types::decode_position(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+
+        #[test]
+        fn test_native_position_precedes_higher_timestamp() {
+            let comparator = MySqlPositionComparator;
+            let resume = make_position("mysql-bin.000001", 100, None, 1000);
+            let event = make_position("mysql-bin.000001", 50, None, 2000);
+            assert!(!comparator.position_reached(&event, &resume));
+        }
+
+        #[test]
+        fn test_newer_native_position_passes_despite_lower_timestamp() {
             let comparator = MySqlPositionComparator;
             let resume = make_position("mysql-bin.000001", 100, None, 2000);
             let event = make_position("mysql-bin.000001", 200, None, 1000);
-            assert!(!comparator.position_reached(&event, &resume));
+            assert!(comparator.position_reached(&event, &resume));
         }
 
         #[test]
@@ -343,12 +447,12 @@ mod tests {
 
         #[test]
         fn test_roundtrip_serialization() {
-            let state = ReplicationState {
-                binlog_file: "mysql-bin.000003".to_string(),
-                binlog_position: 456,
-                gtid_set: Some("abc-123:1-10".to_string()),
-                last_processed_timestamp: 1700000000,
-            };
+            let state = ReplicationState::new(
+                "mysql-bin.000003",
+                456,
+                Some("abc-123:1-10".to_string()),
+                1700000000,
+            );
             let bytes = state.to_position_bytes();
             let recovered = ReplicationState::from_position_bytes(&bytes).unwrap();
             assert_eq!(recovered.binlog_file, "mysql-bin.000003");
