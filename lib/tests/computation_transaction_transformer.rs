@@ -73,6 +73,7 @@ fn provider(path: &std::path::Path) -> Arc<dyn ComputationIndexProvider> {
 struct Probe {
     fail: AtomicBool,
     wait: AtomicBool,
+    invalid_output: AtomicBool,
     entered: Notify,
     trace: Mutex<Vec<(String, i64, i64)>>,
     standalone_calls: AtomicUsize,
@@ -259,6 +260,9 @@ impl TransactionalTransformer for Arithmetic {
                 !self.probe.fail.load(Ordering::Acquire),
                 "injected second-step failure"
             );
+            if self.probe.invalid_output.load(Ordering::Acquire) {
+                return Ok(number_event(7, input.system().sequence()));
+            }
         }
         Ok(result)
     }
@@ -544,6 +548,45 @@ async fn failed_or_cancelled_later_step_rolls_back_every_step_and_input_progress
         subject.delivery_completed(&output).await.expect("confirm");
         subject.stop().await.expect("stop");
     }
+}
+
+#[tokio::test]
+async fn invalid_intermediate_schema_rolls_back_before_the_next_step_can_run() {
+    let directory = tempfile::tempdir().expect("temp");
+    let provider = provider(directory.path());
+    let probe = Arc::new(Probe::default());
+    let registry = registry(probe.clone());
+    let mut definition = definition();
+    definition.steps.push(step("third", json!({"add":5})));
+    {
+        let mut subject = open(definition.clone(), registry.clone(), provider.clone()).await;
+        probe.invalid_output.store(true, Ordering::Release);
+        let error = subject
+            .transform(input(1, 3))
+            .await
+            .expect_err("foreign schema");
+        assert!(format!("{error:#}").contains("schema"), "{error:#}");
+        assert_eq!(
+            *probe.trace.lock().expect("trace"),
+            [("first".into(), 5, 1), ("second".into(), 20, 1)],
+            "the third step must never see the invalid intermediate result"
+        );
+        assert!(subject.transform(input(2, 4)).await.is_err());
+        subject.stop().await.expect("rollback");
+    }
+    probe.invalid_output.store(false, Ordering::Release);
+    let mut reopened = open(definition, registry, provider).await;
+    assert!(!reopened.has_pending_emissions());
+    let output = reopened
+        .transform(input(1, 3))
+        .await
+        .expect("retry rolled-back input");
+    assert_eq!(values(&output[0].envelope, "value"), [25]);
+    for name in ["first_count", "second_count", "third_count"] {
+        assert_eq!(values(&output[0].envelope, name), [1], "{name}");
+    }
+    reopened.delivery_completed(&output).await.expect("confirm");
+    reopened.stop().await.expect("stop");
 }
 
 #[tokio::test]

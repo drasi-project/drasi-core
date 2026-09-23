@@ -1,6 +1,9 @@
-# Historical pre-removal corpus pinned at 01813156842035ac6c9539c8996536f94cab8676.
-# Classifications and reasons describe that historical corpus, not multiple current engines.
-# Removed or renamed original names require an explicit entry in case-mappings.tsv.
+# Current main reviewed at c2d80aa7e4de874302b301584a6c7134c3609ed7.
+# Union of all 970 main library cases and the earlier 01813156 corpus (9 older names).
+# Every case requires execution or an explicit mapping; only listed diagnostics may be ignored.
+# binary	original-case	classification	reason
+bootstrap_failure_e2e	query_enters_error_state_when_bootstrap_fails	runtime	Original bootstrap failure inputs/status assertions use the explicit integration-test runtime builder.
+bootstrap_failure_e2e	query_enters_error_state_when_multiple_bootstraps_fail	runtime	Original bootstrap failure inputs/status assertions use the explicit integration-test runtime builder.
 lib	bootstrap::component_graph::tests::test_bootstrap_emitted_labels_match_component_kind	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
 lib	bootstrap::component_graph::tests::test_bootstrap_empty_graph	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
 lib	bootstrap::component_graph::tests::test_bootstrap_with_sources_and_queries	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
@@ -73,13 +76,17 @@ lib	channels::dispatcher::tests::test_channel_dispatcher_only_one_receiver	share
 lib	channels::dispatcher::tests::test_channel_dispatcher_single_receiver	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::dispatcher::tests::test_dispatch_mode_default	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::dispatcher::tests::test_dispatch_mode_serialization	shared	Unchanged plugin channels and event values used by both sets of adapters.
+lib	channels::events::tests::test_constructor_preserves_sequence	main-contract	Additional c2d80aa7 main contract from lib/src/channels/events.rs; require the case or its explicit mapping.
+lib	channels::events::tests::test_profiled_wrapper_preserves_sequence_and_position	main-contract	Additional c2d80aa7 main contract from lib/src/channels/events.rs; require the case or its explicit mapping.
 lib	channels::events::tests::test_source_event_wrapper_into_parts	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::events::tests::test_source_event_wrapper_new_has_no_sequence	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::events::tests::test_source_event_wrapper_with_sequence	shared	Unchanged plugin channels and event values used by both sets of adapters.
+lib	channels::events::tests::test_stamped_event_into_parts	main-contract	Additional c2d80aa7 main contract from lib/src/channels/events.rs; require the case or its explicit mapping.
 lib	channels::events::tests::test_subscription_response_with_position_handle	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::events::tests::test_subscription_settings_with_resume_from	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::events::tests::test_try_unwrap_arc_shared	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::events::tests::test_try_unwrap_arc_sole_owner	shared	Unchanged plugin channels and event values used by both sets of adapters.
+lib	channels::events::tests::test_wrapper_has_no_source_position_by_default	main-contract	Additional c2d80aa7 main contract from lib/src/channels/events.rs; require the case or its explicit mapping.
 lib	channels::events::tests::test_zero_copy_extraction_path	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::events_test::tests::test_channel_closes_when_sender_dropped	shared	Unchanged plugin channels and event values used by both sets of adapters.
 lib	channels::events_test::tests::test_component_event_source_starting	shared	Unchanged plugin channels and event values used by both sets of adapters.
@@ -322,6 +329,7 @@ lib	indexes::factory::tests::test_index_factory_default_backend_accessor	shared	
 lib	indexes::factory::tests::test_index_factory_new_splits_backends	shared	Unchanged index configuration/factory used by the native provider adapter as well as the legacy runtime.
 lib	indexes::factory::tests::test_index_set_debug	shared	Unchanged index configuration/factory used by the native provider adapter as well as the legacy runtime.
 lib	indexes::factory::tests::test_is_volatile_declared_plugin_without_provider	shared	Unchanged index configuration/factory used by the native provider adapter as well as the legacy runtime.
+lib	indexes::factory::tests::test_is_volatile_for_query_none_is_volatile	main-contract	Additional c2d80aa7 main contract from lib/src/indexes/factory.rs; require the case or its explicit mapping.
 lib	indexes::factory::tests::test_is_volatile_inline	shared	Unchanged index configuration/factory used by the native provider adapter as well as the legacy runtime.
 lib	indexes::factory::tests::test_is_volatile_memory	shared	Unchanged index configuration/factory used by the native provider adapter as well as the legacy runtime.
 lib	indexes::factory::tests::test_is_volatile_provider_delegates	shared	Unchanged index configuration/factory used by the native provider adapter as well as the legacy runtime.
@@ -388,6 +396,7 @@ lib	lib_core_ops::query_ops::tests::get_query_config_returns_correct_fields	runt
 lib	lib_core_ops::query_ops::tests::get_query_status_nonexistent_returns_error	runtime	Original public CRUD, lifecycle, schema and topology scenarios use the selected DrasiLib builder.
 lib	lib_core_ops::query_ops::tests::get_query_status_returns_correct_status	runtime	Original public CRUD, lifecycle, schema and topology scenarios use the selected DrasiLib builder.
 lib	lib_core_ops::query_ops::tests::list_queries_empty_then_populated	runtime	Original public CRUD, lifecycle, schema and topology scenarios use the selected DrasiLib builder.
+lib	lib_core_ops::query_ops::tests::remove_query_does_not_deregister_a_source	main-contract	Additional c2d80aa7 main contract from lib/src/lib_core_ops/query_ops.rs; require the case or its explicit mapping.
 lib	lib_core_ops::query_ops::tests::remove_query_happy_path	runtime	Original public CRUD, lifecycle, schema and topology scenarios use the selected DrasiLib builder.
 lib	lib_core_ops::query_ops::tests::remove_query_nonexistent_returns_error	runtime	Original public CRUD, lifecycle, schema and topology scenarios use the selected DrasiLib builder.
 lib	lib_core_ops::query_ops::tests::start_and_stop_query_lifecycle	runtime	Original public CRUD, lifecycle, schema and topology scenarios use the selected DrasiLib builder.
@@ -508,6 +517,7 @@ lib	queries::checkpoint_tests::orchestration_tests::test_persistent_query_with_v
 lib	queries::checkpoint_tests::orchestration_tests::test_position_unavailable_auto_reset_retries	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::orchestration_tests::test_position_unavailable_strict_policy_fails	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::orchestration_tests::test_volatile_query_with_volatile_source_ok	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
+lib	queries::checkpoint_tests::tests::test_autoreset_resume_adopts_persisted_generation	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
 lib	queries::checkpoint_tests::tests::test_checkpoint_and_sequence_consistency	shared	Direct unchanged core in-memory checkpoint store.
 lib	queries::checkpoint_tests::tests::test_checkpoint_persistence_end_to_end	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::tests::test_clear_checkpoints_failure_prevents_hash_write	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
@@ -517,12 +527,17 @@ lib	queries::checkpoint_tests::tests::test_config_hash_read_failure_falls_throug
 lib	queries::checkpoint_tests::tests::test_dedup_skips_duplicate_events_after_restart	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::tests::test_in_memory_checkpoint_various_sizes	shared	Direct unchanged core in-memory checkpoint store.
 lib	queries::checkpoint_tests::tests::test_initial_subscribe_no_checkpoint	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
+lib	queries::checkpoint_tests::tests::test_mismatch_index_clear_failure_does_not_leave_matching_hash	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
 lib	queries::checkpoint_tests::tests::test_multi_source_checkpoint_isolation	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::tests::test_position_handle_updated_after_checkpoint	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
+lib	queries::checkpoint_tests::tests::test_reset_output_failure_on_hash_mismatch_aborts_start	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
 lib	queries::checkpoint_tests::tests::test_sequence_assignment_monotonic	shared	Direct unchanged source plugin sequence assignment.
 lib	queries::checkpoint_tests::tests::test_sequence_recovery_continues_after_restart	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib	queries::checkpoint_tests::tests::test_source_position_preserved_through_dispatch	shared	Direct unchanged source plugin dispatch and cursor.
 lib	queries::checkpoint_tests::tests::test_source_position_size_validation	shared	Direct unchanged source plugin position validation.
+lib	queries::checkpoint_tests::tests::test_teardown_archive_clear_failure_marks_reset_in_progress	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
+lib	queries::checkpoint_tests::tests::test_teardown_fails_when_clear_checkpoints_fails	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
+lib	queries::checkpoint_tests::tests::test_wipe_failure_then_restart_clears_stale_indexes	main-contract	Additional c2d80aa7 main contract from lib/src/queries/checkpoint_tests.rs; require the case or its explicit mapping.
 lib	queries::config_hash::tests::auto_start_change_same_hash	shared	Unchanged public configuration hash used by the compatibility profile.
 lib	queries::config_hash::tests::bootstrap_buffer_size_change_same_hash	shared	Unchanged public configuration hash used by the compatibility profile.
 lib	queries::config_hash::tests::different_join_property_different_hash	shared	Unchanged public configuration hash used by the compatibility profile.
@@ -573,8 +588,26 @@ lib	queries::manager::pipeline_characterization_tests::committed_input_has_no_re
 lib	queries::manager::pipeline_characterization_tests::due_future_output_is_dispatched_after_core_commit	legacy-boundary	Pins legacy query internals: transactional commit/rollback, MessagePack payloads, delivery order, replay and restart deduplication; not native parity coverage.
 lib	queries::manager::pipeline_characterization_tests::evaluation_results_map_to_ordered_query_result_and_sequence	legacy-boundary	Pins legacy query internals: transactional commit/rollback, MessagePack payloads, delivery order, replay and restart deduplication; not native parity coverage.
 lib	queries::manager::tests::temporal_values_serialize_as_plain_strings	codec	The same original temporal-value assertions execute the selected native result codec or legacy conversion.
+lib	queries::output_state::tests::hydrate_from_empty_installs_sequence	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::hydrate_installs_results_outbox_and_sequence	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::hydrate_trims_outbox_to_capacity_keeping_newest	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::next_output_generation_always_bumps_from_disk	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::output_epoch_hash_generation_zero_is_identity	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_does_not_lower_stored_sequence_below_outbox_hwm	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_duplicate_outbox_sequence_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_empty_durable_output_is_sequence_zero	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_gapped_outbox_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_matching_sequence_and_outbox_hwm	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_missing_live_rows_for_stored_sequence	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_outbox_ahead_of_sequence_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_sequence_zero_against_live_rows_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reconcile_sequence_zero_against_outbox_is_inconsistent	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reset_clears_hydrated_state	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reset_from_generation_bumps_existing_ram_generation	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
+lib	queries::output_state::tests::reset_from_persisted_generation_does_not_restart_at_one	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
 lib	queries::output_state::tests::snapshot_stream_yields_all_values	shared	Unchanged public SnapshotStream values.
 lib	queries::output_state::tests::test_advance_sequence_and_push	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
+lib	queries::output_state::tests::test_apply_committed_sequence_uses_durable_seq	main-contract	Additional c2d80aa7 main contract from lib/src/queries/output_state.rs; require the case or its explicit mapping.
 lib	queries::output_state::tests::test_apply_diffs_add	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
 lib	queries::output_state::tests::test_apply_diffs_aggregation	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
 lib	queries::output_state::tests::test_apply_diffs_delete	legacy-structure	Concrete old QueryOutputState units; ordinary snapshot/outbox/bootstrap assertions run on both real query implementations elsewhere.
@@ -663,7 +696,11 @@ lib	reactions::common::base::tests::test_graceful_shutdown_timing	shared	Unchang
 lib	reactions::common::base::tests::test_identity_provider_none_by_default	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::base::tests::test_priority_queue_operations	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::base::tests::test_reaction_base_creation	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
+lib	reactions::common::base::tests::test_run_standard_loop_autoreset_retries_then_advances_checkpoint	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/base.rs; require the case or its explicit mapping.
+lib	reactions::common::base::tests::test_run_standard_loop_autoskip_advances_past_failed_side_effect	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/base.rs; require the case or its explicit mapping.
 lib	reactions::common::base::tests::test_run_standard_loop_dedup_and_checkpoint	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
+lib	reactions::common::base::tests::test_run_standard_loop_handler_error_does_not_advance_checkpoint	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/base.rs; require the case or its explicit mapping.
+lib	reactions::common::base::tests::test_run_standard_loop_uses_passed_policy_not_strict_default	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/base.rs; require the case or its explicit mapping.
 lib	reactions::common::base::tests::test_set_processing_task_stores_handle	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::base::tests::test_shutdown_channel_replaced_on_second_create	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::base::tests::test_shutdown_channel_signal	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
@@ -674,11 +711,19 @@ lib	reactions::common::base::tests::test_status_transitions	shared	Unchanged rea
 lib	reactions::common::base::tests::test_stop_common_sends_shutdown_signal	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::base::tests::test_stop_common_without_shutdown_channel	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::checkpoint_state::tests::advance_persists_monotonically_and_preserves_seeded_config_hash	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
+lib	reactions::common::checkpoint_state::tests::advance_with_policy_autoskip_does_not_return_err_on_write_failure	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
 lib	reactions::common::checkpoint_state::tests::advance_without_store_is_a_noop	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
+lib	reactions::common::checkpoint_state::tests::batch_autoskip_attempts_every_query_when_writes_fail	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
+lib	reactions::common::checkpoint_state::tests::batch_checkpoints_max_sequence_only_after_ack	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
+lib	reactions::common::checkpoint_state::tests::batch_strict_stops_after_first_failed_query_in_sorted_order	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
 lib	reactions::common::checkpoint_state::tests::candidates_advance_completed_only_for_terminal_items	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::checkpoint_state::tests::candidates_do_not_advance_completed_for_a_split_tail	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::checkpoint_state::tests::candidates_track_multiple_queries_independently	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::checkpoint_state::tests::failure_action_maps_policy	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
+lib	reactions::common::checkpoint_state::tests::persist_autoreset_exhausted_retries_errors	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
+lib	reactions::common::checkpoint_state::tests::persist_autoreset_retries_then_succeeds	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
+lib	reactions::common::checkpoint_state::tests::persist_autoskip_logs_and_continues	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
+lib	reactions::common::checkpoint_state::tests::persist_strict_surfaces_write_error	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/common/checkpoint_state.rs; require the case or its explicit mapping.
 lib	reactions::common::templates::tests::test_operation_type_as_str	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::templates::tests::test_operation_type_from_str	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
 lib	reactions::common::templates::tests::test_query_config_serialization	shared	Unchanged reaction plugin base, queue, templates and checkpoint state also used by native adapters; includes the separately recorded legacy ordering regression.
@@ -696,8 +741,14 @@ lib	reactions::manager::tests::config_hash_mismatch_with_auto_reset_triggers_boo
 lib	reactions::manager::tests::config_hash_mismatch_with_strict_fails_startup	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
 lib	reactions::manager::tests::forwarder_filters_stale_events_after_gate_opens	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
 lib	reactions::manager::tests::fresh_start_no_snapshot_starts_at_seq_zero	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
+lib	reactions::manager::tests::fresh_trigger_broadcast_does_not_lag_during_gate_wait	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/manager.rs; require the case or its explicit mapping.
+lib	reactions::manager::tests::fresh_trigger_does_not_enqueue_retained_outbox	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/manager.rs; require the case or its explicit mapping.
+lib	reactions::manager::tests::fresh_trigger_does_not_persist_zero_when_query_unavailable	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/manager.rs; require the case or its explicit mapping.
 lib	reactions::manager::tests::outbox_catchup_replays_entries_to_reaction	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
+lib	reactions::manager::tests::query_is_volatile_defaults_to_true_when_not_overridden	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/manager.rs; require the case or its explicit mapping.
+lib	reactions::manager::tests::subscribe_head_is_not_raised_by_later_outbox	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/manager.rs; require the case or its explicit mapping.
 lib	reactions::manager::tests::validation_allows_non_durable_no_snapshot_strict	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
+lib	reactions::manager::tests::validation_rejects_durable_store_before_volatile_query	main-contract	Additional c2d80aa7 main contract from lib/src/reactions/manager.rs; require the case or its explicit mapping.
 lib	reactions::manager::tests::validation_rejects_durable_without_durable_store	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
 lib	reactions::manager::tests::validation_rejects_no_snapshot_with_auto_reset	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
 lib	reactions::manager::tests::validation_rejects_snapshot_with_auto_skip_gap	runtime	Original recovery and failure scenarios use the selected DrasiLib builder.
@@ -747,9 +798,11 @@ lib	secret_store::tests::test_memory_store_default	shared	Unchanged secret refer
 lib	secret_store::tests::test_memory_store_get_secret	shared	Unchanged secret reference/context resolution.
 lib	secret_store::tests::test_memory_store_missing_secret	shared	Unchanged secret reference/context resolution.
 lib	secret_store::tests::test_memory_store_set_and_remove	shared	Unchanged secret reference/context resolution.
+lib	sources::base::tests::batch_preserves_supplied_sequences_and_generated_sequence_floor	main-contract	Additional c2d80aa7 main contract from lib/src/sources/base.rs; require the case or its explicit mapping.
 lib	sources::base::tests::concurrent_batch_dispatch_preserves_sequence_order	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::concurrent_dispatch_preserves_sequence_order	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::next_monotonic_timestamp_is_strictly_increasing	shared	Unchanged source plugin base used by native source adapters.
+lib	sources::base::tests::supplied_sequence_is_preserved_and_advances_allocator	main-contract	Additional c2d80aa7 main contract from lib/src/sources/base.rs; require the case or its explicit mapping.
 lib	sources::base::tests::test_batch_dispatch_populates_sequence_position_map	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::test_bootstrap_boundary_first_publish_wins	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::test_cleanup_stale_handles_drops_orphaned_arc	shared	Unchanged source plugin base used by native source adapters.
@@ -768,6 +821,7 @@ lib	sources::base::tests::test_create_position_handle_initializes_to_u64_max	sha
 lib	sources::base::tests::test_dispatch_events_batch_empty_returns_ok	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::test_dispatch_events_batch_multi_dispatcher_fanout	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::test_dispatch_events_batch_oversized_position_still_dispatches	shared	Unchanged source plugin base used by native source adapters.
+lib	sources::base::tests::test_dispatch_events_batch_preserves_allocated_sequences	main-contract	Additional c2d80aa7 main contract from lib/src/sources/base.rs; require the case or its explicit mapping.
 lib	sources::base::tests::test_dispatch_events_batch_stamps_monotonic_sequences	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::test_filled_sequences_survive_dedup_after_restart	shared	Unchanged source plugin base used by native source adapters.
 lib	sources::base::tests::test_floor_mechanisms_compose_regardless_of_order	shared	Unchanged source plugin base used by native source adapters.
@@ -838,6 +892,7 @@ lib	sources::future_queue_source::tests::stop_sets_status_to_stopped	legacy-stru
 lib	sources::future_queue_source::tests::stop_when_already_stopped_is_noop	legacy-structure	Concrete old future-source task/dispatcher fields; actual temporal query results have a shared native/legacy scenario.
 lib	sources::future_queue_source::tests::subscribe_returns_receiver	legacy-structure	Concrete old future-source task/dispatcher fields; actual temporal query results have a shared native/legacy scenario.
 lib	sources::future_queue_source::tests::subscribe_sets_dispatcher	legacy-structure	Concrete old future-source task/dispatcher fields; actual temporal query results have a shared native/legacy scenario.
+lib	sources::tests::contract_tests::test_mock_source_sequences_start_at_one	main-contract	Additional c2d80aa7 main contract from lib/src/sources/tests.rs; require the case or its explicit mapping.
 lib	sources::tests::contract_tests::test_source_error_position_unavailable_display	shared	Unchanged plugin source contract defaults.
 lib	sources::tests::contract_tests::test_source_error_position_unavailable_no_earliest	shared	Unchanged plugin source contract defaults.
 lib	sources::tests::contract_tests::test_source_supports_replay_default_true	shared	Unchanged plugin source contract defaults.
@@ -893,19 +948,36 @@ lib	test_helpers::tests::test_wait_for_all_statuses	shared	Test event-waiting he
 lib	test_helpers::tests::test_wait_for_component_status_immediate	shared	Test event-waiting helpers only.
 lib	test_helpers::tests::test_wait_for_component_status_skips_non_matching	shared	Test event-waiting helpers only.
 lib	test_helpers::tests::test_wait_for_component_status_timeout	shared	Test event-waiting helpers only.
-bootstrap_failure_e2e	query_enters_error_state_when_bootstrap_fails	runtime	Original bootstrap failure inputs/status assertions use the explicit integration-test runtime builder.
-bootstrap_failure_e2e	query_enters_error_state_when_multiple_bootstraps_fail	runtime	Original bootstrap failure inputs/status assertions use the explicit integration-test runtime builder.
-reaction_recovery_e2e	test_reaction_outbox_catchup_on_restart	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
-reaction_recovery_e2e	test_reaction_restart_no_missed_events	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
-reaction_recovery_e2e	test_reaction_outbox_gap_auto_skip	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
-reaction_recovery_e2e	test_reaction_outbox_gap_auto_reset	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
-reaction_recovery_e2e	test_reaction_live_delivery_after_restart	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
-reaction_recovery_e2e	test_runtime_gap_detection_broadcast_lag	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
-reaction_recovery_e2e	test_runtime_gap_strict_policy_stops_reaction	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
-metrics_e2e	query_output_metrics_updated_after_events	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
-metrics_e2e	reaction_metrics_show_checkpoint_progress	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
 metrics_e2e	lifecycle_metrics_count_startup_rejections	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
-metrics_e2e	query_output_metrics_error_for_nonexistent	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
-metrics_e2e	reaction_metrics_error_for_nonexistent	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
-metrics_e2e	lifecycle_metrics_reject_snapshot_skip_gap	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
 metrics_e2e	lifecycle_metrics_reject_no_snapshot_auto_reset	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
+metrics_e2e	lifecycle_metrics_reject_snapshot_skip_gap	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
+metrics_e2e	query_output_metrics_error_for_nonexistent	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
+metrics_e2e	query_output_metrics_updated_after_events	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
+metrics_e2e	reaction_metrics_error_for_nonexistent	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
+metrics_e2e	reaction_metrics_show_checkpoint_progress	runtime	Original public query/reaction/lifecycle metric assertions use the explicit integration-test runtime builder.
+outbox_serialization_throughput_probe	measure_outbox_encoding_cost	main-contract	Additional c2d80aa7 main contract from lib/tests/outbox_serialization_throughput_probe.rs; require the case or its explicit mapping.
+query_output_wipe_e2e	delete_and_recreate_advances_output_generation	main-contract	Additional c2d80aa7 main contract from lib/tests/query_output_wipe_e2e.rs; require the case or its explicit mapping.
+query_output_wipe_e2e	delete_and_recreate_same_query_id_starts_at_sequence_zero	main-contract	Additional c2d80aa7 main contract from lib/tests/query_output_wipe_e2e.rs; require the case or its explicit mapping.
+query_output_wipe_e2e	stop_query_same_config_preserves_output	main-contract	Additional c2d80aa7 main contract from lib/tests/query_output_wipe_e2e.rs; require the case or its explicit mapping.
+query_output_wipe_e2e	update_query_text_wipes_output_in_process	main-contract	Additional c2d80aa7 main contract from lib/tests/query_output_wipe_e2e.rs; require the case or its explicit mapping.
+query_output_wipe_e2e	update_query_twice_in_quick_succession_does_not_lock	main-contract	Additional c2d80aa7 main contract from lib/tests/query_output_wipe_e2e.rs; require the case or its explicit mapping.
+query_output_wipe_e2e	volatile_reconfigure_and_remove_succeed	main-contract	Additional c2d80aa7 main contract from lib/tests/query_output_wipe_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_add_reaction_auto_start_rejects_durable_on_volatile_query	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_durable_reaction_rejects_after_query_backend_becomes_volatile	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_durable_reaction_rejects_if_any_subscribed_query_is_volatile	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_durable_reaction_rejects_volatile_query	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_durable_reaction_rejects_volatile_store_before_volatile_query	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_durable_reaction_rejects_volatile_store_with_persistent_query	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_durable_reaction_starts_with_persistent_query	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_fresh_state_sync_bootstraps_snapshot_and_dedupes_live	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_fresh_trigger_does_not_replay_retained_history	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_reaction_live_delivery_after_restart	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e	test_reaction_outbox_catchup_on_restart	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e	test_reaction_outbox_gap_auto_reset	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e	test_reaction_outbox_gap_auto_skip	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e	test_reaction_restart_no_missed_events	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e	test_runtime_gap_detection_broadcast_lag	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e	test_runtime_gap_strict_policy_recovers_from_outbox	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_runtime_gap_strict_policy_stops_reaction	runtime	Original recovery, replay, gap and live-delivery assertions use the explicit integration-test runtime builder.
+reaction_recovery_e2e	test_trigger_autoreset_is_rejected	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.
+reaction_recovery_e2e	test_volatile_reaction_allows_volatile_query	main-contract	Additional c2d80aa7 main contract from lib/tests/reaction_recovery_e2e.rs; require the case or its explicit mapping.

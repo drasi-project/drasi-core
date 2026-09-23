@@ -6,8 +6,8 @@
 
 Use this page when implementing a component, connection provider or management
 tool. It contains the exact API names and rules that the shorter guides leave
-out. The APIs are under `drasi_lib::computation::v1` and require the `computation`
-feature.
+out. The APIs are under `drasi_lib::computation::v1` and are available without a
+feature opt-in.
 
 ## Main types and ownership
 
@@ -551,10 +551,66 @@ cargo test --locked -p lib-integration-tests
 ```
 
 The integration suite includes container-backed cases and needs Docker.
-The runtime runner checks the supported build configurations and retains
-failures rather than converting them into skips. These are build checks for one
-engine, not alternate execution modes. Leave
-`RUST_LOG` unset for suites that assert logging behaviour.
+The runtime runner executes default, no-default-feature, extra-capability,
+integration and SDK descriptor-factory profiles. These are build configurations
+of one engine, not alternate execution modes. Leave `RUST_LOG` unset for suites
+that assert logging behaviour.
 
-Paired result comparisons preserve emission order, row identities, metadata,
-snapshots and replay. Only wall-clock/profiling clock values are normalized.
+### Main-branch contracts and graph-specific coverage
+
+The comparison baseline is main commit
+[`c2d80aa7`](https://github.com/drasi-project/drasi-core/commit/c2d80aa7e4de874302b301584a6c7134c3609ed7).
+The library [inventory](../tests/runtime_parity/original-cases.tsv) includes all
+970 test cases at that revision, plus nine older names retained by the previous
+baseline. The [integration inventory](../tests/runtime_parity/integration-cases.tsv)
+records all 88 main integration cases. Tests whose implementation moved have
+explicit [case mappings](../tests/runtime_parity/case-mappings.tsv); a removed
+mutable graph API is not a blanket exemption from its observable contract.
+
+The runner checks both discovery and actual passing results. Adding `#[ignore]`,
+dropping a test file, losing a mapped replacement, or filtering required tests
+out of execution fails the run. The only
+[permitted ignores](../tests/runtime_parity/allowed-ignored.tsv) are the existing
+manual serialization benchmark and subprocess workers whose crash drivers must
+pass. The [runner self-check](../tests/runtime_parity/check-runner.sh) exercises
+these failure paths without compiling Rust.
+
+The [graph contract inventory](../tests/runtime_parity/computation-contracts.tsv)
+also requires named coverage for functionality with no ComponentGraph equivalent:
+
+| Capability | Required behavior |
+|---|---|
+| Admission, readiness and control | Accepted nodes retain errors; pending creation and full data queues do not block unrelated control |
+| Lifecycle and live changes | Revision/generation fencing, safe replacement, drain boundaries, cancellation and retryable cleanup |
+| Typed events and transport | Ordered operations, schema validation, isolated fanout context, FIFO and explicit retention gaps |
+| Resources and inspection | Shared identity, obsolete-report rejection, scoped inventory, topology import and bounded history |
+| Query/plugin integration | Matching join/middleware results, source progress, producer identity and handled-only reaction checkpoints |
+| Descriptor factories | Real source/reaction pipelines, configuration validation, isolated secrets and transactional provider commit/rollback/reopen |
+| Transaction sequences | Isolated values/elements, relation identity, rollback before another step consumes invalid output, standalone participation |
+| Durable reconstruction | Actual process exit before transaction commit and before/after partial fanout and delivery confirmation |
+
+Preserved main tests run against ComputationGraph, not a second copy of the old
+engine. The result trace additionally pins exact Add/Update/Delete values,
+duplicate-row identities, metadata, snapshots and outbox replay; comparing two
+runs of the same implementation is not its only oracle. Paired ordinary/direct
+graph tests compare logical results under both Tokio runtime flavors.
+Only wall-clock/profiling clock values are normalized.
+
+The inherited query-output tests now require the expected bootstrap rows, live
+results and retained sequences. They cannot pass merely because no result was
+produced. Live delivery provides a processing barrier instead of sleeps; the
+no-op case verifies that a later matching input receives sequence one.
+
+Some expectations intentionally differ from main and are asserted explicitly:
+
+| Change | Expected difference |
+|---|---|
+| Node-first addition | Later validation/startup errors remain on the accepted node and its readiness handle |
+| Source ordering | Reordering declared sources changes input rank and therefore the query configuration hash |
+| Reconfiguring an existing query | Old rows/output are removed and the generation advances, but its sequence high-water mark does not move backwards; old history requests report a gap |
+| Plugin resume sequence | `Some(0)` remains distinct from `None` across the SDK interface |
+
+Clean restart without an actual replacement snapshot is not a reset: rows,
+sequence, generation and Strict reaction progress must remain unchanged. A real
+volatile snapshot refresh does advance the generation and must fence a Strict
+consumer's obsolete checkpoint.

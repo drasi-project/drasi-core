@@ -1,0 +1,4 @@
+# package	binary	case	required-driver	reason
+drasi-lib	outbox_serialization_throughput_probe	measure_plugin_result_encoding_cost	-	Manual serialization timing diagnostic, not a runtime contract.
+lib-integration-tests	computation_middleware_durability	middleware_recovery_crash_worker	abrupt_process_exit_recovers_state_delivery_and_partial_fanout	Worker explicitly executed and checked by the crash driver.
+lib-integration-tests	computation_transaction_durability	transaction_crash_worker	process_crashes_preserve_transaction_atomicity_and_partial_fanout_recovery	Worker explicitly executed and checked by the crash driver.

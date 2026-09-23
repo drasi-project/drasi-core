@@ -1007,17 +1007,11 @@ mod output_state_integration_tests {
         )
         .await;
 
-        // fetch_snapshot should block while Starting — spawn it and check it doesn't resolve
         let query = manager.get_query_instance("snap-query").await.unwrap();
-        let snapshot_handle = tokio::spawn({
-            let q = query.clone();
-            async move { q.fetch_snapshot().await }
-        });
-
-        // Give it a moment — it should NOT resolve yet
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let snapshot_request = query.fetch_snapshot();
+        tokio::pin!(snapshot_request);
         assert!(
-            !snapshot_handle.is_finished(),
+            futures::poll!(&mut snapshot_request).is_pending(),
             "fetch_snapshot should block during bootstrap"
         );
 
@@ -1039,18 +1033,24 @@ mod output_state_integration_tests {
         .await;
 
         // Now fetch_snapshot should resolve
-        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), snapshot_handle)
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), snapshot_request)
             .await
             .expect("fetch_snapshot should complete after bootstrap")
-            .unwrap()
             .expect("fetch_snapshot should return Ok");
 
         // After bootstrap: results should contain the bootstrapped data,
         // sequence should be 0 (bootstrap doesn't advance sequence)
         assert_eq!(snapshot.as_of_sequence, 0);
-        // The result set may or may not contain the bootstrap row depending on
-        // whether the query engine matched it. The important invariant is that
-        // the snapshot resolved and as_of_sequence is 0.
+        assert_eq!(
+            snapshot.len(),
+            1,
+            "the matching bootstrap row must be present"
+        );
+        assert_eq!(
+            snapshot.to_vec(),
+            vec![serde_json::json!({"name": "Alice"})]
+        );
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1087,6 +1087,7 @@ mod output_state_integration_tests {
         assert!(outbox.results.is_empty());
         assert_eq!(outbox.latest_sequence, 0);
 
+        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
         // Inject a live event via the source manager
         let source_arc = source_manager
             .get_source_instance("live-src")
@@ -1099,20 +1100,24 @@ mod output_state_integration_tests {
         let insert = make_person_insert("live-src", "p1", "Bob");
         mock_source.inject_event(insert).await.unwrap();
 
-        // Give the query time to process
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // After a live event that produces results, sequence should advance
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .expect("matching input must produce a result")
+            .unwrap();
         let snap = query.fetch_snapshot().await.unwrap();
-        // The sequence may or may not advance depending on whether the query
-        // engine matched the node. If it did match (MATCH (n) RETURN n), then
-        // sequence should be >= 1 and outbox should have entries.
-        if snap.as_of_sequence > 0 {
-            let outbox = query.fetch_outbox(0).await.unwrap();
-            assert_eq!(outbox.results.len(), snap.as_of_sequence as usize);
-            assert_eq!(outbox.results[0].sequence, 1);
-            assert_eq!(outbox.latest_sequence, snap.as_of_sequence);
-        }
+        assert_eq!(result.sequence, 1);
+        assert_eq!(snap.as_of_sequence, 1);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.to_vec(), vec![serde_json::json!({"name": "Bob"})]);
+        let outbox = query.fetch_outbox(0).await.unwrap();
+        assert_eq!(outbox.results.len(), 1);
+        assert_eq!(outbox.results[0].sequence, 1);
+        assert_eq!(outbox.latest_sequence, 1);
+        assert_eq!(
+            serde_json::to_value(&outbox.results[0]).unwrap(),
+            serde_json::to_value(result.as_ref()).unwrap()
+        );
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1160,6 +1165,7 @@ mod output_state_integration_tests {
 
         let query = manager.get_query_instance("gap-query").await.unwrap();
 
+        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
         // Inject multiple events to fill and overflow the outbox
         let source_arc = source_manager.get_source_instance("gap-src").await.unwrap();
         let mock_source = source_arc
@@ -1169,20 +1175,32 @@ mod output_state_integration_tests {
         for i in 0..5 {
             let insert = make_person_insert("gap-src", &format!("p{i}"), &format!("Person{i}"));
             mock_source.inject_event(insert).await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+                .await
+                .expect("each matching input must be evaluated")
+                .unwrap();
+            assert_eq!(result.sequence, i + 1);
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         let snap = query.fetch_snapshot().await.unwrap();
-        if snap.as_of_sequence > 2 {
-            // Requesting after seq 0 when outbox only holds recent entries → gap
-            let result = query.fetch_outbox(0).await;
-            assert!(
-                matches!(result, Err(FetchError::OutboxGap(_))),
-                "Expected OutboxGap error when requesting evicted position, got {result:?}"
-            );
-        }
+        assert_eq!(snap.as_of_sequence, 5);
+        assert_eq!(snap.len(), 5);
+        let result = query.fetch_outbox(0).await;
+        assert!(
+            matches!(result, Err(FetchError::OutboxGap(_))),
+            "Expected OutboxGap error when requesting evicted position, got {result:?}"
+        );
+        let retained = query.fetch_outbox(3).await.unwrap();
+        assert_eq!(
+            retained
+                .results
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>(),
+            [4, 5]
+        );
+        assert_eq!(retained.latest_sequence, 5);
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1287,6 +1305,20 @@ mod output_state_integration_tests {
             snap.as_of_sequence, 0,
             "Bootstrap should not advance the sequence counter"
         );
+        let mut names: Vec<_> = snap
+            .to_vec()
+            .iter()
+            .map(|row| row["name"].clone())
+            .collect();
+        names.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        assert_eq!(
+            names,
+            vec![
+                serde_json::json!("BSPerson0"),
+                serde_json::json!("BSPerson1"),
+                serde_json::json!("BSPerson2")
+            ]
+        );
 
         let outbox = query.fetch_outbox(0).await.unwrap();
         assert!(
@@ -1294,6 +1326,7 @@ mod output_state_integration_tests {
             "Outbox should be empty after bootstrap (only live events populate it)"
         );
         assert_eq!(outbox.latest_sequence, 0);
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1342,6 +1375,7 @@ mod output_state_integration_tests {
         .await;
 
         let query = manager.get_query_instance("noop-query").await.unwrap();
+        let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
 
         // Send a node with a different label (Vehicle) — should not match the query
         let source_arc = source_manager
@@ -1371,20 +1405,30 @@ mod output_state_integration_tests {
             .await
             .unwrap();
 
-        // Give time to process
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Non-matching event should NOT advance the sequence
-        let snap = query.fetch_snapshot().await.unwrap();
+        // A later matching input is a FIFO processing barrier for the non-match.
+        mock_source
+            .inject_event(make_person_insert("noop-src", "p1", "Alice"))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .expect("matching barrier must complete")
+            .unwrap();
         assert_eq!(
-            snap.as_of_sequence, 0,
-            "Non-matching events should not advance the sequence counter"
+            result.sequence, 1,
+            "the preceding non-match must not allocate a result sequence"
         );
-
+        let snap = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snap.as_of_sequence, 1);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.to_vec(), vec![serde_json::json!({"name": "Alice"})]);
         let outbox = query.fetch_outbox(0).await.unwrap();
-        assert!(
-            outbox.results.is_empty(),
-            "Non-matching events should not populate the outbox"
+        assert_eq!(outbox.results.len(), 1);
+        assert_eq!(outbox.results[0].sequence, 1);
+        assert_eq!(
+            serde_json::to_value(&outbox.results[0]).unwrap(),
+            serde_json::to_value(result.as_ref()).unwrap()
         );
+        manager.0.shutdown().await.unwrap();
     }
 }

@@ -169,13 +169,56 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
         ];
         let mut emissions = Vec::new();
         let mut snapshots = Vec::new();
+        let mut identities = Vec::new();
         for (index, change) in changes.into_iter().enumerate() {
             source.inject_event(change).await.unwrap();
             let result = receive(output.as_mut()).await;
             assert_eq!(result.sequence, index as u64 + 1);
             assert_eq!(result.query_id, "query");
-            assert!(!result.results.is_empty());
-            assert_eq!(result.metadata["source_id"], json!("source"));
+            assert_eq!(result.results.len(), 1);
+            if index < 2 {
+                let ResultDiff::Add { row_signature, .. } = result.results[0] else {
+                    panic!("inserting a matching row must produce Add");
+                };
+                identities.push(row_signature);
+                if index == 1 {
+                    assert_ne!(
+                        identities[0], identities[1],
+                        "equal values are distinct rows"
+                    );
+                }
+            }
+            let expected = match index {
+                0 | 1 => ResultDiff::Add {
+                    data: json!({"name": "same"}),
+                    row_signature: identities[index],
+                },
+                2 => ResultDiff::Update {
+                    data: json!({"name": "changed"}),
+                    before: json!({"name": "same"}),
+                    after: json!({"name": "changed"}),
+                    grouping_keys: None,
+                    row_signature: identities[0],
+                },
+                3 => ResultDiff::Delete {
+                    data: json!({"name": "same"}),
+                    row_signature: identities[1],
+                },
+                4 => ResultDiff::Delete {
+                    data: json!({"name": "changed"}),
+                    row_signature: identities[0],
+                },
+                _ => unreachable!(),
+            };
+            assert_eq!(result.results, vec![expected], "input {index}");
+            assert_eq!(
+                result.metadata,
+                HashMap::from([
+                    ("source_id".into(), json!("source")),
+                    ("processed_by".into(), json!("drasi-core")),
+                    ("result_count".into(), json!(1)),
+                ])
+            );
             let profile = result.profiling.as_ref().expect("query profiling");
             assert!(profile.query_receive_ns.is_some());
             assert!(profile.query_core_call_ns.is_some());
@@ -185,7 +228,17 @@ async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() 
             let snapshot = query.fetch_snapshot().await.unwrap();
             assert_eq!(snapshot.as_of_sequence, result.sequence);
             let rows: BTreeMap<_, _> = snapshot.stream_keyed().collect().await;
-            assert_eq!(rows.len(), [1, 2, 2, 1, 0][index]);
+            let mut expected_rows = BTreeMap::new();
+            if index < 4 {
+                expected_rows.insert(
+                    identities[0],
+                    json!({"name": if index < 2 { "same" } else { "changed" }}),
+                );
+            }
+            if (1..=2).contains(&index) {
+                expected_rows.insert(identities[1], json!({"name": "same"}));
+            }
+            assert_eq!(rows, expected_rows, "snapshot after input {index}");
             snapshots.push(serde_json::to_value(rows).unwrap());
         }
         let outbox = query.fetch_outbox(0).await.unwrap();

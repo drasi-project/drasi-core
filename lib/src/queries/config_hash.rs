@@ -352,7 +352,7 @@ mod tests {
     // ----------------------------------------------------------------
 
     #[test]
-    fn source_reorder_same_hash() {
+    fn source_reorder_changes_hash() {
         let mut a = base();
         a.sources = vec![
             SourceSubscriptionConfig {
@@ -385,8 +385,6 @@ mod tests {
             },
         ];
 
-        // Retain the pinned test identity, but source order now changes the
-        // query's event rank and is no longer a cosmetic configuration change.
         assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
     }
 

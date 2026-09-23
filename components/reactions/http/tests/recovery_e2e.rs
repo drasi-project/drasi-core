@@ -20,8 +20,7 @@
 //! downstream server actually received**. Recovery is driven with the public
 //! `stop_reaction` / `start_reaction` lifecycle calls.
 //!
-//! Select `DRASI_TEST_EXECUTION=component` or `computation` per Cargo invocation.
-//! Native coverage requires the opt-in `computation-tests` feature.
+//! ComputationGraph is always used; no runtime selector or opt-in feature is needed.
 //!
 //! Scenarios:
 //! * `at_least_once_replays_unacked_events_after_restart` — events produced while

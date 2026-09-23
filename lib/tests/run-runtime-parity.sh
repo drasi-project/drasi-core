@@ -27,11 +27,14 @@ if [[ "${DRASI_TEST_EXECUTION+x}" == x && "$DRASI_TEST_EXECUTION" != computation
 fi
 unset DRASI_TEST_EXECUTION
 mkdir -p "$logs" "$TMPDIR" || exit 1
-inventory=lib/tests/runtime_parity/original-cases.tsv
-mappings=lib/tests/runtime_parity/case-mappings.tsv
 failed=0
 
-for profile in default no-default-features extra-capabilities; do
+for profile in default no-default-features extra-capabilities integration plugin-factories; do
+    package=drasi-lib
+    inventory=lib/tests/runtime_parity/original-cases.tsv
+    mappings=lib/tests/runtime_parity/case-mappings.tsv
+    sources=lib/tests
+    targets=(--lib --tests)
     features=(--locked)
     case "$profile" in
         no-default-features) features+=(--no-default-features) ;;
@@ -39,11 +42,27 @@ for profile in default no-default-features extra-capabilities; do
             features+=(--no-default-features --features \
                 computation-rocksdb-tests,middleware-decoder,middleware-map,middleware-parse-json,middleware-promote,middleware-relabel,middleware-unwind)
             ;;
+        integration)
+            package=lib-integration-tests
+            inventory=lib/tests/runtime_parity/integration-cases.tsv
+            mappings=/dev/null
+            sources=lib-integration-tests/tests
+            targets=(--tests)
+            features+=(--no-default-features --features computation-middleware-tests,garnet-tests)
+            ;;
+        plugin-factories)
+            package=drasi-plugin-sdk
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=components/plugin-sdk/tests
+            targets=(--test computation_factories)
+            features+=(--no-default-features --features computation)
+            ;;
     esac
     discovered="$logs/$profile.discovered.tsv"
     : > "$discovered"
     listing="$logs/$profile.list.log"
-    if cargo test --color never -p drasi-lib "${features[@]}" --lib --tests \
+    if cargo test --color never -p "$package" "${features[@]}" "${targets[@]}" \
         -- --list > "$listing" 2>&1; then
         if ! awk '
             /Running unittests src\/lib.rs / { binary = "lib"; next }
@@ -109,7 +128,29 @@ for profile in default no-default-features extra-capabilities; do
         ' "$inventory" "$mappings" "$discovered"; then
             failed=1
         fi
-        for source in lib/tests/*.rs; do
+        if ! awk -F '\t' -v package="$package" -v profile="$profile" '
+            /^#/ || NF == 0 { next }
+            FILENAME == ARGV[1] {
+                if ($1 == package && ($4 == "all" || $4 == profile)) {
+                    required[$2 SUBSEP $3] = $5;
+                }
+                next;
+            }
+            { found[$1 SUBSEP $2] = 1 }
+            END {
+                for (key in required) {
+                    if (!(key in found)) {
+                        split(key, parts, SUBSEP);
+                        print "Missing computation contract: " parts[1] "::" parts[2] " - " required[key];
+                        invalid = 1;
+                    }
+                }
+                exit invalid;
+            }
+        ' lib/tests/runtime_parity/computation-contracts.tsv "$discovered"; then
+            failed=1
+        fi
+        for source in "$sources"/*.rs; do
             binary="${source##*/}"
             binary="${binary%.rs}"
             case "$binary" in
@@ -147,12 +188,82 @@ for profile in default no-default-features extra-capabilities; do
         failed=1
     fi
     printf 'Running %s (full log: %s/%s.log)\n' "$profile" "$logs" "$profile"
-    cargo test --color never -p drasi-lib \
-        "${features[@]}" --lib --tests --no-fail-fast > "$logs/$profile.log" 2>&1
+    cargo test --color never -p "$package" \
+        "${features[@]}" "${targets[@]}" --no-fail-fast -- --format pretty > "$logs/$profile.log" 2>&1
     status=$?
     printf '%s\n' "$status" > "$logs/$profile.exit-code"
     grep -E '^test result:|^error:|^failures:' "$logs/$profile.log" || true
     if [[ "$status" != 0 ]]; then
+        failed=1
+    fi
+    executed="$logs/$profile.executed.tsv"
+    awk '
+        function finish(outcome) {
+            print binary "\t" pending "\t" outcome;
+            pending = "";
+        }
+        function abandon() {
+            if (pending != "") finish("unreported");
+        }
+        { gsub(/\033\[[0-9;]*m/, "") }
+        /Running unittests src\/lib.rs / { abandon(); binary = "lib"; next }
+        /Running tests\/[^ ]+\.rs / {
+            abandon();
+            binary = $2;
+            sub(/^tests\//, "", binary);
+            sub(/\.rs$/, "", binary);
+            next;
+        }
+        /^test [^ ]+( - should panic)? \.\.\. / {
+            abandon();
+            split($0, parts, " ");
+            pending = parts[2];
+            sub(/^test [^ ]+( - should panic)? \.\.\. /, "");
+        }
+        pending != "" && /^(ok|FAILED|ignored)([[:space:],]|[12][0-9][0-9][0-9]-|$)/ {
+            outcome = $0;
+            sub(/[^a-zA-Z].*$/, "", outcome);
+            finish(outcome);
+        }
+        END { abandon() }
+    ' "$logs/$profile.log" > "$executed"
+    if ! awk -F '\t' -v package="$package" '
+        /^#/ || NF == 0 { next }
+        FILENAME == ARGV[1] {
+            if ($1 == package) allowed[$2 SUBSEP $3] = $4;
+            next;
+        }
+        FILENAME == ARGV[2] { discovered[$1 SUBSEP $2] = 1; count++; next }
+        {
+            key = $1 SUBSEP $2;
+            if (!(key in discovered) || key in outcomes) {
+                print "Unexpected or duplicate executed case: " $1 "::" $2;
+                invalid = 1;
+            }
+            outcome = $3;
+            sub(/,$/, "", outcome);
+            outcomes[key] = outcome;
+        }
+        END {
+            if (!count) {
+                print "No discovered cases to verify";
+                invalid = 1;
+            }
+            for (key in discovered) {
+                if (outcomes[key] == "ok") { passed++; continue }
+                split(key, parts, SUBSEP);
+                if (outcomes[key] == "ignored" && key in allowed &&
+                    (allowed[key] == "-" || outcomes[parts[1] SUBSEP allowed[key]] == "ok")) {
+                    ignored++;
+                    continue;
+                }
+                print "Required case did not pass: " parts[1] "::" parts[2] " (" outcomes[key] ")";
+                invalid = 1;
+            }
+            printf "Execution verified: %d passed; %d explicitly permitted diagnostics/workers ignored\n", passed, ignored;
+            exit invalid;
+        }
+    ' lib/tests/runtime_parity/allowed-ignored.tsv "$discovered" "$executed"; then
         failed=1
     fi
 done

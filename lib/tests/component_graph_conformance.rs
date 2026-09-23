@@ -222,3 +222,134 @@ async fn read_only_graph_handles_do_not_keep_the_runtime_alive() {
     assert!(clone.subscribe().is_err());
     assert!(view.inspector().is_err());
 }
+
+#[tokio::test]
+async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results() {
+    use std::collections::BTreeSet;
+
+    timeout(Duration::from_secs(10), async {
+        let (source1, _input1) = mock_source::MockSource::new("source-1").unwrap();
+        let (source2, _input2) = mock_source::MockSource::new("source-2").unwrap();
+        let (reaction, _output) = drasi_reaction_application::ApplicationReaction::new(
+            "reaction-1",
+            vec!["query-1".into(), "query-2".into()],
+        );
+        let core = DrasiLib::builder()
+            .with_id("test-instance")
+            .with_source(source1)
+            .with_source(source2)
+            .with_query(
+                Query::cypher("query-1")
+                    .query("MATCH (n:Item) RETURN n.name AS name")
+                    .from_source("source-1")
+                    .from_source("source-2")
+                    .enable_bootstrap(false)
+                    .build(),
+            )
+            .with_query(
+                Query::cypher("query-2")
+                    .query("MATCH (n:Item) RETURN n")
+                    .from_source("source-1")
+                    .enable_bootstrap(false)
+                    .build(),
+            )
+            .with_reaction(reaction)
+            .build()
+            .await
+            .unwrap();
+        core.remove_source(drasi_lib::sources::COMPONENT_GRAPH_SOURCE_ID, false)
+            .await
+            .unwrap();
+        for id in ["source-1", "source-2", "query-1", "query-2", "reaction-1"] {
+            core.computation_component(id)
+                .unwrap()
+                .wait_created()
+                .await
+                .unwrap();
+        }
+        let view = core.component_graph();
+        let snapshot = view.snapshot().await.unwrap();
+        assert_eq!(snapshot.instance_id, "test-instance");
+        assert_eq!(snapshot.nodes.len(), 6);
+        let kinds: BTreeSet<_> = snapshot
+            .nodes
+            .iter()
+            .map(|node| format!("{}:{:?}", node.id, node.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                "test-instance:Instance".into(),
+                "source-1:Source".into(),
+                "source-2:Source".into(),
+                "query-1:Query".into(),
+                "query-2:Query".into(),
+                "reaction-1:Reaction".into(),
+            ])
+        );
+        let edges: BTreeSet<_> = snapshot
+            .edges
+            .iter()
+            .map(|edge| format!("{}:{:?}:{}", edge.from, edge.relationship, edge.to))
+            .collect();
+        let mut expected = BTreeSet::new();
+        for id in ["source-1", "source-2", "query-1", "query-2", "reaction-1"] {
+            expected.insert(format!("test-instance:Owns:{id}"));
+            expected.insert(format!("{id}:OwnedBy:test-instance"));
+            assert_eq!(
+                snapshot.get_component(id).unwrap().status,
+                ComponentStatus::Added
+            );
+        }
+        for (source, consumer) in [
+            ("source-1", "query-1"),
+            ("source-2", "query-1"),
+            ("source-1", "query-2"),
+            ("query-1", "reaction-1"),
+            ("query-2", "reaction-1"),
+        ] {
+            expected.insert(format!("{source}:Feeds:{consumer}"));
+            expected.insert(format!("{consumer}:SubscribesTo:{source}"));
+        }
+        assert_eq!(snapshot.edges.len(), 20, "no duplicate edges");
+        assert_eq!(edges, expected);
+        let serialized = serde_json::to_value(&snapshot).unwrap();
+        let roundtrip: drasi_lib::component_graph::GraphSnapshot =
+            serde_json::from_value(serialized.clone()).unwrap();
+        assert_eq!(serde_json::to_value(roundtrip).unwrap(), serialized);
+        for id in ["source-1", "source-2"] {
+            assert_eq!(snapshot.get_component(id).unwrap().metadata["kind"], "mock");
+        }
+        assert_eq!(
+            snapshot.get_component("query-1").unwrap().metadata["query"],
+            "MATCH (n:Item) RETURN n.name AS name"
+        );
+
+        assert!(core.remove_source("test-instance", false).await.is_err());
+        assert!(core.remove_query("test-instance").await.is_err());
+        assert!(core.remove_reaction("test-instance", false).await.is_err());
+        assert!(core.remove_source("source-1", false).await.is_err());
+        assert!(core.remove_query("query-1").await.is_err());
+        assert_eq!(
+            serde_json::to_value(view.snapshot().await.unwrap()).unwrap(),
+            serialized,
+            "rejected removals cannot change membership, status, or relationships"
+        );
+        core.remove_reaction("reaction-1", false).await.unwrap();
+        for id in ["query-1", "query-2"] {
+            core.remove_query(id).await.unwrap();
+        }
+        for id in ["source-1", "source-2"] {
+            core.remove_source(id, false).await.unwrap();
+        }
+        let empty = view.snapshot().await.unwrap();
+        assert_eq!(empty.nodes.len(), 1);
+        assert_eq!(empty.nodes[0].id, "test-instance");
+        assert!(empty.edges.is_empty());
+        assert_eq!(snapshot.nodes.len(), 6, "old snapshots remain detached");
+        assert_eq!(snapshot.edges.len(), 20);
+        core.shutdown().await.unwrap();
+    })
+    .await
+    .expect("main snapshot contract timed out");
+}

@@ -235,6 +235,7 @@ async fn concurrent_descriptor_creation_uses_instance_secrets_without_global_res
 #[tokio::test]
 async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_real_contracts() {
     use drasi_core::computation::ComputationIndexProvider;
+    use drasi_core::interface::{RowMutation, SessionGuard};
     use drasi_plugin_sdk::computation::{
         create_identity_provider, create_scoped_index_provider, create_secret_store,
         BootstrapPluginFactory,
@@ -309,15 +310,16 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         .expect("bootstrap");
     assert_eq!(result.event_count, 0);
     assert!(receiver.recv().await.is_none());
+    let index_configuration = PluginConfiguration::new(
+        "rocksdb",
+        "1.1.0",
+        serde_json::json!({
+            "path":temp.path().join("indexes"), "memoryBudgetBytes":32 * 1024 * 1024,
+        }),
+    );
     let provider = create_scoped_index_provider(
         Arc::new(drasi_index_rocksdb::RocksDbIndexDescriptor),
-        &PluginConfiguration::new(
-            "rocksdb",
-            "1.1.0",
-            serde_json::json!({
-                "path":temp.path().join("indexes"), "memoryBudgetBytes":32 * 1024 * 1024,
-            }),
-        ),
+        &index_configuration,
         &services,
     )
     .await
@@ -326,10 +328,74 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         .create_indexes("families", "query")
         .await
         .expect("native index resources");
-    assert!(
-        indexes.atomic_result_transaction().is_err(),
-        "legacy writers must not acquire an invented shared transaction"
-    );
+    indexes
+        .atomic_result_transaction()
+        .expect("RocksDB explicitly guarantees joint atomic output");
+    for commit in [false, true] {
+        let session = SessionGuard::begin(indexes.indexes().session_control.clone())
+            .await
+            .expect("begin shared session");
+        let checkpoint = indexes.checkpoint_store().expect("checkpoint");
+        let outbox = indexes.outbox_writer().expect("outbox");
+        let live = indexes.live_results_writer().expect("live rows");
+        checkpoint
+            .stage_checkpoint("source", 7, Some(&bytes::Bytes::from_static(b"position")))
+            .await
+            .expect("stage source progress");
+        checkpoint
+            .stage_result_sequence("query", 1)
+            .await
+            .expect("stage output sequence");
+        outbox
+            .append("query", 1, b"output")
+            .await
+            .expect("stage output");
+        live.apply_mutations(
+            "query",
+            &[RowMutation {
+                row_signature: 42,
+                data: Some(b"row"),
+            }],
+        )
+        .await
+        .expect("stage live rows");
+        if commit {
+            session.commit().await.expect("commit all writers");
+        } else {
+            drop(session);
+        }
+        assert_eq!(
+            checkpoint
+                .read_checkpoint("source")
+                .await
+                .expect("read source progress")
+                .map(|value| value.sequence),
+            commit.then_some(7)
+        );
+        assert_eq!(
+            checkpoint
+                .read_result_sequence("query")
+                .await
+                .expect("read result sequence"),
+            commit.then_some(1)
+        );
+        assert_eq!(
+            outbox.read_from("query", 0).await.expect("read outbox"),
+            if commit {
+                vec![(1, b"output".to_vec())]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            live.read_snapshot("query").await.expect("read live rows"),
+            if commit {
+                vec![(42, b"row".to_vec())]
+            } else {
+                vec![]
+            }
+        );
+    }
     indexes
         .cleanup()
         .expect("I/O owner")
@@ -338,5 +404,66 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         .expect("I/O cleanup");
     drop(indexes);
     provider.shutdown().await.expect("provider cleanup");
+    drop(provider);
+    let reopened_provider = create_scoped_index_provider(
+        Arc::new(drasi_index_rocksdb::RocksDbIndexDescriptor),
+        &index_configuration,
+        &services,
+    )
+    .await
+    .expect("reopen same descriptor scope");
+    let reopened = reopened_provider
+        .create_indexes("families", "query")
+        .await
+        .expect("reopen index resources");
+    assert_eq!(
+        reopened
+            .checkpoint_store()
+            .expect("reopened checkpoints")
+            .read_checkpoint("source")
+            .await
+            .expect("read recovered source progress")
+            .expect("committed source progress")
+            .sequence,
+        7
+    );
+    assert_eq!(
+        reopened
+            .checkpoint_store()
+            .expect("reopened checkpoints")
+            .read_result_sequence("query")
+            .await
+            .expect("read recovered result sequence"),
+        Some(1)
+    );
+    assert_eq!(
+        reopened
+            .outbox_writer()
+            .expect("reopened outbox")
+            .read_from("query", 0)
+            .await
+            .expect("read recovered output"),
+        [(1, b"output".to_vec())]
+    );
+    assert_eq!(
+        reopened
+            .live_results_writer()
+            .expect("reopened live rows")
+            .read_snapshot("query")
+            .await
+            .expect("read recovered snapshot"),
+        [(42, b"row".to_vec())]
+    );
+    reopened
+        .cleanup()
+        .expect("reopened I/O owner")
+        .shutdown()
+        .await
+        .expect("reopened I/O cleanup");
+    drop(reopened);
+    reopened_provider
+        .shutdown()
+        .await
+        .expect("reopened provider cleanup");
     drasi.shutdown().await.expect("instance cleanup");
 }
