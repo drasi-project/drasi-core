@@ -612,26 +612,28 @@ impl ContinuousQuery {
             contexts = result.clone();
         }
 
+        // Projections and filters after aggregation retain the group's identity,
+        // not the identity of the graph solution that changed that group.
         Ok(result
             .into_iter()
             .map(|(ctx, cc)| match ctx {
                 QueryPartEvaluationContext::Adding { after, .. } => {
                     QueryPartEvaluationContext::Adding {
                         after,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.after_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Updating { before, after, .. } => {
                     QueryPartEvaluationContext::Updating {
                         before,
                         after,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.after_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Removing { before, .. } => {
                     QueryPartEvaluationContext::Removing {
                         before,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.before_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Aggregation {

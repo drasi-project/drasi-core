@@ -12,22 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use drasi_query_cypher::CypherParser;
 use serde_json::json;
 
 use crate::{
     evaluation::{
-        context::QueryPartEvaluationContext,
-        functions::{Function, FunctionRegistry, Sum},
+        context::{QueryPartEvaluationContext, QueryVariables},
+        functions::{Avg, Floor, Function, FunctionRegistry, Sum},
+        variable_value::VariableValue,
     },
     in_memory_index::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
         in_memory_result_index::InMemoryResultIndex,
     },
-    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
-    query::QueryBuilder,
+    models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, QueryJoin, QueryJoinKey,
+        SourceChange,
+    },
+    query::{ContinuousQuery, QueryBuilder},
 };
 
 fn create_registry_with_sum() -> Arc<FunctionRegistry> {
@@ -288,5 +292,425 @@ async fn aggregating_different_groups_get_different_row_signatures() {
         result1[0].row_signature(),
         result2[0].row_signature(),
         "Different GROUP BY values should produce different row_signatures"
+    );
+}
+
+type KeyedSnapshot = BTreeMap<u64, QueryVariables>;
+
+async fn apply_to_snapshot(
+    query: &ContinuousQuery,
+    snapshot: &mut KeyedSnapshot,
+    change: SourceChange,
+) {
+    for result in query.process_source_change(change).await.unwrap() {
+        match result {
+            QueryPartEvaluationContext::Adding {
+                after,
+                row_signature,
+            }
+            | QueryPartEvaluationContext::Updating {
+                after,
+                row_signature,
+                ..
+            }
+            | QueryPartEvaluationContext::Aggregation {
+                after,
+                row_signature,
+                ..
+            } => {
+                snapshot.insert(row_signature, after);
+            }
+            QueryPartEvaluationContext::Removing { row_signature, .. } => {
+                snapshot.remove(&row_signature);
+            }
+            QueryPartEvaluationContext::Noop => {}
+        }
+    }
+}
+
+const FLOOR_ALERT: &str = "
+MATCH (r:Room)-[:PART_OF_FLOOR]->(f:Floor)
+WITH f, floor(50+(r.temperature-72)+(r.humidity-42)+CASE WHEN r.co2>500 THEN (r.co2-500)/25 ELSE 0 END) AS RoomComfortLevel
+WITH f, avg(RoomComfortLevel) AS ComfortLevel
+WHERE ComfortLevel<40 OR ComfortLevel>50
+RETURN f.id AS FloorId,f.name AS FloorName,ComfortLevel";
+
+const BUILDING_ALERT: &str = "
+MATCH (r:Room)-[:PART_OF_FLOOR]->(f:Floor)-[:PART_OF_BUILDING]->(b:Building)
+WITH f,b,floor(50+(r.temperature-72)+(r.humidity-42)+CASE WHEN r.co2>500 THEN (r.co2-500)/25 ELSE 0 END) AS RoomComfortLevel
+WITH f,b,avg(RoomComfortLevel) AS FloorComfortLevel
+WITH b,avg(FloorComfortLevel) AS ComfortLevel
+WHERE ComfortLevel<40 OR ComfortLevel>50
+RETURN b.id AS BuildingId,b.name AS BuildingName,ComfortLevel";
+
+async fn build_comfort_query(query: &str) -> ContinuousQuery {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register_function("avg", Function::Aggregating(Arc::new(Avg {})));
+    registry.register_function("floor", Function::Scalar(Arc::new(Floor {})));
+    let joins = [
+        ("PART_OF_FLOOR", "Room", "floor_id", "Floor", "id"),
+        ("PART_OF_BUILDING", "Floor", "building_id", "Building", "id"),
+    ]
+    .into_iter()
+    .map(
+        |(id, from_label, from_property, to_label, to_property)| QueryJoin {
+            id: id.into(),
+            keys: vec![
+                QueryJoinKey {
+                    label: from_label.into(),
+                    property: from_property.into(),
+                },
+                QueryJoinKey {
+                    label: to_label.into(),
+                    property: to_property.into(),
+                },
+            ],
+        },
+    )
+    .collect();
+    QueryBuilder::new(query, Arc::new(CypherParser::new(registry.clone())))
+        .with_function_registry(registry)
+        .with_joins(joins)
+        .try_build()
+        .await
+        .unwrap()
+}
+
+fn room_properties(floor: usize, room: usize, broken: bool) -> serde_json::Value {
+    let (temperature, humidity, co2) = if broken { (40, 20, 700) } else { (70, 40, 10) };
+    json!({
+        "id": format!("room_01_{floor:02}_{room:02}"),
+        "name": format!("Room {room:02}"),
+        "floor_id": format!("floor_01_{floor:02}"),
+        "temperature": temperature, "humidity": humidity, "co2": co2,
+    })
+}
+
+async fn seed_comfort(query: &ContinuousQuery, snapshot: &mut KeyedSnapshot) {
+    apply_to_snapshot(
+        query,
+        snapshot,
+        make_node(
+            "facilities",
+            "building_01",
+            "Building",
+            json!({"id": "building_01", "name": "Building 01"}),
+        ),
+    )
+    .await;
+    for floor in 1..=3 {
+        apply_to_snapshot(
+            query,
+            snapshot,
+            make_node(
+                "facilities",
+                &format!("floor_01_{floor:02}"),
+                "Floor",
+                json!({
+                    "id": format!("floor_01_{floor:02}"),
+                    "name": format!("Floor {floor:02}"), "building_id": "building_01"
+                }),
+            ),
+        )
+        .await;
+        for room in 1..=3 {
+            apply_to_snapshot(
+                query,
+                snapshot,
+                make_node(
+                    "facilities",
+                    &format!("room_01_{floor:02}_{room:02}"),
+                    "Room",
+                    room_properties(floor, room, false),
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+async fn change_room(
+    query: &ContinuousQuery,
+    snapshot: &mut KeyedSnapshot,
+    floor: usize,
+    room: usize,
+    broken: bool,
+) {
+    apply_to_snapshot(
+        query,
+        snapshot,
+        make_update(
+            "facilities",
+            &format!("room_01_{floor:02}_{room:02}"),
+            "Room",
+            room_properties(floor, room, broken),
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn projected_floor_alert_snapshot_clears_after_reset() {
+    let query = build_comfort_query(FLOOR_ALERT).await;
+    let mut snapshot = KeyedSnapshot::new();
+    seed_comfort(&query, &mut snapshot).await;
+    assert!(snapshot.is_empty());
+
+    change_room(&query, &mut snapshot, 1, 1, true).await;
+    assert_eq!(snapshot.len(), 1);
+    let floor_one_key = *snapshot.keys().next().unwrap();
+    assert_eq!(
+        snapshot[&floor_one_key]["ComfortLevel"],
+        VariableValue::Float(32.0.into())
+    );
+    change_room(&query, &mut snapshot, 1, 2, true).await;
+    assert_eq!(snapshot.len(), 1, "another room must update the same floor");
+    assert_eq!(
+        snapshot[&floor_one_key]["ComfortLevel"],
+        VariableValue::Float(18.0.into())
+    );
+
+    for floor in 1..=3 {
+        for room in 1..=3 {
+            change_room(&query, &mut snapshot, floor, room, true).await;
+        }
+    }
+    assert_eq!(snapshot.len(), 3);
+    for row in snapshot.values() {
+        assert_eq!(row["ComfortLevel"], VariableValue::Float(4.0.into()));
+    }
+    for floor in 1..=3 {
+        let floor_id = VariableValue::String(format!("floor_01_{floor:02}"));
+        assert_eq!(
+            snapshot
+                .values()
+                .filter(|row| row.get("FloorId") == Some(&floor_id))
+                .count(),
+            1,
+            "each floor must have exactly one current alert"
+        );
+    }
+    let group_keys: Vec<_> = snapshot.keys().copied().collect();
+
+    for floor in 1..=3 {
+        for room in 1..=3 {
+            change_room(&query, &mut snapshot, floor, room, false).await;
+        }
+    }
+    assert!(
+        snapshot.is_empty(),
+        "reset must remove every aggregate alert"
+    );
+
+    for floor in 1..=3 {
+        change_room(&query, &mut snapshot, floor, 3, true).await;
+    }
+    assert_eq!(
+        snapshot.keys().copied().collect::<Vec<_>>(),
+        group_keys,
+        "filter reentry must retain the group identity, independent of contributor"
+    );
+}
+
+#[tokio::test]
+async fn projected_building_alert_snapshot_clears_after_reset() {
+    let query = build_comfort_query(BUILDING_ALERT).await;
+    let mut snapshot = KeyedSnapshot::new();
+    seed_comfort(&query, &mut snapshot).await;
+    assert!(snapshot.is_empty());
+
+    change_room(&query, &mut snapshot, 1, 1, true).await;
+    assert!(
+        snapshot.is_empty(),
+        "one cold room does not alert the building"
+    );
+    change_room(&query, &mut snapshot, 1, 2, true).await;
+    assert_eq!(snapshot.len(), 1);
+    let building_key = *snapshot.keys().next().unwrap();
+    assert_eq!(
+        snapshot[&building_key]["BuildingId"],
+        VariableValue::String("building_01".to_string())
+    );
+
+    for floor in 1..=3 {
+        for room in 1..=3 {
+            change_room(&query, &mut snapshot, floor, room, true).await;
+        }
+    }
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(
+        snapshot[&building_key]["ComfortLevel"],
+        VariableValue::Float(4.0.into())
+    );
+    for floor in 1..=3 {
+        for room in 1..=3 {
+            change_room(&query, &mut snapshot, floor, room, false).await;
+        }
+    }
+    assert!(snapshot.is_empty(), "reset must remove the building alert");
+}
+
+#[tokio::test]
+async fn projected_whole_element_group_keeps_identity_across_contributors() {
+    let query = build_comfort_query(
+        "MATCH (r:Room)-[:PART_OF_FLOOR]->(f:Floor)
+         WITH f, avg(r.temperature) AS temperature
+         WHERE temperature < 65
+         RETURN f, temperature",
+    )
+    .await;
+    let mut snapshot = KeyedSnapshot::new();
+    seed_comfort(&query, &mut snapshot).await;
+    assert!(snapshot.is_empty());
+    change_room(&query, &mut snapshot, 1, 1, true).await;
+    let group_key = *snapshot.keys().next().unwrap();
+    change_room(&query, &mut snapshot, 1, 2, true).await;
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(
+        snapshot[&group_key]["temperature"],
+        VariableValue::Float(50.0.into())
+    );
+    let VariableValue::Element(floor) = &snapshot[&group_key]["f"] else {
+        panic!("the grouped floor must remain an element");
+    };
+    assert_eq!(floor.get_reference().element_id.as_ref(), "floor_01_01");
+
+    change_room(&query, &mut snapshot, 1, 1, false).await;
+    assert_eq!(snapshot.len(), 1);
+    assert!(snapshot.contains_key(&group_key));
+    change_room(&query, &mut snapshot, 1, 2, false).await;
+    assert!(snapshot.is_empty());
+}
+
+#[tokio::test]
+async fn projected_group_snapshot_preserves_identity_across_filter_and_group_changes() {
+    let query = build_aggregating_query(
+        "MATCH (n:Sensor) WITH n.region AS region, sum(n.value) AS total
+         WHERE total > 10 RETURN region, total",
+    )
+    .await;
+    let mut snapshot = KeyedSnapshot::new();
+    for (id, value) in [("s1", 5), ("s2", 6)] {
+        apply_to_snapshot(
+            &query,
+            &mut snapshot,
+            make_node(
+                "test",
+                id,
+                "Sensor",
+                json!({"region": "west", "value": value}),
+            ),
+        )
+        .await;
+    }
+    assert_eq!(snapshot.len(), 1);
+    let west_key = *snapshot.keys().next().unwrap();
+    apply_to_snapshot(
+        &query,
+        &mut snapshot,
+        make_update(
+            "test",
+            "s1",
+            "Sensor",
+            json!({"region": "west", "value": 7}),
+        ),
+    )
+    .await;
+    assert_eq!(snapshot.len(), 1);
+    assert!(snapshot.contains_key(&west_key));
+
+    apply_to_snapshot(
+        &query,
+        &mut snapshot,
+        make_update(
+            "test",
+            "s2",
+            "Sensor",
+            json!({"region": "east", "value": 20}),
+        ),
+    )
+    .await;
+    assert_eq!(snapshot.len(), 1);
+    assert!(!snapshot.contains_key(&west_key));
+    let east_key = *snapshot.keys().next().unwrap();
+    assert_eq!(
+        snapshot[&east_key]["region"],
+        VariableValue::String("east".to_string())
+    );
+    apply_to_snapshot(
+        &query,
+        &mut snapshot,
+        make_update(
+            "test",
+            "s1",
+            "Sensor",
+            json!({"region": "west", "value": 30}),
+        ),
+    )
+    .await;
+    assert_eq!(snapshot.len(), 2);
+    assert!(snapshot.contains_key(&west_key));
+    apply_to_snapshot(&query, &mut snapshot, make_delete("test", "s2")).await;
+    assert_eq!(snapshot.len(), 1);
+    assert!(snapshot.contains_key(&west_key));
+    apply_to_snapshot(&query, &mut snapshot, make_delete("test", "s1")).await;
+    assert!(snapshot.is_empty());
+}
+
+#[tokio::test]
+async fn non_aggregate_whole_element_snapshot_keeps_solution_identity() {
+    let query = build_simple_query("MATCH (n:Sensor) WITH n WHERE n.value > 10 RETURN n").await;
+    let mut snapshot = KeyedSnapshot::new();
+    apply_to_snapshot(
+        &query,
+        &mut snapshot,
+        make_node("test", "s1", "Sensor", json!({"value": 20})),
+    )
+    .await;
+    let signature = *snapshot.keys().next().unwrap();
+    for value in [30, 40] {
+        apply_to_snapshot(
+            &query,
+            &mut snapshot,
+            make_update("test", "s1", "Sensor", json!({"value": value})),
+        )
+        .await;
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.contains_key(&signature));
+        let VariableValue::Element(element) = &snapshot[&signature]["n"] else {
+            panic!("the projection must retain the updated element");
+        };
+        let Element::Node { properties, .. } = element.as_ref() else {
+            panic!("expected a sensor node");
+        };
+        assert_eq!(
+            properties.get("value"),
+            Some(&crate::models::ElementValue::Integer(value))
+        );
+    }
+    apply_to_snapshot(
+        &query,
+        &mut snapshot,
+        make_update("test", "s1", "Sensor", json!({"value": 0})),
+    )
+    .await;
+    assert!(snapshot.is_empty());
+    apply_to_snapshot(
+        &query,
+        &mut snapshot,
+        make_update("test", "s1", "Sensor", json!({"value": 40})),
+    )
+    .await;
+    assert!(snapshot.contains_key(&signature));
+    apply_to_snapshot(
+        &query,
+        &mut snapshot,
+        make_node("test", "s2", "Sensor", json!({"value": 40})),
+    )
+    .await;
+    assert_eq!(
+        snapshot.len(),
+        2,
+        "equal projections remain distinct solutions"
     );
 }
