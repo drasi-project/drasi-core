@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 use anyhow::{Context, Result};
 use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -20,8 +20,7 @@ use drasi_lib::{
     config::QueryConfig,
     queries::output_state::SnapshotStream,
     queries::{FetchError, SnapshotResponse},
-    CapacityPolicy, DrasiLib, DurabilityConfig, ExecutionMode, Query, RecoveryPolicy,
-    StorageBackendRef,
+    CapacityPolicy, DrasiLib, DurabilityConfig, Query, RecoveryPolicy, StorageBackendRef,
 };
 use drasi_source_application::{
     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle, PropertyMapBuilder,
@@ -57,6 +56,7 @@ async fn build(
     instance: &str,
     query: QueryConfig,
 ) -> Result<(DrasiLib, ApplicationSourceHandle)> {
+    let query_id = query.id.clone();
     let (source, handle) = ApplicationSource::new(
         SOURCE,
         ApplicationSourceConfig {
@@ -70,7 +70,6 @@ async fn build(
     )?;
     let core = DrasiLib::builder()
         .with_id(instance)
-        .with_execution_mode(ExecutionMode::ComputationGraph)
         .with_source(source)
         .with_query(query)
         .with_wal_provider(Arc::new(RedbWalProvider::new(root.join("wal"))))
@@ -85,14 +84,18 @@ async fn build(
         .build()
         .await?;
     core.start().await?;
-    ready(&core).await?;
+    ready_named(&core, &query_id).await?;
     Ok((core, handle))
 }
 
 async fn ready(core: &DrasiLib) -> Result<()> {
+    ready_named(core, QUERY).await
+}
+
+async fn ready_named(core: &DrasiLib, query: &str) -> Result<()> {
     timeout(
         Duration::from_secs(15),
-        core.computation_component(QUERY)?.wait_started(),
+        core.computation_component(query)?.wait_started(),
     )
     .await
     .context("query readiness timed out")??;
@@ -113,9 +116,13 @@ async fn insert(source: &ApplicationSourceHandle, id: &str) -> Result<()> {
 }
 
 async fn snapshot(core: &DrasiLib, minimum: u64) -> Result<SnapshotResponse> {
+    snapshot_named(core, QUERY, minimum).await
+}
+
+async fn snapshot_named(core: &DrasiLib, id: &str, minimum: u64) -> Result<SnapshotResponse> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let diagnostic = match core.query_manager().get_query_instance(QUERY).await {
+        let diagnostic = match core.query_manager().get_query_instance(id).await {
             Ok(query) => match query.fetch_snapshot().await {
                 Ok(snapshot) if snapshot.as_of_sequence >= minimum => return Ok(snapshot),
                 Ok(snapshot) => format!("output is only at sequence {}", snapshot.as_of_sequence),
@@ -256,4 +263,37 @@ async fn reconfiguration_wipes_old_output_and_persists_the_new_lifetime() -> Res
     assert_eq!(reopened.output_generation, current.output_generation);
     assert_eq!(keyed(reopened).await, keyed(current).await);
     shutdown(core, source).await
+}
+
+#[tokio::test]
+async fn long_instance_and_query_identifiers_reopen_the_same_persistent_output() -> Result<()> {
+    for instance in [
+        "http-persist-index-instance",
+        "http-persist-index-budget-instance",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let mut query = config(TEXT, 8);
+        query.id = format!("{instance}-query");
+        let (core, source) = build(directory.path(), instance, query.clone()).await?;
+        insert(&source, "persisted").await?;
+        let before = snapshot_named(&core, &query.id, 1).await?;
+        assert_eq!(before.as_of_sequence, 1);
+        assert_eq!(
+            before.to_vec(),
+            vec![serde_json::json!({"name": "persisted"})]
+        );
+        let generation = before.output_generation;
+        shutdown(core, source).await?;
+
+        let (core, source) = build(directory.path(), instance, query.clone()).await?;
+        let reopened = snapshot_named(&core, &query.id, 1).await?;
+        assert_eq!(reopened.output_generation, generation);
+        assert_eq!(keyed(reopened).await, keyed(before).await);
+        insert(&source, "after-reopen").await?;
+        let after = snapshot_named(&core, &query.id, 2).await?;
+        assert_eq!(after.as_of_sequence, 2);
+        assert_eq!(after.len(), 2);
+        shutdown(core, source).await?;
+    }
+    Ok(())
 }

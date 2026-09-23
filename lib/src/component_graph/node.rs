@@ -124,9 +124,8 @@ impl RelationshipKind {
 /// A node in the component graph.
 ///
 /// Contains metadata (ID, kind, status, properties) for each component.
-/// Runtime component instances (`Arc<dyn Source>`, etc.) are stored in the
-/// managers' HashMaps alongside the graph, keyed by the same component ID.
-/// The graph and HashMaps are always updated together in the same code paths.
+/// This is an inspection DTO only. Runtime instances and their statuses belong
+/// exclusively to the ComputationGraph registry publication it was derived from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentNode {
     /// Unique identifier for this component

@@ -40,6 +40,12 @@ pub trait ComputationBootstrapProvider: Send + Sync {
     async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
         Ok(BootstrapPreparation::Ready)
     }
+    /// Whether prepared source subscriptions supplied a snapshot for this start.
+    /// Standalone snapshot providers always supply one; plugin adapters can
+    /// distinguish an actual new snapshot from a checkpoint-based replay.
+    fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot>;
     /// Boundaries that become available only after the snapshot stream closes.
     async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {

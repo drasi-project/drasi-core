@@ -8,15 +8,15 @@ ComputationGraph manages components and moves changes between them inside a
 DrasiLib instance. It owns the components, their connections, their resources
 and the decisions about when to create, start, stop or replace them.
 
-This describes the implementation in this branch. It is opt-in:
-**ComponentGraph remains the default engine.**
+This describes the implementation in this branch.
+**ComputationGraph is the only execution engine.**
 
-## What changes when you select it
+## One runtime, existing plugin contracts
 
 You can keep using the existing source, query and reaction APIs and plugins.
-Selecting `ExecutionMode::ComputationGraph` changes the engine behind those APIs;
-it does not merely add another graph while leaving queries on the old engine.
-The old query manager does not evaluate ComputationGraph queries.
+Those APIs use ComputationGraph directly; there is no engine selector or fallback
+query manager. Existing plugin contracts remain supported through adapters, not
+through a second execution engine.
 
 The graph can also run custom sources, transformers, sinks and services without
 a continuous query. A service is a component with background work but no data
@@ -32,8 +32,10 @@ flowchart LR
 ```
 
 The existing ComponentGraph-shaped inspection and event APIs remain available
-for compatibility. They describe what is happening; they do not decide which
-components exist or control ComputationGraph's execution.
+as read-only compatibility views of ComputationGraph publications. There is no
+second mutable ComponentGraph or background task copying runtime state into it.
+These APIs describe what is happening; they do not decide which components exist
+or control execution.
 
 ## A node appears before initialization
 

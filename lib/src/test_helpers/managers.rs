@@ -19,7 +19,7 @@ use crate::{
 use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 /// The same bare-library fixture used by manager scenarios, without the
-/// application builder's built-in topology source. Only construction varies.
+/// application builder's built-in topology source.
 pub(crate) async fn core(
     indexes: Arc<crate::indexes::IndexFactory>,
     middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
@@ -39,17 +39,7 @@ pub(crate) async fn core(
     );
     config.index_factory = indexes;
     let mut core = DrasiLib::new_with_middleware(Arc::new(config), middleware);
-    #[cfg(feature = "computation")]
-    if super::execution_mode() == crate::ExecutionMode::ComputationGraph {
-        let runtime = crate::computation::compatibility::Runtime::new(&core, None)
-            .await
-            .expect("native fixture");
-        core.inspection.set_computation(runtime.clone());
-        core.computation_runtime = Some(runtime);
-        core.state_guard.mark_initialized();
-        return Arc::new(core);
-    }
-    core.initialize().await.expect("legacy fixture");
+    core.initialize().await.expect("computation fixture");
     Arc::new(core)
 }
 
@@ -66,7 +56,7 @@ pub(crate) struct SourceManager(pub Arc<DrasiLib>);
 impl Deref for SourceManager {
     type Target = crate::sources::SourceManager;
     fn deref(&self) -> &Self::Target {
-        &self.0.legacy().source_manager
+        self.0.source_manager()
     }
 }
 impl SourceManager {
@@ -104,11 +94,7 @@ impl SourceManager {
         Ok(self.0.update_source(&id, source).await?)
     }
     pub(crate) async fn start_all(&self) -> anyhow::Result<()> {
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.0.computation_runtime {
-            return runtime.start_kind("source").await;
-        }
-        self.0.legacy().source_manager.start_all().await
+        self.0.computation_runtime.start_kind("source").await
     }
 }
 
@@ -124,33 +110,14 @@ pub(crate) struct ReactionManager(pub Arc<DrasiLib>);
 impl Deref for ReactionManager {
     type Target = crate::reactions::ReactionManager;
     fn deref(&self) -> &Self::Target {
-        &self.0.legacy().reaction_manager
+        self.0.reaction_manager()
     }
 }
 impl ReactionManager {
     pub(crate) async fn add(&self, reaction: impl crate::Reaction + 'static) -> anyhow::Result<()> {
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.0.computation_runtime {
-            return runtime.declare_reaction(Box::new(reaction)).await;
-        }
-        {
-            let mut graph = self.0.component_graph.write().await;
-            let queries = reaction.query_ids();
-            for query in &queries {
-                if !graph.contains(query) {
-                    graph.register_query(query, HashMap::new(), &[])?;
-                }
-            }
-            graph.register_reaction(
-                reaction.id(),
-                HashMap::from([("kind".into(), reaction.type_name().into())]),
-                &queries,
-            )?;
-        }
         self.0
-            .legacy()
-            .reaction_manager
-            .provision_reaction(reaction)
+            .computation_runtime
+            .declare_reaction(Box::new(reaction))
             .await
     }
     pub(crate) async fn delete(&self, id: &str, cleanup: bool) -> anyhow::Result<()> {
@@ -170,11 +137,7 @@ impl ReactionManager {
         Ok(self.0.update_reaction(&id, reaction).await?)
     }
     pub(crate) async fn start_all(&self) -> anyhow::Result<()> {
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.0.computation_runtime {
-            return runtime.start_kind("reaction").await;
-        }
-        self.0.legacy().reaction_manager.start_all().await
+        self.0.computation_runtime.start_kind("reaction").await
     }
 }
 impl QueryManager {
@@ -182,18 +145,7 @@ impl QueryManager {
         &self,
         id: &str,
     ) -> anyhow::Result<Arc<dyn crate::queries::Query>> {
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.0.computation_runtime {
-            let query = runtime.query(id).await?;
-            assert_query_implementation(&self.0, query.as_ref());
-            return Ok(query);
-        }
-        let query = self
-            .0
-            .query_manager()
-            .get_query_instance(id)
-            .await
-            .map_err(anyhow::Error::msg)?;
+        let query = self.0.computation_runtime.query(id).await?;
         assert_query_implementation(&self.0, query.as_ref());
         Ok(query)
     }
@@ -201,48 +153,13 @@ impl QueryManager {
         &self,
         config: crate::config::QueryConfig,
     ) -> anyhow::Result<()> {
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.0.computation_runtime {
-            return runtime.declare_query(config).await;
-        }
-
-        self.0.legacy().query_manager.provision_query(config).await
+        self.0.computation_runtime.declare_query(config).await
     }
     pub(crate) async fn teardown_query(&self, id: String) -> anyhow::Result<()> {
-        #[cfg(feature = "computation")]
-        if self.0.computation_runtime.is_some() {
-            return Ok(self.0.remove_query(&id).await?);
-        }
-        self.0.legacy().query_manager.teardown_query(id).await
+        Ok(self.0.remove_query(&id).await?)
     }
     pub(crate) async fn declare(&self, config: crate::config::QueryConfig) -> anyhow::Result<()> {
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.0.computation_runtime {
-            let result = runtime.declare_query(config).await;
-            if let Err(error) = &result {
-                log::error!("Query fixture declaration failed: {error:#}");
-            }
-            return result;
-        }
-        {
-            let mut graph = self.0.component_graph.write().await;
-            let sources: Vec<_> = config
-                .sources
-                .iter()
-                .map(|source| source.source_id.clone())
-                .collect();
-            for source in &sources {
-                if !graph.contains(source) {
-                    graph.register_source(source, HashMap::new())?;
-                }
-            }
-            graph.register_query(
-                &config.id,
-                HashMap::from([("query".into(), config.query.clone())]),
-                &sources,
-            )?;
-        }
-        self.0.legacy().query_manager.provision_query(config).await
+        self.0.computation_runtime.declare_query(config).await
     }
     pub(crate) async fn add(&self, config: crate::config::QueryConfig) -> anyhow::Result<()> {
         Ok(self.0.add_query(config).await?)
@@ -255,12 +172,8 @@ impl QueryManager {
     }
     pub(crate) async fn start_query_and_wait(&self, id: String) -> anyhow::Result<()> {
         self.0.start_query(&id).await?;
-        #[cfg(feature = "computation")]
-        if self.0.computation_runtime.is_some() {
-            let handle = self.0.computation_component(&id)?;
-            tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_started())
-                .await??;
-        }
+        let handle = self.0.computation_component(&id)?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_started()).await??;
         Ok(())
     }
     pub(crate) async fn stop_query(&self, id: String) -> anyhow::Result<()> {
@@ -275,18 +188,11 @@ impl QueryManager {
     }
 }
 
-pub(crate) fn assert_query_implementation(core: &DrasiLib, query: &dyn crate::queries::Query) {
-    match core.execution_mode() {
-        crate::ExecutionMode::ComponentGraph => assert!(
-            query.as_any().is::<crate::queries::DrasiQuery>(),
-            "component fixture must use the original query implementation"
-        ),
-        #[cfg(feature = "computation")]
-        crate::ExecutionMode::ComputationGraph => assert!(
-            query
-                .as_any()
-                .is::<crate::computation::compatibility::QueryInstance>(),
-            "native fixture must execute a native query, not delegate to DrasiQuery"
-        ),
-    }
+pub(crate) fn assert_query_implementation(_core: &DrasiLib, query: &dyn crate::queries::Query) {
+    assert!(
+        query
+            .as_any()
+            .is::<crate::computation::runtime::QueryInstance>(),
+        "queries must execute through the computation runtime"
+    );
 }

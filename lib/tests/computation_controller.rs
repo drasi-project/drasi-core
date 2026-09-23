@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 #[allow(dead_code)]
 mod computation_support;
@@ -142,7 +142,7 @@ fn sink(
     })
 }
 
-macro_rules! both_runtimes {
+macro_rules! both_tokio_flavors {
     ($name:ident, $scenario:ident) => {
         mod $name {
             #[tokio::test(flavor = "current_thread")]
@@ -276,7 +276,7 @@ async fn independent_activation() {
     assert_eq!(sink_calls.stop.load(Ordering::SeqCst), 1);
 }
 
-both_runtimes!(source_failure_is_not_eof, independent_activation);
+both_tokio_flavors!(source_failure_is_not_eof, independent_activation);
 
 async fn revision_and_generation() {
     let source_calls = Arc::new(Calls::default());
@@ -397,7 +397,7 @@ async fn revision_and_generation() {
     ));
 }
 
-both_runtimes!(live_cas_and_health, revision_and_generation);
+both_tokio_flavors!(live_cas_and_health, revision_and_generation);
 
 struct FailingPipe;
 

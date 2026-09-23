@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 #[test]
 fn generic_graph_modules_do_not_depend_on_legacy_runtime_contracts() {

@@ -33,7 +33,7 @@ use drasi_lib::channels::events::{
     BootstrapEvent, BootstrapEventSender, SourceEvent, SourceEventWrapper,
 };
 use drasi_lib::channels::ChangeReceiver;
-use drasi_lib::component_graph::ComponentUpdateReceiver;
+use drasi_lib::channels::ComponentUpdateReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;

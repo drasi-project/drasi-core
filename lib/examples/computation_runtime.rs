@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The ordinary DrasiLib API, explicitly backed by a ComputationGraph.
-//! Run: cargo run -p drasi-lib --features computation --example computation_runtime
+//! The ordinary DrasiLib API backed by ComputationGraph.
+//! Run: cargo run -p drasi-lib --example computation_runtime
 
-use drasi_lib::{DrasiLib, ExecutionMode, Query};
+use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use std::time::Duration;
@@ -37,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("output receiver already taken"))?;
     let drasi = DrasiLib::builder()
         .with_id("native-runtime-example")
-        .with_execution_mode(ExecutionMode::ComputationGraph)
         .with_source(source)
         .with_query(
             Query::cypher("orders-query")
@@ -63,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     let result = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("output closed"))?;
-    println!("{:?} produced {:?}", drasi.execution_mode(), result.results);
+    println!("ComputationGraph produced {:?}", result.results);
     println!(
         "Current rows: {:?}",
         drasi.get_query_results("orders-query").await?

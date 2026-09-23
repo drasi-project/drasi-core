@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,17 +22,17 @@ use drasi_core::models::{
 use drasi_lib::{
     bootstrap::BootstrapResult,
     channels::{
-        BootstrapEvent, ChangeReceiver, ComponentStatusHandle, QueryResult, SourceEvent,
-        SourceEventWrapper, SubscriptionResponse,
+        BootstrapEvent, ChangeReceiver, ComponentStatusHandle, SourceEvent, SourceEventWrapper,
+        SubscriptionResponse,
     },
     config::SourceSubscriptionSettings,
     profiling::ProfilingMetadata,
-    ComponentStatus, DrasiLib, ExecutionMode, Source, SourceRuntimeContext,
+    ComponentStatus, DrasiLib, Source, SourceRuntimeContext,
 };
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -69,6 +69,7 @@ struct OrderedSource {
     id: String,
     status: ComponentStatusHandle,
     sequence: Arc<AtomicU64>,
+    subscription_count: Arc<AtomicUsize>,
     subscribers: Arc<Mutex<BTreeMap<String, Subscription>>>,
 }
 impl OrderedSource {
@@ -77,8 +78,18 @@ impl OrderedSource {
             id: id.into(),
             status: ComponentStatusHandle::new(id),
             sequence: Arc::new(AtomicU64::new(1)),
+            subscription_count: Arc::new(AtomicUsize::new(0)),
             subscribers: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+    async fn wait_subscriptions(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.subscription_count.load(Ordering::Acquire) < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("query subscriptions were not established");
     }
     async fn emit(&self, timestamp: i64) {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
@@ -212,6 +223,7 @@ impl Source for OrderedSource {
                 bootstrap_count: 0,
             },
         );
+        self.subscription_count.fetch_add(1, Ordering::Release);
         Ok(SubscriptionResponse {
             query_id: settings.query_id,
             source_id: self.id.clone(),
@@ -223,13 +235,12 @@ impl Source for OrderedSource {
     }
 }
 
-async fn scenario(mode: ExecutionMode) -> BTreeMap<String, Vec<Arc<QueryResult>>> {
+async fn scenario() {
     let z = OrderedSource::new("z-source");
     let a = OrderedSource::new("a-source");
     let earlier = OrderedSource::new("early");
     let quiet = OrderedSource::new("quiet");
     let mut builder = DrasiLib::builder()
-        .with_execution_mode(mode)
         .with_source(z.clone())
         .with_source(a.clone())
         .with_source(earlier.clone())
@@ -254,6 +265,9 @@ async fn scenario(mode: ExecutionMode) -> BTreeMap<String, Vec<Arc<QueryResult>>
         .await
         .unwrap()
         .unwrap();
+    for source in [&a, &z, &earlier, &quiet] {
+        source.wait_subscriptions(2).await;
+    }
     a.emit(2_000).await;
     a.emit(2_000).await;
     z.emit(2_000).await;
@@ -267,13 +281,13 @@ async fn scenario(mode: ExecutionMode) -> BTreeMap<String, Vec<Arc<QueryResult>>
     for source in [&a, &z, &earlier, &quiet] {
         source.release_bootstrap().await;
     }
-    let mut traces = BTreeMap::new();
     for id in ["z-first", "a-first"] {
+        core.computation_component(id)
+            .expect("query belongs to the computation graph")
+            .wait_started()
+            .await
+            .unwrap();
         let query = core.query_manager().get_query_instance(id).await.unwrap();
-        assert_eq!(
-            query.as_any().is::<drasi_lib::queries::DrasiQuery>(),
-            mode == ExecutionMode::ComponentGraph,
-        );
         let outbox = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let outbox = query.fetch_outbox(0).await.unwrap();
@@ -291,6 +305,7 @@ async fn scenario(mode: ExecutionMode) -> BTreeMap<String, Vec<Arc<QueryResult>>
             vec![("early", 1), ("a-source", 1), ("a-source", 2), ("z-source", 1), ("z-source", 2)]
         };
         for ((origin, source_sequence), result) in expected.into_iter().zip(&outbox.results) {
+            assert_eq!(result.query_id, id);
             assert_eq!(result.metadata["source_id"], origin);
             assert_eq!(result.results.len(), 1);
             let drasi_lib::channels::ResultDiff::Add { data, .. } = &result.results[0] else {
@@ -316,7 +331,6 @@ async fn scenario(mode: ExecutionMode) -> BTreeMap<String, Vec<Arc<QueryResult>>
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5]
         );
-        traces.insert(id.to_owned(), outbox.results);
     }
     core.stop().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -338,6 +352,9 @@ async fn scenario(mode: ExecutionMode) -> BTreeMap<String, Vec<Arc<QueryResult>>
         .await
         .unwrap()
         .unwrap();
+    for source in [&a, &z, &earlier, &quiet] {
+        source.wait_subscriptions(4).await;
+    }
     a.emit(3_000).await;
     z.emit(3_000).await;
     for source in [&a, &z, &earlier, &quiet] {
@@ -365,33 +382,17 @@ async fn scenario(mode: ExecutionMode) -> BTreeMap<String, Vec<Arc<QueryResult>>
         .unwrap();
     }
     core.shutdown().await.unwrap();
-    traces
 }
 
 #[tokio::test]
-async fn both_runtimes_use_query_specific_source_ranks_without_lexical_or_effective_time_ordering()
-{
-    let legacy = scenario(ExecutionMode::ComponentGraph).await;
-    let native = scenario(ExecutionMode::ComputationGraph).await;
-    for id in ["z-first", "a-first"] {
-        for (legacy, native) in legacy[id].iter().zip(&native[id]) {
-            // Runtime clocks remain intact and were checked above; all result
-            // variants, row signatures, ordering and source metadata must match.
-            assert_eq!(legacy.results, native.results);
-            assert_eq!(legacy.metadata, native.metadata);
-            assert_eq!(legacy.sequence, native.sequence);
-            assert_eq!(legacy.query_id, native.query_id);
-        }
-    }
+async fn query_specific_source_ranks_do_not_use_lexical_or_effective_time_ordering() {
+    scenario().await;
 }
 
 #[tokio::test]
-async fn both_runtimes_process_scheduled_batches_and_keep_original_source_provenance() {
-    let mut traces = Vec::new();
-    for mode in [ExecutionMode::ComponentGraph, ExecutionMode::ComputationGraph] {
-        let source = OrderedSource::new("source");
-        let core = DrasiLib::builder()
-            .with_execution_mode(mode)
+async fn scheduled_batches_keep_original_source_provenance() {
+    let source = OrderedSource::new("source");
+    let core = DrasiLib::builder()
             .with_source(source.clone())
             .with_query(drasi_lib::Query::cypher("timed")
                 .query("MATCH (n:Item) WHERE drasi.trueFor(n.ready, duration({seconds:5})) RETURN n.name AS name")
@@ -400,55 +401,55 @@ async fn both_runtimes_process_scheduled_batches_and_keep_original_source_proven
                 .auto_start(true)
                 .build())
             .build().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), core.start())
-            .await
-            .unwrap()
-            .unwrap();
-        for index in 0..3u64 {
-            source
-                .bootstrap_event(SourceChange::Insert {
-                    element: Element::Node {
-                        metadata: ElementMetadata {
-                            reference: ElementReference::new("source", &format!("node-{index}")),
-                            labels: Arc::from([Arc::from("Item")]),
-                            effective_from: 1_000 + index,
-                        },
-                        properties: ElementPropertyMap::from(serde_json::json!({
-                            "name": format!("node-{index}"), "ready":true,
-                        })),
+    tokio::time::timeout(Duration::from_secs(5), core.start())
+        .await
+        .unwrap()
+        .unwrap();
+    source.wait_subscriptions(1).await;
+    for index in 0..3u64 {
+        source
+            .bootstrap_event(SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("source", &format!("node-{index}")),
+                        labels: Arc::from([Arc::from("Item")]),
+                        effective_from: 1_000 + index,
                     },
-                })
-                .await;
-        }
-        source.release_bootstrap().await;
-        let query = core
-            .query_manager()
-            .get_query_instance("timed")
-            .await
-            .unwrap();
-        let results = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let outbox = query.fetch_outbox(0).await.unwrap();
-                if outbox.results.len() == 3 {
-                    break outbox.results;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
+                    properties: ElementPropertyMap::from(serde_json::json!({
+                        "name": format!("node-{index}"), "ready":true,
+                    })),
+                },
+            })
+            .await;
+    }
+    source.release_bootstrap().await;
+    let query = core
+        .query_manager()
+        .get_query_instance("timed")
         .await
         .unwrap();
-        for (index, result) in results.iter().enumerate() {
-            assert_eq!(result.sequence, index as u64 + 1);
-            assert_eq!(result.metadata["source_id"], "source");
-            assert!(result.profiling.is_some());
+    let results = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let outbox = query.fetch_outbox(0).await.unwrap();
+            if outbox.results.len() == 3 {
+                break outbox.results;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        traces.push(results);
-        core.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result.sequence, index as u64 + 1);
+        assert_eq!(result.query_id, "timed");
+        assert_eq!(result.metadata["source_id"], "source");
+        assert!(result.profiling.is_some());
+        let [drasi_lib::channels::ResultDiff::Add { data, .. }] = result.results.as_slice() else {
+            panic!("expected one scheduled add");
+        };
+        assert_eq!(data, &serde_json::json!({"name": format!("node-{index}")}));
     }
-    for (legacy, native) in traces[0].iter().zip(&traces[1]) {
-        assert_eq!(legacy.results, native.results);
-        assert_eq!(legacy.metadata, native.metadata);
-    }
+    core.shutdown().await.unwrap();
 }
 
 #[tokio::test]

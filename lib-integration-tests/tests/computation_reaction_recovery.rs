@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 #[path = "../../lib/tests/computation_reaction_support/mod.rs"]
 mod computation_reaction_support;
@@ -22,7 +22,7 @@ use computation_reaction_support::{
 };
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::{
-    computation::v1::*, CapacityPolicy, ComponentStatus, DrasiLib, DurabilityConfig, ExecutionMode,
+    computation::v1::*, CapacityPolicy, ComponentStatus, DrasiLib, DurabilityConfig,
     ReactionRecoveryPolicy, StateStoreProvider, StorageBackendRef,
 };
 use drasi_source_application::{
@@ -72,7 +72,6 @@ impl Fixture {
         .unwrap();
         let mut builder = DrasiLib::builder()
             .with_id("computation-reaction-recovery")
-            .with_execution_mode(ExecutionMode::ComputationGraph)
             .with_source(source)
             .with_state_store_provider(state.clone());
         if persistent {

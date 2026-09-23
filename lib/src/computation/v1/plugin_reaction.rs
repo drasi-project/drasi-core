@@ -1381,6 +1381,10 @@ impl ComponentFactory for ReactionPluginAdapterFactory {
 }
 
 #[cfg(test)]
+#[path = "plugin_reaction_recovery_tests.rs"]
+mod recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use drasi_core::evaluation::variable_value::VariableValue;

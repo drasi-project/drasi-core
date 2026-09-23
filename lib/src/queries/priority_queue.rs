@@ -50,6 +50,7 @@ impl Timestamped for RankedSourceEvent {
 pub(crate) struct QueryEventQueue {
     queue: crate::channels::priority_queue::PriorityQueue<RankedSourceEvent>,
     ranks: Arc<HashMap<String, usize>>,
+    scheduled_rank: usize,
 }
 
 impl QueryEventQueue {
@@ -61,22 +62,15 @@ impl QueryEventQueue {
         let mut ranks = HashMap::new();
         for (rank, source) in sources.into_iter().enumerate() {
             anyhow::ensure!(
-                source != crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID,
-                "the scheduled-work source ID is reserved"
-            );
-            anyhow::ensure!(
                 ranks.insert(source.to_owned(), rank).is_none(),
                 "duplicate source subscription '{source}'"
             );
         }
         let scheduled_rank = ranks.len();
-        ranks.insert(
-            crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID.to_owned(),
-            scheduled_rank,
-        );
         Ok(Self {
             queue: crate::channels::priority_queue::PriorityQueue::new(capacity),
             ranks: Arc::new(ranks),
+            scheduled_rank,
         })
     }
 
@@ -90,10 +84,16 @@ impl QueryEventQueue {
         ) {
             return Ok(None);
         }
-        let rank = *self
-            .ranks
-            .get(&event.source_id)
-            .ok_or_else(|| anyhow::anyhow!("undeclared query source '{}'", event.source_id))?;
+        // Scheduled work has its own rank regardless of the diagnostic source
+        // name. A real source named "__future_queue__" remains an ordinary input.
+        let rank = if matches!(event.event, SourceEvent::Control(SourceControl::FuturesDue)) {
+            self.scheduled_rank
+        } else {
+            *self
+                .ranks
+                .get(&event.source_id)
+                .ok_or_else(|| anyhow::anyhow!("undeclared query source '{}'", event.source_id))?
+        };
         let sequence = event.sequence;
         Ok(Some(Arc::new(RankedSourceEvent {
             event,
@@ -296,7 +296,7 @@ mod tests {
         let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
         assert!(QueryEventQueue::new(0, ["source"]).is_err());
         assert!(QueryEventQueue::new(1, ["source", "source"]).is_err());
-        assert!(QueryEventQueue::new(1, [future]).is_err());
+        assert!(QueryEventQueue::new(1, [future]).is_ok());
         let queue = QueryEventQueue::new(1, ["source"]).unwrap();
         assert!(queue
             .enqueue(create_test_event("source", Utc::now()))

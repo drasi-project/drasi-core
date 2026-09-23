@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 #[allow(dead_code)]
 mod computation_support;
@@ -188,7 +188,7 @@ fn cancelled(result: GraphResult<()>) {
     assert!(matches!(result, Err(GraphError::Cancelled)));
 }
 
-macro_rules! both_runtimes {
+macro_rules! both_tokio_flavors {
     ($name:ident, $scenario:ident) => {
         mod $name {
             #[tokio::test(flavor = "current_thread")]
@@ -301,7 +301,7 @@ async fn replace_sink_at_safe_boundary() {
     });
     cancelled(result);
 }
-both_runtimes!(sink_replacement, replace_sink_at_safe_boundary);
+both_tokio_flavors!(sink_replacement, replace_sink_at_safe_boundary);
 
 async fn add_remove_preserves_stable_indices() {
     let upstream = Arc::new(Calls::default());
@@ -397,7 +397,7 @@ async fn add_remove_preserves_stable_indices() {
     });
     cancelled(result);
 }
-both_runtimes!(live_add_remove, add_remove_preserves_stable_indices);
+both_tokio_flavors!(live_add_remove, add_remove_preserves_stable_indices);
 
 struct RecordingProvider(Arc<Mutex<Vec<Arc<dyn EnvelopeSender>>>>);
 impl PipeProvider for RecordingProvider {
@@ -1010,7 +1010,7 @@ async fn retained_backlog_boundaries() {
         cancelled(result);
     }
 }
-both_runtimes!(retained_reconciliation, retained_backlog_boundaries);
+both_tokio_flavors!(retained_reconciliation, retained_backlog_boundaries);
 
 struct GatedTransform {
     descriptor: ComponentDescriptor,
@@ -1125,7 +1125,7 @@ async fn drain_multi_hop_backlog() {
     });
     cancelled(result);
 }
-both_runtimes!(multi_hop_drain, drain_multi_hop_backlog);
+both_tokio_flavors!(multi_hop_drain, drain_multi_hop_backlog);
 
 struct StoreCleanup {
     store: Arc<MemoryEnvelopeStore>,

@@ -264,7 +264,7 @@ async fn wait_for_status(drasi: &DrasiLib, component: &str, id: &str, expected: 
 /// This validates the host-managed query subscription model where:
 /// 1. Source dispatches SourceChange events
 /// 2. Query subscribes to source, processes events through drasi-core
-/// 3. ReactionManager subscribes to query on behalf of reaction
+/// 3. The computation runtime subscribes to the query on behalf of the reaction
 /// 4. QueryResults are forwarded to reaction via `enqueue_query_result()`
 /// 5. Reaction's processing task receives and processes the results
 #[tokio::test]

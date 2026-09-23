@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! One DrasiLib instance, one shared legacy source, two independent query engines.
-//! Run: cargo run -p drasi-lib --features computation --example computation_instance
+//! One DrasiLib instance, one shared plugin source, two independent computation graphs.
+//! Run: cargo run -p drasi-lib --example computation_instance
 
 use drasi_lib::{
     computation::v1::{
@@ -40,29 +40,29 @@ async fn main() -> anyhow::Result<()> {
         .from_source("orders")
         .enable_bootstrap(false)
         .build();
-    let (legacy_reaction, legacy_handle) =
-        ApplicationReaction::new("legacy-output", vec![query.id.clone()]);
-    let mut legacy_output = legacy_handle
+    let (ordinary_reaction, ordinary_handle) =
+        ApplicationReaction::new("ordinary-output", vec![query.id.clone()]);
+    let mut ordinary_output = ordinary_handle
         .take_receiver()
         .await
-        .ok_or_else(|| anyhow::anyhow!("legacy receiver already taken"))?;
+        .ok_or_else(|| anyhow::anyhow!("ordinary receiver already taken"))?;
     let drasi = DrasiLib::builder()
         .with_id("parallel-example")
         .with_source(source)
         .with_query(query.clone())
-        .with_reaction(legacy_reaction)
+        .with_reaction(ordinary_reaction)
         .build()
         .await?;
 
-    let pipeline = drasi.computation_pipeline("native-orders")?;
-    let (native_reaction, native_handle) =
-        ApplicationReaction::new("native-output", vec![query.id.clone()]);
-    let mut native_output = native_handle
+    let pipeline = drasi.computation_pipeline("additional-orders")?;
+    let (additional_reaction, additional_handle) =
+        ApplicationReaction::new("additional-output", vec![query.id.clone()]);
+    let mut additional_output = additional_handle
         .take_receiver()
         .await
-        .ok_or_else(|| anyhow::anyhow!("native receiver already taken"))?;
+        .ok_or_else(|| anyhow::anyhow!("additional receiver already taken"))?;
     let reaction = ReactionPluginHost::owned(
-        Box::new(native_reaction),
+        Box::new(additional_reaction),
         pipeline.services(),
         pipeline.catalog(),
         ReactionPluginOptions::default(),
@@ -90,34 +90,40 @@ async fn main() -> anyhow::Result<()> {
                 .build(),
         )
         .await?;
-    let (legacy, native) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(legacy_output.recv(), native_output.recv())
+    let (ordinary, additional) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(ordinary_output.recv(), additional_output.recv())
     })
     .await?;
-    let legacy = legacy.ok_or_else(|| anyhow::anyhow!("legacy output closed"))?;
-    let native = native.ok_or_else(|| anyhow::anyhow!("native output closed"))?;
-    anyhow::ensure!(legacy.results == native.results, "query results differ");
-    println!("Both engines produced: {:?}", native.results);
+    let ordinary = ordinary.ok_or_else(|| anyhow::anyhow!("ordinary output closed"))?;
+    let additional = additional.ok_or_else(|| anyhow::anyhow!("additional output closed"))?;
+    anyhow::ensure!(
+        ordinary.results == additional.results,
+        "query results differ"
+    );
+    println!("Both graphs produced: {:?}", additional.results);
     println!(
-        "Native graph revision: {:?}",
+        "Additional graph revision: {:?}",
         handle.inspector().snapshot().desired.revision
     );
 
-    drasi.stop_computation_graph("native-orders").await?;
+    drasi.stop_computation_graph("additional-orders").await?;
     input
         .send_node_insert(
             "two",
             vec!["Order"],
             PropertyMapBuilder::new()
-                .with_string("name", "Legacy still running")
+                .with_string("name", "Ordinary pipeline still running")
                 .build(),
         )
         .await?;
-    let result = tokio::time::timeout(Duration::from_secs(5), legacy_output.recv())
+    let result = tokio::time::timeout(Duration::from_secs(5), ordinary_output.recv())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("legacy output stopped"))?;
-    println!("After stopping only the native graph: {:?}", result.results);
-    // This transient source has no replay: events sent while native is stopped
+        .ok_or_else(|| anyhow::anyhow!("ordinary output stopped"))?;
+    println!(
+        "After stopping only the additional graph: {:?}",
+        result.results
+    );
+    // This transient source has no replay: events sent while the extra graph is stopped
     // are intentionally not recoverable by that subscriber.
     drasi.shutdown().await?;
     Ok(())

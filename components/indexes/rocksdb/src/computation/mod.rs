@@ -78,7 +78,7 @@ impl ComputationIndexProvider for RocksDbComputationProvider {
     ) -> Result<ComputationIndexes, IndexError> {
         let graph = scope_segment(graph_id)?;
         let query = scope_segment(query_id)?;
-        let path = self.path.join("computation-v1").join(graph);
+        let path = crate::plugin::storage_directory(&self.path.join("computation-v1"), &graph);
         let path = path.to_str().ok_or_else(|| {
             IndexError::other(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

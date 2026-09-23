@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![cfg(test)]
 #![cfg(all(
     feature = "computation-rocksdb-tests",
     any(feature = "middleware-unwind", feature = "middleware-all")

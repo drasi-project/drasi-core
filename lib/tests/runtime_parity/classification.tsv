@@ -1,4 +1,6 @@
-# Longest matching prefix wins. Corpus pinned at 01813156842035ac6c9539c8996536f94cab8676.
+# Historical classification: longest matching prefix wins.
+# Corpus pinned at 01813156842035ac6c9539c8996536f94cab8676, before the sole-runtime port.
+# Old engine descriptions are historical; case-mappings.tsv requires executing replacements.
 # prefix	classification	reason
 lib::bootstrap::component_graph::tests::	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
 lib::bootstrap::tests::	shared	Unchanged bootstrap configuration values and serialization.

@@ -120,7 +120,6 @@ use drasi_core::models::SourceMiddlewareConfig;
 /// # }
 /// ```
 pub struct DrasiLibBuilder {
-    execution_mode: crate::ExecutionMode,
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
@@ -148,7 +147,6 @@ pub struct DrasiLibBuilder {
     secret_store_provider: Option<Arc<dyn SecretStoreProvider>>,
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     default_index_backend: Option<crate::indexes::StorageBackendRef>,
-    #[cfg(feature = "computation")]
     computation_graphs: Vec<(
         crate::computation::v1::ComputationGraph,
         crate::computation::v1::ComputationOptions,
@@ -162,15 +160,7 @@ impl Default for DrasiLibBuilder {
 }
 
 impl DrasiLibBuilder {
-    /// Select the implementation behind the normal source/query/reaction APIs.
-    /// The default remains ComponentGraph even when computation is enabled.
-    pub fn with_execution_mode(mut self, mode: crate::ExecutionMode) -> Self {
-        self.execution_mode = mode;
-        self
-    }
-    /// Register a parallel computation graph with instance-owned execution.
-    /// It does not add its nodes to the existing ComponentGraph.
-    #[cfg(feature = "computation")]
+    /// Register an additional computation graph with instance-owned execution.
     pub fn with_computation_graph(
         mut self,
         graph: crate::computation::v1::ComputationGraph,
@@ -183,10 +173,6 @@ impl DrasiLibBuilder {
     /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
-            #[cfg(test)]
-            execution_mode: crate::test_helpers::execution_mode(),
-            #[cfg(not(test))]
-            execution_mode: crate::ExecutionMode::default(),
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -202,7 +188,6 @@ impl DrasiLibBuilder {
             secret_store_provider: None,
             default_recovery_policy: None,
             default_index_backend: None,
-            #[cfg(feature = "computation")]
             computation_graphs: Vec::new(),
         }
     }
@@ -515,14 +500,9 @@ impl DrasiLibBuilder {
     /// This validates the configuration, creates all components, and initializes the server.
     /// After building, you can call `start()` to begin processing.
     pub async fn build(self) -> Result<DrasiLib> {
-        #[cfg(feature = "computation")]
-        {
-            let mut builder = self;
-            let graphs = std::mem::take(&mut builder.computation_graphs);
-            crate::computation::instance::build_instance(builder.build_inner(), graphs).await
-        }
-        #[cfg(not(feature = "computation"))]
-        self.build_inner().await
+        let mut builder = self;
+        let graphs = std::mem::take(&mut builder.computation_graphs);
+        crate::computation::instance::build_instance(builder.build_inner(), graphs).await
     }
 
     async fn build_inner(self) -> Result<DrasiLib> {
@@ -535,40 +515,26 @@ impl DrasiLibBuilder {
             queries: self.query_configs.clone(),
         };
 
-        #[cfg(feature = "computation")]
-        let node_first = self.execution_mode == crate::ExecutionMode::ComputationGraph;
-        #[cfg(not(feature = "computation"))]
-        let node_first = false;
+        // Query validation belongs to graph realization, after node declaration.
         let mut validation_config = config.clone();
-        if node_first {
-            validation_config.queries.clear();
-        }
+        validation_config.queries.clear();
         validation_config
             .validate()
             .map_err(|e| DrasiError::validation(e.to_string()))?;
 
-        // Strict referential validation for query storage backends. Config-level
-        // validation (DrasiLibConfig::validate) is intentionally lenient about named
-        // references because injected providers are only known here. We perform the
-        // authoritative check now, where both declared backends and injected provider
-        // names are available, so any misconfiguration fails at build time rather than
-        // being deferred to (possibly manual) query start.
+        // Validate instance-level provider bindings before declaring any nodes.
         {
             use crate::indexes::config::{StorageBackendRef, StorageBackendSpec};
 
             // Declared backends, classified as in-memory or plugin (by kind).
             let mut declared_memory: std::collections::HashSet<&str> =
                 std::collections::HashSet::new();
-            let mut declared_plugin: std::collections::HashMap<&str, &str> =
-                std::collections::HashMap::new();
             for b in &config.storage_backends {
                 match &b.spec {
                     StorageBackendSpec::Memory { .. } => {
                         declared_memory.insert(b.id.as_str());
                     }
-                    StorageBackendSpec::Plugin { kind } => {
-                        declared_plugin.insert(b.id.as_str(), kind.as_str());
-                    }
+                    StorageBackendSpec::Plugin { .. } => {}
                 }
             }
 
@@ -581,42 +547,6 @@ impl DrasiLibBuilder {
                         "Injected index provider '{name}' collides with a storage backend \
                          declared as 'memory'. Rename the provider or the storage backend."
                     )));
-                }
-            }
-
-            for query in config.queries.iter().filter(|_| !node_first) {
-                match &query.storage_backend {
-                    Some(StorageBackendRef::Named(name)) => {
-                        if self.index_providers.contains_key(name)
-                            || declared_memory.contains(name.as_str())
-                        {
-                            // Resolvable: injected provider or in-memory backend.
-                        } else if let Some(kind) = declared_plugin.get(name.as_str()) {
-                            return Err(DrasiError::validation(format!(
-                                "Query '{}' references storage backend '{}' (kind '{}') which is \
-                                 declared but has no injected provider. Inject one via \
-                                 with_index_provider(\"{}\", ...).",
-                                query.id, name, kind, name
-                            )));
-                        } else {
-                            return Err(DrasiError::validation(format!(
-                                "Query '{}' references unknown storage backend '{}'. Declare it in \
-                                 storage_backends or inject a provider via \
-                                 with_index_provider(\"{}\", ...).",
-                                query.id, name, name
-                            )));
-                        }
-                    }
-                    Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind })) => {
-                        return Err(DrasiError::validation(format!(
-                            "Query '{}' uses an inline '{}' storage backend, which is not \
-                             supported in embedded mode. Declare a named storage backend and \
-                             inject a provider via with_index_provider(name, ...).",
-                            query.id, kind
-                        )));
-                    }
-                    // Inline Memory or no backend: nothing to validate here.
-                    Some(StorageBackendRef::Inline(StorageBackendSpec::Memory { .. })) | None => {}
                 }
             }
 
@@ -646,228 +576,14 @@ impl DrasiLibBuilder {
             self.default_recovery_policy,
             self.default_index_backend,
         ));
-        #[cfg(feature = "computation")]
-        if self.execution_mode == crate::ExecutionMode::ComputationGraph {
-            return crate::computation::compatibility::build(
-                runtime_config,
-                self.source_instances,
-                self.reaction_instances,
-                self.bootstrap_metadata,
-                self.wal_provider,
-            )
-            .await;
-        }
-        let mut core = DrasiLib::new(runtime_config);
-
-        // Inject state store before provisioning sources (they need it for initialization)
-        let state_store = core.config.state_store_provider.clone();
-        core.legacy()
-            .source_manager
-            .inject_state_store(state_store.clone())
-            .await;
-        core.legacy()
-            .reaction_manager
-            .inject_state_store(state_store)
-            .await;
-
-        // Inject WAL provider into SourceManager (if configured)
-        // This allows transient sources to persist events for crash recovery
-        if let Some(wal_provider) = self.wal_provider {
-            #[cfg(feature = "computation")]
-            {
-                *core
-                    .computation_registry
-                    .wal
-                    .lock()
-                    .map_err(|_| DrasiError::invalid_state("computation WAL binding poisoned"))? =
-                    Some(wal_provider.clone());
-            }
-            core.legacy()
-                .source_manager
-                .inject_wal_provider(wal_provider)
-                .await;
-        }
-
-        // Register the component graph source BEFORE initialize (which loads query config).
-        // Queries reference sources, so sources must exist in the graph first.
-        {
-            use crate::sources::component_graph_source::ComponentGraphSource;
-            let graph_source = ComponentGraphSource::new(
-                core.component_event_broadcast_tx.clone(),
-                core.config.id.clone(),
-                core.component_graph.clone(),
-            )
-            .map_err(|e| {
-                DrasiError::operation_failed(
-                    "source",
-                    "component-graph",
-                    "add",
-                    format!("Failed to create: {e}"),
-                )
-            })?;
-
-            let source_id = graph_source.id().to_string();
-            let source_type = graph_source.type_name().to_string();
-            {
-                let mut graph = core.component_graph.write().await;
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("kind".to_string(), source_type);
-                metadata.insert(
-                    "autoStart".to_string(),
-                    graph_source.auto_start().to_string(),
-                );
-                graph.register_source(&source_id, metadata).map_err(|e| {
-                    DrasiError::operation_failed(
-                        "source",
-                        &source_id,
-                        "add",
-                        format!("Failed to register: {e}"),
-                    )
-                })?;
-            }
-            if let Err(e) = core
-                .legacy()
-                .source_manager
-                .provision_source(graph_source)
-                .await
-            {
-                let mut graph = core.component_graph.write().await;
-                let _ = graph.deregister(&source_id);
-                return Err(DrasiError::operation_failed(
-                    "source",
-                    &source_id,
-                    "add",
-                    format!("Failed to provision: {e}"),
-                ));
-            }
-        }
-
-        // Inject pre-built source instances BEFORE initialize.
-        // Queries reference sources by ID, so sources must be in the graph first.
-        for (source, extra_metadata) in self.source_instances {
-            let source_id = source.id().to_string();
-            let source_type = source.type_name().to_string();
-            let auto_start = source.auto_start();
-
-            {
-                let mut graph = core.component_graph.write().await;
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("kind".to_string(), source_type);
-                metadata.insert("autoStart".to_string(), auto_start.to_string());
-                metadata.extend(extra_metadata);
-                graph.register_source(&source_id, metadata).map_err(|e| {
-                    DrasiError::operation_failed(
-                        "source",
-                        &source_id,
-                        "add",
-                        format!("Failed to register: {e}"),
-                    )
-                })?;
-            }
-            if let Err(e) = core.legacy().source_manager.provision_source(source).await {
-                let mut graph = core.component_graph.write().await;
-                let _ = graph.deregister(&source_id);
-                return Err(DrasiError::operation_failed(
-                    "source",
-                    &source_id,
-                    "add",
-                    format!("Failed to provision: {e}"),
-                ));
-            }
-        }
-
-        // Register bootstrap provider metadata in the component graph.
-        // This enables snapshot_configuration() to persist and reconstruct
-        // bootstrap provider configurations.
-        for (source_id, kind, properties) in self.bootstrap_metadata {
-            let bp_id = format!("{source_id}-bootstrap");
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("kind".to_string(), kind);
-            for (key, value) in properties {
-                metadata.insert(key, serde_json::to_string(&value).unwrap_or_default());
-            }
-            let mut graph = core.component_graph.write().await;
-            if let Err(e) = graph.register_bootstrap_provider(
-                &bp_id,
-                metadata,
-                std::slice::from_ref(&source_id),
-            ) {
-                log::warn!(
-                    "Failed to register bootstrap provider metadata for source '{source_id}': {e}"
-                );
-            }
-        }
-
-        // Initialize the server (loads query configurations — sources must already be registered)
-        core.initialize().await?;
-
-        // Inject pre-built reaction instances
-        for (reaction, extra_metadata) in self.reaction_instances {
-            let reaction_id = reaction.id().to_string();
-            let reaction_type = reaction.type_name().to_string();
-            let query_ids = reaction.query_ids();
-
-            // Register in graph first, then provision
-            {
-                let mut graph = core.component_graph.write().await;
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("kind".to_string(), reaction_type);
-                metadata.extend(extra_metadata);
-                graph
-                    .register_reaction(&reaction_id, metadata, &query_ids)
-                    .map_err(|e| {
-                        DrasiError::operation_failed(
-                            "reaction",
-                            &reaction_id,
-                            "add",
-                            format!("Failed to register: {e}"),
-                        )
-                    })?;
-            }
-            if let Err(e) = core
-                .legacy()
-                .reaction_manager
-                .provision_reaction(reaction)
-                .await
-            {
-                let mut graph = core.component_graph.write().await;
-                let _ = graph.deregister(&reaction_id);
-                return Err(DrasiError::operation_failed(
-                    "reaction",
-                    &reaction_id,
-                    "add",
-                    format!("Failed to provision: {e}"),
-                ));
-            }
-        }
-
-        // Register the identity provider in the component graph (if configured).
-        // This creates an IdentityProvider node with Authenticates edges to all
-        // sources and reactions that receive credentials from it.
-        if core.config.identity_provider.is_some() {
-            let mut graph = core.component_graph.write().await;
-            let component_ids: Vec<String> = graph
-                .list_by_kind(&crate::component_graph::ComponentKind::Source)
-                .into_iter()
-                .chain(graph.list_by_kind(&crate::component_graph::ComponentKind::Reaction))
-                .map(|(id, _)| id)
-                .collect();
-
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("kind".to_string(), "identity_provider".to_string());
-            graph
-                .register_identity_provider("identity-provider", metadata, &component_ids)
-                .map_err(|e| {
-                    DrasiError::operation_failed(
-                        "identity_provider",
-                        "identity-provider",
-                        "add",
-                        format!("Failed to register: {e}"),
-                    )
-                })?;
-        }
-
-        Ok(core)
+        crate::computation::runtime::build(
+            runtime_config,
+            self.source_instances,
+            self.reaction_instances,
+            self.bootstrap_metadata,
+            self.wal_provider,
+        )
+        .await
     }
 }
 
@@ -1375,57 +1091,48 @@ mod tests {
             .with_storage_backend(StorageBackendRef::Named("nope".to_string()))
             .build();
         let result = DrasiLibBuilder::new().with_query(query).build().await;
-        match crate::test_helpers::execution_mode() {
-            crate::ExecutionMode::ComponentGraph => {
-                let err = result
-                    .map(|_| ())
-                    .expect_err("unknown named backend should fail");
-                assert!(err.to_string().contains("unknown storage backend"));
-            }
-            #[cfg(feature = "computation")]
-            crate::ExecutionMode::ComputationGraph => {
-                use crate::computation::v1::{GraphError, RealizationState};
-                use crate::indexes::IndexError;
+        {
+            use crate::computation::v1::{GraphError, RealizationState};
+            use crate::indexes::IndexError;
 
-                let core = result.expect("native builder should admit the query node");
-                let handle = core.computation_component("q").expect("declared query");
-                let err =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
-                        .await
-                        .expect("query creation should settle")
-                        .expect_err("unknown named backend should fail query creation");
-                let GraphError::Reported { cause } = err else {
-                    panic!("expected a recorded creation failure: {err:?}");
-                };
-                let GraphError::Creation {
-                    component, source, ..
-                } = cause.as_ref()
-                else {
-                    panic!("unexpected creation failure: {cause:?}");
-                };
-                assert_eq!(component.as_str(), "q");
-                assert!(
-                    matches!(source.downcast_ref::<IndexError>(),
+            let core = result.expect("native builder should admit the query node");
+            let handle = core.computation_component("q").expect("declared query");
+            let err =
+                tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
+                    .await
+                    .expect("query creation should settle")
+                    .expect_err("unknown named backend should fail query creation");
+            let GraphError::Reported { cause } = err else {
+                panic!("expected a recorded creation failure: {err:?}");
+            };
+            let GraphError::Creation {
+                component, source, ..
+            } = cause.as_ref()
+            else {
+                panic!("unexpected creation failure: {cause:?}");
+            };
+            assert_eq!(component.as_str(), "q");
+            assert!(
+                matches!(source.downcast_ref::<IndexError>(),
                         Some(IndexError::UnknownStore(name)) if name == "nope"),
-                    "unexpected backend failure: {source:?}"
-                );
-                assert_eq!(
-                    handle.observed().expect("retained query node").realization,
-                    RealizationState::CreationFailed
-                );
-                assert_eq!(
-                    serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
-                    serde_json::to_value(&core.get_config().queries[0]).unwrap()
-                );
-                assert!(core
-                    .computation_control()
-                    .unwrap()
-                    .desired_snapshot()
-                    .nodes
-                    .iter()
-                    .any(|node| node.descriptor.id().as_str() == "q"));
-                core.shutdown().await.unwrap();
-            }
+                "unexpected backend failure: {source:?}"
+            );
+            assert_eq!(
+                handle.observed().expect("retained query node").realization,
+                RealizationState::CreationFailed
+            );
+            assert_eq!(
+                serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
+                serde_json::to_value(&core.get_config().queries[0]).unwrap()
+            );
+            assert!(core
+                .computation_control()
+                .unwrap()
+                .desired_snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.descriptor.id().as_str() == "q"));
+            core.shutdown().await.unwrap();
         }
     }
 
@@ -1470,57 +1177,48 @@ mod tests {
             .with_query(query)
             .build()
             .await;
-        match crate::test_helpers::execution_mode() {
-            crate::ExecutionMode::ComponentGraph => {
-                let err = result
-                    .map(|_| ())
-                    .expect_err("declared plugin without provider should fail");
-                assert!(err.to_string().contains("no injected provider"));
-            }
-            #[cfg(feature = "computation")]
-            crate::ExecutionMode::ComputationGraph => {
-                use crate::computation::v1::{GraphError, RealizationState};
-                use crate::indexes::IndexError;
+        {
+            use crate::computation::v1::{GraphError, RealizationState};
+            use crate::indexes::IndexError;
 
-                let core = result.expect("native builder should admit the query node");
-                let handle = core.computation_component("q").expect("declared query");
-                let err =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
-                        .await
-                        .expect("query creation should settle")
-                        .expect_err("declared plugin without provider should fail query creation");
-                let GraphError::Reported { cause } = err else {
-                    panic!("expected a recorded creation failure: {err:?}");
-                };
-                let GraphError::Creation {
-                    component, source, ..
-                } = cause.as_ref()
-                else {
-                    panic!("unexpected creation failure: {cause:?}");
-                };
-                assert_eq!(component.as_str(), "q");
-                assert!(
-                    matches!(source.downcast_ref::<IndexError>(),
+            let core = result.expect("native builder should admit the query node");
+            let handle = core.computation_component("q").expect("declared query");
+            let err =
+                tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
+                    .await
+                    .expect("query creation should settle")
+                    .expect_err("declared plugin without provider should fail query creation");
+            let GraphError::Reported { cause } = err else {
+                panic!("expected a recorded creation failure: {err:?}");
+            };
+            let GraphError::Creation {
+                component, source, ..
+            } = cause.as_ref()
+            else {
+                panic!("unexpected creation failure: {cause:?}");
+            };
+            assert_eq!(component.as_str(), "q");
+            assert!(
+                matches!(source.downcast_ref::<IndexError>(),
                         Some(IndexError::UnknownStore(name)) if name == "rocks"),
-                    "unexpected backend failure: {source:?}"
-                );
-                assert_eq!(
-                    handle.observed().expect("retained query node").realization,
-                    RealizationState::CreationFailed
-                );
-                assert_eq!(
-                    serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
-                    serde_json::to_value(&core.get_config().queries[0]).unwrap()
-                );
-                assert!(core
-                    .computation_control()
-                    .unwrap()
-                    .desired_snapshot()
-                    .nodes
-                    .iter()
-                    .any(|node| node.descriptor.id().as_str() == "q"));
-                core.shutdown().await.unwrap();
-            }
+                "unexpected backend failure: {source:?}"
+            );
+            assert_eq!(
+                handle.observed().expect("retained query node").realization,
+                RealizationState::CreationFailed
+            );
+            assert_eq!(
+                serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
+                serde_json::to_value(&core.get_config().queries[0]).unwrap()
+            );
+            assert!(core
+                .computation_control()
+                .unwrap()
+                .desired_snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.descriptor.id().as_str() == "q"));
+            core.shutdown().await.unwrap();
         }
     }
 
@@ -1535,59 +1233,50 @@ mod tests {
             }))
             .build();
         let result = DrasiLibBuilder::new().with_query(query).build().await;
-        match crate::test_helpers::execution_mode() {
-            crate::ExecutionMode::ComponentGraph => {
-                let err = result
-                    .map(|_| ())
-                    .expect_err("inline plugin backend should fail in embedded mode");
-                assert!(err.to_string().contains("not supported in embedded mode"));
-            }
-            #[cfg(feature = "computation")]
-            crate::ExecutionMode::ComputationGraph => {
-                use crate::computation::v1::{GraphError, RealizationState};
-                use crate::indexes::IndexError;
+        {
+            use crate::computation::v1::{GraphError, RealizationState};
+            use crate::indexes::IndexError;
 
-                let core = result.expect("native builder should admit the query node");
-                let handle = core.computation_component("q").expect("declared query");
-                let err =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
-                        .await
-                        .expect("query creation should settle")
-                        .expect_err("inline plugin backend should fail query creation");
-                let GraphError::Reported { cause } = err else {
-                    panic!("expected a recorded creation failure: {err:?}");
-                };
-                let GraphError::Creation {
-                    component, source, ..
-                } = cause.as_ref()
-                else {
-                    panic!("unexpected creation failure: {cause:?}");
-                };
-                assert_eq!(component.as_str(), "q");
-                assert!(
-                    matches!(
-                        source.downcast_ref::<IndexError>(),
-                        Some(IndexError::NotSupported)
-                    ),
-                    "unexpected backend failure: {source:?}"
-                );
-                assert_eq!(
-                    handle.observed().expect("retained query node").realization,
-                    RealizationState::CreationFailed
-                );
-                assert_eq!(
-                    serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
-                    serde_json::to_value(&core.get_config().queries[0]).unwrap()
-                );
-                assert!(core
-                    .computation_control()
-                    .unwrap()
-                    .desired_snapshot()
-                    .nodes
-                    .iter()
-                    .any(|node| node.descriptor.id().as_str() == "q"));
-                core.shutdown().await.unwrap();
-            }
+            let core = result.expect("native builder should admit the query node");
+            let handle = core.computation_component("q").expect("declared query");
+            let err =
+                tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_created())
+                    .await
+                    .expect("query creation should settle")
+                    .expect_err("inline plugin backend should fail query creation");
+            let GraphError::Reported { cause } = err else {
+                panic!("expected a recorded creation failure: {err:?}");
+            };
+            let GraphError::Creation {
+                component, source, ..
+            } = cause.as_ref()
+            else {
+                panic!("unexpected creation failure: {cause:?}");
+            };
+            assert_eq!(component.as_str(), "q");
+            assert!(
+                matches!(
+                    source.downcast_ref::<IndexError>(),
+                    Some(IndexError::NotSupported)
+                ),
+                "unexpected backend failure: {source:?}"
+            );
+            assert_eq!(
+                handle.observed().expect("retained query node").realization,
+                RealizationState::CreationFailed
+            );
+            assert_eq!(
+                serde_json::to_value(core.get_query_config("q").await.unwrap()).unwrap(),
+                serde_json::to_value(&core.get_config().queries[0]).unwrap()
+            );
+            assert!(core
+                .computation_control()
+                .unwrap()
+                .desired_snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.descriptor.id().as_str() == "q"));
+            core.shutdown().await.unwrap();
         }
     }
 

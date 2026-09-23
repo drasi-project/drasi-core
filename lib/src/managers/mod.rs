@@ -16,7 +16,6 @@
 
 mod component_log;
 mod event_history;
-pub(crate) mod lifecycle_helpers;
 mod logging;
 mod tracing_layer;
 

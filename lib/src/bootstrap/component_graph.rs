@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use drasi_core::models::{ElementPropertyMap, ElementValue, SourceChange};
 use log::info;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use crate::channels::*;
@@ -35,15 +34,14 @@ use crate::sources::graph_elements::{make_node, make_relation, status_str};
 
 /// Bootstrap provider that generates a consistent snapshot from the [`ComponentGraph`].
 ///
-/// Takes a single read lock on the graph, iterates all nodes and edges, and
-/// translates them into `SourceChange::Insert` elements. This replaces the
-/// previous approach of querying three separate managers independently.
+/// Reads one authoritative computation publication and translates its component
+/// snapshot into `SourceChange::Insert` elements.
 pub struct ComponentGraphBootstrapProvider {
-    graph: Arc<RwLock<ComponentGraph>>,
+    graph: ComponentGraph,
 }
 
 impl ComponentGraphBootstrapProvider {
-    pub fn new(graph: Arc<RwLock<ComponentGraph>>) -> Self {
+    pub fn new(graph: ComponentGraph) -> Self {
         Self { graph }
     }
 }
@@ -63,7 +61,7 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
         );
 
         // Take a single atomic snapshot of the graph
-        let snapshot = self.graph.read().await.snapshot();
+        let snapshot = self.graph.snapshot().await?;
         let mut count: u64 = 0;
 
         // Emit all nodes
@@ -221,7 +219,6 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
 mod tests {
     use super::*;
     use drasi_core::models::Element;
-    use std::collections::HashMap;
     use tokio::sync::mpsc;
 
     fn make_request(query_id: &str) -> BootstrapRequest {
@@ -240,18 +237,25 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_new_creates_provider_with_graph_reference() {
-        let (graph, _rx) = ComponentGraph::new("test-instance");
-        let graph = Arc::new(RwLock::new(graph));
-        let _provider = ComponentGraphBootstrapProvider::new(graph);
+    #[tokio::test]
+    async fn test_new_creates_provider_with_graph_reference() {
+        let core = crate::DrasiLib::builder()
+            .with_id("test-instance")
+            .build()
+            .await
+            .unwrap();
+        let _provider = ComponentGraphBootstrapProvider::new(core.component_graph());
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_bootstrap_empty_graph() {
-        let (graph, _rx) = ComponentGraph::new("test-instance");
-        let graph = Arc::new(RwLock::new(graph));
-        let provider = ComponentGraphBootstrapProvider::new(graph);
+        let core = crate::DrasiLib::builder()
+            .with_id("test-instance")
+            .build()
+            .await
+            .unwrap();
+        let provider = ComponentGraphBootstrapProvider::new(core.component_graph());
 
         let (tx, mut rx) = mpsc::channel::<BootstrapEvent>(100);
         let request = make_request("test-query");
@@ -280,19 +284,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_bootstrap_with_sources_and_queries() {
-        let (mut graph, _rx) = ComponentGraph::new("test-instance");
-        graph.register_source("src1", HashMap::new()).unwrap();
-        graph.register_source("src2", HashMap::new()).unwrap();
-        graph
-            .register_query(
-                "q1",
-                HashMap::new(),
-                &["src1".to_string(), "src2".to_string()],
+        let core = crate::DrasiLib::builder()
+            .with_id("test-instance")
+            .with_source(crate::sources::tests::TestMockSource::new("src1".into()).unwrap())
+            .with_source(crate::sources::tests::TestMockSource::new("src2".into()).unwrap())
+            .with_query(
+                crate::Query::cypher("q1")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("src1")
+                    .from_source("src2")
+                    .auto_start(false)
+                    .build(),
             )
+            .build()
+            .await
             .unwrap();
-
-        let graph = Arc::new(RwLock::new(graph));
-        let provider = ComponentGraphBootstrapProvider::new(graph);
+        let provider = ComponentGraphBootstrapProvider::new(core.component_graph());
 
         let (tx, mut rx) = mpsc::channel::<BootstrapEvent>(100);
         let request = make_request("test-query");
@@ -331,17 +338,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_bootstrap_emitted_labels_match_component_kind() {
-        let (mut graph, _rx) = ComponentGraph::new("test-instance");
-        graph.register_source("my-source", HashMap::new()).unwrap();
-        graph
-            .register_query("my-query", HashMap::new(), &["my-source".to_string()])
+        let core = crate::DrasiLib::builder()
+            .with_id("test-instance")
+            .with_source(crate::sources::tests::TestMockSource::new("my-source".into()).unwrap())
+            .with_query(
+                crate::Query::cypher("my-query")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("my-source")
+                    .auto_start(false)
+                    .build(),
+            )
+            .with_reaction(
+                crate::reactions::tests::manager_tests::TestMockReaction::new(
+                    "my-reaction".into(),
+                    vec!["my-query".into()],
+                ),
+            )
+            .build()
+            .await
             .unwrap();
-        graph
-            .register_reaction("my-reaction", HashMap::new(), &["my-query".to_string()])
-            .unwrap();
-
-        let graph = Arc::new(RwLock::new(graph));
-        let provider = ComponentGraphBootstrapProvider::new(graph);
+        let provider = ComponentGraphBootstrapProvider::new(core.component_graph());
 
         let (tx, mut rx) = mpsc::channel::<BootstrapEvent>(100);
         let request = make_request("test-query");

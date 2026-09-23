@@ -1342,7 +1342,7 @@ async fn stop_is_idempotent() {
 
 #[tokio::test]
 async fn full_lifecycle_with_runtime_context() {
-    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::channels::ComponentUpdate;
     use drasi_lib::context::ReactionRuntimeContext;
     use tokio::sync::mpsc;
 

@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
+
 #[allow(dead_code)]
 mod computation_support;
 use computation_support::*;
@@ -49,7 +50,7 @@ fn graph() -> ComputationGraph {
 }
 
 #[tokio::test]
-async fn inspection_history_is_coherent_and_exposed_without_legacy_graph_nodes() {
+async fn inspection_history_is_coherent_and_keeps_managed_graph_scopes_separate() {
     let drasi = DrasiLib::builder().build().await.expect("instance");
     let handle = drasi
         .add_computation_graph(graph(), ComputationOptions { auto_start: false })
@@ -76,12 +77,12 @@ async fn inspection_history_is_coherent_and_exposed_without_legacy_graph_nodes()
         assert_eq!(snapshot.desired.revision, snapshot.observed.revision);
     }
     assert_eq!(inspector.snapshot().desired.revision, GraphRevision(2));
-    assert!(drasi
-        .component_graph()
-        .read()
+    assert!(!drasi
+        .get_graph()
         .await
-        .get_component("sink")
-        .is_none());
+        .nodes
+        .iter()
+        .any(|node| node.id == "sink"));
     drasi.shutdown().await.expect("shutdown");
 }
 

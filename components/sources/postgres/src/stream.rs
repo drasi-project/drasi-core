@@ -28,8 +28,8 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::{PostgresSourceConfig, ReplayState};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
+use drasi_lib::channels::ComponentStatusHandle;
 use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
-use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::SourceBase;
 
 pub struct ReplicationStream {

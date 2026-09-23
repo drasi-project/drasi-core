@@ -555,10 +555,7 @@ mod manager_tests {
         format!("{prefix}-{counter}")
     }
 
-    async fn create_test_manager() -> (
-        Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
-    ) {
+    async fn create_test_manager() -> (Arc<SourceManager>, crate::component_graph::ComponentGraph) {
         let core = crate::test_helpers::managers::empty_core().await;
         (
             Arc::new(SourceManager(core.clone())),
@@ -567,17 +564,15 @@ mod manager_tests {
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph() -> (
-        Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
-    ) {
+    async fn create_test_manager_with_graph(
+    ) -> (Arc<SourceManager>, crate::component_graph::ComponentGraph) {
         create_test_manager().await
     }
 
     /// Helper: register a source in the graph, then provision it in the manager.
     async fn add_source(
         manager: &SourceManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
         manager.add(source).await
@@ -586,7 +581,7 @@ mod manager_tests {
     /// Helper: teardown a source in the manager, then deregister from the graph.
     async fn delete_source(
         manager: &SourceManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
@@ -622,34 +617,28 @@ mod manager_tests {
         let result = add_source(&manager, &graph, source2).await;
         assert!(result.is_err());
         let error = result.unwrap_err();
-        match manager.0.execution_mode() {
-            crate::ExecutionMode::ComponentGraph => {
-                assert!(error.to_string().contains("already exists"));
-            }
-            #[cfg(feature = "computation")]
-            crate::ExecutionMode::ComputationGraph => {
-                use crate::computation::v1::GraphError;
+        {
+            use crate::computation::v1::GraphError;
 
-                let crate::DrasiError::Internal(error) = error
-                    .downcast_ref::<crate::DrasiError>()
-                    .expect("public API error")
-                else {
-                    panic!("native rejection must retain its ownership-bearing cause: {error:?}");
-                };
-                let GraphError::AdditionRejected { cause, addition } = error
-                    .downcast_ref::<GraphError>()
-                    .expect("native graph error")
-                else {
-                    panic!("expected a rejected addition: {error:?}");
-                };
-                assert!(
-                    matches!(cause.as_ref(), GraphError::Topology { reason }
+            let crate::DrasiError::Internal(error) = error
+                .downcast_ref::<crate::DrasiError>()
+                .expect("public API error")
+            else {
+                panic!("native rejection must retain its ownership-bearing cause: {error:?}");
+            };
+            let GraphError::AdditionRejected { cause, addition } = error
+                .downcast_ref::<GraphError>()
+                .expect("native graph error")
+            else {
+                panic!("expected a rejected addition: {error:?}");
+            };
+            assert!(
+                matches!(cause.as_ref(), GraphError::Topology { reason }
                         if reason == "duplicate component test-source"),
-                    "unexpected rejection cause: {cause:?}"
-                );
-                let rejected = addition.take().await.expect("retained rejected source");
-                assert_eq!(rejected.definition.descriptor.id().as_str(), "test-source");
-            }
+                "unexpected rejection cause: {cause:?}"
+            );
+            let rejected = addition.take().await.expect("retained rejected source");
+            assert_eq!(rejected.definition.descriptor.id().as_str(), "test-source");
         }
     }
 
@@ -683,7 +672,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = create_test_mock_source("test-source".to_string());
         add_source(&manager, &graph, source).await.unwrap();
@@ -721,7 +710,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = create_test_mock_source("test-source".to_string());
         add_source(&manager, &graph, source).await.unwrap();
@@ -777,7 +766,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add multiple sources
         let source1 = create_test_mock_source("source1".to_string());
@@ -898,7 +887,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=true
         let source1 =
@@ -948,7 +937,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Create source using default constructor (should have auto_start=true)
         let source = create_test_mock_source("default-source".to_string());
@@ -986,7 +975,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=false
         let source = TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap();
@@ -1297,16 +1286,7 @@ mod manager_tests {
         let source = LoggingTestSource::new(&source_id).unwrap();
         add_source(&manager, &graph, source).await.unwrap();
 
-        // Record an event manually to simulate lifecycle
-        manager
-            .record_event(ComponentEvent {
-                component_id: source_id.clone(),
-                component_type: crate::ComponentType::Source,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some("Test event".to_string()),
-            })
-            .await;
+        manager.start_source(source_id.clone()).await.unwrap();
 
         // Verify events exist
         let events = manager.get_source_events(&source_id).await;
@@ -1536,7 +1516,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DeprovisionTestSource::new_simple("reconfig-running-source");
         add_source(&manager, &graph, source).await.unwrap();
@@ -1643,7 +1623,7 @@ mod manager_tests {
         let (manager, graph) = create_test_manager_with_graph().await;
 
         // Subscribe to graph events BEFORE adding source
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DeprovisionTestSource::new_simple("reconfig-event-source");
         add_source(&manager, &graph, source).await.unwrap();

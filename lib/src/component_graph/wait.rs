@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,93 +12,127 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
-
+use super::ComponentGraph;
 use crate::channels::ComponentStatus;
 
-use super::graph::ComponentGraph;
-
-// ============================================================================
-// Async Status Waiter
-// ============================================================================
-
-/// Wait for a component to reach one of the target statuses, with a timeout.
-///
-/// This replaces polling loops that use `sleep()` + status check. It uses the
-/// graph's [`Notify`] to wake up only when a status actually changes, avoiding
-/// busy-waiting.
-///
-/// # Pattern
-///
-/// Uses the same register-before-check pattern as `PriorityQueue::enqueue_wait()`:
-/// 1. Register `notified()` interest
-/// 2. Acquire read lock, check condition
-/// 3. If not met, release lock and await notification
-/// 4. Repeat until condition met or timeout
-///
-/// # Arguments
-///
-/// * `graph` — The shared graph handle
-/// * `component_id` — ID of the component to watch
-/// * `target_statuses` — One or more acceptable statuses to wait for
-/// * `timeout` — Maximum time to wait before returning an error
-///
-/// # Errors
-///
-/// Returns an error if the timeout expires before the component reaches any
-/// target status, or if the component is not found in the graph.
+/// Wait on authoritative computation publications, without polling or a second
+/// mutable component graph.
 pub async fn wait_for_status(
-    graph: &Arc<RwLock<ComponentGraph>>,
+    graph: &ComponentGraph,
     component_id: &str,
     target_statuses: &[ComponentStatus],
     timeout: std::time::Duration,
 ) -> anyhow::Result<ComponentStatus> {
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    // Get the Notify handle once (doesn't require holding the lock)
-    let notify = {
-        let g = graph.read().await;
-        g.status_notifier()
-    };
-
-    loop {
-        // Register interest BEFORE checking condition (avoid race)
-        let notified = notify.notified();
-
-        // Check current status under read lock
-        {
-            let g = graph.read().await;
-            if let Some(node) = g.get_component(component_id) {
-                if target_statuses.contains(&node.status) {
-                    return Ok(node.status);
-                }
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Component '{component_id}' not found in graph"
-                ));
+    let mut changes = graph.inspector()?.subscribe();
+    tokio::time::timeout(timeout, async {
+        loop {
+            changes.borrow_and_update();
+            let snapshot = graph.snapshot().await?;
+            let component = snapshot
+                .get_component(component_id)
+                .ok_or_else(|| anyhow::anyhow!("Component '{component_id}' not found in graph"))?;
+            if target_statuses.contains(&component.status) {
+                return Ok(component.status);
             }
+            changes.changed().await?;
         }
-        // Lock released
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Timed out waiting for component '{component_id}' to reach {target_statuses:?}"
+        )
+    })?
+}
 
-        // Wait for a status change or timeout
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(anyhow::anyhow!(
-                "Timed out waiting for component '{component_id}' to reach {target_statuses:?}",
-            ));
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{sources::tests::TestMockSource, DrasiLib};
+    use std::time::Duration;
 
-        tokio::select! {
-            _ = notified => {
-                // A status changed somewhere — loop back and re-check
-            }
-            _ = tokio::time::sleep(remaining) => {
-                return Err(anyhow::anyhow!(
-                    "Timed out waiting for component '{component_id}' to reach {target_statuses:?}",
-                ));
-            }
-        }
+    async fn instance() -> DrasiLib {
+        DrasiLib::builder()
+            .with_source(TestMockSource::with_auto_start("source-1".into(), false).unwrap())
+            .build()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_already_reached() {
+        let core = instance().await;
+        let status = wait_for_status(
+            &core.component_graph(),
+            "source-1",
+            &[ComponentStatus::Added],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, ComponentStatus::Added);
+        core.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_component_not_found() {
+        let core = instance().await;
+        let error = wait_for_status(
+            &core.component_graph(),
+            "nonexistent",
+            &[ComponentStatus::Running],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("not found"));
+        core.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_timeout() {
+        let core = instance().await;
+        let error = wait_for_status(
+            &core.component_graph(),
+            "source-1",
+            &[ComponentStatus::Running],
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Timed out"));
+        core.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_reaches_target_via_update() {
+        let core = instance().await;
+        let graph = core.component_graph();
+        let waiter = wait_for_status(
+            &graph,
+            "source-1",
+            &[ComponentStatus::Running],
+            Duration::from_secs(2),
+        );
+        tokio::pin!(waiter);
+        assert!(futures::poll!(&mut waiter).is_pending());
+        core.start_source("source-1").await.unwrap();
+        assert_eq!(waiter.await.unwrap(), ComponentStatus::Running);
+        core.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_multiple_targets() {
+        let core = instance().await;
+        let status = wait_for_status(
+            &core.component_graph(),
+            "source-1",
+            &[ComponentStatus::Running, ComponentStatus::Added],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, ComponentStatus::Added);
+        core.shutdown().await.unwrap();
     }
 }

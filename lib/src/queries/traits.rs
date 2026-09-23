@@ -24,7 +24,8 @@ use crate::{
     metrics::QueryOutputMetrics,
 };
 
-/// Application-facing query contract implemented by either runtime backend.
+/// Application-facing query contract implemented by graph-owned queries and
+/// plugin proxies. It does not select or construct an execution runtime.
 #[async_trait]
 pub trait Query: Send + Sync {
     async fn start(&self) -> Result<()>;
@@ -71,4 +72,50 @@ pub trait Query: Send + Sync {
     /// Volatile implementations have nothing to release. Persistent
     /// implementations must release their retained handles at awaited shutdown.
     async fn release_persistent_handles(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ContractQuery(QueryConfig);
+
+    #[async_trait]
+    impl Query for ContractQuery {
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Stopped
+        }
+        fn get_config(&self) -> &QueryConfig {
+            &self.0
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        async fn subscribe(&self, _: String) -> Result<QuerySubscriptionResponse> {
+            anyhow::bail!("test contract has no subscriptions")
+        }
+        async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
+            Err(FetchError::NotRunning {
+                status: ComponentStatus::Stopped,
+            })
+        }
+        async fn fetch_outbox(&self, _: u64) -> Result<OutboxResponse, FetchError> {
+            Err(FetchError::NotRunning {
+                status: ComponentStatus::Stopped,
+            })
+        }
+    }
+
+    #[test]
+    fn query_is_volatile_defaults_to_true_when_not_overridden() {
+        assert!(
+            ContractQuery(crate::Query::cypher("contract").query("RETURN 1").build()).is_volatile()
+        );
+    }
 }

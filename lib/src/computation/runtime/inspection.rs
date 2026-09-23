@@ -20,19 +20,7 @@ use crate::{
 };
 
 pub(super) fn status(record: &Record, observed: &ObservedComponent) -> ComponentStatus {
-    if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
-        ComponentStatus::Error
-    } else if observed.lifecycle == ComponentLifecycle::Starting {
-        ComponentStatus::Starting
-    } else if observed.lifecycle == ComponentLifecycle::Stopping {
-        ComponentStatus::Stopping
-    } else if !observed.lifecycle_requested || observed.realization != RealizationState::Created {
-        record.initial_status
-    } else if observed.exhausted || observed.lifecycle == ComponentLifecycle::Stopped {
-        ComponentStatus::Stopped
-    } else {
-        ComponentStatus::Running
-    }
+    events::observed_status(observed, record.initial_status)
 }
 
 fn error_message(record: &Record, observed: &ObservedComponent) -> Option<String> {
@@ -51,14 +39,12 @@ fn error_message(record: &Record, observed: &ObservedComponent) -> Option<String
 
 impl Runtime {
     pub(crate) async fn component_events(&self, id: &str) -> Vec<ComponentEvent> {
-        self.projection.read().await.get_events(id)
+        self.events.component(id)
     }
 
     pub(crate) async fn events(&self, kind: Option<ComponentType>) -> Vec<ComponentEvent> {
-        self.projection
-            .read()
-            .await
-            .get_all_events()
+        self.events
+            .all()
             .into_iter()
             .filter(|event| {
                 matches!(
@@ -292,12 +278,7 @@ impl Runtime {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         self.record(id, kind).await?;
-        self.project().await?;
-        self.projection
-            .read()
-            .await
-            .subscribe_events(id)
-            .ok_or_else(|| anyhow::anyhow!("event projection for {kind} {id} is unavailable"))
+        Ok(self.events.subscribe(id))
     }
 
     pub(crate) async fn configuration_snapshot(

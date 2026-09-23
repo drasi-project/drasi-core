@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+//! Legacy Source/Reaction plugin adapters coexist with directly assembled graphs
+//! on the same computation runtime; no alternate execution engine is involved.
+
+#![cfg(test)]
 
 use std::{
     collections::HashMap,
     future::pending,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -243,20 +246,20 @@ impl EnvelopeSink for NativeSink {
     }
 }
 
-async fn wait_for_legacy_running(drasi: &DrasiLib, id: &str) {
+async fn wait_for_legacy_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
     let mut events = drasi.subscribe_all_component_events();
     if drasi
         .get_graph()
         .await
         .nodes
         .iter()
-        .any(|node| node.id == id && node.status == ComponentStatus::Running)
+        .any(|node| node.id == id && node.status == expected)
     {
         return;
     }
     loop {
         let event = events.recv().await.expect("legacy status channel closed");
-        if event.component_id == id && event.status == ComponentStatus::Running {
+        if event.component_id == id && event.status == expected {
             return;
         }
     }
@@ -353,7 +356,7 @@ async fn assert_coexistence(instance_id: &str) {
 
     drasi.start().await.expect("start legacy pipeline");
     for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
-        wait_for_legacy_running(&drasi, id).await;
+        wait_for_legacy_status(&drasi, id, ComponentStatus::Running).await;
     }
     assert_legacy_running(&drasi).await;
     let before = inject_and_assert_result(&injector, &mut results_rx, "before", 1000).await;
@@ -701,7 +704,12 @@ async fn assert_coexistence(instance_id: &str) {
     }
     assert_shared_source_ingress_fence(&drasi, source, &injector, &mut results_rx).await;
     drasi.stop().await.expect("stop legacy pipeline");
+    wait_for_legacy_status(&drasi, LEGACY_REACTION, ComponentStatus::Stopped).await;
     assert_eq!(legacy_loop_stops.load(Ordering::SeqCst), 1);
+    drasi
+        .shutdown()
+        .await
+        .expect("shutdown all computation drivers");
 }
 
 async fn run_coexistence(instance_id: &str) {
@@ -719,6 +727,185 @@ async fn legacy_pipeline_survives_graph_cancellation_on_current_thread() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_pipeline_survives_graph_cancellation_on_multi_thread() {
     run_coexistence("coexistence-multi-thread").await;
+}
+
+#[tokio::test]
+async fn ordinary_restart_preserves_streaming_progress_and_fences_actual_snapshot_refresh() {
+    struct SnapshotBootstrap(Arc<Mutex<Vec<SourceChange>>>);
+
+    #[async_trait]
+    impl drasi_lib::bootstrap::BootstrapProvider for SnapshotBootstrap {
+        async fn bootstrap(
+            &self,
+            _: drasi_lib::bootstrap::BootstrapRequest,
+            context: &drasi_lib::bootstrap::BootstrapContext,
+            events: drasi_lib::channels::BootstrapEventSender,
+            _: Option<&SourceSubscriptionSettings>,
+        ) -> anyhow::Result<drasi_lib::bootstrap::BootstrapResult> {
+            let rows = self.0.lock().expect("source snapshot").clone();
+            let event_count = rows.len();
+            for change in rows {
+                events
+                    .send(drasi_lib::channels::BootstrapEvent {
+                        source_id: context.source_id.clone(),
+                        change,
+                        timestamp: chrono::Utc::now(),
+                        sequence: context.next_sequence(),
+                    })
+                    .await?;
+            }
+            Ok(drasi_lib::bootstrap::BootstrapResult {
+                event_count,
+                source_position: None,
+            })
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for (bootstrap, has_snapshot) in [(false, true), (true, false), (true, true)] {
+            let rows = Arc::new(Mutex::new(Vec::new()));
+            let mut params = SourceBaseParams::new(LEGACY_SOURCE);
+            if has_snapshot {
+                params = params.with_bootstrap_provider(SnapshotBootstrap(rows.clone()));
+            }
+            let injector = Arc::new(SourceBase::new(params).expect("source fixture"));
+            let (results, mut receiver) = mpsc::channel(4);
+            let reaction_base = Arc::new(ReactionBase::new(ReactionBaseParams::new(
+                LEGACY_REACTION,
+                vec![LEGACY_QUERY.into()],
+            )));
+            let core = DrasiLib::builder()
+                .with_id(format!("clean-pipeline-restart-{bootstrap}-{has_snapshot}"))
+                .with_source(InjectableSource {
+                    base: injector.clone(),
+                })
+                .with_query(
+                    Query::cypher(LEGACY_QUERY)
+                        .query("MATCH (i:Item) RETURN i.name AS name")
+                        .from_source(LEGACY_SOURCE)
+                        .enable_bootstrap(bootstrap)
+                        .build(),
+                )
+                .with_reaction(CapturingReaction {
+                    base: reaction_base.clone(),
+                    results,
+                    loop_stops: Arc::new(AtomicUsize::new(0)),
+                })
+                .build()
+                .await
+                .expect("ordinary pipeline");
+            core.start().await.expect("initial start");
+            for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
+                core.computation_component(id)
+                    .expect("component handle")
+                    .wait_started()
+                    .await
+                    .expect("initial component readiness");
+            }
+            assert_eq!(
+                inject_and_assert_result(&injector, &mut receiver, "before-restart", 1_000).await,
+                1
+            );
+            rows.lock()
+                .expect("source snapshot")
+                .push(SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(LEGACY_SOURCE, "before-restart"),
+                            labels: Arc::from([Arc::from("Item")]),
+                            effective_from: 1_000,
+                        },
+                        properties: ElementPropertyMap::from(
+                            serde_json::json!({"name": "before-restart"}),
+                        ),
+                    },
+                });
+            let query = core
+                .query_manager()
+                .get_query_instance(LEGACY_QUERY)
+                .await
+                .expect("query facade");
+            let before = query
+                .fetch_snapshot()
+                .await
+                .expect("snapshot before restart");
+            assert_eq!(before.as_of_sequence, 1);
+            assert_eq!(before.len(), 1);
+            core.stop().await.expect("clean instance stop");
+            for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
+                wait_for_legacy_status(&core, id, ComponentStatus::Stopped).await;
+            }
+            let checkpoint = reaction_base
+                .read_checkpoint(LEGACY_QUERY)
+                .await
+                .expect("reaction checkpoint lookup")
+                .expect("handled pre-stop output checkpoint");
+            assert_eq!(checkpoint.sequence, 1);
+            let restarted = core.start().await;
+            if bootstrap && has_snapshot {
+                let error = restarted.expect_err("Strict must fence an actual snapshot refresh");
+                let message = error.to_string();
+                assert!(
+                    message.contains("Strict") && message.contains("generation"),
+                    "{message}"
+                );
+                core.computation_component(LEGACY_QUERY)
+                    .expect("query handle")
+                    .wait_started()
+                    .await
+                    .expect("refreshed query readiness");
+                let refreshed = query.fetch_snapshot().await.expect("refreshed snapshot");
+                assert!(refreshed.output_generation > before.output_generation);
+                assert_eq!(refreshed.to_vec(), before.to_vec());
+                assert_eq!(
+                    core.get_reaction_status(LEGACY_REACTION)
+                        .await
+                        .expect("reaction status"),
+                    ComponentStatus::Error
+                );
+                let rejected = reaction_base
+                    .read_checkpoint(LEGACY_QUERY)
+                    .await
+                    .expect("reaction checkpoint lookup")
+                    .expect("Strict must preserve its old checkpoint");
+                assert_eq!(rejected.sequence, checkpoint.sequence);
+                assert_eq!(rejected.config_hash, checkpoint.config_hash);
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "Strict must not deliver refreshed output"
+                );
+                core.shutdown()
+                    .await
+                    .expect("shutdown fenced snapshot pipeline");
+                continue;
+            }
+            restarted.expect("streaming-only clean restart");
+            for id in [LEGACY_SOURCE, LEGACY_QUERY, LEGACY_REACTION] {
+                core.computation_component(id)
+                    .expect("component handle")
+                    .wait_started()
+                    .await
+                    .expect("restarted component readiness");
+            }
+            let after = query
+                .fetch_snapshot()
+                .await
+                .expect("snapshot after restart");
+            assert_eq!(
+                after.output_generation, before.output_generation,
+                "clean stop/start is not an output reset (bootstrap={bootstrap})"
+            );
+            assert_eq!(after.as_of_sequence, before.as_of_sequence);
+            assert_eq!(after.to_vec(), before.to_vec());
+            assert_eq!(
+                inject_and_assert_result(&injector, &mut receiver, "after-restart", 2_000).await,
+                2
+            );
+            core.shutdown().await.expect("shutdown restarted pipeline");
+        }
+    })
+    .await
+    .expect("clean pipeline restart timed out");
 }
 
 async fn assert_shared_source_ingress_fence(

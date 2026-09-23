@@ -22,7 +22,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use drasi_lib::channels::events::{ComponentEvent, ComponentStatus, ComponentType};
-use drasi_lib::component_graph::{ComponentUpdate, ComponentUpdateSender};
+use drasi_lib::channels::{ComponentUpdate, ComponentUpdateSender};
 use drasi_lib::managers::{ComponentEventHistory, ComponentLogRegistry, LogLevel, LogMessage};
 use drasi_plugin_sdk::ffi::{
     FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, FfiLogLevelFilter,

@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(all(feature = "computation", feature = "middleware-relabel"))]
+//! Ordinary Source/Reaction adapters and explicitly assembled graphs must retain
+//! identical joins, middleware, output identities, and independent lifecycles.
+
+#![cfg(test)]
+#![cfg(feature = "middleware-relabel")]
 use drasi_lib::{
     computation::v1::*,
     config::{QueryJoinConfig, QueryJoinKeyConfig},
@@ -83,6 +87,14 @@ async fn scenario() {
         .build()
         .await
         .expect("instance");
+    for id in ["orders", "customers", "joined", "legacy-output"] {
+        drasi
+            .computation_component(id)
+            .expect("ordinary component handle")
+            .wait_created()
+            .await
+            .expect("ordinary component creation");
+    }
     let pipeline = drasi.computation_pipeline("native").expect("pipeline");
     let catalog = pipeline.catalog();
     let services = pipeline.services();
@@ -154,7 +166,18 @@ async fn scenario() {
         .add_computation_graph(graph, ComputationOptions::default())
         .await
         .expect("register graph");
-    drasi.start().await.expect("start both paths");
+    drasi
+        .start()
+        .await
+        .expect("start both graph construction paths");
+    for id in ["orders", "customers", "joined", "legacy-output"] {
+        drasi
+            .computation_component(id)
+            .expect("ordinary component handle")
+            .wait_started()
+            .await
+            .expect("ordinary component readiness");
+    }
     assert_eq!(
         native
             .control()
@@ -237,12 +260,12 @@ async fn scenario() {
     );
     let native_source =
         ComputationPipelineBuilder::source_component_id("joined", "orders").expect("source ID");
-    assert!(drasi
-        .component_graph()
-        .read()
+    assert!(!drasi
+        .get_graph()
         .await
-        .get_component(native_source.as_str())
-        .is_none());
+        .nodes
+        .iter()
+        .any(|node| node.id == native_source.as_str()));
     native.stop().await.expect("stop new pipeline only");
     for source in ["orders", "customers"] {
         assert_eq!(

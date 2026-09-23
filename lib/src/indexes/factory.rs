@@ -102,7 +102,6 @@ impl fmt::Debug for IndexFactory {
 impl IndexFactory {
     /// Distinct configured instances, using their lexically first name as the
     /// canonical graph binding when several names share the same provider.
-    #[cfg(feature = "computation")]
     pub(crate) fn configured_providers(&self) -> Vec<(String, Arc<dyn IndexBackendPlugin>)> {
         let mut providers: Vec<_> = self.providers.iter().collect();
         providers.sort_by_key(|(name, _)| *name);
@@ -118,7 +117,6 @@ impl IndexFactory {
         distinct
     }
 
-    #[cfg(feature = "computation")]
     pub(crate) fn configured_provider(
         &self,
         requested: Option<&StorageBackendRef>,
@@ -206,7 +204,6 @@ impl IndexFactory {
         self.default_backend.as_ref()
     }
 
-    #[cfg(feature = "computation")]
     pub(crate) fn computation_backend(
         &self,
         requested: Option<&StorageBackendRef>,
@@ -290,7 +287,6 @@ impl IndexFactory {
         }
     }
 
-    #[cfg(feature = "computation")]
     pub(crate) async fn build_scoped(
         &self,
         backend_ref: &StorageBackendRef,
@@ -421,7 +417,6 @@ mod tests {
         m
     }
 
-    #[cfg(feature = "computation")]
     #[tokio::test]
     async fn scoped_provider_receives_separate_storage_and_logical_query_ids() {
         struct ScopedProvider(std::sync::Mutex<Vec<(String, String)>>);

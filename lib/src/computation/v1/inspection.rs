@@ -20,7 +20,7 @@ use drasi_core::models::{
 };
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::watch;
 
@@ -48,6 +48,13 @@ struct History {
 struct InspectionState {
     latest: watch::Sender<Arc<ComputationInspection>>,
     history: Mutex<History>,
+    observers: Mutex<Vec<Weak<dyn PublicationObserver>>>,
+}
+
+/// Synchronous, read-only delivery at the publication boundary. Observers must
+/// not call back into the controller or inspector while handling a publication.
+pub(crate) trait PublicationObserver: Send + Sync {
+    fn publish(&self, previous: &ComputationInspection, current: &ComputationInspection);
 }
 
 /// Read-only inspection and bounded controller history. Snapshots have no live
@@ -69,7 +76,15 @@ impl ComputationInspector {
                 sequence: 0,
                 entries: VecDeque::from([initial]),
             }),
+            observers: Mutex::new(Vec::new()),
         }))
+    }
+    pub(crate) fn observe(&self, observer: &Arc<dyn PublicationObserver>) {
+        self.0
+            .observers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Arc::downgrade(observer));
     }
     pub fn snapshot(&self) -> Arc<ComputationInspection> {
         self.0.latest.borrow().clone()
@@ -116,11 +131,28 @@ impl ComputationInspector {
             desired: Arc::new(desired.clone()),
             observed,
         });
+        let previous = history
+            .entries
+            .back()
+            .cloned()
+            .expect("initial publication");
         history.entries.push_back(snapshot.clone());
         while history.entries.len() > 256 {
             history.entries.pop_front();
         }
-        self.0.latest.send_replace(snapshot);
+        self.0.latest.send_replace(snapshot.clone());
+        self.0
+            .observers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|observer| {
+                if let Some(observer) = observer.upgrade() {
+                    observer.publish(&previous, &snapshot);
+                    true
+                } else {
+                    false
+                }
+            });
     }
 }
 

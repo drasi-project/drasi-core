@@ -1,3 +1,6 @@
+# Historical pre-removal corpus pinned at 01813156842035ac6c9539c8996536f94cab8676.
+# Classifications and reasons describe that historical corpus, not multiple current engines.
+# Removed or renamed original names require an explicit entry in case-mappings.tsv.
 lib	bootstrap::component_graph::tests::test_bootstrap_emitted_labels_match_component_kind	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
 lib	bootstrap::component_graph::tests::test_bootstrap_empty_graph	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.
 lib	bootstrap::component_graph::tests::test_bootstrap_with_sources_and_queries	shared	The same topology-source bootstrap plugin reads the inspection projection in both runtimes.

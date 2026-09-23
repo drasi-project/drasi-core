@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 use async_trait::async_trait;
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
@@ -1137,11 +1137,7 @@ impl drasi_lib::Source for SlowReadySource {
 
 #[tokio::test]
 async fn ordinary_source_handle_waits_for_running_not_only_successful_start_hook() {
-    let core = drasi_lib::DrasiLib::builder()
-        .with_execution_mode(drasi_lib::ExecutionMode::ComputationGraph)
-        .build()
-        .await
-        .unwrap();
+    let core = drasi_lib::DrasiLib::builder().build().await.unwrap();
     core.start().await.unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new(
@@ -1177,11 +1173,7 @@ async fn ordinary_source_handle_waits_for_running_not_only_successful_start_hook
 
 #[tokio::test]
 async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors() {
-    let core = drasi_lib::DrasiLib::builder()
-        .with_execution_mode(drasi_lib::ExecutionMode::ComputationGraph)
-        .build()
-        .await
-        .unwrap();
+    let core = drasi_lib::DrasiLib::builder().build().await.unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new("source"))
             .unwrap(),
@@ -1255,11 +1247,7 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
 
 #[tokio::test]
 async fn a_void_initializer_error_is_not_lost_when_the_initializer_returns() {
-    let core = drasi_lib::DrasiLib::builder()
-        .with_execution_mode(drasi_lib::ExecutionMode::ComputationGraph)
-        .build()
-        .await
-        .unwrap();
+    let core = drasi_lib::DrasiLib::builder().build().await.unwrap();
     core.start().await.unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new(

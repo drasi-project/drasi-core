@@ -25,11 +25,11 @@ all the other steps rather than in a separate middleware transaction.
 
 ## Configure a sequence
 
-Enable `computation` and the middleware features you use. For example:
+Enable the middleware features you use. ComputationGraph itself is always
+available. For example:
 
 ```toml
 drasi-lib = { path = "../drasi-core/lib", features = [
-  "computation",
   "middleware-decoder",
   "middleware-parse-json",
   "middleware-promote"

@@ -548,14 +548,10 @@ impl LegacySourceSubscription {
                     Arc::new(SourceProgressSnapshot::default())
                 };
                 let saved = self.checkpoint(&view);
-                if !view.ready
+                let refresh_volatile = !view.ready
                     && view.bootstrap_complete
                     && self.options.enable_bootstrap
-                    && !view.persistent
-                {
-                    self.reset(&view, true).await?;
-                    continue;
-                }
+                    && !view.persistent;
                 let source = self.host.source()?;
                 if source.dispatch_mode() == crate::DispatchMode::Broadcast
                     && !self.options.allow_broadcast_loss
@@ -591,7 +587,8 @@ impl LegacySourceSubscription {
                     && view.persistent
                     && view.bootstrap_complete
                     && (!recoverable
-                        || !replay_from_start
+                        || !self.runtime_compatibility
+                            && !replay_from_start
                             && saved
                                 .as_ref()
                                 .and_then(|saved| saved.source_position.as_ref())
@@ -605,7 +602,12 @@ impl LegacySourceSubscription {
                     query_id: self.id.clone(),
                     nodes: self.options.nodes.clone(),
                     relations: self.options.relations.clone(),
-                    enable_bootstrap: self.options.enable_bootstrap && !view.bootstrap_complete,
+                    // Ordinary plugins choose bootstrap/replay from the optional
+                    // source cursor and sequence, not the graph-wide marker.
+                    enable_bootstrap: self.options.enable_bootstrap
+                        && (self.runtime_compatibility
+                            || !view.bootstrap_complete
+                            || refresh_volatile),
                     resume_from: if view.persistent && recoverable {
                         saved
                             .as_ref()
@@ -650,6 +652,8 @@ impl LegacySourceSubscription {
                 if response.source_id != self.host.id() || response.query_id != self.id {
                     anyhow::bail!("source returned a subscription for another source/query");
                 }
+                let supplies_bootstrap =
+                    response.bootstrap_receiver.is_some() || response.bootstrap_result_receiver.is_some();
                 {
                     let mut state = self
                         .state
@@ -668,6 +672,18 @@ impl LegacySourceSubscription {
                     state.result = response.bootstrap_result_receiver;
                     state.position = response.position_handle;
                     state.generation = view.reset_generation;
+                }
+                // Request a fresh snapshot before discarding volatile query state.
+                // A source with no bootstrap channel cannot rebuild that state,
+                // and must not invent a reset on an otherwise clean restart.
+                if refresh_volatile && supplies_bootstrap {
+                    self.reset(&view, true).await?;
+                    let generation = self.progress.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("snapshot refresh lost source progress"))?
+                        .snapshot().reset_generation;
+                    self.state.lock()
+                        .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
+                        .generation = generation;
                 }
                 self.confirm_position()?;
                 self.phase.send_replace(SubscriptionPhase::Ready);
@@ -888,6 +904,19 @@ impl LegacySourceBootstrap {
 }
 #[async_trait]
 impl ComputationBootstrapProvider for LegacySourceBootstrap {
+    fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
+        for subscription in &self.subscriptions {
+            let state = subscription
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?;
+            if state.bootstrap.is_some() || state.result.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
         let mut result = BootstrapPreparation::Ready;
         for subscription in &self.subscriptions {
@@ -966,6 +995,11 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
                     receiver,
                 )
                 .await???;
+                if subscription.runtime_compatibility && result.source_position.is_none() {
+                    // An absent bootstrap cursor is not a confirmed sequence-zero
+                    // checkpoint: the next start may still require bootstrap.
+                    continue;
+                }
                 watermarks.push(BootstrapWatermark {
                     stream: subscription.stream.clone(),
                     source_id: Some(subscription.host.id().to_owned()),

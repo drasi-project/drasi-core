@@ -103,8 +103,8 @@ pub struct SourceRuntimeContext {
 
     /// mpsc sender for fire-and-forget component status updates.
     ///
-    /// Status changes sent here are applied to the component graph by the
-    /// graph update loop, which emits broadcast events to all subscribers.
+    /// The graph-owned plugin adapter observes updates and reports lifecycle
+    /// outcomes to ComputationGraph, which publishes component events.
     pub update_tx: ComponentUpdateSender,
 
     /// Optional identity provider for credential injection.
@@ -244,8 +244,8 @@ pub struct ReactionRuntimeContext {
 
     /// mpsc sender for fire-and-forget component status updates.
     ///
-    /// Status changes sent here are applied to the component graph by the
-    /// graph update loop, which emits broadcast events to all subscribers.
+    /// The graph-owned plugin adapter observes updates and reports lifecycle
+    /// outcomes to ComputationGraph, which publishes component events.
     pub update_tx: ComponentUpdateSender,
 
     /// Optional identity provider for credential injection.
@@ -373,8 +373,8 @@ pub struct QueryRuntimeContext {
 
     /// mpsc sender for fire-and-forget component status updates.
     ///
-    /// Status changes sent here are applied to the component graph by the
-    /// graph update loop, which emits broadcast events to all subscribers.
+    /// Plugin-facing status channel. Graph-owned adapters report lifecycle
+    /// outcomes to ComputationGraph, which publishes component events.
     pub update_tx: ComponentUpdateSender,
 }
 
@@ -424,13 +424,11 @@ impl std::fmt::Debug for QueryRuntimeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component_graph::ComponentGraph;
     use crate::state_store::MemoryStateStoreProvider;
     use std::sync::Arc;
 
     fn test_update_tx() -> ComponentUpdateSender {
-        let (graph, _rx) = ComponentGraph::new("test-instance");
-        graph.update_sender()
+        tokio::sync::mpsc::channel(32).0
     }
 
     #[tokio::test]

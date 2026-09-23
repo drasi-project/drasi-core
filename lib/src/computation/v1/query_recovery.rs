@@ -250,7 +250,11 @@ impl ContinuousQueryTransformer {
         let Some(provider) = &self.bootstrap else {
             return Ok(());
         };
-        if self.bootstrap_complete.load(Ordering::Acquire) {
+        // Ordinary Source subscriptions can request a new snapshot when no
+        // source checkpoint exists. Consume the receivers chosen for this start
+        // without resetting previously committed output or its generation.
+        let requested_snapshot = self.runtime_compatibility && provider.has_pending_snapshot()?;
+        if self.bootstrap_complete.load(Ordering::Acquire) && !requested_snapshot {
             return Ok(());
         }
         let query = self.query()?;
@@ -259,6 +263,7 @@ impl ContinuousQueryTransformer {
                 .read_checkpoint(BOOTSTRAP)
                 .await?
                 .is_some_and(|marker| marker.sequence == 1)
+                && !requested_snapshot
             {
                 self.bootstrap_complete.store(true, Ordering::Release);
                 return Ok(());

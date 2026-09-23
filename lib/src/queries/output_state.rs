@@ -46,9 +46,9 @@ pub const DEFAULT_OUTBOX_CAPACITY: usize = 1000;
 
 /// In-memory state tracking the live result set and recent emissions for a query.
 ///
-/// This struct is held behind `Arc<RwLock<...>>` in `DrasiQuery`. Writers acquire
-/// a write lock to apply diffs and push to the outbox. Readers (e.g., `fetch_snapshot`)
-/// acquire a read lock and clone the `im::HashMap` in O(1) via structural sharing.
+/// A compatibility utility for consumers of the public result DTOs. The runtime
+/// itself owns typed output state in its computation query host. Callers sharing
+/// this utility across tasks must synchronize mutations and snapshot reads.
 ///
 /// All fields are private to enforce invariants (sequence monotonicity, ring buffer
 /// bounds). Use accessor methods for read access and `apply_diffs` /
@@ -219,7 +219,7 @@ impl QueryOutputState {
 
     /// Clone the live result set as an `im::HashMap` (O(1) via structural sharing).
     ///
-    /// This is used by `DrasiQuery::fetch_snapshot()` to take a lightweight clone
+    /// This lets snapshot consumers take a lightweight clone
     /// under the read lock, then build the `SnapshotResponse` outside the lock.
     pub fn clone_results(&self) -> im::HashMap<u64, serde_json::Value> {
         self.results.clone()
@@ -250,7 +250,7 @@ impl QueryOutputState {
                 requested: after_sequence,
                 earliest_available: earliest,
                 latest_sequence: self.as_of_sequence,
-                config_hash: 0, // Enriched by `DrasiQuery::fetch_outbox()`
+                config_hash: 0, // Enriched by the owning query.
             });
         }
 
@@ -484,7 +484,7 @@ pub struct OutboxGap {
     pub earliest_available: u64,
     /// The latest sequence in the outbox.
     pub latest_sequence: u64,
-    /// The query's config hash (set by `DrasiQuery`, not by `QueryOutputState`).
+    /// The query's config hash (set by its owner, not by `QueryOutputState`).
     pub config_hash: u64,
 }
 
@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(err.requested, 0);
         assert_eq!(err.earliest_available, 3);
         assert_eq!(err.latest_sequence, 5);
-        assert_eq!(err.config_hash, 0); // Default; enriched by DrasiQuery
+        assert_eq!(err.config_hash, 0); // Default; enriched by the query owner.
     }
 
     #[test]

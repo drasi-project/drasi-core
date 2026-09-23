@@ -34,7 +34,6 @@ mod tests {
     use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
-    use crate::queries::manager::DrasiQuery;
     use crate::sources::base::{SourceBase, SourceBaseParams};
     use crate::sources::Source;
     use crate::test_helpers::wait_for_component_status;
@@ -217,7 +216,7 @@ mod tests {
     async fn create_test_env() -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraph,
     ) {
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
@@ -236,7 +235,7 @@ mod tests {
 
     async fn add_source(
         source_manager: &crate::test_helpers::managers::SourceManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
@@ -244,7 +243,7 @@ mod tests {
 
     async fn add_query(
         manager: &crate::test_helpers::managers::QueryManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.declare(config).await
@@ -382,7 +381,7 @@ mod tests {
         let (query_manager, source_manager, graph) = create_test_env().await;
 
         // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Create and register source
         let source = CheckpointTestSource::new("e2e-source").unwrap();
@@ -633,7 +632,7 @@ mod tests {
     async fn test_initial_subscribe_no_checkpoint() {
         let (query_manager, source_manager, graph) = create_test_env().await;
 
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("fresh-source").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -689,7 +688,7 @@ mod tests {
     #[tokio::test]
     async fn test_dedup_skips_duplicate_events_after_restart() {
         let (query_manager, source_manager, graph) = create_test_env().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("dedup-source").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -960,7 +959,7 @@ mod tests {
     #[tokio::test]
     async fn test_multi_source_checkpoint_isolation() {
         let (query_manager, source_manager, graph) = create_test_env().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Create two sources
         let source_a = CheckpointTestSource::new("src-alpha").unwrap();
@@ -1167,7 +1166,7 @@ mod tests {
     #[tokio::test]
     async fn test_position_handle_updated_after_checkpoint() {
         let (query_manager, source_manager, graph) = create_test_env().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Create source with position handle enabled
         let source = CheckpointTestSource::new("handle-source")
@@ -1441,7 +1440,7 @@ mod tests {
     async fn create_test_env_with_persistent_backend() -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraph,
     ) {
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
@@ -1499,7 +1498,7 @@ mod tests {
     async fn test_config_hash_match_preserves_checkpoints() {
         let (query_manager, source_manager, graph) =
             create_test_env_with_persistent_backend().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add and start source
         let source = CheckpointTestSource::new("hash-src").unwrap();
@@ -1648,7 +1647,7 @@ mod tests {
     async fn test_config_hash_mismatch_clears_checkpoints() {
         let (query_manager, source_manager, graph) =
             create_test_env_with_persistent_backend().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add and start source
         let source = CheckpointTestSource::new("mismatch-src").unwrap();
@@ -1841,7 +1840,7 @@ mod tests {
     #[tokio::test]
     async fn test_sequence_recovery_continues_after_restart() {
         let (query_manager, source_manager, graph) = create_test_env().await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("recov-source").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -2380,7 +2379,7 @@ mod tests {
     ) -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraph,
     ) {
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
@@ -2407,7 +2406,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add and start source
         let source = CheckpointTestSource::new("fail-src").unwrap();
@@ -2471,7 +2470,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Add and start source
         let source = CheckpointTestSource::new("clear-fail-src").unwrap();
@@ -2536,7 +2535,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("wipe-fail-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -2584,7 +2583,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("stale-idx-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -2675,7 +2674,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("mismatch-idx-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -2777,7 +2776,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("autoreset-gen-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -2860,7 +2859,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("teardown-fail-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -2936,7 +2935,7 @@ mod tests {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = CheckpointTestSource::new("archive-fail-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -3403,7 +3402,7 @@ mod orchestration_tests {
 
     async fn add_source(
         source_manager: &crate::test_helpers::managers::SourceManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
         let source_id = source.id().to_string();
@@ -3413,7 +3412,7 @@ mod orchestration_tests {
 
     async fn add_query(
         manager: &crate::test_helpers::managers::QueryManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.declare(config).await
@@ -3425,7 +3424,7 @@ mod orchestration_tests {
     ) -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraph,
     ) {
         let providers: std::collections::HashMap<
             String,
@@ -3457,7 +3456,7 @@ mod orchestration_tests {
     #[tokio::test]
     async fn test_volatile_query_with_volatile_source_ok() {
         let (query_manager, source_manager, graph) = create_test_env(None, None).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = VolatileTestSource::new("vol-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -3496,7 +3495,7 @@ mod orchestration_tests {
     async fn test_persistent_query_with_durable_source_ok() {
         let plugin = Arc::new(MockPersistentPlugin::new());
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DurableTestSource::new("dur-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -3536,7 +3535,7 @@ mod orchestration_tests {
     async fn test_persistent_query_with_volatile_source_fails() {
         let plugin = Arc::new(MockPersistentPlugin::new());
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = VolatileTestSource::new("vol-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -3577,7 +3576,7 @@ mod orchestration_tests {
     async fn test_position_unavailable_strict_policy_fails() {
         let plugin = Arc::new(MockPersistentPlugin::new());
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DurableTestSource::new("strict-src").unwrap();
         source.set_fail_count(u32::MAX);
@@ -3620,7 +3619,7 @@ mod orchestration_tests {
     async fn test_position_unavailable_auto_reset_retries() {
         let plugin = Arc::new(MockPersistentPlugin::new());
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DurableTestSource::new("reset-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
@@ -3671,7 +3670,7 @@ mod orchestration_tests {
     async fn test_default_strict_policy_when_none_configured() {
         let plugin = Arc::new(MockPersistentPlugin::new());
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DurableTestSource::new("default-src").unwrap();
         source.set_fail_count(u32::MAX);
@@ -3706,7 +3705,7 @@ mod orchestration_tests {
         let plugin = Arc::new(MockPersistentPlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env(Some(plugin), Some(RecoveryPolicy::AutoReset)).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DurableTestSource::new("global-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
@@ -3756,7 +3755,7 @@ mod orchestration_tests {
         // Global: AutoReset, per-query: Strict → Strict wins
         let (query_manager, source_manager, graph) =
             create_test_env(Some(plugin), Some(RecoveryPolicy::AutoReset)).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DurableTestSource::new("override-src").unwrap();
         source.set_fail_count(u32::MAX);
@@ -3790,7 +3789,7 @@ mod orchestration_tests {
     async fn test_auto_reset_double_failure_errors() {
         let plugin = Arc::new(MockPersistentPlugin::new());
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let source = DurableTestSource::new("double-fail-src").unwrap();
         source.set_fail_count(u32::MAX);

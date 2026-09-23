@@ -31,7 +31,7 @@
 // Core Public Modules
 // ============================================================================
 
-/// Component dependency graph — the single source of truth for configuration
+/// Read-only component inspection and compatibility data types.
 pub mod component_graph;
 
 /// Fluent builders for DrasiLib and components
@@ -52,8 +52,7 @@ pub mod wal;
 /// Error types for drasi-lib
 pub mod error;
 
-/// Experimental, opt-in computation contracts and standalone DAG runtime.
-#[cfg(feature = "computation")]
+/// Computation contracts and the authoritative DAG runtime.
 pub mod computation;
 
 /// Identity providers for authentication credentials
@@ -79,8 +78,6 @@ pub mod inspection;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod lib_core;
 #[cfg_attr(not(test), doc(hidden))]
-pub mod lifecycle;
-#[cfg_attr(not(test), doc(hidden))]
 pub mod queries;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod reactions;
@@ -88,7 +85,6 @@ pub mod reactions;
 pub mod sources;
 
 // Sub-modules for lib_core operations (split for maintainability)
-mod legacy_backend;
 mod lib_core_ops;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod managers;
@@ -138,8 +134,6 @@ mod lifecycle_events_tests;
 /// # }
 /// ```
 pub use lib_core::DrasiLib;
-mod execution;
-pub use execution::ExecutionMode;
 
 /// Error types for drasi-lib
 pub use error::{DrasiError, Result};

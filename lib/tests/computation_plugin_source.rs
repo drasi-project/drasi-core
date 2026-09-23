@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
+
 use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,

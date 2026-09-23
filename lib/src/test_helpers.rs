@@ -23,7 +23,7 @@
 //! use crate::test_helpers::wait_for_component_status;
 //!
 //! // Subscribe BEFORE triggering the action
-//! let mut event_rx = graph.read().await.subscribe();
+//! let mut event_rx = graph.subscribe().unwrap();
 //!
 //! manager.start_source("my-source").await.unwrap();
 //!
@@ -43,9 +43,8 @@ use tokio::sync::broadcast;
 use crate::channels::{ComponentEvent, ComponentStatus};
 pub(crate) mod checkpoints;
 pub(crate) mod managers;
-mod runtime_parity;
+mod runtime_behavior;
 
-#[cfg(feature = "computation")]
 pub(crate) fn native_query_value(
     value: &drasi_core::evaluation::variable_value::VariableValue,
 ) -> serde_json::Value {
@@ -75,17 +74,6 @@ pub(crate) fn native_query_value(
         panic!("expected a projected query row");
     };
     data["value"].clone()
-}
-
-pub(crate) fn execution_mode() -> crate::ExecutionMode {
-    match std::env::var("DRASI_TEST_EXECUTION").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("component") => {
-            crate::ExecutionMode::ComponentGraph
-        }
-        #[cfg(feature = "computation")]
-        Ok("computation") => crate::ExecutionMode::ComputationGraph,
-        mode => panic!("unsupported test execution mode: {mode:?}"),
-    }
 }
 
 /// Wait for a specific component to reach a target status via the broadcast channel.

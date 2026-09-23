@@ -19,14 +19,10 @@ use super::v1::{
 use crate::{DrasiError, DrasiLib, Result};
 
 impl DrasiLib {
-    /// Access the native instance controller for explicit port connections and
-    /// graph inspection. Legacy execution mode is not changed by this API.
+    /// Access the instance controller for explicit port connections and inspection.
     pub fn computation_control(&self) -> Result<super::v1::GraphControl> {
         self.state_guard.require_initialized()?;
-        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
-            DrasiError::invalid_state("this operation requires ComputationGraph execution mode")
-        })?;
-        runtime.control().map_err(DrasiError::from)
+        self.computation_runtime.control().map_err(DrasiError::from)
     }
 
     pub fn computation_component(&self, id: &str) -> Result<super::v1::ComponentHandle> {
@@ -45,10 +41,7 @@ impl DrasiLib {
     /// are not inferred. Individual scopes are coherent, not globally atomic.
     pub async fn inspect_computation_inventory(&self) -> Result<super::v1::ComputationInventory> {
         self.state_guard.require_initialized()?;
-        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
-            DrasiError::invalid_state("this operation requires ComputationGraph execution mode")
-        })?;
-        let mut inventory = runtime.inventory().await?;
+        let mut inventory = self.computation_runtime.inventory().await?;
         for graph in self.computation_registry.list().await? {
             let scope = super::v1::ComputationScope::root(graph.id());
             if !inventory.scopes.contains_key(&scope) {
@@ -68,10 +61,7 @@ impl DrasiLib {
         id: &str,
     ) -> Result<super::v1::ComputationInspector> {
         self.state_guard.require_initialized()?;
-        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
-            DrasiError::invalid_state("this operation requires ComputationGraph execution mode")
-        })?;
-        runtime
+        self.computation_runtime
             .query(id)
             .await
             .map(|query| query.inspector())
@@ -146,12 +136,19 @@ impl DrasiLib {
     ) -> Result<std::sync::Arc<super::v1::ReactionPluginHost>> {
         self.state_guard.require_initialized()?;
         let reaction = self
-            .component_graph
-            .read()
+            .computation_runtime
+            .reaction(id)
             .await
-            .get_runtime::<std::sync::Arc<dyn crate::Reaction>>(id)
-            .cloned()
-            .ok_or_else(|| DrasiError::component_not_found("reaction", id))?;
+            .map_err(|error| {
+                if error
+                    .downcast_ref::<crate::managers::ComponentNotFoundError>()
+                    .is_some()
+                {
+                    DrasiError::component_not_found("reaction", id)
+                } else {
+                    DrasiError::from(error)
+                }
+            })?;
         super::v1::ReactionPluginHost::borrowed(reaction, catalog)
             .map_err(|error| DrasiError::invalid_config(error.to_string()))
     }
@@ -172,58 +169,29 @@ impl DrasiLib {
         .map_err(|error| DrasiError::invalid_config(error.to_string()))
     }
     pub(crate) async fn start_parallel_components(&self) -> anyhow::Result<()> {
-        if let Some(runtime) = &self.computation_runtime {
-            let mut failures = Vec::new();
-            if let Err(error) = runtime.start_kind("source").await {
-                failures.push(format!("native sources: {error:#}"));
-            }
-            // A failed start can leave independent components running. Keep the
-            // ordinary stop path available for that partially active instance.
-            *self.running.write().await = true;
-            runtime.start_kind("query").await?;
-            if let Err(error) = runtime.start_native_components().await {
-                failures.push(format!("native components: {error:#}"));
-            }
-            if let Err(error) = self.computation_registry.start_auto().await {
-                failures.push(format!("additional native graphs: {error:#}"));
-            }
-            runtime.subscriptions_complete().await?;
-            if let Err(error) = runtime.start_kind("reaction").await {
-                failures.push(format!("native reactions: {error:#}"));
-            }
-            if !failures.is_empty() {
-                anyhow::bail!(
-                    "native startup completed with failures: {}",
-                    failures.join("; ")
-                );
-            }
-            return Ok(());
-        }
-        if self.computation_registry.is_empty()? {
-            return self.legacy().lifecycle.start_components().await;
-        }
+        let runtime = &self.computation_runtime;
         let mut failures = Vec::new();
-        if let Err(error) = self.legacy().source_manager.start_all().await {
-            failures.push(format!("legacy sources: {error:#}"));
+        if let Err(error) = runtime.start_kind("source").await {
+            failures.push(format!("sources: {error:#}"));
         }
+        // Keep stop available if independent components start before a failure.
         *self.running.write().await = true;
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("instance shutdown interrupted startup");
         }
-        // Native subscriptions must register their position handles before the
-        // legacy instance releases the common source subscription fence.
+        runtime.start_kind("query").await?;
+        if let Err(error) = runtime.start_native_components().await {
+            failures.push(format!("native components: {error:#}"));
+        }
         if let Err(error) = self.computation_registry.start_auto().await {
-            failures.push(format!("{error:#}"));
+            failures.push(format!("additional graphs: {error:#}"));
         }
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("instance shutdown interrupted startup");
         }
-        if let Err(error) = self.legacy().query_manager.start_all().await {
-            log::warn!("Some legacy queries failed to start (retaining legacy best-effort behavior): {error}");
-        }
-        self.legacy().source_manager.subscriptions_complete().await;
-        if let Err(error) = self.legacy().reaction_manager.start_all().await {
-            failures.push(format!("legacy reactions: {error:#}"));
+        runtime.subscriptions_complete().await?;
+        if let Err(error) = runtime.start_kind("reaction").await {
+            failures.push(format!("reactions: {error:#}"));
         }
         if !failures.is_empty() {
             anyhow::bail!("instance startup had failures: {}", failures.join("; "));
@@ -290,7 +258,7 @@ impl DrasiLib {
         );
         Ok(self.log_registry.subscribe_by_key(&key).await)
     }
-    /// Register a parallel graph without adding its nodes to ComponentGraph.
+    /// Register an additional graph under instance-owned execution.
     /// The instance owns its driver; failures stay inspectable on the handle.
     pub async fn add_computation_graph(
         &self,

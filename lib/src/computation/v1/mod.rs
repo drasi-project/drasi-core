@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Version 1 of the experimental, default-off computation contracts and DAG runtime.
+//! Version 1 of the computation contracts and DAG runtime.
 //!
-//! Enable with `drasi-lib = { version = "0.9", features = ["computation"] }`.
 //! [`ComputationGraph`] runs owned native sources, transformers and sinks without
 //! a Continuous Query. [`BoundedPipe`] supplies volatile FIFO/backpressure.
-//! Legacy source/query/reaction execution remains unchanged.
+//! It also powers every ordinary [`crate::DrasiLib`] source/query/reaction API,
+//! retaining the existing plugin contracts through explicit graph-owned adapters.
 //!
 //! Every data-plane boundary carries [`ChangeEnvelope`]: a shared immutable
 //! [`ChangeEvent`] describing a set diff and a branch-owned appendable list of

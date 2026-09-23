@@ -1316,6 +1316,7 @@ async fn test_durable_reaction_rejects_volatile_store_with_persistent_query() ->
             .await?,
     );
     core.start().await?;
+    core.computation_component("q1")?.wait_started().await?;
 
     let (reaction, _receiver) = recording_reaction_with_auto_start(
         "rec",
@@ -1400,6 +1401,9 @@ async fn test_durable_reaction_rejects_if_any_subscribed_query_is_volatile() -> 
             .await?,
     );
     core.start().await?;
+    for query in ["q-persistent", "q-volatile"] {
+        core.computation_component(query)?.wait_started().await?;
+    }
 
     let (reaction, _receiver) = recording_reaction_with_auto_start(
         "rec",
@@ -1438,9 +1442,9 @@ async fn test_durable_reaction_rejects_if_any_subscribed_query_is_volatile() -> 
     Ok(())
 }
 
-/// `add_reaction` with auto-start also rejects durable-on-volatile-query.
+/// Node-first addition retains the rejected auto-start outcome on the reaction handle.
 #[tokio::test]
-async fn test_add_reaction_auto_start_rejects_durable_on_volatile_query() -> Result<()> {
+async fn test_reaction_auto_start_reports_durable_on_volatile_query() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
     let core = Arc::new(
@@ -1462,10 +1466,11 @@ async fn test_add_reaction_auto_start_rejects_durable_on_volatile_query() -> Res
         false,
         true,
     );
-    let result = core.add_reaction(reaction).await;
+    let reaction = core.add_reaction_with_handle(reaction).await?;
+    let result = reaction.wait_started().await;
     assert!(
         result.is_err(),
-        "add_reaction+auto-start unexpectedly succeeded for durable+volatile"
+        "reaction auto-start unexpectedly succeeded for durable+volatile"
     );
     let msg = format!("{}", result.unwrap_err());
     assert!(

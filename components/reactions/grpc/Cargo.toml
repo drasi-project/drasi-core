@@ -74,5 +74,5 @@ tonic-prost-build = "0.14"
 [features]
 # default = []
 dynamic-plugin = []
-# Opt-in native runtime coverage for integration tests, not a production default.
-computation-tests = ["drasi-lib/computation"]
+# Compatibility alias for older test commands; all tests use ComputationGraph.
+computation-tests = []

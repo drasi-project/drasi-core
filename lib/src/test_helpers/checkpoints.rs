@@ -28,29 +28,17 @@ impl QueryCheckpointView<'_> {
 pub(crate) async fn store(
     query: &Arc<dyn crate::queries::Query>,
 ) -> Option<Arc<dyn CheckpointStore>> {
-    #[cfg(feature = "computation")]
-    if let Some(query) = query
-        .as_any()
-        .downcast_ref::<crate::computation::compatibility::QueryInstance>()
-    {
-        return query
-            .checkpoint_store()
-            .expect("native checkpoint resource")
-            .map(|inner| Arc::new(NativeCheckpoints(inner)) as Arc<dyn CheckpointStore>);
-    }
     query
         .as_any()
-        .downcast_ref::<crate::queries::DrasiQuery>()
-        .expect("legacy query implementation")
-        .get_checkpoint_store()
-        .await
+        .downcast_ref::<crate::computation::runtime::QueryInstance>()
+        .expect("computation query")
+        .checkpoint_store()
+        .expect("native checkpoint resource")
+        .map(|inner| Arc::new(NativeCheckpoints(inner)) as Arc<dyn CheckpointStore>)
 }
 
 pub(crate) fn storage_id(query: &str) -> String {
-    #[cfg(feature = "computation")]
-    if super::execution_mode() == crate::ExecutionMode::ComputationGraph
-        && !query.starts_with("computation-v2-")
-    {
+    if !query.starts_with("computation-v2-") {
         let graph = format!(
             "lib-query/{}",
             query
@@ -68,9 +56,7 @@ pub(crate) fn storage_id(query: &str) -> String {
 }
 
 /// A semantic checkpoint view: translate storage keys, never checkpoint values.
-#[cfg(feature = "computation")]
 struct NativeCheckpoints(Arc<dyn CheckpointStore>);
-#[cfg(feature = "computation")]
 #[async_trait::async_trait]
 impl CheckpointStore for NativeCheckpoints {
     fn is_persistent(&self) -> bool {

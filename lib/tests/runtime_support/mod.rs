@@ -12,18 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use drasi_lib::{DrasiLib, DrasiLibBuilder, ExecutionMode};
+use drasi_lib::{DrasiLib, DrasiLibBuilder};
 
 pub fn builder() -> DrasiLibBuilder {
-    let mode = match std::env::var("DRASI_TEST_EXECUTION").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("component") => ExecutionMode::ComponentGraph,
-        #[cfg(feature = "computation")]
-        Ok("computation") => ExecutionMode::ComputationGraph,
-        other => panic!(
-            "unsupported test execution mode (computation requires its Cargo feature): {other:?}"
-        ),
-    };
-    DrasiLib::builder().with_execution_mode(mode)
+    DrasiLib::builder()
 }
 
 #[allow(dead_code)]

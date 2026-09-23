@@ -57,7 +57,7 @@ use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use recovery_support::{execution_mode, outbox, wait_for_checkpoint, wait_for_outbox};
+use recovery_support::{outbox, require_current_runtime, wait_for_checkpoint, wait_for_outbox};
 
 const SOURCE: &str = "e2e-source";
 const QUERY: &str = "e2e-query";
@@ -97,10 +97,9 @@ async fn build_core(
     }
     let reaction = builder.build().expect("reaction builder");
 
-    let mode = execution_mode();
+    require_current_runtime();
     let core = Arc::new(
         DrasiLib::builder()
-            .with_execution_mode(mode)
             .with_id("e2e-core")
             .with_source(mock_source)
             .with_query(query)
@@ -110,11 +109,8 @@ async fn build_core(
             .await
             .expect("build core"),
     );
-    assert_eq!(
-        core.execution_mode(),
-        mode,
-        "requested engine must be built"
-    );
+    core.computation_control()
+        .expect("ComputationGraph controller");
 
     (core, handle)
 }

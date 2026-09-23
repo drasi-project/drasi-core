@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
+
 use drasi_core::{
     computation::ComputationIndexProvider,
     interface::{CreatedIndexes, IndexBackendPlugin, IndexError},

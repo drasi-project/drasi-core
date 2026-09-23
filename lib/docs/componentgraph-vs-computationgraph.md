@@ -2,29 +2,32 @@
 
 **Updated 22 September 2026**
 
-Comparison of the current `agentofreality-parallel-computation-graph` branch,
-not a published release.
+ComputationGraph is now the only runtime on
+`agentofreality-parallel-computation-graph`. ComponentGraph below is a historical
+comparison, not another selectable engine. This is not a published release.
 
 ## Bottom line
 
-**ComputationGraph is a working alternative with better control over components
-and more flexible processing arrangements. It is not yet a faster replacement.**
+**This branch uses one runtime: ComputationGraph.** Existing source and reaction
+plugins remain supported through adapters, but the old execution engine and
+engine-selection settings are removed.
 
 Independent queries now run in separate, owned tasks. The last measured
 ComputationGraph run took **23.1% longer than ComponentGraph** on that workload.
 Those timings predate the recovery changes below and have not been rerun for them.
 
-Continue developing it, but keep ComponentGraph as the default for now.
+The pre-removal checkpoint is `milestone/computation-only-baseline`, at core
+`2ad4e8ac`. It retains the previous implementation for comparison.
 
-## What both engines already support
+## Functionality retained from the previous runtime
 
-Both use the same underlying query-evaluation code. Both support the existing
-source, query and reaction interfaces, Cypher/GQL, joins, middleware, initial data
-loading, scheduled work and recovery where the source and storage support it.
-Both engines use the same plugin interface. The current SDK contract is `0.15.0`;
-locally built hosts and plugins must use matching SDK versions.
+The query evaluator, Cypher/GQL, joins, middleware, initial data loading, scheduled
+work, storage transactions and supported recovery remain. Source/reaction
+adapters retain the existing plugin interfaces while direct graph components
+can use ports and change envelopes. The SDK contract remains `0.15.0`; locally
+built hosts and plugins must use matching SDK versions.
 
-These improvements apply to **both engines**, not just ComputationGraph:
+These improvements were already present before the single-runtime change:
 
 - Queued query inputs are ordered by source-reported event time, then source
   order in the query definition, then source-maintained sequence number. This
@@ -35,7 +38,7 @@ These improvements apply to **both engines**, not just ComputationGraph:
 - Server reports a loaded plugin's actual package version, not its
   configuration-format version.
 
-## The meaningful differences
+## Historical architecture comparison
 
 | Area | ComponentGraph | ComputationGraph |
 |---|---|---|
@@ -49,9 +52,10 @@ These improvements apply to **both engines**, not just ComputationGraph:
 | Inspection | Established component status, relationships and events. | Also shows nested query graphs, known resources, plugin references and recent graph changes. |
 | Readiness / cleanup | Managed through component managers and plugins. | Separate readiness messages and explicit cleanup ownership. |
 
-The standard DrasiLib and Server APIs can select either engine. A DrasiLib
-instance can also host additional computation graphs alongside its existing
-ComponentGraph pipeline. Neither arrangement automatically migrates saved state.
+DrasiLib, Server and embedded test instances now use ComputationGraph without
+an engine selector. Additional graphs can still share an instance with the
+ordinary source/query/reaction pipeline; they are not a second runtime.
+No automatic import of ComponentGraph's old saved state is provided.
 
 ## Last measured performance
 
@@ -121,14 +125,15 @@ without replay or a retained event log cannot resend lost data. Persistent query
 indexes alone do not make query output durable.
 
 Conformance scenarios select the execution engine explicitly, including child
-processes. Coverage includes abrupt exits around reaction checkpoints and
+processes in the preserved baseline. Current scenarios run only ComputationGraph.
+Coverage includes abrupt exits around reaction checkpoints and
 middleware delivery, partial fanout, saved state reopening and configured recovery
 policies. It is evidence for those paths, not proof about every third-party plugin.
 
 ## Main remaining work
 
-- **Reduce the remaining performance gap** and measure more queries, multiple
-  sources, persistent storage and real plugins.
+- **Measure the simplified runtime** against the preserved baseline with more
+  queries, multiple sources, persistent storage and real plugins.
 - **Create source/reaction plugins from configuration inside the standard add
   APIs.** They currently receive preconstructed objects, so constructor failures
   before the call cannot appear as failed graph nodes.
@@ -137,16 +142,21 @@ policies. It is evidence for those paths, not proof about every third-party plug
   storage provider and connection to a supplied object.
 - **Move more deployment/cloning work into reusable library APIs** and expose
   the richer graph controls through Server.
+- **Convert selected plugins to direct graph contracts** and add Continuous
+  Query participation in TransactionTransformer. Removing engine switching does
+  not automatically remove event adapters or combine independent transactions.
 - **Decide whether all-or-nothing batch deployment is needed.**
   Additions deliberately remain visible, including failures. Saving one query's
   storage updates together does not make a whole deployment all-or-nothing.
 
 ## Versions and supporting material
 
-Recovery checkpoints are core `15eaaa04` (sources), `4110b3ee` (consumers) and
-`31f9b9be` (middleware). This revision adds explicit crash conformance and corrects
-saved-output corruption handling. Server remains at `58669661` and test-infra at
-`d3fbbbb4`. Migration between engines is outside this recovery work.
+Recovery checkpoints are core `15eaaa04` (sources), `4110b3ee` (consumers),
+`31f9b9be` (middleware) and `76de23e3` (crash conformance).
+TransactionTransformer was added at `2ad4e8ac`, the single-runtime work's
+baseline. Matching local baseline branches also preserve Server `58669661`,
+test-infra `d3fbbbb4` and learning examples `bdfd6939`.
+Migration between engines is outside this work.
 The performance figures are from the earlier core commit `6a6301bc`, not these
 recovery revisions. Benchmark evidence is retained in this workspace session's `parallel-performance-summary.json`,
 `ranked-baseline/` and `parallel-query-benchmark/` records.

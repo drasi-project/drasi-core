@@ -18,8 +18,9 @@
 //! test re-executes the current binary as a child (`DRASI_RECOVERY_CONFORMANCE_PHASE`
 //! = `seed` then `recover`) so RocksDB/redb state is reconstructed after a real
 //! process exit. `run_phase` / `seed_phase` / `recover_phase` implement that
-//! handshake. Set `DRASI_TEST_EXECUTION=component` or `computation`; computation
-//! requires the matching Cargo feature. Every child attests its actual runtime.
+//! handshake. ComputationGraph is the sole runtime. The former
+//! `DRASI_TEST_EXECUTION=component` selector is rejected rather than silently
+//! relabeled. Every child attests graph ownership and its actual process ID.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -30,10 +31,10 @@ use drasi_lib::queries::{FetchError, OutboxGap};
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::wal::WalProvider;
 use drasi_lib::{
-    CapacityPolicy, DrasiLib, DurabilityConfig, ExecutionMode, IndexBackendPlugin, Reaction,
-    ReactionBase, ReactionBaseParams, ReactionCheckpoint, ReactionRecoveryPolicy,
-    ReactionRuntimeContext, RecoveryPolicy, Source, SourceRuntimeContext,
-    SourceSubscriptionSettings, StateStoreProvider, StorageBackendRef,
+    CapacityPolicy, DrasiLib, DurabilityConfig, IndexBackendPlugin, Reaction, ReactionBase,
+    ReactionBaseParams, ReactionCheckpoint, ReactionRecoveryPolicy, ReactionRuntimeContext,
+    RecoveryPolicy, Source, SourceRuntimeContext, SourceSubscriptionSettings, StateStoreProvider,
+    StorageBackendRef,
 };
 use drasi_source_application::{
     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle, PropertyMapBuilder,
@@ -45,7 +46,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, Weak,
@@ -54,6 +55,7 @@ use std::time::Duration;
 
 const PHASE_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_PHASE";
 const EXECUTION_ENV: &str = "DRASI_TEST_EXECUTION";
+const RUNTIME_NAME: &str = "computation";
 const ROCKS_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_ROCKS_PATH";
 const STATE_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_STATE_PATH";
 const WAL_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_WAL_PATH";
@@ -75,34 +77,23 @@ const QUERY_TEXT: &str =
 const RECONFIGURED_QUERY_TEXT: &str =
     "MATCH (p:Person) RETURN p.personId AS id, p.name AS name, p.active AS active, true AS revision";
 
-fn parse_execution_mode(value: &str) -> Result<ExecutionMode> {
+fn validate_runtime_selector(value: &str) -> Result<()> {
     match value {
-        "component" => Ok(ExecutionMode::ComponentGraph),
-        #[cfg(feature = "computation")]
-        "computation" => Ok(ExecutionMode::ComputationGraph),
-        #[cfg(not(feature = "computation"))]
-        "computation" => anyhow::bail!(
-            "{EXECUTION_ENV}=computation requires --features computation; refusing legacy fallback"
-        ),
+        RUNTIME_NAME => Ok(()),
+        "component" => {
+            anyhow::bail!("{EXECUTION_ENV}=component selects the removed ComponentGraph runtime")
+        }
         other => {
-            anyhow::bail!("invalid {EXECUTION_ENV}={other:?}; expected component or computation")
+            anyhow::bail!("invalid {EXECUTION_ENV}={other:?}; only computation is supported")
         }
     }
 }
 
-fn execution_mode() -> Result<ExecutionMode> {
+fn validate_runtime_environment() -> Result<()> {
     match std::env::var(EXECUTION_ENV) {
-        Ok(value) => parse_execution_mode(&value),
-        Err(std::env::VarError::NotPresent) => Ok(ExecutionMode::ComponentGraph),
-        Err(error) => Err(error).context("read test execution mode"),
-    }
-}
-
-fn execution_name(mode: ExecutionMode) -> &'static str {
-    match mode {
-        ExecutionMode::ComponentGraph => "component",
-        #[cfg(feature = "computation")]
-        ExecutionMode::ComputationGraph => "computation",
+        Ok(value) => validate_runtime_selector(&value),
+        Err(std::env::VarError::NotPresent) => Ok(()),
+        Err(error) => Err(error).context("read test runtime selector"),
     }
 }
 
@@ -149,15 +140,15 @@ impl FixturePaths {
             .env(INDEX_LOCATION_ENV, &self.index_location);
     }
 
-    fn execution_attestation(&self, phase: &str) -> PathBuf {
+    fn runtime_attestation(&self, phase: &str) -> PathBuf {
         self.ready.with_file_name(format!("execution-{phase}.json"))
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct ExecutionAttestation {
+struct RuntimeAttestation {
     phase: String,
-    mode: String,
+    runtime: String,
     process_id: u32,
 }
 
@@ -165,13 +156,12 @@ struct ExecutionAttestation {
 struct IndexLocation {
     storage_scope: String,
     query_id: String,
-    mode: String,
+    runtime: String,
 }
 
 struct ObservedRocksDb {
     inner: RocksDbIndexProvider,
     location: PathBuf,
-    mode: ExecutionMode,
 }
 
 #[async_trait]
@@ -193,7 +183,7 @@ impl IndexBackendPlugin for ObservedRocksDb {
             let location = IndexLocation {
                 storage_scope: storage_scope.to_string(),
                 query_id: query_id.to_string(),
-                mode: execution_name(self.mode).to_string(),
+                runtime: RUNTIME_NAME.to_string(),
             };
             let bytes = serde_json::to_vec(&location).map_err(IndexError::other)?;
             write_synced_file(&self.location, &bytes)
@@ -217,8 +207,8 @@ fn read_index_location(paths: &FixturePaths) -> Result<IndexLocation> {
     )
     .context("decode observed query index location")?;
     anyhow::ensure!(
-        location.query_id == QUERY_ID && location.mode == execution_name(execution_mode()?),
-        "query index location belongs to another query or execution mode: {location:?}"
+        location.query_id == QUERY_ID && location.runtime == RUNTIME_NAME,
+        "query index location belongs to another query or runtime: {location:?}"
     );
     Ok(location)
 }
@@ -244,7 +234,10 @@ struct SourceObservations {
 
 impl SourceObservations {
     fn subscriptions(&self) -> Vec<SourceSubscription> {
-        self.subscriptions.lock().unwrap().clone()
+        self.subscriptions
+            .lock()
+            .expect("source observations")
+            .clone()
     }
 
     fn confirmed_position(&self) -> Option<u64> {
@@ -311,7 +304,7 @@ impl Source for ObservedApplication {
         self.observations
             .subscriptions
             .lock()
-            .unwrap()
+            .expect("source observations")
             .push(SourceSubscription {
                 settings,
                 position: response.position_handle.as_ref().map(Arc::downgrade),
@@ -606,7 +599,7 @@ async fn build_fixture(paths: &FixturePaths) -> Result<RecoveryFixture> {
 }
 
 async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<RecoveryFixture> {
-    let mode = execution_mode()?;
+    validate_runtime_environment()?;
     std::fs::create_dir_all(&paths.rocks)
         .with_context(|| format!("create RocksDB directory {}", paths.rocks.display()))?;
     std::fs::create_dir_all(&paths.wal)
@@ -633,14 +626,12 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
     let rocks = Arc::new(ObservedRocksDb {
         inner: RocksDbIndexProvider::new(&paths.rocks, false, false),
         location: paths.index_location.clone(),
-        mode,
     });
     let state_store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
     let wal = Arc::new(RedbWalProvider::new(&paths.wal));
 
     let mut builder = DrasiLib::builder()
         .with_id(INSTANCE_ID)
-        .with_execution_mode(mode)
         .with_source(source)
         .with_query(
             drasi_lib::Query::cypher(QUERY_ID)
@@ -667,17 +658,16 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
     }
 
     let core = builder.build().await?;
-    anyhow::ensure!(
-        core.execution_mode() == mode,
-        "requested {mode:?}, constructed {:?}",
-        core.execution_mode()
-    );
+    core.computation_control()
+        .context("fixture must construct a computation controller")?;
+    core.computation_component(QUERY_ID)
+        .context("fixture query must belong to the computation graph")?;
     let phase = std::env::var(PHASE_ENV).context("fixture requires a child conformance phase")?;
     write_synced_file(
-        &paths.execution_attestation(&phase),
-        &serde_json::to_vec(&ExecutionAttestation {
+        &paths.runtime_attestation(&phase),
+        &serde_json::to_vec(&RuntimeAttestation {
             phase,
-            mode: execution_name(core.execution_mode()).to_string(),
+            runtime: RUNTIME_NAME.to_string(),
             process_id: std::process::id(),
         })?,
     )?;
@@ -1402,11 +1392,7 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
         .context("missing expected reset high-water mark")?
         .parse()
         .context("invalid expected reset high-water mark")?;
-    let reset_sequence = if execution_name(execution_mode()?) == "computation" {
-        retained_high_water
-    } else {
-        0
-    };
+    let reset_sequence = retained_high_water;
     let fixture = build_fixture_opts(
         paths,
         FixtureOpts {
@@ -1423,7 +1409,7 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
     let wiped = observe_snapshot(&fixture.core).await?;
     assert_eq!(
         wiped.sequence, reset_sequence,
-        "AutoReset must clear rows; native output preserves its prior sequence high-water"
+        "AutoReset must clear rows while preserving the prior sequence high-water"
     );
     assert!(
         wiped.people.is_empty(),
@@ -1872,7 +1858,7 @@ fn run_phase_with_env(
     paths: &FixturePaths,
     extra_env: &[(&str, &str)],
 ) -> Result<Output> {
-    let mode = execution_mode()?;
+    validate_runtime_environment()?;
     let executable = std::env::current_exe().context("resolve current test executable")?;
     let mut command = Command::new(executable);
     command
@@ -1884,28 +1870,36 @@ fn run_phase_with_env(
         .env_remove(FAIL_EFFECT_ENV)
         .env_remove(QUERY_POLICY_ENV)
         .env_remove(IDENTITY_CASE_ENV)
-        .env(PHASE_ENV, phase);
+        .env(PHASE_ENV, phase)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     paths.apply_to(&mut command);
     for (key, value) in extra_env {
         anyhow::ensure!(
             *key != EXECUTION_ENV,
-            "phase overrides must not change the selected runtime"
+            "phase overrides must not change the runtime selector"
         );
         command.env(key, value);
     }
-    command.env(EXECUTION_ENV, execution_name(mode));
-    let output = command.output().context("spawn conformance phase child")?;
+    command.env(EXECUTION_ENV, RUNTIME_NAME);
+    let child = command.spawn().context("spawn conformance phase child")?;
+    let process_id = child.id();
+    let output = child
+        .wait_with_output()
+        .context("wait for conformance phase child")?;
     if output.status.success() {
-        let observed: ExecutionAttestation = serde_json::from_slice(
-            &std::fs::read(paths.execution_attestation(phase))
-                .with_context(|| format!("child {phase} omitted execution-mode attestation"))?,
+        let observed: RuntimeAttestation = serde_json::from_slice(
+            &std::fs::read(paths.runtime_attestation(phase))
+                .with_context(|| format!("child {phase} omitted runtime attestation"))?,
         )
-        .context("decode child execution-mode attestation")?;
+        .context("decode child runtime attestation")?;
         anyhow::ensure!(
             observed.phase == phase
-                && observed.mode == execution_name(mode)
+                && observed.runtime == RUNTIME_NAME
+                && observed.process_id == process_id
                 && observed.process_id != std::process::id(),
-            "child did not execute its requested runtime in a separate process: {observed:?}"
+            "child did not execute ComputationGraph in its own process: {observed:?}"
         );
     }
     Ok(output)
@@ -2669,8 +2663,8 @@ async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
                 .checkpoint_store
                 .context("missing checkpoint store")?;
             let checkpoints = store.read_all_checkpoints().await?;
-            // Native internal query markers use the reserved NUL namespace;
-            // neither runtime may have a per-source cursor in this fixture.
+            // Internal query markers use the reserved NUL namespace; this
+            // fixture must not persist any per-source cursor before restart.
             assert!(
                 checkpoints.keys().all(|key| key.starts_with('\0')),
                 "seed process unexpectedly persisted source progress: {checkpoints:?}"
@@ -2810,13 +2804,9 @@ async fn seed_query_identity_change_phase(paths: &FixturePaths) -> Result<()> {
     assert_eq!(new.people, vec![person("p2", "Bob", false)]);
     wait_for_source_position(&fixture, 2).await?;
     let snapshot = query.fetch_snapshot().await?;
-    let checkpoint_hash = if fixture.core.execution_mode() == ExecutionMode::ComponentGraph {
-        drasi_lib::queries::output_epoch_hash(snapshot.config_hash, snapshot.output_generation)
-    } else {
-        // Native reactions persist the config hash directly and fence the
-        // output generation in their separate recovery metadata.
-        snapshot.config_hash
-    };
+    // Reactions persist the config hash directly and fence the output generation
+    // in their separate recovery metadata.
+    let checkpoint_hash = snapshot.config_hash;
     if matches!(change, IdentityChange::Reconfigure) {
         assert_ne!(snapshot.config_hash, old.config_hash);
         assert!(snapshot
@@ -3276,7 +3266,7 @@ async fn rocksdb_redb_overflow_gap_autoskip() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn reaction_recovery_conformance_phase() -> Result<()> {
-    execution_mode()?;
+    validate_runtime_environment()?;
     let phase = match std::env::var(PHASE_ENV) {
         Ok(phase) => phase,
         Err(std::env::VarError::NotPresent) => return Ok(()),
@@ -3325,21 +3315,12 @@ async fn reaction_recovery_conformance_phase() -> Result<()> {
 }
 
 #[test]
-fn execution_mode_selection_is_explicit() {
-    assert_eq!(
-        parse_execution_mode("component").unwrap(),
-        ExecutionMode::ComponentGraph
-    );
-    assert!(parse_execution_mode("unknown").is_err());
-    assert!(parse_execution_mode("").is_err());
-    #[cfg(feature = "computation")]
-    assert_eq!(
-        parse_execution_mode("computation").unwrap(),
-        ExecutionMode::ComputationGraph
-    );
-    #[cfg(not(feature = "computation"))]
-    assert!(parse_execution_mode("computation")
+fn removed_runtime_selector_is_rejected() {
+    assert!(validate_runtime_selector("component")
         .unwrap_err()
         .to_string()
-        .contains("requires --features computation"));
+        .contains("removed ComponentGraph runtime"));
+    assert!(validate_runtime_selector("unknown").is_err());
+    assert!(validate_runtime_selector("").is_err());
+    validate_runtime_selector("computation").unwrap();
 }

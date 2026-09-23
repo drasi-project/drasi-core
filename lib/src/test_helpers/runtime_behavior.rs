@@ -27,17 +27,8 @@ use serde_json::json;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>) {
-    pipeline_for_mode(text, capacity, super::execution_mode()).await
-}
-
-async fn pipeline_for_mode(
-    text: &str,
-    capacity: usize,
-    mode: crate::ExecutionMode,
-) -> (Arc<DrasiLib>, Arc<dyn Query>) {
     let core = Arc::new(
         DrasiLib::builder()
-            .with_execution_mode(mode)
             .with_id("runtime-parity")
             .with_source(TestMockSource::new("source".into()).unwrap())
             .with_query(
@@ -52,7 +43,7 @@ async fn pipeline_for_mode(
             .await
             .unwrap(),
     );
-    let mut events = core.component_graph.read().await.subscribe();
+    let mut events = core.subscribe_all_component_events();
     core.start().await.unwrap();
     wait_for_component_status(
         &mut events,
@@ -66,9 +57,8 @@ async fn pipeline_for_mode(
         .await
         .unwrap();
 
-    #[cfg(feature = "computation")]
-    if core.execution_mode() == crate::ExecutionMode::ComputationGraph {
-        use crate::computation::{compatibility::QueryInstance, v1::*};
+    {
+        use crate::computation::{runtime::QueryInstance, v1::*};
         let native = query.as_any().downcast_ref::<QueryInstance>().unwrap();
         let snapshot = native.inspector().snapshot();
         let id = ComponentId::try_new("query").unwrap();
@@ -119,9 +109,8 @@ async fn receive(
         .unwrap()
 }
 
-#[cfg(feature = "computation")]
 #[tokio::test]
-async fn both_backends_preserve_ordered_diffs_metadata_snapshots_and_outbox() {
+async fn native_runtime_preserves_ordered_diffs_metadata_snapshots_and_outbox() {
     use std::collections::BTreeMap;
 
     fn normalized(result: &QueryResult) -> serde_json::Value {
@@ -156,9 +145,8 @@ async fn both_backends_preserve_ordered_diffs_metadata_snapshots_and_outbox() {
         }
     }
 
-    async fn trace(mode: crate::ExecutionMode) -> serde_json::Value {
-        let (core, query) =
-            pipeline_for_mode("MATCH (n:Person) RETURN n.name AS name", 8, mode).await;
+    async fn trace() -> serde_json::Value {
+        let (core, query) = pipeline("MATCH (n:Person) RETURN n.name AS name", 8).await;
         let mut output = query.subscribe("capture".into()).await.unwrap().receiver;
         let source = core.source_instance("source").await.unwrap();
         let source = source.as_any().downcast_ref::<TestMockSource>().unwrap();
@@ -207,16 +195,13 @@ async fn both_backends_preserve_ordered_diffs_metadata_snapshots_and_outbox() {
             .map(|result| normalized(result))
             .collect();
         assert_eq!(replay, emissions);
-        if mode == crate::ExecutionMode::ComputationGraph {
-            assert!(core.legacy_backend.initialized().is_none());
-        }
         core.shutdown().await.unwrap();
         json!({"emissions": emissions, "snapshots": snapshots, "outbox": replay})
     }
 
-    let legacy = trace(crate::ExecutionMode::ComponentGraph).await;
-    let native = trace(crate::ExecutionMode::ComputationGraph).await;
-    assert_eq!(native, legacy);
+    let first = trace().await;
+    let rebuilt = trace().await;
+    assert_eq!(rebuilt, first);
 }
 
 async fn bounded_fanout() {
@@ -268,15 +253,9 @@ async fn bounded_fanout_preserves_complete_results_multi_thread() {
     bounded_fanout().await;
 }
 
-#[cfg(feature = "computation")]
 #[tokio::test]
 async fn native_slow_subscriber_does_not_block_other_deliveries() {
-    let (core, query) = pipeline_for_mode(
-        "MATCH (n:Person) RETURN n.name AS name",
-        1,
-        crate::ExecutionMode::ComputationGraph,
-    )
-    .await;
+    let (core, query) = pipeline("MATCH (n:Person) RETURN n.name AS name", 1).await;
     let mut slow = query.subscribe("slow".into()).await.unwrap().receiver;
     let mut fast = query.subscribe("fast".into()).await.unwrap().receiver;
     insert(&core, "1", "Alice").await;
@@ -343,7 +322,6 @@ async fn scheduled_query_result_preserves_legacy_metadata_and_snapshot() {
     core.shutdown().await.unwrap();
 }
 
-#[cfg(feature = "computation")]
 #[tokio::test]
 async fn partially_started_native_instance_can_stop_its_successful_components() {
     struct FailingSource;
@@ -379,7 +357,6 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
         }
     }
     let core = DrasiLib::builder()
-        .with_execution_mode(crate::ExecutionMode::ComputationGraph)
         .with_source(FailingSource)
         .with_source(TestMockSource::new("good".into()).unwrap())
         .with_query(
@@ -392,7 +369,7 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
         .build()
         .await
         .unwrap();
-    let mut events = core.component_graph.read().await.subscribe();
+    let mut events = core.subscribe_all_component_events();
     assert!(core.start().await.is_err());
     wait_for_component_status(
         &mut events,

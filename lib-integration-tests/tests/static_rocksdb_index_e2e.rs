@@ -256,6 +256,7 @@ async fn static_rocksdb_descriptor_drives_query() -> Result<()> {
     );
 
     core.start().await?;
+    wait_for_query_status(&core, "people", ComponentStatus::Running).await;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
     insert_person(&handle, "p2", "Bob", 25).await?;
@@ -270,7 +271,7 @@ async fn static_rocksdb_descriptor_drives_query() -> Result<()> {
     assert!(names.contains(&"Alice"), "missing Alice in {results:?}");
     assert!(names.contains(&"Bob"), "missing Bob in {results:?}");
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -315,6 +316,7 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
     );
 
     core.start().await?;
+    wait_for_query_status(&core, "people", ComponentStatus::Running).await;
 
     // Ingest 3 rows as live source changes.
     insert_person(&handle, "p1", "Alice", 30).await?;
@@ -344,7 +346,7 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
     assert!(names.contains(&"Bob"), "missing Bob in {recovered:?}");
     assert!(names.contains(&"Carol"), "missing Carol in {recovered:?}");
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -376,7 +378,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     let (source1, handle1) = test_source("people-src")?;
     let core1 = Arc::new(
         DrasiLib::builder()
-            .with_id("static-rocksdb-1")
+            .with_id("static-rocksdb-reopen")
             .with_index_provider("rocks-1", provider1)
             .with_source(source1)
             // Bootstrap disabled so that, after reopen, rows can only come from the
@@ -395,6 +397,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     );
 
     core1.start().await?;
+    wait_for_query_status(&core1, "people", ComponentStatus::Running).await;
 
     insert_person(&handle1, "p1", "Alice", 30).await?;
     insert_person(&handle1, "p2", "Bob", 25).await?;
@@ -413,7 +416,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     let (source2, _handle2) = test_source("people-src")?;
     let core2 = Arc::new(
         DrasiLib::builder()
-            .with_id("static-rocksdb-2")
+            .with_id("static-rocksdb-reopen")
             .with_index_provider("rocks-1", provider2)
             .with_source(source2)
             .with_query(
@@ -493,6 +496,7 @@ async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()>
     );
 
     core.start().await?;
+    wait_for_query_status(&core, "people", ComponentStatus::Running).await;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
     insert_person(&handle, "p2", "Bob", 25).await?;
@@ -523,6 +527,6 @@ async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()>
     assert!(names.contains(&"Alice"), "missing Alice in {recovered:?}");
     assert!(names.contains(&"Bob"), "missing Bob in {recovered:?}");
 
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }

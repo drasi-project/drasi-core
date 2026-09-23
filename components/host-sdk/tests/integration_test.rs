@@ -1085,8 +1085,8 @@ async fn test_plugin_logs_routed_to_log_registry() {
 async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     //! Verify that lifecycle events (Starting, Started, Stopping, Stopped) from a plugin
     //! flow through the update_tx channel when source.initialize() is called with a real
-    //! SourceRuntimeContext. This is the same channel that LifecycleManager monitors.
-    use drasi_lib::component_graph::ComponentUpdate;
+    //! SourceRuntimeContext. The graph-owned plugin host observes this channel.
+    use drasi_lib::channels::ComponentUpdate;
     use drasi_lib::context::SourceRuntimeContext;
     use drasi_lib::sources::Source;
     use drasi_lib::ComponentStatus;

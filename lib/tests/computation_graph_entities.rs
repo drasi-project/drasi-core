@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 #[allow(dead_code)]
 mod computation_support;
@@ -2172,7 +2172,6 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_graph_s
         .build()
         .expect("right graph");
     let instance = drasi_lib::DrasiLib::builder()
-        .with_execution_mode(drasi_lib::ExecutionMode::ComputationGraph)
         .with_computation_graph(left, ComputationOptions { auto_start: false })
         .with_computation_graph(right, ComputationOptions { auto_start: false })
         .build()

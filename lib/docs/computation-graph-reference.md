@@ -23,15 +23,23 @@ feature.
 | `ComputationRegistry` | DrasiLib's registered graphs and their owned tasks |
 | `ComputationInventory` | Combined view of registered graphs and their nested query graphs |
 
-An instance's source/query/reaction records are owned by its graph. The old
-ComponentGraph inspection view is produced from those records, not used to
-recover membership or decide removals. Explicit access to an old manager remains
-an engine-specific API; it is not a ComputationGraph command.
+An instance's source/query/reaction records are owned by its graph. Compatibility
+inspection responses are derived from those records, not used to recover
+membership or decide removals. Ordinary component operations and any retained
+manager-style accessors are graph-backed APIs, not a second execution engine.
+
+`DrasiLib::get_graph().await` returns the compatibility snapshot directly.
+`component_graph()` is now a weak, read-only asynchronous view: it is not an
+`Arc<RwLock<ComponentGraph>>`, has no node/relationship mutation methods, and
+cannot store runtime instances. Existing callers must remove graph-lock and
+direct-mutation code rather than using that view as another lifecycle owner.
 
 DrasiLib owns a task for each registered graph and each query's nested graph.
 Inside a graph, the controller polls its component futures and serializes mutable
 calls to each component. Independent query tasks can use different Tokio workers.
-No API requires a multi-thread runtime.
+The in-process graph APIs support both single-thread and multi-thread Tokio
+runtimes. A particular plugin or its foreign-function bridge can have additional
+requirements; those are not an alternative graph engine.
 
 ## Identifying the right object
 
@@ -368,6 +376,12 @@ query state: Strict refuses startup; AutoReset can rebuild from a configured
 bootstrap. Output decoding failures retain their original cause. Output-store
 read outages are not reclassified as corruption or permission to clear state.
 
+A bootstrap setting alone does not clear a healthy query on an in-process
+restart. The source must actually supply a snapshot or its completion stream
+before a volatile snapshot refresh is requested. A real refresh still rebuilds
+query state and advances its output generation; reaction recovery policies are
+not silently relaxed.
+
 Query output generation identifies one lifetime of the query's output. Reset
 and deletion preserve this identity information, even when rows/checkpoints are
 cleared. Stop/restart without reset preserves it. It is separate from
@@ -420,27 +434,20 @@ The non-streaming snapshot API can still allocate the complete requested snapsho
 
 ### Recovery conformance
 
-From the drasi-core repository root, run the same recovery scenarios under both
-engines:
+From the drasi-core repository root, run the recovery scenarios against the
+single runtime:
 
 ```bash
-for engine in component computation; do
-  DRASI_TEST_EXECUTION="$engine" cargo test --locked -p lib-integration-tests \
-    --features computation --test reaction_recovery_conformance
-  DRASI_TEST_EXECUTION="$engine" cargo test --locked \
-    -p drasi-reaction-http -p drasi-reaction-grpc \
-    --features drasi-reaction-http/computation-tests,drasi-reaction-grpc/computation-tests \
-    --test recovery_e2e
-done
+cargo test --locked -p lib-integration-tests --test reaction_recovery_conformance
+cargo test --locked -p drasi-reaction-http -p drasi-reaction-grpc --test recovery_e2e
 
 cargo test --locked -p lib-integration-tests --features computation-middleware-tests \
   --test computation_middleware_durability
 ```
 
-These fixtures explicitly select and verify the engine. The subprocess tests
-preserve that selection across restarts; they do not silently fall back to
-ComponentGraph. `DRASI_TEST_EXECUTION` is a test setting, not a production
-configuration option. The middleware target includes abrupt process exits before
+The subprocess fixtures verify distinct processes and actual graph-backed
+execution; they cannot fall back to ComponentGraph. The middleware target
+includes abrupt process exits before
 delivery, during partial fanout, and before/after delivery confirmation.
 
 Post-commit query timestamps are appended only to live output annotations.
@@ -526,9 +533,8 @@ different surfaces and must not be assumed safe for public disclosure.
 | Query execution and ordering | [`query.rs`](../src/computation/v1/query.rs), [`ranked_pipe.rs`](../src/computation/v1/ranked_pipe.rs), [`query_scheduling.rs`](../src/computation/v1/query_scheduling.rs) |
 | Standalone graph middleware | [`middleware.rs`](../src/computation/v1/middleware.rs) |
 | Instance and query task ownership | [`instance.rs`](../src/computation/instance.rs), [`scoped_graph.rs`](../src/computation/scoped_graph.rs) |
-| Existing API/plugin integration | [`compatibility`](../src/computation/compatibility), [`pipeline.rs`](../src/computation/v1/pipeline.rs), [`plugin_source.rs`](../src/computation/v1/plugin_source.rs), [`plugin_reaction.rs`](../src/computation/v1/plugin_reaction.rs) |
+| Ordinary APIs and plugin integration | [`runtime`](../src/computation/runtime), [`pipeline.rs`](../src/computation/v1/pipeline.rs), [`plugin_source.rs`](../src/computation/v1/plugin_source.rs), [`plugin_reaction.rs`](../src/computation/v1/plugin_reaction.rs) |
 | Inspection and inventory | [`entities.rs`](../src/computation/v1/entities.rs), [`inventory.rs`](../src/computation/v1/inventory.rs) |
-| Previous execution engine | [`legacy_backend.rs`](../src/legacy_backend.rs) |
 
 The general graph modules do not decode the plugin adapter's private configuration
 or construct the old managers. Provider translation and plugin factory assembly
@@ -541,14 +547,13 @@ env -u RUST_LOG bash lib/tests/run-runtime-parity.sh
 cargo test --locked -p drasi-lib --features computation-rocksdb-tests \
   --test computation_query_codec --test computation_query_faults \
   --test computation_query_recovery
-cargo test --locked -p lib-integration-tests --features computation
+cargo test --locked -p lib-integration-tests
 ```
 
 The integration suite includes container-backed cases and needs Docker.
-The parity runner checks discovery of the
-[original cases](../tests/runtime_parity/original-cases.tsv) in three builds/modes
-and retains failures rather than converting them into skips. Its test-only
-`DRASI_TEST_EXECUTION` selection is not a production engine setting. Leave
+The runtime runner checks the supported build configurations and retains
+failures rather than converting them into skips. These are build checks for one
+engine, not alternate execution modes. Leave
 `RUST_LOG` unset for suites that assert logging behaviour.
 
 Paired result comparisons preserve emission order, row identities, metadata,

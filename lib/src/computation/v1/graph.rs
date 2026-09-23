@@ -541,6 +541,11 @@ pub struct ComputationGraphBuilder {
 }
 
 impl ComputationGraphBuilder {
+    pub(crate) fn for_additions(mut self) -> Self {
+        self.allow_empty = true;
+        self
+    }
+
     pub fn require_downstream_ready(mut self, component: ComponentId) -> Self {
         self.readiness_required.insert(component);
         self
@@ -1076,7 +1081,7 @@ impl GraphControl {
     }
 }
 
-/// Standalone opt-in DAG, unrelated to legacy `ComponentGraph`/`DrasiLib`.
+/// Authoritative DAG runtime, usable standalone or owned by [`crate::DrasiLib`].
 ///
 /// `start` deploys and requests automatic startup in a caller-polled run; `run`
 /// deploys without automatic activation and keeps its command controller open.
@@ -1155,9 +1160,7 @@ impl ComputationGraph {
     /// Create an empty graph whose controller can accept individual additions.
     /// Use `run()` to keep it open while adding nodes and connecting their ports.
     pub fn empty(id: impl Into<Arc<str>>) -> GraphResult<Self> {
-        let mut builder = Self::builder(id);
-        builder.allow_empty = true;
-        builder.build()
+        Self::builder(id).for_additions().build()
     }
 
     pub fn snapshot(&self) -> &GraphSnapshot {

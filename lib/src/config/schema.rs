@@ -318,7 +318,7 @@ impl Default for DrasiLibConfig {
 /// # Bootstrap Processing
 ///
 /// - **enableBootstrap**: Controls whether the query processes initial data (default: true)
-/// - **bootstrapBufferSize**: ComponentGraph bootstrap buffer setting (default: 10000).
+/// - **bootstrapBufferSize**: Retained configuration compatibility field (default: 10000).
 ///   ComputationGraph's live-event inbox during bootstrap uses `priority_queue_capacity`.
 ///
 /// During bootstrap, events are buffered to maintain ordering while initial data loads.
@@ -339,7 +339,7 @@ impl Default for DrasiLibConfig {
 /// - **auto_start**: Start automatically (default: true)
 /// - **joins**: Optional synthetic join definitions
 /// - **enableBootstrap**: Process initial data (default: true)
-/// - **bootstrapBufferSize**: ComponentGraph bootstrap buffer setting (default: 10000)
+/// - **bootstrapBufferSize**: Retained compatibility field; live bootstrap buffering uses `priority_queue_capacity`
 /// - **priority_queue_capacity**: Out-of-order event queue size (overrides global)
 /// - **dispatch_buffer_capacity**: Output buffer size (overrides global)
 /// - **dispatch_mode**: Broadcast or Channel routing
@@ -404,7 +404,7 @@ impl Default for DrasiLibConfig {
 ///       - source_id: event_stream
 ///     priority_queue_capacity: 100000  # Large queue for many out-of-order events
 ///     dispatch_buffer_capacity: 10000  # Large output buffer
-///     bootstrapBufferSize: 50000       # ComponentGraph bootstrap buffer
+///     bootstrapBufferSize: 50000       # Retained configuration compatibility field
 /// ```
 ///
 /// ## GQL Query

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 mod computation_support;
 
@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use computation_support::*;
 use drasi_lib::computation::v1::*;
 
-macro_rules! both_runtimes {
+macro_rules! both_tokio_flavors {
     ($name:ident, $scenario:ident) => {
         mod $name {
             #[tokio::test(flavor = "current_thread")]
@@ -111,7 +111,7 @@ async fn direct_scenario() {
     }
 }
 
-both_runtimes!(direct, direct_scenario);
+both_tokio_flavors!(direct, direct_scenario);
 
 async fn annotation_history_scenario() {
     let original = root("source", 1, &[2, 4]);
@@ -181,7 +181,7 @@ async fn annotation_history_scenario() {
     );
 }
 
-both_runtimes!(annotation_history, annotation_history_scenario);
+both_tokio_flavors!(annotation_history, annotation_history_scenario);
 
 async fn chain_scenario() {
     let inputs = [root("source", 20, &[2, 4]), root("source", 30, &[6])];
@@ -270,7 +270,7 @@ async fn chain_scenario() {
     }
 }
 
-both_runtimes!(two_transform_chain, chain_scenario);
+both_tokio_flavors!(two_transform_chain, chain_scenario);
 
 async fn cardinality_scenario() {
     for counts in [vec![], vec![0], vec![1], vec![3], vec![0, 1, 3, 0, 1]] {
@@ -350,7 +350,7 @@ async fn cardinality_scenario() {
     }
 }
 
-both_runtimes!(zero_one_many_outputs, cardinality_scenario);
+both_tokio_flavors!(zero_one_many_outputs, cardinality_scenario);
 
 async fn fanout_scenario() {
     let original = root("source", 42, &[7, 11]);
@@ -412,7 +412,7 @@ async fn fanout_scenario() {
     }
 }
 
-both_runtimes!(fanout_branch_isolation, fanout_scenario);
+both_tokio_flavors!(fanout_branch_isolation, fanout_scenario);
 
 async fn fanin_scenario() {
     // No cross-stream order is assumed. Both a shared input and distinct input
@@ -510,7 +510,7 @@ async fn fanin_scenario() {
     }
 }
 
-both_runtimes!(fanin_per_stream_fifo, fanin_scenario);
+both_tokio_flavors!(fanin_per_stream_fifo, fanin_scenario);
 
 #[derive(Debug, Clone, Copy)]
 enum Fault {
@@ -637,7 +637,7 @@ async fn invalid_source_scenario() {
     }
 }
 
-both_runtimes!(invalid_source_outputs, invalid_source_scenario);
+both_tokio_flavors!(invalid_source_outputs, invalid_source_scenario);
 
 async fn invalid_transform_scenario() {
     for fault in [
@@ -710,7 +710,7 @@ async fn invalid_transform_scenario() {
     }
 }
 
-both_runtimes!(
+both_tokio_flavors!(
     complete_transform_batch_validation,
     invalid_transform_scenario
 );

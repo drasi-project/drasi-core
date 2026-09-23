@@ -4,24 +4,24 @@
 [Usage](computation-graph-usage.md) |
 [Implementation reference](computation-graph-reference.md)
 
-**ComponentGraph remains the default.** This reference describes the
-ComputationGraph implementation in this branch, not a promise about released
-crate versions.
+**ComputationGraph is the only runtime in this branch.** This reference describes
+the branch implementation, not a promise about released crate versions.
 
-## Put the setting in the right place
+## Runtime selection has been removed
 
-| Where you run Drasi | How to select ComputationGraph | Details |
+| Where you run Drasi | Current setup | Details |
 |---|---|---|
-| Rust application using DrasiLib | Cargo feature `computation`, then `.with_execution_mode(ExecutionMode::ComputationGraph)` | [Library settings](#library-settings) |
-| Drasi Server | `--execution-mode computation-graph`, or YAML `executionMode: computationGraph` | [Server reference](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#execution-engine) |
-| Embedded instance in the test framework | Instance override `test_run_overrides.execution_mode: computationGraph` inside a test run | [Harness reference](https://github.com/drasi-project/test-infra/blob/agentofreality-parallel-computation-graph/e2e-test-framework/README.md) |
+| Rust application using DrasiLib | `DrasiLib::builder()`; no engine selector | [Library settings](#library-settings) |
+| Drasi Server | Normal configuration; no `executionMode` field or engine CLI flag | [Server reference](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#execution-engine) |
+| Embedded instance in the test framework | Normal embedded-instance configuration; no `execution_mode` override | [Harness reference](https://github.com/drasi-project/test-infra/blob/agentofreality-parallel-computation-graph/e2e-test-framework/README.md) |
 
-These are different formats. Server uses `executionMode`; the test framework
-uses `execution_mode` at its instance-override location. `DrasiLibConfig` itself
-has no engine-selection field: choose the engine on the Rust builder.
+Remove obsolete engine-selector settings. They must not suggest that
+ComponentGraph remains a supported option. The compatibility `computation`
+Cargo feature does not select an engine; disabling default features does not
+disable ComputationGraph.
 
-Engine selection does not move a running instance or import ComponentGraph's
-saved indexes/checkpoints. ComputationGraph uses its own storage namespaces.
+This change does not import the retired engine's saved indexes/checkpoints.
+ComputationGraph keeps its existing storage namespaces.
 
 ## Library settings
 
@@ -31,7 +31,6 @@ Server YAML.
 
 | Builder method | Default | Meaning |
 |---|---|---|
-| `with_execution_mode(mode)` | `ExecutionMode::ComponentGraph` | Engine used by the usual source/query/reaction APIs |
 | `with_id(id)` | `"drasi-lib"` | Instance identity; keep it stable when resuming instance-scoped storage |
 | `with_priority_queue_capacity(n)` | 10,000 when no override is set | Default query input-queue capacity |
 | `with_dispatch_buffer_capacity(n)` | 1,000 when no override is set | Default runtime dispatch-buffer capacity |
@@ -53,14 +52,18 @@ default.
 an ID generates a UUID. The Rust builder defaults to `"drasi-lib"`. For persistent
 storage, set an explicit stable ID rather than relying on either default.
 
+RocksDB preserves existing short storage-directory names. Longer combined
+instance/graph/query identifiers use a stable bounded directory name and retain
+their full logical identity; applications do not need to shorten IDs to fit a
+filesystem's filename limit.
+
 Example settings, before adding your source/query/reaction objects:
 
 ```rust,ignore
-use drasi_lib::{DrasiLib, ExecutionMode, RecoveryPolicy};
+use drasi_lib::{DrasiLib, RecoveryPolicy};
 
 let builder = DrasiLib::builder()
     .with_id("orders-app")
-    .with_execution_mode(ExecutionMode::ComputationGraph)
     .with_priority_queue_capacity(10_000)
     .with_dispatch_buffer_capacity(1_000)
     .with_default_recovery_policy(RecoveryPolicy::Strict);
@@ -140,8 +143,8 @@ bootstrapTimeoutSecs: 60
 recoveryPolicy: strict
 ```
 
-Deserializing configuration does not register source/reaction plugins or select
-the engine. When loading a `DrasiLibConfig`, explicitly apply its instance
+Deserializing configuration does not register source/reaction plugins.
+When loading a `DrasiLibConfig`, explicitly apply its instance
 settings and queries to your builder and supply the plugin objects/providers.
 
 ## Ordering and buffers

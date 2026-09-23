@@ -13,7 +13,7 @@ ComputationGraph. For a custom processing graph without a query, see
 From the **drasi-core repository root**:
 
 ```bash
-cargo run --locked -p drasi-lib --features computation --example computation_runtime
+cargo run --locked -p drasi-lib --example computation_runtime
 ```
 
 The [example source](../examples/computation_runtime.rs) is a complete Rust
@@ -24,36 +24,30 @@ no external database.
 The output identifies `ComputationGraph` and includes an added result whose
 `name` is `First order`. It also prints the current query rows and query metrics.
 
-## Select the engine in an application
+## Use the library in an application
 
-There are two separate choices:
-
-1. Compile `drasi-lib` with its `computation` Cargo feature.
-2. Select `ExecutionMode::ComputationGraph` when building the instance.
-
-Enabling the Cargo feature alone does **not** change the default engine.
-These docs describe this development branch; do not assume a published crate
-with the same version number contains the branch's implementation.
+ComputationGraph is the only runtime; no feature or builder selector chooses an
+engine. It remains available with `--no-default-features`. These docs describe
+this development branch, not necessarily a published crate with the same version.
 
 For an application beside this checkout, the library dependency can be:
 
 ```toml
 [dependencies]
-drasi-lib = { path = "../drasi-core/lib", features = ["computation"] }
+drasi-lib = { path = "../drasi-core/lib" }
 ```
 
 Add whichever source/reaction crates your application uses. Keep the Drasi
 dependencies from the same checkout; the complete example above already does so.
 
-In an existing application, keep constructing your source and reaction objects
-and add the engine selection to its builder. This excerpt assumes `source`,
+In an existing application, keep constructing your source and reaction objects.
+This excerpt assumes `source`,
 `query_config` and `reaction` have already been created:
 
 ```rust,ignore
-use drasi_lib::{DrasiLib, ExecutionMode};
+use drasi_lib::DrasiLib;
 
 let drasi = DrasiLib::builder()
-    .with_execution_mode(ExecutionMode::ComputationGraph)
     .with_source(source)
     .with_query(query_config)
     .with_reaction(reaction)
@@ -63,14 +57,13 @@ let drasi = DrasiLib::builder()
 drasi.start().await?;
 ```
 
-The normal add, update, remove, status and result APIs now use ComputationGraph.
-`drasi.execution_mode()` returns the selected engine. This is a choice made at
-construction, not a way to switch an existing running instance or migrate its
-stored state.
+The add, update, remove, status and result APIs all use ComputationGraph. Remove
+old `ExecutionMode` imports and `with_execution_mode` calls. Existing plugin
+adapters do not provide a fallback to ComponentGraph.
 
 ## Add a component and wait for readiness
 
-In ComputationGraph mode, successful addition means the node was accepted.
+Successful addition means the node was accepted.
 Initialization or startup may still fail afterwards. The node and its error
 remain available for inspection.
 
@@ -212,13 +205,14 @@ transformers remain independently usable and are not automatically participants.
 From the drasi-core repository root:
 
 ```bash
-cargo run --locked -p drasi-lib --features computation --example computation_graph
-cargo run --locked -p drasi-lib --features computation --example computation_instance
+cargo run --locked -p drasi-lib --example computation_graph
+cargo run --locked -p drasi-lib --example computation_instance
 ```
 
 The first [example](../examples/computation_graph.rs) builds direct processing
-chains. The second [example](../examples/computation_instance.rs) hosts both
-engines in one DrasiLib instance over a shared application source.
+chains. The second [example](../examples/computation_instance.rs) hosts an
+ordinary pipeline and an additional graph over a shared application source.
+Both use the same ComputationGraph runtime.
 
 A standalone `GraphRun` must be awaited by its caller. A graph registered through
 `add_computation_graph` or `with_computation_graph` has its task owned by DrasiLib.
@@ -228,10 +222,10 @@ Borrowing a source does not transfer ownership of its start/stop lifecycle.
 
 These hosts use different configuration formats; do not interchange their keys:
 
-- [Drasi Server engine configuration](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#execution-engine)
-  selects the engine behind Server's existing component APIs.
+- [Drasi Server runtime configuration](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#execution-engine)
+  uses ComputationGraph for all instances; remove old engine selectors.
 - [Embedded test-framework configuration](https://github.com/drasi-project/test-infra/blob/agentofreality-parallel-computation-graph/e2e-test-framework/README.md)
-  selects the engine for a particular embedded instance in a test run.
+  configures embedded instances without selecting an execution engine.
 
 The [configuration reference](computation-graph-configuration.md) explains which
 settings belong to which layer.

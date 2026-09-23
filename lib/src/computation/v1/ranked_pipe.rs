@@ -728,18 +728,103 @@ mod tests {
         assert!(format!("{error:#}").contains("authoritative event sequence"));
     }
 
-    #[test]
-    fn native_and_legacy_queries_reserve_the_scheduled_source_identity() {
+    #[tokio::test]
+    async fn native_and_compatibility_queues_distinguish_colliding_source_from_scheduled_work() {
         let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
-        assert!(QueryEventQueue::new(1, [future]).is_err());
         let config = crate::Query::cypher("query")
             .query("MATCH (n) RETURN n")
             .from_source(future)
             .build();
         let settings = QueryExecutionSettings::from_legacy_config(&config);
+        settings.validate(None).unwrap();
+
+        let timestamp = chrono::DateTime::from_timestamp_millis(2000).unwrap();
+        let data = Arc::new(SourceEventWrapper::with_sequence(
+            future.into(),
+            SourceEvent::Change(SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new(future, "data"),
+                        labels: vec!["Item".into()].into(),
+                        effective_from: 1,
+                    },
+                    properties: ElementPropertyMap::default(),
+                },
+            }),
+            timestamp,
+            129,
+            None,
+        ));
+        let scheduled = Arc::new(SourceEventWrapper::with_sequence(
+            future.into(),
+            SourceEvent::Control(SourceControl::FuturesDue),
+            timestamp,
+            1,
+            None,
+        ));
+        let compatibility = QueryEventQueue::new(2, [future]).unwrap();
+        compatibility.enqueue_wait(scheduled.clone()).await.unwrap();
+        compatibility.enqueue_wait(data.clone()).await.unwrap();
+        assert!(Arc::ptr_eq(&compatibility.dequeue().await, &data));
+        assert!(Arc::ptr_eq(&compatibility.dequeue().await, &scheduled));
+
+        let queue_id = ResourceId::try_new("colliding-inputs").unwrap();
+        let queue = RankedInputQueue::new(2).unwrap();
+        let bindings = BTreeMap::from([(queue_id.clone(), queue.resource())]);
+        let mut data_pipe = RankedInputPipeConfig {
+            queue: queue_id.clone(),
+            capacity: 2,
+            source_rank: 0,
+            source_id: Some(future.into()),
+            drop_when_full: false,
+        }
+        .create_with_resources(&bindings)
+        .unwrap();
+        let mut scheduled_pipe = RankedInputPipeConfig {
+            queue: queue_id,
+            capacity: 2,
+            source_rank: 1,
+            source_id: None,
+            drop_when_full: false,
+        }
+        .create_with_resources(&bindings)
+        .unwrap();
+        scheduled_pipe
+            .pipe
+            .sender()
+            .send(encode(scheduled, 1))
+            .await
+            .unwrap();
+        data_pipe
+            .pipe
+            .sender()
+            .send(encode(data, 130))
+            .await
+            .unwrap();
+        let data = data_pipe
+            .pipe
+            .take_receiver()
+            .unwrap()
+            .receive()
+            .await
+            .unwrap()
+            .unwrap();
+        let scheduled = scheduled_pipe
+            .pipe
+            .take_receiver()
+            .unwrap()
+            .receive()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!GraphChangeCodec::is_futures_due(data.envelope()));
+        assert!(GraphChangeCodec::is_futures_due(scheduled.envelope()));
         assert_eq!(
-            settings.validate(None).unwrap_err().to_string(),
-            "the scheduled-work source ID is reserved"
+            GraphChangeCodec::source_metadata(data.envelope())
+                .unwrap()
+                .unwrap()
+                .sequence,
+            Some(129)
         );
     }
 }

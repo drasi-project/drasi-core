@@ -766,9 +766,7 @@ mod tests {
     async fn test_status_transitions() {
         use crate::context::ReactionRuntimeContext;
 
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(RwLock::new(graph));
+        let (update_tx, mut updates) = tokio::sync::mpsc::channel(32);
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
@@ -784,13 +782,24 @@ mod tests {
 
         assert_eq!(base.get_status().await, ComponentStatus::Starting);
 
-        // Check event was sent via graph broadcast
-        let mut event_rx = graph.read().await.subscribe();
-        // The status was already set; emit another event to verify the graph path works
+        assert!(matches!(
+            updates.recv().await,
+            Some(crate::channels::ComponentUpdate::Status {
+                status: ComponentStatus::Starting,
+                ..
+            })
+        ));
         base.set_status(ComponentStatus::Running, Some("Running test".to_string()))
             .await;
 
         assert_eq!(base.get_status().await, ComponentStatus::Running);
+        assert!(matches!(
+            updates.recv().await,
+            Some(crate::channels::ComponentUpdate::Status {
+                status: ComponentStatus::Running,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1028,8 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_some_after_initialize() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
         let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
 
         let params = ReactionBaseParams::new("r1", vec![]);
@@ -1050,8 +1058,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_store_none_after_initialize_without_store() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
         let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
 
         let params = ReactionBaseParams::new("r1", vec![]);
@@ -1129,8 +1136,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_read_write_round_trip() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params =
             ReactionBaseParams::new("ckpt-reaction", vec!["q1".to_string(), "q2".to_string()]);
@@ -1203,8 +1209,7 @@ mod tests {
     async fn test_run_standard_loop_dedup_and_checkpoint() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-reaction", vec!["q1".to_string()]);
         let base = ReactionBase::new(params);
@@ -1299,8 +1304,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_handler_error_does_not_advance_checkpoint() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-fail", vec!["q1".to_string()])
             .with_recovery_policy(ReactionRecoveryPolicy::Strict);
@@ -1375,8 +1379,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_autoskip_advances_past_failed_side_effect() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-skip", vec!["q1".to_string()])
             .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap);
@@ -1453,8 +1456,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_autoreset_retries_then_advances_checkpoint() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         let params = ReactionBaseParams::new("loop-reset", vec!["q1".to_string()])
             .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
@@ -1531,8 +1533,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_standard_loop_uses_passed_policy_not_strict_default() {
-        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
-        let update_tx = graph.update_sender();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
 
         // No per-instance override on ReactionBaseParams.
         let params = ReactionBaseParams::new("loop-trait-default", vec!["q1".to_string()]);

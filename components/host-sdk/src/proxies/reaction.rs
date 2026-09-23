@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::component_graph::ComponentStatusHandle;
+use drasi_lib::channels::ComponentStatusHandle;
 use drasi_lib::context::{ComponentResource, PluginOrigin};
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
@@ -1102,7 +1102,7 @@ mod resource_observer_tests {
     };
     use tokio::sync::{mpsc, Mutex};
 
-    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::channels::ComponentUpdate;
     use drasi_lib::context::ComponentResourceObserver;
     use drasi_lib::identity::PasswordIdentityProvider;
     use drasi_lib::state_store::{MemoryStateStoreProvider, StateStoreProvider};

@@ -16,19 +16,15 @@ use std::time::Duration;
 
 use drasi_lib::{
     queries::OutboxResponse, reactions::ReactionCheckpoint, state_store::StateStoreProvider,
-    DrasiLib, ExecutionMode,
+    DrasiLib,
 };
 
-pub fn execution_mode() -> ExecutionMode {
+pub fn require_current_runtime() {
     match std::env::var("DRASI_TEST_EXECUTION").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("component") => ExecutionMode::ComponentGraph,
-        #[cfg(feature = "computation-tests")]
-        Ok("computation") => ExecutionMode::ComputationGraph,
-        #[cfg(not(feature = "computation-tests"))]
-        Ok("computation") => {
-            panic!("DRASI_TEST_EXECUTION=computation requires --features computation-tests")
+        Err(std::env::VarError::NotPresent) | Ok("computation") => {}
+        mode => {
+            panic!("ComponentGraph is no longer supported; remove DRASI_TEST_EXECUTION={mode:?}")
         }
-        mode => panic!("unsupported DRASI_TEST_EXECUTION: {mode:?}"),
     }
 }
 

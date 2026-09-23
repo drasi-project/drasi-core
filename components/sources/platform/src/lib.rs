@@ -174,11 +174,11 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
+use drasi_lib::channels::ComponentStatusHandle;
 use drasi_lib::channels::{
     ComponentStatus, ControlOperation, DispatchMode, SourceControl, SourceEvent,
     SourceEventWrapper, SubscriptionResponse,
 };
-use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 use drasi_lib::Source;

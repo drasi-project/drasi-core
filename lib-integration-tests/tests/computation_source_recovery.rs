@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -31,9 +31,8 @@ use drasi_lib::{
     queries::SnapshotResponse,
     sources::SourceError,
     wal::{WalError, WalProvider},
-    CapacityPolicy, ComponentStatus, DispatchMode, DrasiLib, DurabilityConfig, ExecutionMode,
-    Query, RecoveryPolicy, Source, SourceRuntimeContext, SourceSubscriptionSettings,
-    StorageBackendRef,
+    CapacityPolicy, ComponentStatus, DispatchMode, DrasiLib, DurabilityConfig, Query,
+    RecoveryPolicy, Source, SourceRuntimeContext, SourceSubscriptionSettings, StorageBackendRef,
 };
 use drasi_source_application::{
     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle,
@@ -255,7 +254,6 @@ fn application(id: &str) -> Result<(ApplicationSource, ApplicationSourceHandle)>
 
 impl Fixture {
     async fn new(
-        mode: ExecutionMode,
         policy: RecoveryPolicy,
         dispatch_mode: DispatchMode,
         sources: &[&str],
@@ -269,7 +267,6 @@ impl Fixture {
         let wal = Arc::new(RedbWalProvider::new(directory.path().join("wal")));
         let mut builder = DrasiLib::builder()
             .with_id("source-recovery")
-            .with_execution_mode(mode)
             .with_wal_provider(wal.clone())
             .with_index_provider(
                 "rocks",
@@ -427,26 +424,17 @@ async fn rows(core: &DrasiLib, expected: &[&str]) -> Result<SnapshotResponse> {
     .with_context(|| format!("query did not recover rows {expected:?}"))?
 }
 
-fn modes_and_policies() -> [(ExecutionMode, RecoveryPolicy); 4] {
-    [
-        (ExecutionMode::ComponentGraph, RecoveryPolicy::Strict),
-        (ExecutionMode::ComponentGraph, RecoveryPolicy::AutoReset),
-        (ExecutionMode::ComputationGraph, RecoveryPolicy::Strict),
-        (ExecutionMode::ComputationGraph, RecoveryPolicy::AutoReset),
-    ]
-}
-
 #[tokio::test]
 async fn ordinary_runtime_replays_uncheckpointed_wal_without_reset_in_both_dispatch_modes(
 ) -> Result<()> {
     for dispatch in [DispatchMode::Channel, DispatchMode::Broadcast] {
-        for (mode, policy) in modes_and_policies() {
-            let fixture = Fixture::new(mode, policy, dispatch, &["people"], false).await?;
+        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
+            let fixture = Fixture::new(policy, dispatch, &["people"], false).await?;
             let before = rows(&fixture.core, &[]).await?;
             assert_eq!(
                 fixture.observations("people").confirmed(),
                 Some(u64::MAX),
-                "{mode:?}/{policy:?}/{dispatch:?}"
+                "{policy:?}/{dispatch:?}"
             );
             fixture.stop_query().await?;
             fixture.send("people", "missed").await?;
@@ -488,15 +476,9 @@ async fn ordinary_runtime_replays_uncheckpointed_wal_without_reset_in_both_dispa
 #[tokio::test]
 async fn ordinary_multisource_recovery_keeps_committed_rows_when_only_one_checkpoint_is_missing(
 ) -> Result<()> {
-    for (mode, policy) in modes_and_policies() {
-        let fixture = Fixture::new(
-            mode,
-            policy,
-            DispatchMode::Channel,
-            &["active", "quiet"],
-            false,
-        )
-        .await?;
+    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
+        let fixture =
+            Fixture::new(policy, DispatchMode::Channel, &["active", "quiet"], false).await?;
         fixture.send("active", "committed").await?;
         let before = rows(&fixture.core, &["committed"]).await?;
         fixture.wait_confirmed("active", 1).await?;
@@ -533,8 +515,8 @@ async fn ordinary_multisource_recovery_keeps_committed_rows_when_only_one_checkp
 async fn real_retention_gaps_remain_strict_or_rebootstrap_under_the_requested_policy() -> Result<()>
 {
     for dispatch in [DispatchMode::Channel, DispatchMode::Broadcast] {
-        for (mode, policy) in modes_and_policies() {
-            let fixture = Fixture::new(mode, policy, dispatch, &["people"], true).await?;
+        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
+            let fixture = Fixture::new(policy, dispatch, &["people"], true).await?;
             fixture.send("people", "committed").await?;
             let before = rows(&fixture.core, &["committed"]).await?;
             fixture.wait_confirmed("people", 1).await?;
@@ -547,7 +529,7 @@ async fn real_retention_gaps_remain_strict_or_rebootstrap_under_the_requested_po
                 .await
                 .context("gap recovery timed out")?;
             if policy == RecoveryPolicy::Strict {
-                assert!(restarted.is_err(), "{mode:?}/{dispatch:?}");
+                assert!(restarted.is_err(), "{policy:?}/{dispatch:?}");
                 wait_status(&fixture.core, ComponentStatus::Error).await?;
                 assert_eq!(fixture.observations("people").subscriptions().len(), 2);
                 assert_eq!(

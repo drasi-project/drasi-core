@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
+
 #[allow(dead_code)]
 mod computation_support;
 
@@ -196,12 +197,12 @@ async fn instance_lifecycle() {
         .expect("scoped logs");
     handle.deployment().await.expect("deployment");
     assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
-    assert!(drasi
-        .component_graph()
-        .read()
+    assert!(!drasi
+        .get_graph()
         .await
-        .get_component("native-source")
-        .is_none());
+        .nodes
+        .iter()
+        .any(|node| node.id == "native-source"));
     drasi.start().await.expect("start instance");
     let message = tokio::time::timeout(Duration::from_secs(5), logs.recv())
         .await
@@ -212,24 +213,22 @@ async fn instance_lifecycle() {
         "managed-instance::computation::managed"
     );
     roundtrip(&input, &mut output_rx, 1).await;
-    let mut legacy_events = drasi.subscribe_all_component_events();
+    let mut instance_events = drasi.subscribe_all_component_events();
     drasi.stop().await.expect("soft stop");
     loop {
-        let legacy = drasi.component_graph();
-        if legacy
-            .read()
+        if drasi
+            .get_graph()
             .await
-            .snapshot()
             .nodes
             .iter()
             .all(|node| node.status != drasi_lib::ComponentStatus::Stopping)
         {
             break;
         }
-        legacy_events
+        instance_events
             .recv()
             .await
-            .expect("legacy stop observations");
+            .expect("instance stop observations");
     }
     assert_eq!(calls.stops.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -258,8 +257,15 @@ async fn managed_driver_runs_and_restarts_on_multiple_threads() {
 }
 
 #[tokio::test]
-async fn graph_registration_and_errors_are_independent_of_legacy_component_ids() {
+async fn graph_registration_and_errors_are_independent_of_ordinary_component_ids() {
     let drasi = DrasiLib::builder().build().await.expect("instance");
+    let original_graphs: Vec<_> = drasi
+        .list_computation_graphs()
+        .await
+        .expect("ordinary runtime graph")
+        .into_iter()
+        .map(|graph| graph.id)
+        .collect();
     let calls = Arc::new(Calls::default());
     let (graph, input, mut output_rx) = graph("manual", calls.clone());
     let handle = drasi
@@ -286,11 +292,16 @@ async fn graph_registration_and_errors_are_independent_of_legacy_component_ids()
         drasi.get_computation_graph("manual").await,
         Err(DrasiError::ComponentNotFound { .. })
     ));
-    assert!(drasi
-        .list_computation_graphs()
-        .await
-        .expect("list")
-        .is_empty());
+    assert_eq!(
+        drasi
+            .list_computation_graphs()
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|graph| graph.id)
+            .collect::<Vec<_>>(),
+        original_graphs
+    );
     drasi.shutdown().await.expect("shutdown legacy");
 }
 
@@ -339,7 +350,7 @@ async fn builder_rejection_awaits_all_owned_graph_resources_without_starting_dri
 }
 
 #[tokio::test]
-async fn legacy_builder_validation_failure_also_disposes_transferred_graphs() {
+async fn query_creation_failure_retains_transferred_graphs_until_explicit_cleanup() {
     let calls = Arc::new(Calls::default());
     let (graph, _, _) = graph("cleanup", calls.clone());
     let mut query = drasi_lib::Query::cypher("invalid")
@@ -348,13 +359,26 @@ async fn legacy_builder_validation_failure_also_disposes_transferred_graphs() {
     query.storage_backend = Some(drasi_lib::indexes::StorageBackendRef::Named(
         "missing".into(),
     ));
-    assert!(DrasiLib::builder()
+    let drasi = DrasiLib::builder()
         .with_query(query)
         .with_computation_graph(graph, ComputationOptions::default())
         .build()
         .await
-        .is_err());
+        .expect("node-first builder retains failed query declarations");
+    let query = drasi
+        .computation_component("invalid")
+        .expect("query handle");
+    let failure = query
+        .wait_created()
+        .await
+        .expect_err("missing backend must fail creation");
+    assert!(failure.to_string().contains("missing"));
     assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.disposals.load(Ordering::SeqCst), 0);
+    drasi
+        .shutdown()
+        .await
+        .expect("dispose every transferred graph");
     assert_eq!(calls.disposals.load(Ordering::SeqCst), 1);
 }
 

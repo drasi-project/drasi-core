@@ -34,7 +34,8 @@
 use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::checkpoint::{self, RocksDbCheckpointStore};
@@ -47,6 +48,20 @@ use crate::{
     RocksDbMemoryBudget, RocksDbMemoryBudgetError, RocksDbSessionControl, RocksDbSessionState,
     RocksIndexOptions,
 };
+
+const MAX_STORAGE_SEGMENT_BYTES: usize = 255;
+const LONG_ID_KEY: &[u8] = b"\0drasi:storage-identifier:v1";
+
+pub(crate) fn storage_directory(base: &Path, identifier: &str) -> PathBuf {
+    if identifier.len() <= MAX_STORAGE_SEGMENT_BYTES {
+        base.join(identifier)
+    } else {
+        // Keep every previously representable directory unchanged. The extra
+        // level cannot collide with a valid single-segment short identifier.
+        base.join(".drasi-long-identifiers-v1")
+            .join(format!("{:x}", Sha256::digest(identifier.as_bytes())))
+    }
+}
 
 /// Open a unified RocksDB database with all column families needed for a query.
 ///
@@ -61,7 +76,9 @@ use crate::{
 ///
 /// # Directory Structure
 ///
-/// Data is stored at `{path}/{query_id}/` (single unified directory).
+/// IDs up to 255 UTF-8 bytes retain `{path}/{query_id}/`. Longer scoped IDs use
+/// a stable SHA-256 directory below `{path}/.drasi-long-identifiers-v1/`; their
+/// full identity is verified inside the database, never truncated.
 pub fn open_unified_db(
     path: &str,
     query_id: &str,
@@ -91,7 +108,7 @@ pub fn open_unified_db(
     db_opts.set_use_direct_reads(options.direct_io());
     db_opts.set_use_direct_io_for_flush_and_compaction(options.direct_io());
 
-    let db_path = PathBuf::from(path).join(query_id);
+    let db_path = storage_directory(Path::new(path), query_id);
     let db_path = match db_path.to_str() {
         Some(p) => p.to_string(),
         None => return Err(IndexError::NotSupported),
@@ -117,6 +134,20 @@ pub fn open_unified_db(
     let txn_db_opts = rocksdb::TransactionDBOptions::default();
     let db = IndexDb::open_cf_descriptors(&db_opts, &txn_db_opts, db_path, cfs)
         .map_err(IndexError::other)?;
+    if query_id.len() > MAX_STORAGE_SEGMENT_BYTES {
+        match db.get(LONG_ID_KEY).map_err(IndexError::other)? {
+            Some(stored) if stored != query_id.as_bytes() => {
+                return Err(IndexError::other(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "RocksDB storage identifier does not match its directory",
+                )));
+            }
+            Some(_) => {}
+            None => db
+                .put(LONG_ID_KEY, query_id.as_bytes())
+                .map_err(IndexError::other)?,
+        }
+    }
     Ok(Arc::new(db))
 }
 
@@ -140,6 +171,9 @@ pub fn open_unified_db(
 /// {path}/
 ///   {query_id}/   - Single unified database with all column families
 /// ```
+///
+/// Overlong scoped identifiers use the bounded directory mapping described by
+/// [`open_unified_db`]. Existing short-identifier paths are not moved.
 pub struct RocksDbIndexProvider {
     path: PathBuf,
     enable_archive: bool,

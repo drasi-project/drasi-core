@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "computation")]
+#![cfg(test)]
 
 use async_trait::async_trait;
 use drasi_core::{
@@ -706,7 +706,7 @@ mod construction_scopes {
     use super::*;
     use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, OutboxWriter};
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::{ComponentStatus, DrasiLib, ExecutionMode, Query, StorageBackendRef};
+    use drasi_lib::{ComponentStatus, DrasiLib, Query, StorageBackendRef};
     use drasi_source_application::{
         ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder,
     };
@@ -839,7 +839,6 @@ mod construction_scopes {
         let before = provider.captured.lock().unwrap().len();
         let core = DrasiLib::builder()
             .with_id(instance)
-            .with_execution_mode(ExecutionMode::ComputationGraph)
             .with_index_provider("rocks", provider.clone())
             .with_wal_provider(Arc::new(drasi_wal_redb::RedbWalProvider::new(
                 root.join(format!("wal-{instance}")),

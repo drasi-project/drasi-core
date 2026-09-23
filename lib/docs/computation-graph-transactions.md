@@ -102,8 +102,9 @@ application.
 ## Configure a sequence
 
 The definition contains the sequence and output settings; the storage provider
-is supplied separately. Enable `computation` plus the middleware features used
-by the steps. This example uses `middleware-decoder` and `middleware-parse-json`.
+is supplied separately. Enable the middleware features used by the steps;
+ComputationGraph itself is always available. This example uses
+`middleware-decoder` and `middleware-parse-json`.
 
 ```rust,ignore
 use std::{num::NonZeroUsize, sync::Arc};

@@ -14,7 +14,7 @@
 
 //! Native finite computations: no Continuous Query or legacy source/reaction adapter.
 //!
-//! Run: `cargo run -p drasi-lib --features computation --example computation_graph`
+//! Run: `cargo run -p drasi-lib --example computation_graph`
 //!
 //! Expected output:
 //! ```text

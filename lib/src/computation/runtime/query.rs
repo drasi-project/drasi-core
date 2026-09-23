@@ -87,6 +87,40 @@ struct ParentBinding {
     node: ComponentId,
     token: u64,
     initial_status: ComponentStatus,
+    _status_observer: Arc<dyn PublicationObserver>,
+}
+
+struct QueryStatusObserver {
+    node: ComponentId,
+    token: u64,
+    initial_status: ComponentStatus,
+    status: watch::Sender<ComponentStatus>,
+}
+
+impl PublicationObserver for QueryStatusObserver {
+    fn publish(&self, previous: &ComputationInspection, current: &ComputationInspection) {
+        let status = if super::record_token(&current.desired, &self.node) == Some(self.token) {
+            current
+                .observed
+                .components
+                .get(&self.node)
+                .map(|observed| super::events::observed_status(observed, self.initial_status))
+        } else if super::record_token(&previous.desired, &self.node) == Some(self.token) {
+            Some(ComponentStatus::Stopped)
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            self.status.send_if_modified(|current| {
+                if *current == status {
+                    false
+                } else {
+                    *current = status;
+                    true
+                }
+            });
+        }
+    }
 }
 
 struct QueryExecution {
@@ -269,12 +303,20 @@ impl QueryInstance {
         token: u64,
         initial_status: ComponentStatus,
     ) -> anyhow::Result<()> {
+        let observer: Arc<dyn PublicationObserver> = Arc::new(QueryStatusObserver {
+            node: node.clone(),
+            token,
+            initial_status,
+            status: self.status.clone(),
+        });
+        control.inspector().observe(&observer);
         self.parent
             .set(ParentBinding {
                 control,
                 node,
                 token,
                 initial_status,
+                _status_observer: observer,
             })
             .map_err(|_| anyhow::anyhow!("query already has a construction binding"))
     }
@@ -571,7 +613,15 @@ impl RuntimeComponent for QueryInstance {
         loop {
             tokio::select! {
                 result = life.scope.run() => return result,
-                result = changes.changed() => { result?; self.notify(); }
+                result = changes.changed() => {
+                    result?;
+                    self.notify();
+                    if let Some(failure) = changes.borrow_and_update().observed.components.values()
+                        .find_map(|component| component.failure.clone())
+                    {
+                        return Err(GraphError::Reported { cause: failure.cause }.into());
+                    }
+                }
             }
         }
     }

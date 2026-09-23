@@ -802,12 +802,12 @@ mod integration {
     async fn running_base_with_store() -> ReactionBase {
         let base = running_base();
         let store = std::sync::Arc::new(drasi_lib::MemoryStateStoreProvider::new());
-        let (graph, _rx) = drasi_lib::component_graph::ComponentGraph::new("test-instance");
+        let (updates, _rx) = tokio::sync::mpsc::channel(64);
         let context = drasi_lib::context::ReactionRuntimeContext::new(
             "test-instance",
             "test-grpc",
             Some(store),
-            graph.update_sender(),
+            updates,
             None,
         );
         base.initialize(context).await;
@@ -898,12 +898,12 @@ mod integration {
     async fn running_base_with_failing_store() -> ReactionBase {
         let base = running_base();
         let store = std::sync::Arc::new(FailAlwaysStore::new());
-        let (graph, _rx) = drasi_lib::component_graph::ComponentGraph::new("test-instance");
+        let (updates, _rx) = tokio::sync::mpsc::channel(64);
         let context = drasi_lib::context::ReactionRuntimeContext::new(
             "test-instance",
             "test-grpc",
             Some(store),
-            graph.update_sender(),
+            updates,
             None,
         );
         base.initialize(context).await;

@@ -1,3 +1,6 @@
+//! Diagnostic for plugin-facing QueryResult encoding. Computation outboxes persist
+//! typed envelopes rather than either of the MessagePack representations below.
+
 use std::{collections::HashMap, hint::black_box, time::Instant};
 
 use drasi_lib::{
@@ -7,12 +10,12 @@ use drasi_lib::{
 use serde_json::json;
 
 #[test]
-#[ignore = "diagnostic serialization timing; not a recovery baseline"]
+#[ignore = "diagnostic plugin serialization timing; not a computation outbox or recovery baseline"]
 #[allow(
     clippy::print_stdout,
     reason = "diagnostic probe emits CSV timing results"
 )]
-fn measure_outbox_encoding_cost() {
+fn measure_plugin_result_encoding_cost() {
     let iterations = 100000;
     let room_before =
         json!({"RoomId":"R_000_001_000","Temperature":5110,"Humidity":5061,"Co2":4769});

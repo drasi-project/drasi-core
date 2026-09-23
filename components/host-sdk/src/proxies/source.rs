@@ -27,7 +27,7 @@ use drasi_lib::bootstrap::{
 };
 use drasi_lib::channels::events::SubscriptionResponse;
 use drasi_lib::channels::BootstrapEventSender;
-use drasi_lib::component_graph::ComponentStatusHandle;
+use drasi_lib::channels::ComponentStatusHandle;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::{ComponentResource, ComponentResourceObserver, PluginOrigin};
 use drasi_lib::identity::IdentityProvider;
@@ -886,7 +886,7 @@ pub(super) mod resource_observer_tests {
     use std::sync::atomic::AtomicUsize;
     use tokio::sync::{mpsc, Mutex};
 
-    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::channels::ComponentUpdate;
     use drasi_lib::context::ComponentResourceObserver;
     use drasi_lib::identity::PasswordIdentityProvider;
     use drasi_lib::state_store::{MemoryStateStoreProvider, StateStoreProvider};

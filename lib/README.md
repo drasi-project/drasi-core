@@ -35,19 +35,20 @@ tokio = { version = "1", features = ["full"] }
 
 **Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
 
-## Experimental computation graphs
+## ComputationGraph runtime
 
-ComputationGraph is an opt-in engine for the existing source, query and reaction
-APIs. It owns the running components, keeps failed additions visible, supports
-dependency-aware changes and lets independent queries run in parallel.
-**ComponentGraph remains the default.**
+**ComputationGraph is the only runtime in this branch**, including builds with
+`--no-default-features`. It owns running components, keeps failed additions
+visible, supports dependency-aware changes and lets independent queries run in
+parallel. Existing source/reaction plugins remain usable through adapters;
+there is no second execution engine.
 
 Start with the guide for your task:
 
 | Guide | What it covers |
 |---|---|
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
-| [Usage](docs/computation-graph-usage.md) | A runnable example, engine selection, readiness, results and shutdown |
+| [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
@@ -56,13 +57,13 @@ Start with the guide for your task:
 From the drasi-core repository root, run a complete in-process example:
 
 ```bash
-cargo run --locked -p drasi-lib --features computation --example computation_runtime
+cargo run --locked -p drasi-lib --example computation_runtime
 ```
 
-The Cargo feature makes the implementation available. A Rust application also
-selects `.with_execution_mode(ExecutionMode::ComputationGraph)` on its
-`DrasiLib::builder()`. The [usage guide](docs/computation-graph-usage.md#select-the-engine-in-an-application)
-shows the dependency setup for this branch and the existing APIs.
+Use `DrasiLib::builder()` directly: no engine-selection call is needed or
+supported. The [usage guide](docs/computation-graph-usage.md#use-the-library-in-an-application)
+shows the dependency setup for this branch. The `computation` feature name is
+retained as a build-compatibility alias, not a runtime switch.
 
 The main behaviour to understand before using it:
 
@@ -72,7 +73,7 @@ The main behaviour to understand before using it:
   query's definition, then source sequence. Unseen events are not held back.
 - Persistent recovery depends on the source, query storage and reaction
   capabilities. Disk indexes alone do not make all output durable.
-- Changing engines does not migrate stored state. Always await shutdown.
+- Preserve stable storage identities when restarting. Always await shutdown.
 
 [Server configuration](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/README.md#execution-engine)
 and [test-framework configuration](https://github.com/drasi-project/test-infra/blob/agentofreality-parallel-computation-graph/e2e-test-framework/README.md)
@@ -213,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## Table of Contents
 
-- [ComputationGraph](#experimental-computation-graphs)
+- [ComputationGraph](#computationgraph-runtime)
 - [Builder API](#builder-api)
 - [Query Builder](#query-builder)
 - [Multi-Source Queries and Joins](#multi-source-queries-and-joins)

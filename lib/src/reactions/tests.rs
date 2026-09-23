@@ -140,17 +140,9 @@ pub(crate) mod manager_tests {
         TestMockReaction::new(id, queries)
     }
 
-    async fn create_test_manager() -> (
-        Arc<ReactionManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
-    ) {
+    async fn create_test_manager() -> (Arc<ReactionManager>, crate::component_graph::ComponentGraph)
+    {
         let core = crate::test_helpers::managers::empty_core().await;
-        if core.execution_mode() == crate::ExecutionMode::ComponentGraph {
-            core.legacy()
-                .reaction_manager
-                .inject_query_provider(Arc::new(MockQueryProvider))
-                .await;
-        }
         (
             Arc::new(ReactionManager(core.clone())),
             core.component_graph(),
@@ -158,10 +150,8 @@ pub(crate) mod manager_tests {
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph() -> (
-        Arc<ReactionManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
-    ) {
+    async fn create_test_manager_with_graph(
+    ) -> (Arc<ReactionManager>, crate::component_graph::ComponentGraph) {
         create_test_manager().await
     }
 
@@ -169,7 +159,7 @@ pub(crate) mod manager_tests {
     /// Registers placeholder query nodes for any referenced queries not already in the graph.
     async fn add_reaction(
         manager: &ReactionManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         reaction: impl crate::reactions::Reaction + 'static,
     ) -> anyhow::Result<()> {
         manager.add(reaction).await
@@ -178,7 +168,7 @@ pub(crate) mod manager_tests {
     /// Helper: teardown a reaction in the manager, then deregister from the graph.
     async fn delete_reaction(
         manager: &ReactionManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
@@ -215,31 +205,25 @@ pub(crate) mod manager_tests {
         let result = add_reaction(&manager, &graph, reaction2).await;
         assert!(result.is_err());
         let error = result.unwrap_err();
-        match manager.0.execution_mode() {
-            crate::ExecutionMode::ComponentGraph => {
-                assert!(error.to_string().contains("already exists"));
-            }
-            #[cfg(feature = "computation")]
-            crate::ExecutionMode::ComputationGraph => {
-                use crate::computation::v1::GraphError;
+        {
+            use crate::computation::v1::GraphError;
 
-                let GraphError::AdditionRejected { cause, addition } = error
-                    .downcast_ref::<GraphError>()
-                    .expect("native graph error")
-                else {
-                    panic!("expected a rejected addition: {error:?}");
-                };
-                assert!(
-                    matches!(cause.as_ref(), GraphError::Topology { reason }
+            let GraphError::AdditionRejected { cause, addition } = error
+                .downcast_ref::<GraphError>()
+                .expect("native graph error")
+            else {
+                panic!("expected a rejected addition: {error:?}");
+            };
+            assert!(
+                matches!(cause.as_ref(), GraphError::Topology { reason }
                         if reason == "duplicate component test-reaction"),
-                    "unexpected rejection cause: {cause:?}"
-                );
-                let rejected = addition.take().await.expect("retained rejected reaction");
-                assert_eq!(
-                    rejected.definition.descriptor.id().as_str(),
-                    "test-reaction"
-                );
-            }
+                "unexpected rejection cause: {cause:?}"
+            );
+            let rejected = addition.take().await.expect("retained rejected reaction");
+            assert_eq!(
+                rejected.definition.descriptor.id().as_str(),
+                "test-reaction"
+            );
         }
     }
 
@@ -419,7 +403,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction2).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status changes
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Start all reactions
         manager.start_all().await.unwrap();
@@ -468,7 +452,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status changes
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Start all should start this reaction
         manager.start_all().await.unwrap();
@@ -518,7 +502,7 @@ pub(crate) mod manager_tests {
         );
 
         // Subscribe BEFORE the operation that triggers status change
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         // Manually start the reaction
         manager
@@ -558,16 +542,10 @@ pub(crate) mod manager_tests {
         let reaction = create_test_mock_reaction("cleanup-events-reaction".to_string(), vec![]);
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
-        // Record an event manually to simulate lifecycle
         manager
-            .record_event(ComponentEvent {
-                component_id: "cleanup-events-reaction".to_string(),
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some("Test event".to_string()),
-            })
-            .await;
+            .start_reaction("cleanup-events-reaction".into())
+            .await
+            .unwrap();
 
         // Verify events exist
         let events = manager.get_reaction_events("cleanup-events-reaction").await;
@@ -763,7 +741,7 @@ pub(crate) mod manager_tests {
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status change
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         manager
             .start_reaction("reconfig-running-reaction".to_string())
@@ -809,7 +787,7 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager_with_graph().await;
 
         // Subscribe to graph events BEFORE adding reaction
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
 
         let reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
         add_reaction(&manager, &graph, reaction).await.unwrap();

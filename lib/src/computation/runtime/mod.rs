@@ -13,10 +13,11 @@
 // limitations under the License.
 
 mod component;
+mod events;
 mod inspection;
-mod projection;
 mod query;
 mod reaction;
+mod snapshot;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -26,13 +27,11 @@ mod tests;
 
 use super::v1::*;
 use crate::{
-    component_graph::{ComponentGraph, ComponentUpdate},
     config::{QueryConfig, RuntimeConfig},
     metrics::{LifecycleMetrics, ReactionMetricsSnapshot},
     queries::Query as QueryTrait,
     ComponentStatus, DrasiLib, Reaction, Source,
 };
-use async_trait::async_trait;
 use component::{RuntimeComponent, RuntimeFactory, RuntimeInstance};
 pub(crate) use query::QueryInstance;
 use reaction::ReactionInstance;
@@ -41,7 +40,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, OnceLock, Weak,
+        Arc, OnceLock,
     },
 };
 use tokio::sync::{watch, Mutex, RwLock};
@@ -69,7 +68,7 @@ pub(crate) async fn build(
     bootstraps: Vec<BootstrapRegistration>,
     wal: Option<Arc<dyn crate::wal::WalProvider>>,
 ) -> crate::Result<DrasiLib> {
-    let mut core = DrasiLib::new(config.clone());
+    let mut core = DrasiLib::new_with_wal(config.clone(), wal);
     let setup = async {
         let mut recipes = BTreeMap::new();
         for (source, kind, properties) in bootstraps {
@@ -88,18 +87,12 @@ pub(crate) async fn build(
                 "duplicate bootstrap recipe for source '{source}'"
             );
         }
-        *core
-            .computation_registry
-            .wal
-            .lock()
-            .map_err(|_| anyhow::anyhow!("computation WAL binding poisoned"))? = wal.clone();
-        let runtime = Runtime::new(&core, wal).await?;
-        core.computation_runtime = Some(runtime.clone());
-        core.inspection.set_computation(runtime.clone());
+        core.initialize().await?;
+        let runtime = core.computation_runtime.clone();
         let source = crate::sources::component_graph_source::ComponentGraphSource::new(
             core.component_event_broadcast_tx.clone(),
             config.id.clone(),
-            core.component_graph.clone(),
+            core.component_graph(),
         )?;
         runtime
             .add_source_with_recipe(
@@ -254,11 +247,12 @@ pub(crate) struct Runtime {
     config: Arc<RuntimeConfig>,
     services: LegacyPluginServices,
     middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
-    projection: Arc<RwLock<ComponentGraph>>,
+    events: Arc<events::Events>,
     parent: OnceLock<ComputationHandle>,
-    records: RwLock<BTreeMap<u64, Record>>,
+    // Retain interrupted/unsubmitted additions until awaited cleanup. This is
+    // never consulted for membership, status, or installed resource lookup.
+    cleanup_candidates: RwLock<BTreeMap<u64, Record>>,
     mutations: Mutex<()>,
-    projecting: Mutex<()>,
     next_instance: AtomicU64,
     changed: watch::Sender<u64>,
     catalog: QueryResultsCatalog,
@@ -268,48 +262,52 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
-    pub(crate) async fn new(
-        core: &DrasiLib,
+    pub(crate) fn new(
+        config: Arc<RuntimeConfig>,
+        middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
+        logs: Arc<crate::managers::ComponentLogRegistry>,
         wal: Option<Arc<dyn crate::wal::WalProvider>>,
-    ) -> anyhow::Result<Arc<Self>> {
+    ) -> Arc<Self> {
         let services = LegacyPluginServices {
-            scope: Arc::from(core.config.id.as_str()),
-            state_store: Some(core.config.state_store_provider.clone()),
-            identity: core.config.identity_provider.clone(),
+            scope: Arc::from(config.id.as_str()),
+            state_store: Some(config.state_store_provider.clone()),
+            identity: config.identity_provider.clone(),
             wal,
-            secrets: core.config.secret_store_provider.clone(),
+            secrets: config.secret_store_provider.clone(),
         };
         let factory = Arc::new(RuntimeFactory::new(
             services.clone(),
-            core.config.index_factory.clone(),
+            config.index_factory.clone(),
         ));
-        let runtime = Arc::new(Self {
-            config: core.config.clone(),
+        Arc::new(Self {
+            config,
             services,
-            middleware: core.middleware_registry.clone(),
-            projection: core.component_graph.clone(),
+            middleware,
+            events: events::Events::new(),
             parent: OnceLock::new(),
-            records: RwLock::new(BTreeMap::new()),
+            cleanup_candidates: RwLock::new(BTreeMap::new()),
             mutations: Mutex::new(()),
-            projecting: Mutex::new(()),
             next_instance: AtomicU64::new(1),
             changed: watch::channel(0).0,
-            catalog: QueryResultsCatalog::new("__drasi_lib_queries__")?,
+            catalog: QueryResultsCatalog::new("__drasi_lib_queries__").expect("runtime catalog ID"),
             factory,
-            logs: core.log_registry.clone(),
+            logs,
             lifecycle_metrics: Arc::new(LifecycleMetrics::new()),
-        });
-        let projector = Projection {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("__inspection_projection__")?,
-                vec![],
-            )?,
-            runtime: Arc::downgrade(&runtime),
-        };
-        let mut builder = runtime
+        })
+    }
+
+    pub(crate) fn event_sender(&self) -> crate::channels::ComponentEventBroadcastSender {
+        self.events.broadcast.clone()
+    }
+
+    pub(crate) async fn initialize(
+        self: &Arc<Self>,
+        registry: &super::instance::ComputationRegistry,
+    ) -> anyhow::Result<()> {
+        let mut builder = self
             .services
-            .declare(ComputationGraph::builder("__drasi_lib_runtime__"))?;
-        for (name, provider) in runtime.config.index_factory.configured_providers() {
+            .declare(ComputationGraph::builder("__drasi_lib_runtime__").for_additions())?;
+        for (name, provider) in self.config.index_factory.configured_providers() {
             // Provider names are configuration keys, not validated graph identifiers.
             let id = index_resource_id(&name)?;
             builder = builder
@@ -324,20 +322,18 @@ impl Runtime {
                     ResourceHandle::new(ResourceRole::IndexBackend, Arc::new(provider)),
                 )?;
         }
-        let mut graph = builder.service(Box::new(projector)).build()?;
-        // Preserve the ordinary API's instance-root namespace without letting
-        // the compatibility projection decide whether an addition is accepted.
-        graph.reserve_component_id(&core.config.id);
-        let handle = core
-            .computation_registry
+        let mut graph = builder.build()?;
+        let observer: Arc<dyn PublicationObserver> = self.events.clone();
+        graph.inspector().observe(&observer);
+        graph.reserve_component_id(&self.config.id);
+        let handle = registry
             .add(graph, ComputationOptions { auto_start: false })
             .await?;
-        runtime
-            .parent
+        self.parent
             .set(handle.clone())
             .map_err(|_| anyhow::anyhow!("native runtime already initialized"))?;
         handle.start().await?;
-        Ok(runtime)
+        Ok(())
     }
     fn parent(&self) -> anyhow::Result<ComputationHandle> {
         self.parent
@@ -400,22 +396,12 @@ impl Runtime {
             .await
     }
 
-    async fn validate_registration(
-        &self,
-        id: &str,
-        _kind: crate::component_graph::ComponentKind,
-        _allow_placeholder: bool,
-    ) -> anyhow::Result<()> {
-        ComponentId::try_new(id)?;
-        Ok(())
-    }
-
     async fn discard_uninstalled(&self, record: &Record) -> anyhow::Result<()> {
         if record_token(&self.parent()?.control().desired_snapshot(), &record.node)
             != Some(record.token)
         {
             record.owner.shutdown().await?;
-            self.records.write().await.remove(&record.token);
+            self.cleanup_candidates.write().await.remove(&record.token);
         }
         Ok(())
     }
@@ -567,7 +553,10 @@ impl Runtime {
             activation_requested,
         };
         record.owner.bind_record(record.data())?;
-        self.records.write().await.insert(number, record.clone());
+        self.cleanup_candidates
+            .write()
+            .await
+            .insert(number, record.clone());
         let result = async {
             let mut bindings = TopologyBindings {
                 defer_activation: !activate,
@@ -645,13 +634,6 @@ impl Runtime {
         Ok(())
     }
 
-    async fn project_addition(&self) {
-        if let Err(error) = self.project_declarations().await {
-            log::error!("Could not project declared native components: {error:#}");
-        }
-        self.notify();
-    }
-
     pub(crate) async fn add_source(
         self: &Arc<Self>,
         source: Box<dyn Source>,
@@ -676,8 +658,7 @@ impl Runtime {
             .or_insert_with(|| source.type_name().to_owned());
         meta.entry("autoStart".into())
             .or_insert_with(|| source.auto_start().to_string());
-        self.validate_registration(&id, crate::component_graph::ComponentKind::Source, false)
-            .await?;
+        ComponentId::try_new(id)?;
         let source = SourceInstance::new(
             source,
             self.services.clone(),
@@ -694,7 +675,7 @@ impl Runtime {
             )
             .await?;
         drop(mutation);
-        self.project_addition().await;
+        self.notify();
         Ok(handle)
     }
 
@@ -703,27 +684,19 @@ impl Runtime {
         config: QueryConfig,
         start: bool,
     ) -> anyhow::Result<ComponentHandle> {
-        self.add_query_definition(config, start, false).await
+        self.add_query_definition(config, start).await
     }
     pub(crate) async fn declare_query(self: &Arc<Self>, config: QueryConfig) -> anyhow::Result<()> {
-        self.add_query_definition(config, false, true)
-            .await
-            .map(|_| ())
+        self.add_query_definition(config, false).await.map(|_| ())
     }
     async fn add_query_definition(
         self: &Arc<Self>,
         config: QueryConfig,
         start: bool,
-        allow_unbound: bool,
     ) -> anyhow::Result<ComponentHandle> {
         let mutation = self.mutations.lock().await;
         let id = config.id.clone();
-        self.validate_registration(
-            &id,
-            crate::component_graph::ComponentKind::Query,
-            allow_unbound,
-        )
-        .await?;
+        ComponentId::try_new(id)?;
         let query = QueryInstance::new(config.clone(), self);
         let handle = self
             .register(
@@ -735,7 +708,7 @@ impl Runtime {
             )
             .await?;
         drop(mutation);
-        self.project_addition().await;
+        self.notify();
         Ok(handle)
     }
 
@@ -772,8 +745,7 @@ impl Runtime {
         metadata
             .entry("autoStart".into())
             .or_insert_with(|| reaction.auto_start().to_string());
-        self.validate_registration(&id, crate::component_graph::ComponentKind::Reaction, false)
-            .await?;
+        ComponentId::try_new(id)?;
         let reaction = ReactionInstance::new(reaction, self);
         let auto_start = reaction.reaction.auto_start();
         let handle = self
@@ -786,7 +758,7 @@ impl Runtime {
             )
             .await?;
         drop(mutation);
-        self.project_addition().await;
+        self.notify();
         Ok(handle)
     }
 
@@ -870,7 +842,6 @@ impl Runtime {
                 .reconcile(preview, TopologyBindings::default())
                 .await?;
             if report.summary != OperationSummary::Completed {
-                self.project().await?;
                 anyhow::bail!("native creation retry failed: {report:?}");
             }
         } else if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
@@ -885,7 +856,6 @@ impl Runtime {
         // Instance startup must reach the source subscription fence before a
         // query's bootstrap can confirm readiness. Handles wait for that later.
         let result = handle.start_requested().await;
-        self.project().await?;
         let report = result?;
         handle.observed()?;
         if report.summary != OperationSummary::Completed
@@ -966,7 +936,6 @@ impl Runtime {
     }
     async fn stop_record(&self, record: &Record) -> anyhow::Result<()> {
         let result = self.handle_for(record)?.stop().await;
-        self.project().await?;
         result?;
         Ok(())
     }
@@ -1053,12 +1022,10 @@ impl Runtime {
             Ok(report) if report.summary == OperationSummary::Completed => {}
             other => {
                 record.owner.cancel_unstarted_removal();
-                self.project().await?;
                 anyhow::bail!("native removal failed: {other:?}");
             }
         }
-        self.project().await?;
-        self.records.write().await.remove(&record.token);
+        self.cleanup_candidates.write().await.remove(&record.token);
         self.logs
             .remove_component_by_key(&crate::managers::ComponentLogKey::new(
                 self.config.id.clone(),
@@ -1091,18 +1058,6 @@ impl Runtime {
             && (self.active(&old)? || observed.failure.is_some())
         {
             self.stop_record(&old).await?;
-        }
-        {
-            let mut projection = self.projection.write().await;
-            if projection.get_component(&id).is_some() {
-                if let Err(error) = projection.project_status(
-                    &id,
-                    ComponentStatus::Reconfiguring,
-                    Some(format!("Reconfiguring {}", component.kind())),
-                ) {
-                    log::warn!("Could not project reconfiguration of {id}: {error:#}");
-                }
-            }
         }
         let (control, revision, _) = self.control_for(&old)?;
         let token = self.next_token()?;
@@ -1153,7 +1108,10 @@ impl Runtime {
         new.owner.bind_record(new.data())?;
         // Retain both candidates before submission. The controller's committed
         // token selects the current record even if the caller drops this await.
-        self.records.write().await.insert(token, new.clone());
+        self.cleanup_candidates
+            .write()
+            .await
+            .insert(token, new.clone());
         let result = async {
             let preview = control
                 .preview(
@@ -1184,14 +1142,13 @@ impl Runtime {
             Ok::<_, anyhow::Error>(())
         }
         .await;
-        self.project().await?;
         if let Err(error) = result {
             if let Err(cleanup) = self.discard_uninstalled(&new).await {
                 return Err(error.context(format!("replacement cleanup also failed: {cleanup:#}")));
             }
             return Err(error);
         }
-        self.records.write().await.remove(&old.token);
+        self.cleanup_candidates.write().await.remove(&old.token);
         Ok(new)
     }
 
@@ -1396,7 +1353,7 @@ impl Runtime {
             .nodes
             .iter()
             .map(|node| node.descriptor.id())
-            .filter(|id| id.as_str() != "__inspection_projection__" && !ordinary.contains(*id))
+            .filter(|id| !ordinary.contains(*id))
             .cloned()
             .collect())
     }
@@ -1534,9 +1491,41 @@ impl Runtime {
         }
         Ok(())
     }
+    pub(crate) async fn stop_kind(&self, kind: &str) -> anyhow::Result<()> {
+        let records = self.current_records().await?;
+        let mut failures = Vec::new();
+        for record in records
+            .values()
+            .filter(|record| record.value.instance().kind() == kind)
+        {
+            let (_, _, observed) = self.control_for(record)?;
+            if matches!(
+                observed.realization,
+                RealizationState::Pending | RealizationState::Creating
+            ) || observed.realization == RealizationState::Created
+                && (self.active(record)? || observed.failure.is_some())
+            {
+                if let Err(error) = self.stop_record(record).await {
+                    failures.push(format!("{}: {error:#}", record.node));
+                }
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("stopping {kind} components failed: {}", failures.join("; "));
+        }
+        Ok(())
+    }
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
-        self.parent()?.shutdown().await?;
-        let candidates: Vec<_> = self.records.read().await.values().cloned().collect();
+        if let Some(parent) = self.parent.get() {
+            parent.shutdown().await?;
+        }
+        let candidates: Vec<_> = self
+            .cleanup_candidates
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
         for record in candidates {
             // Rejected additions belong to the graph's rejection owner, or to
             // the caller after take(). Resubmission makes the record installed.
@@ -1546,15 +1535,17 @@ impl Runtime {
                 record.owner.shutdown().await?;
             }
         }
-        self.projection
-            .write()
-            .await
-            .take_runtime::<Arc<dyn Source>>(crate::sources::COMPONENT_GRAPH_SOURCE_ID);
         Ok(())
     }
     pub(crate) async fn source(&self, id: &str) -> anyhow::Result<Arc<dyn Source>> {
         match self.record(id, "source").await?.value {
             Value::Source(source) => Ok(source.source.clone()),
+            _ => unreachable!(),
+        }
+    }
+    pub(crate) async fn reaction(&self, id: &str) -> anyhow::Result<Arc<dyn Reaction>> {
+        match self.record(id, "reaction").await?.value {
+            Value::Reaction(reaction) => Ok(reaction.reaction.clone()),
             _ => unreachable!(),
         }
     }
@@ -1613,287 +1604,5 @@ impl Runtime {
             }
         }
         Ok(schema)
-    }
-    async fn project_declarations(&self) -> anyhow::Result<()> {
-        let _projecting = self.projecting.lock().await;
-        let publication = self.control()?.registry_snapshot();
-        let records = self.records_at(&publication).await?;
-        self.project_records(&records, &publication.desired).await
-    }
-
-    async fn project_records(
-        &self,
-        records: &BTreeMap<String, Record>,
-        desired: &GraphSnapshot,
-    ) -> anyhow::Result<()> {
-        {
-            use crate::component_graph::RelationshipKind;
-            let mut projection = self.projection.write().await;
-            let retired: Vec<_> = projection
-                .snapshot()
-                .nodes
-                .into_iter()
-                .filter(|node| {
-                    matches!(
-                        node.kind,
-                        crate::component_graph::ComponentKind::Source
-                            | crate::component_graph::ComponentKind::Query
-                            | crate::component_graph::ComponentKind::Reaction
-                    ) && !records.contains_key(&node.id)
-                        && !node
-                            .metadata
-                            .get("unboundReference")
-                            .is_some_and(|value| value == "true")
-                })
-                .map(|node| node.id)
-                .collect();
-            for kind in ["source", "query", "reaction"] {
-                for record in records
-                    .values()
-                    .filter(|record| record.value.instance().kind() == kind)
-                {
-                    let component = record.value.instance();
-                    let id = component.id();
-                    let dependencies: Vec<_> = desired
-                        .subscriptions
-                        .iter()
-                        .filter(|(_, to)| to == &record.node)
-                        .map(|(from, _)| from.as_str().to_owned())
-                        .collect();
-                    let expected_kind = match kind {
-                        "source" => crate::component_graph::ComponentKind::Source,
-                        "query" => crate::component_graph::ComponentKind::Query,
-                        _ => crate::component_graph::ComponentKind::Reaction,
-                    };
-                    if projection.get_component(id).is_some_and(|node| {
-                        node.kind != expected_kind
-                            || node
-                                .metadata
-                                .get("unboundReference")
-                                .is_some_and(|value| value == "true")
-                    }) {
-                        projection.remove_component(id)?;
-                    }
-                    if !projection.contains(id) {
-                        match kind {
-                            "source" => projection.register_source(id, record.metadata.clone())?,
-                            "query" => {
-                                projection.register_query(id, record.metadata.clone(), &[])?
-                            }
-                            _ => projection.register_reaction(id, record.metadata.clone(), &[])?,
-                        }
-                    }
-                    let node = projection
-                        .get_component_mut(id)
-                        .expect("registered projection");
-                    node.metadata = record.metadata.clone();
-                    node.metadata.insert(
-                        "autoStart".into(),
-                        desired.lifecycle_policies[&record.node]
-                            .auto_start
-                            .to_string(),
-                    );
-                    match &record.value {
-                        Value::Source(source) => {
-                            node.metadata
-                                .insert("kind".into(), source.source.type_name().into());
-                            projection.set_runtime(id, Box::new(source.source.clone()))?;
-                        }
-                        Value::Query(query) => {
-                            projection
-                                .set_runtime(id, Box::new(query.clone() as Arc<dyn QueryTrait>))?;
-                        }
-                        Value::Reaction(reaction) => {
-                            node.metadata
-                                .insert("kind".into(), reaction.reaction.type_name().into());
-                            projection.set_runtime(id, Box::new(reaction.reaction.clone()))?;
-                        }
-                    }
-                    let obsolete: Vec<_> = projection
-                        .snapshot()
-                        .edges
-                        .into_iter()
-                        .filter(|edge| {
-                            edge.to == id
-                                && edge.relationship == RelationshipKind::Feeds
-                                && !dependencies.contains(&edge.from)
-                        })
-                        .collect();
-                    for edge in obsolete {
-                        projection.remove_relationship(&edge.from, id, RelationshipKind::Feeds)?;
-                    }
-                    for dependency in dependencies {
-                        let expected = if kind == "query" {
-                            crate::component_graph::ComponentKind::Source
-                        } else {
-                            crate::component_graph::ComponentKind::Query
-                        };
-                        if projection
-                            .get_component(&dependency)
-                            .is_some_and(|node| node.kind == expected)
-                        {
-                            projection.add_relationship(
-                                &dependency,
-                                id,
-                                RelationshipKind::Feeds,
-                            )?;
-                        }
-                    }
-                }
-            }
-            for id in retired {
-                if projection.contains(&id) {
-                    // Native dependency/removal policy has already decided this.
-                    // A stale read-model edge must never veto committed cleanup.
-                    projection.remove_component(&id)?;
-                }
-            }
-            if let Err(error) = self.project_provider_metadata(&mut projection, records) {
-                log::warn!("Could not project provider configuration metadata: {error:#}");
-            }
-        }
-        Ok(())
-    }
-
-    async fn project(&self) -> anyhow::Result<()> {
-        let (publication, records) = {
-            let _projecting = self.projecting.lock().await;
-            let publication = self.control()?.registry_snapshot();
-            let records = self.records_at(&publication).await?;
-            self.project_records(&records, &publication.desired).await?;
-            (publication, records)
-        };
-        for record in records.values() {
-            let component = record.value.instance();
-            let native = publication.observed.components.get(&record.node);
-            let Some(native) = native else { continue };
-            let mut status = inspection::status(record, native);
-            let native_error = || {
-                native
-                    .failure
-                    .as_ref()
-                    .map(|failure| format!("{:#}", failure.cause))
-            };
-            let message = match &record.value {
-                Value::Query(query) => {
-                    query.publish_status(status);
-                    query.last_error().or_else(native_error)
-                }
-                _ => native
-                    .failure
-                    .as_ref()
-                    .map(|failure| format!("{:#}", failure.cause)),
-            };
-            let _projecting = self.projecting.lock().await;
-            let current = self.control()?.registry_snapshot();
-            if record_token(&current.desired, &record.node) != Some(record.token)
-                || current
-                    .observed
-                    .components
-                    .get(&record.node)
-                    .map_or(true, |value| {
-                        value.generation != native.generation || value.operation != native.operation
-                    })
-            {
-                continue;
-            }
-            let mut projection = self.projection.write().await;
-            if projection.get_component(component.id()).is_some() {
-                let current = projection
-                    .get_component(component.id())
-                    .expect("projected component")
-                    .status;
-                if current == ComponentStatus::Reconfiguring && status == ComponentStatus::Stopping
-                {
-                    continue;
-                }
-                if current == ComponentStatus::Reconfiguring && status == ComponentStatus::Added {
-                    status = ComponentStatus::Stopped;
-                }
-                if status == ComponentStatus::Added && current != ComponentStatus::Added {
-                    continue;
-                }
-                if (status == ComponentStatus::Running
-                    && current != ComponentStatus::Running
-                    && current != ComponentStatus::Starting)
-                    || (status == ComponentStatus::Stopped && current == ComponentStatus::Added)
-                    || (status == ComponentStatus::Error && current == ComponentStatus::Added)
-                {
-                    projection.apply_update(ComponentUpdate::Status {
-                        component_id: component.id().to_owned(),
-                        status: ComponentStatus::Starting,
-                        message: None,
-                    });
-                }
-                let current = projection
-                    .get_component(component.id())
-                    .expect("projected component")
-                    .status;
-                if status == ComponentStatus::Stopped
-                    && current != ComponentStatus::Stopped
-                    && current != ComponentStatus::Stopping
-                    && current != ComponentStatus::Reconfiguring
-                {
-                    projection.apply_update(ComponentUpdate::Status {
-                        component_id: component.id().to_owned(),
-                        status: ComponentStatus::Stopping,
-                        message: None,
-                    });
-                }
-                projection.apply_update(ComponentUpdate::Status {
-                    component_id: component.id().to_owned(),
-                    status,
-                    message,
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-struct Projection {
-    descriptor: ComponentDescriptor,
-    runtime: Weak<Runtime>,
-}
-#[async_trait]
-impl ComputationComponent for Projection {
-    fn descriptor(&self) -> &ComponentDescriptor {
-        &self.descriptor
-    }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-#[async_trait]
-impl ComputationService for Projection {
-    async fn run(&mut self) -> anyhow::Result<()> {
-        let runtime = self
-            .runtime
-            .upgrade()
-            .ok_or_else(|| anyhow::anyhow!("runtime was dropped"))?;
-        let mut native = runtime.inspector()?.subscribe();
-        let mut changed = runtime.changed.subscribe();
-        drop(runtime);
-        loop {
-            if let Some(runtime) = self.runtime.upgrade() {
-                if let Err(error) = runtime.project().await {
-                    if !matches!(
-                        error.downcast_ref::<GraphError>(),
-                        Some(GraphError::StaleGeneration)
-                    ) {
-                        return Err(error);
-                    }
-                    log::debug!(
-                        "Computation projection publication was superseded; awaiting current state"
-                    );
-                }
-            } else {
-                return Ok(());
-            }
-            tokio::select! { result = native.changed() => result?, result = changed.changed() => result? }
-        }
     }
 }

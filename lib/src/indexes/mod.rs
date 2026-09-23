@@ -101,7 +101,6 @@ pub mod factory;
 pub use config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use factory::{IndexError, IndexFactory};
 
-#[cfg(feature = "computation")]
 pub(crate) fn operation_error(
     query: &str,
     operation: &str,
@@ -114,7 +113,6 @@ pub(crate) fn operation_error(
     )
 }
 
-#[cfg(feature = "computation")]
 pub(crate) fn check_clear(
     query: &str,
     operation: &str,

@@ -17,21 +17,18 @@
 //! This module provides all query-related operations including creating, removing,
 //! starting, and stopping queries.
 
-use anyhow::Result as AnyhowResult;
 use futures::stream::Stream;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
 use crate::config::{QueryConfig, QueryRuntime};
-use crate::error::{DrasiError, Result};
+use crate::error::Result;
 use crate::lib_core::DrasiLib;
 
 impl DrasiLib {
     /// Create a query in a running server
     ///
-    /// In computation mode, success confirms node declaration. Parsing, dependency
+    /// Success confirms node declaration. Parsing, dependency
     /// validation, construction and activation run afterward; failures remain on
     /// the node. Use `add_query_with_handle` to await those outcomes explicitly.
     ///
@@ -51,23 +48,12 @@ impl DrasiLib {
     /// ```
     pub async fn add_query(&self, query: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
-        #[cfg(feature = "computation")]
-        if self.computation_runtime.is_some() {
-            return self.add_query_with_handle(query).await.map(|_| ());
-        }
-
-        let query_id = query.id.clone();
-        self.add_query_with_options(query, true)
-            .await
-            .map_err(|e| DrasiError::operation_failed("query", &query_id, "add", format!("{e}")))?;
-
-        Ok(())
+        self.add_query_with_handle(query).await.map(|_| ())
     }
 
     /// Declare a query and return its generation-bound computation handle.
     ///
-    /// This requires [`crate::ExecutionMode::ComputationGraph`]. The original
-    /// configuration is retained even when parsing or construction fails.
+    /// The original configuration is retained even when parsing or construction fails.
     /// Await `wait_created()` for validation and construction, or `wait_started()`
     /// for activation. Auto-start is requested only when the instance is running.
     /// `wait_started()` includes query bootstrap and actual `Running` readiness;
@@ -76,22 +62,16 @@ impl DrasiLib {
     /// `set_control_handler()` for receiving them independently of query data.
     /// Ownership-bearing native rejections retain their `GraphError` through
     /// `DrasiError::Internal`, including the rejected addition's recovery handle.
-    #[cfg(feature = "computation")]
     pub async fn add_query_with_handle(
         &self,
         query: QueryConfig,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
-        let runtime = self.computation_runtime.as_ref().ok_or_else(|| {
-            DrasiError::invalid_state("Query handles require ComputationGraph execution mode")
-        })?;
         let id = query.id.clone();
-        runtime
+        self.computation_runtime
             .add_query(query, self.is_running().await)
             .await
-            .map_err(|error| {
-                crate::computation::compatibility::map_addition_error("query", &id, error)
-            })
+            .map_err(|error| crate::computation::runtime::map_addition_error("query", &id, error))
     }
 
     /// Remove a query from a running server
@@ -108,67 +88,14 @@ impl DrasiLib {
     /// ```
     pub async fn remove_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.computation_runtime {
-            return map_component_error(
-                runtime.remove_component(id, "query", true).await,
-                "query",
-                id,
-                "remove",
-            );
-        }
-
-        // Step 1: Validate no dependents
-        {
-            let graph = self.component_graph.read().await;
-            if let Err(dependent_ids) = graph.can_remove(id) {
-                return Err(DrasiError::operation_failed(
-                    "query",
-                    id,
-                    "remove",
-                    format!("Depended on by: {}", dependent_ids.join(", ")),
-                ));
-            }
-        }
-
-        // Step 2: Teardown runtime (stop, remove from runtime map, wipe output).
-        let teardown_result = self
-            .legacy()
-            .query_manager
-            .teardown_query(id.to_string())
-            .await;
-
-        // Step 3: Deregister from graph if the runtime is gone. Wipe failure after
-        // teardown_component must not leave an unremovable graph node; the caller
-        // still sees the cleanup error so leftover disk state is not silent.
-        {
-            let mut graph = self.component_graph.write().await;
-            let is_query = graph
-                .get_component(id)
-                .is_some_and(|node| node.kind == crate::component_graph::ComponentKind::Query);
-            let runtime_gone = graph
-                .get_runtime::<Arc<dyn crate::queries::Query>>(id)
-                .is_none();
-            if is_query && runtime_gone {
-                if let Err(e) = graph.deregister(id) {
-                    log::error!(
-                        "Query '{id}' runtime was torn down but graph deregister failed: {e}. \
-                         Setting component to Error state."
-                    );
-                    let _ = graph.validate_and_transition(
-                        id,
-                        ComponentStatus::Error,
-                        Some(format!("Orphaned: deregister failed after teardown: {e}")),
-                    );
-                }
-            }
-        }
-
-        teardown_result.map_err(|e| {
-            DrasiError::operation_failed("query", id, "remove", format!("Teardown failed: {e}"))
-        })?;
-
-        Ok(())
+        map_component_error(
+            self.computation_runtime
+                .remove_component(id, "query", true)
+                .await,
+            "query",
+            id,
+            "remove",
+        )
     }
 
     /// Start a stopped query
@@ -185,30 +112,8 @@ impl DrasiLib {
     /// ```
     pub async fn start_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.computation_runtime {
-            return map_component_error(
-                runtime.start_component(id, "query").await,
-                "query",
-                id,
-                "start",
-            );
-        }
-
-        // Verify query exists
-        let _config = self
-            .legacy()
-            .query_manager
-            .get_query_config(id)
-            .await
-            .ok_or_else(|| DrasiError::component_not_found("query", id))?;
-
-        // Query will subscribe directly to sources when started
         map_component_error(
-            self.legacy()
-                .query_manager
-                .start_query(id.to_string())
-                .await,
+            self.computation_runtime.start_component(id, "query").await,
             "query",
             id,
             "start",
@@ -227,25 +132,12 @@ impl DrasiLib {
     /// ```
     pub async fn stop_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized()?;
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.computation_runtime {
-            return map_component_error(
-                runtime.stop_component(id, "query").await,
-                "query",
-                id,
-                "stop",
-            );
-        }
-
-        // Stop the query (it unsubscribes from sources automatically)
         map_component_error(
-            self.legacy().query_manager.stop_query(id.to_string()).await,
+            self.computation_runtime.stop_component(id, "query").await,
             "query",
             id,
             "stop",
-        )?;
-
-        Ok(())
+        )
     }
 
     /// Update a query by replacing it with a new configuration.
@@ -260,23 +152,12 @@ impl DrasiLib {
     /// references non-existent sources, or if provisioning fails.
     pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
-        #[cfg(feature = "computation")]
-        if let Some(runtime) = &self.computation_runtime {
-            return map_component_error(
-                runtime.update_query(id, config).await,
-                "query",
-                id,
-                "update",
-            );
-        }
-
-        // Delegate to QueryManager which uses the Reconfiguring transition,
-        // preserving the graph node, edges, and event history.
-        self.legacy()
-            .query_manager
-            .update_query(id.to_string(), config)
-            .await
-            .map_err(|e| DrasiError::operation_failed("query", id, "update", e.to_string()))
+        map_component_error(
+            self.computation_runtime.update_query(id, config).await,
+            "query",
+            id,
+            "update",
+        )
     }
 
     /// List all queries with their current status
@@ -449,41 +330,6 @@ impl DrasiLib {
     )> {
         self.inspection.subscribe_query_events(id).await
     }
-
-    /// Internal helper for creating queries with auto-start control
-    pub(crate) async fn add_query_with_options(
-        &self,
-        config: QueryConfig,
-        allow_auto_start: bool,
-    ) -> AnyhowResult<()> {
-        let query_id = config.id.clone();
-        let should_auto_start = config.auto_start;
-
-        // Step 1: Register in the component graph (validates sources exist, creates node + edges)
-        {
-            let mut graph = self.component_graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            let source_ids: Vec<String> =
-                config.sources.iter().map(|s| s.source_id.clone()).collect();
-            graph.register_query(&config.id, metadata, &source_ids)?;
-        }
-
-        // Step 2: Provision runtime (create DrasiQuery, initialize, store)
-        if let Err(e) = self.legacy().query_manager.provision_query(config).await {
-            // Compensating rollback: remove from graph on runtime failure
-            let mut graph = self.component_graph.write().await;
-            let _ = graph.deregister(&query_id);
-            return Err(e);
-        }
-
-        // Step 3: Start if auto-start is enabled and allowed
-        if should_auto_start && allow_auto_start {
-            self.legacy().query_manager.start_query(query_id).await?;
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -537,29 +383,17 @@ mod tests {
             .auto_start(false)
             .build();
 
-        #[cfg(feature = "computation")]
-        if core.execution_mode() == crate::ExecutionMode::ComputationGraph {
-            let handle = core.add_query_with_handle(config).await.unwrap();
-            assert!(handle.wait_created().await.is_err());
-            let observed = handle.observed().unwrap();
-            assert_eq!(
-                observed.realization,
-                crate::computation::v1::RealizationState::CreationFailed
-            );
-            assert!(format!("{:#}", observed.failure.as_ref().unwrap().cause)
-                .contains("nonexistent-source"));
-            core.remove_query("q-bad").await.unwrap();
-            core.shutdown().await.unwrap();
-            return;
-        }
-
-        let result = core.add_query(config).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
-            "expected OperationFailed, got: {err:?}"
+        let handle = core.add_query_with_handle(config).await.unwrap();
+        assert!(handle.wait_created().await.is_err());
+        let observed = handle.observed().unwrap();
+        assert_eq!(
+            observed.realization,
+            crate::computation::v1::RealizationState::CreationFailed
         );
+        assert!(format!("{:#}", observed.failure.as_ref().unwrap().cause)
+            .contains("nonexistent-source"));
+        core.remove_query("q-bad").await.unwrap();
+        core.shutdown().await.unwrap();
     }
 
     // ========================================================================

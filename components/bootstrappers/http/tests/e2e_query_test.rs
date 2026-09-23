@@ -22,8 +22,8 @@ use axum::{routing::get, Json, Router};
 use drasi_bootstrap_http::config::*;
 use drasi_bootstrap_http::HttpBootstrapProvider;
 use drasi_lib::{
-    wait_for_status, ComponentStatus, DispatchMode, DrasiLib, Query, Source, SourceBase,
-    SourceBaseParams, SourceRuntimeContext, SourceSubscriptionSettings, SubscriptionResponse,
+    ComponentStatus, DispatchMode, DrasiLib, Query, Source, SourceBase, SourceBaseParams,
+    SourceRuntimeContext, SourceSubscriptionSettings, SubscriptionResponse,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -121,6 +121,14 @@ async fn start_server(app: Router) -> String {
     format!("http://127.0.0.1:{}", addr.port()) // DevSkim: ignore DS137138
 }
 
+async fn wait_running(core: &DrasiLib, id: &str) {
+    let component = core.computation_component(id).expect("component");
+    timeout(Duration::from_secs(5), component.wait_started())
+        .await
+        .expect("readiness timeout")
+        .expect("component ready");
+}
+
 // ============================================================================
 // E2E Tests
 // ============================================================================
@@ -199,22 +207,8 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
     drasi.start().await.unwrap();
 
     // Wait for components to be running
-    wait_for_status(
-        &drasi.component_graph(),
-        "http-src",
-        &[ComponentStatus::Running],
-        Duration::from_secs(5),
-    )
-    .await
-    .unwrap();
-    wait_for_status(
-        &drasi.component_graph(),
-        "user-query",
-        &[ComponentStatus::Running],
-        Duration::from_secs(5),
-    )
-    .await
-    .unwrap();
+    wait_running(&drasi, "http-src").await;
+    wait_running(&drasi, "user-query").await;
 
     // Query results should contain the 3 bootstrapped users
     let results = timeout(Duration::from_secs(10), async {
@@ -333,22 +327,8 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
 
     drasi.start().await.unwrap();
 
-    wait_for_status(
-        &drasi.component_graph(),
-        "product-src",
-        &[ComponentStatus::Running],
-        Duration::from_secs(5),
-    )
-    .await
-    .unwrap();
-    wait_for_status(
-        &drasi.component_graph(),
-        "product-query",
-        &[ComponentStatus::Running],
-        Duration::from_secs(5),
-    )
-    .await
-    .unwrap();
+    wait_running(&drasi, "product-src").await;
+    wait_running(&drasi, "product-query").await;
 
     // All 15 products should be queryable
     let results = timeout(Duration::from_secs(10), async {
@@ -482,22 +462,8 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
 
     drasi.start().await.unwrap();
 
-    wait_for_status(
-        &drasi.component_graph(),
-        "social-src",
-        &[ComponentStatus::Running],
-        Duration::from_secs(5),
-    )
-    .await
-    .unwrap();
-    wait_for_status(
-        &drasi.component_graph(),
-        "friends-query",
-        &[ComponentStatus::Running],
-        Duration::from_secs(5),
-    )
-    .await
-    .unwrap();
+    wait_running(&drasi, "social-src").await;
+    wait_running(&drasi, "friends-query").await;
 
     // The traversal query should find Alice -> Bob
     let results = timeout(Duration::from_secs(10), async {

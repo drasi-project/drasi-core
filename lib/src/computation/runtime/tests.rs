@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::channels::ComponentUpdate;
 use crate::{
     channels::{QueryResult, SubscriptionResponse},
     config::SourceSubscriptionSettings,
@@ -20,6 +21,7 @@ use crate::{
     sources::{SourceBase, SourceBaseParams},
     SourceRuntimeContext,
 };
+use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
@@ -31,6 +33,9 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, Notify};
+
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[derive(Default)]
 struct PeerControl {
@@ -196,7 +201,7 @@ struct SourceControl {
 }
 
 #[tokio::test]
-async fn graph_registry_remains_authoritative_without_adapter_candidates_or_projection_entries() {
+async fn graph_registry_remains_authoritative_without_cleanup_candidates() {
     let (source, source_control) = ControlledSource::new("source");
     let (reaction, reaction_control, _) = ControlledReaction::new("reaction", &["query"]);
     let core = builder()
@@ -213,15 +218,8 @@ async fn graph_registry_remains_authoritative_without_adapter_candidates_or_proj
             .await
             .unwrap();
     }
-    let runtime = core.computation_runtime.as_ref().unwrap();
-    runtime.records.write().await.clear();
-    let projecting = runtime.projecting.lock().await;
-    {
-        let mut projection = runtime.projection.write().await;
-        for id in ["reaction", "query", "source"] {
-            projection.remove_component(id).unwrap();
-        }
-    }
+    let runtime = core.computation_runtime.as_ref();
+    runtime.cleanup_candidates.write().await.clear();
     let records = runtime.current_records().await.unwrap();
     assert!(["source", "query", "reaction"]
         .iter()
@@ -270,8 +268,6 @@ async fn graph_registry_remains_authoritative_without_adapter_candidates_or_proj
         .edges
         .iter()
         .any(|edge| edge.from == "source" && edge.to == "query"));
-    drop(projecting);
-    runtime.project().await.unwrap();
     core.start_source("source").await.unwrap();
     core.start_query("query").await.unwrap();
     core.start_reaction("reaction").await.unwrap();
@@ -289,7 +285,7 @@ async fn graph_registry_remains_authoritative_without_adapter_candidates_or_proj
 }
 
 #[tokio::test]
-async fn ordinary_native_operations_never_construct_legacy_execution_managers() {
+async fn ordinary_operations_share_the_single_computation_runtime() {
     use futures::StreamExt;
 
     let (source, _) = ControlledSource::new("source");
@@ -308,7 +304,7 @@ async fn ordinary_native_operations_never_construct_legacy_execution_managers() 
             .await
             .unwrap();
     }
-    assert!(core.legacy_backend.initialized().is_none());
+    assert_eq!(core.list_computation_graphs().await.unwrap().len(), 1);
     core.list_sources().await.unwrap();
     core.list_queries().await.unwrap();
     core.list_reactions().await.unwrap();
@@ -381,11 +377,10 @@ async fn ordinary_native_operations_never_construct_legacy_execution_managers() 
     core.remove_query("query").await.unwrap();
     core.remove_source("source", false).await.unwrap();
     core.shutdown().await.unwrap();
-    assert!(core.legacy_backend.initialized().is_none());
 }
 
 #[tokio::test]
-async fn legacy_manager_escape_hatch_is_lazy_and_shared_without_changing_mode() {
+async fn query_manager_is_a_shared_graph_backed_facade() {
     let core = builder()
         .with_query(config("query", None))
         .build()
@@ -396,14 +391,9 @@ async fn legacy_manager_escape_hatch_is_lazy_and_shared_without_changing_mode() 
         .wait_created()
         .await
         .unwrap();
-    assert!(core.legacy_backend.initialized().is_none());
     let clone = core.clone();
     assert!(std::ptr::eq(core.query_manager(), clone.query_manager()));
-    assert!(core.legacy_backend.initialized().is_some());
-    assert_eq!(
-        core.execution_mode(),
-        crate::ExecutionMode::ComputationGraph
-    );
+    assert_eq!(core.list_computation_graphs().await.unwrap().len(), 1);
     let query = core
         .query_manager()
         .get_query_instance("query")
@@ -414,7 +404,7 @@ async fn legacy_manager_escape_hatch_is_lazy_and_shared_without_changing_mode() 
 }
 
 #[tokio::test]
-async fn provider_recipes_do_not_depend_on_the_legacy_projection() {
+async fn provider_recipes_are_derived_from_graph_owned_configuration() {
     let (source, _) = ControlledSource::new("source");
     let properties = HashMap::from([("file".into(), serde_json::json!("fixture.jsonl"))]);
     let core = builder()
@@ -431,13 +421,10 @@ async fn provider_recipes_do_not_depend_on_the_legacy_projection() {
         .wait_created()
         .await
         .unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
-    let projecting = runtime.projecting.lock().await;
-    {
-        let mut projection = runtime.projection.write().await;
-        projection.remove_component("source-bootstrap").unwrap();
-        projection.remove_component("identity-provider").unwrap();
-    }
+    let mut detached = core.get_graph().await;
+    detached
+        .nodes
+        .retain(|node| node.id != "source-bootstrap" && node.id != "identity-provider");
     let snapshot = core.snapshot_configuration().await.unwrap();
     let source = snapshot
         .sources
@@ -455,9 +442,7 @@ async fn provider_recipes_do_not_depend_on_the_legacy_projection() {
         .edges
         .iter()
         .any(|edge| edge.from == "identity-provider" && edge.to == "source"));
-    drop(projecting);
-    runtime.project().await.unwrap();
-    assert!(runtime.projection.read().await.contains("source-bootstrap"));
+    assert!(core.get_graph().await.contains("source-bootstrap"));
     core.remove_source("source", false).await.unwrap();
     let (replacement, _) = ControlledSource::new("source");
     core.add_source_with_handle(replacement)
@@ -478,12 +463,11 @@ async fn provider_recipes_do_not_depend_on_the_legacy_projection() {
         .edges
         .iter()
         .any(|edge| edge.from == "source-bootstrap" && edge.to == "source"));
-    assert!(core.legacy_backend.initialized().is_none());
     core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn stale_projection_status_and_membership_do_not_change_public_inspection() {
+async fn detached_snapshot_status_and_membership_cannot_change_public_inspection() {
     let (source, _) = ControlledSource::new("source");
     let core = builder().with_source(source).build().await.unwrap();
     core.computation_component("source")
@@ -491,15 +475,19 @@ async fn stale_projection_status_and_membership_do_not_change_public_inspection(
         .wait_created()
         .await
         .unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
-    let projecting = runtime.projecting.lock().await;
-    {
-        let mut projection = runtime.projection.write().await;
-        projection
-            .register_query("phantom", HashMap::new(), &[])
-            .unwrap();
-        projection.get_component_mut("source").unwrap().status = ComponentStatus::Error;
-    }
+    let mut snapshot = core.get_graph().await;
+    snapshot.nodes.push(crate::component_graph::ComponentNode {
+        id: "phantom".into(),
+        kind: crate::component_graph::ComponentKind::Query,
+        status: ComponentStatus::Running,
+        metadata: HashMap::new(),
+    });
+    snapshot
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "source")
+        .unwrap()
+        .status = ComponentStatus::Error;
     assert_eq!(
         core.get_source_status("source").await.unwrap(),
         ComponentStatus::Added
@@ -518,7 +506,7 @@ async fn stale_projection_status_and_membership_do_not_change_public_inspection(
         .unwrap()
         .queries
         .is_empty());
-    drop(projecting);
+    assert!(!core.get_graph().await.contains("phantom"));
     core.shutdown().await.unwrap();
 }
 
@@ -559,28 +547,22 @@ async fn invalid_plugin_metadata_fails_the_added_node_not_the_add_call() {
 }
 
 #[tokio::test]
-async fn stale_projection_cannot_veto_a_graph_addition() {
+async fn detached_snapshot_cannot_veto_a_graph_addition() {
     let core = builder().build().await.unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
-    runtime
-        .projection
-        .write()
-        .await
-        .register_query("source", HashMap::new(), &[])
-        .unwrap();
+    let runtime = core.computation_runtime.as_ref();
+    let mut detached = core.get_graph().await;
+    detached.nodes.push(crate::component_graph::ComponentNode {
+        id: "source".into(),
+        kind: crate::component_graph::ComponentKind::Query,
+        status: ComponentStatus::Running,
+        metadata: HashMap::new(),
+    });
     let (source, source_control) = ControlledSource::new("source");
     let handle = core.add_source_with_handle(source).await.unwrap();
     handle.wait_created().await.unwrap();
-    runtime.project().await.unwrap();
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 1);
     assert_eq!(
-        runtime
-            .projection
-            .read()
-            .await
-            .get_component("source")
-            .unwrap()
-            .kind,
+        core.get_graph().await.get_component("source").unwrap().kind,
         crate::component_graph::ComponentKind::Source,
     );
     assert!(runtime
@@ -945,7 +927,7 @@ impl Reaction for ControlledReaction {
         self.base.queries.clone()
     }
     fn auto_start(&self) -> bool {
-        false
+        self.base.get_auto_start()
     }
     fn needs_snapshot_on_fresh_start(&self) -> bool {
         self.control.snapshot.load(Ordering::Acquire)
@@ -1025,7 +1007,7 @@ impl crate::bootstrap::BootstrapProvider for GatedBootstrap {
 }
 
 fn builder() -> crate::DrasiLibBuilder {
-    DrasiLib::builder().with_execution_mode(crate::ExecutionMode::ComputationGraph)
+    DrasiLib::builder()
 }
 fn config(id: &str, source: Option<&str>) -> QueryConfig {
     let query = crate::Query::cypher(id)
@@ -1073,7 +1055,7 @@ async fn next(receiver: &mut mpsc::UnboundedReceiver<QueryResult>) -> QueryResul
 }
 
 async fn component_handle(core: &DrasiLib, id: &str, kind: &str) -> ComponentHandle {
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let record = runtime.record(id, kind).await.unwrap();
     assert_eq!(record.node.as_str(), id);
     runtime.handle_for(&record).unwrap()
@@ -1088,12 +1070,6 @@ async fn assert_creation_failed(core: &DrasiLib, handle: &ComponentHandle, messa
     assert_eq!(observed.realization, RealizationState::CreationFailed);
     let failure = format!("{:#}", observed.failure.as_ref().unwrap().cause);
     assert!(failure.contains(message), "{failure}");
-    core.computation_runtime
-        .as_ref()
-        .unwrap()
-        .project()
-        .await
-        .unwrap();
 }
 
 async fn wait_for_attached_resources(
@@ -1104,7 +1080,6 @@ async fn wait_for_attached_resources(
     let mut changes = core
         .computation_runtime
         .as_ref()
-        .unwrap()
         .inspector()
         .unwrap()
         .subscribe();
@@ -1264,7 +1239,7 @@ async fn invalid_query_addition_retains_the_original_declared_configuration() {
         core.get_query_status("invalid").await.unwrap(),
         ComponentStatus::Error
     );
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let snapshot = runtime.inspector().unwrap().snapshot();
     assert_eq!(
         snapshot.desired.specifications[handle.id()]
@@ -1387,12 +1362,12 @@ async fn missing_dependencies_fail_on_nodes_and_can_be_retried_when_available() 
         .unwrap();
     let query = component_handle(&core, "query", "query").await;
     assert_creation_failed(&core, &query, "Source 'source' not found").await;
-    assert!(!core.component_graph.read().await.contains("source"));
+    assert!(!core.get_graph().await.contains("source"));
 
     let (reaction, _, _) = ControlledReaction::new("reaction", &["missing-query"]);
     let reaction = core.add_reaction_with_handle(reaction).await.unwrap();
     assert_creation_failed(&core, &reaction, "Query 'missing-query' not found").await;
-    assert!(!core.component_graph.read().await.contains("missing-query"));
+    assert!(!core.get_graph().await.contains("missing-query"));
 
     let (source, _) = ControlledSource::new("source");
     core.add_source_with_handle(source)
@@ -1444,7 +1419,6 @@ async fn creation_retry_reuses_the_owned_source_and_never_retries_in_a_loop() {
     let source = core
         .computation_runtime
         .as_ref()
-        .unwrap()
         .source("source")
         .await
         .unwrap();
@@ -1630,7 +1604,7 @@ async fn duplicate_additions_are_rejected_without_replacing_the_declared_node() 
         .add_query_with_handle(config("query", None))
         .await
         .unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let revision = runtime.inspector().unwrap().snapshot().desired.revision;
     assert!(core.add_query(config("query", None)).await.is_err());
     let (source, control) = ControlledSource::new("query");
@@ -1663,7 +1637,7 @@ fn rejected_addition(error: crate::DrasiError) -> GraphError {
 #[tokio::test]
 async fn rejected_ordinary_addition_retains_ownership_and_can_be_resubmitted() {
     let core = builder().build().await.unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let control = runtime.control().unwrap();
     let reserved = ResourceId::try_new(format!(
         "instance/{}",
@@ -1762,14 +1736,14 @@ async fn rejected_query_and_reaction_errors_retain_graph_owned_cleanup() {
     let GraphError::AdditionRejected {
         addition: query, ..
     } = rejected_addition(
-        core.add_query_with_handle(config("__inspection_projection__", None))
+        core.add_query_with_handle(config(&core.config.id, None))
             .await
             .unwrap_err(),
     )
     else {
         unreachable!("validated rejection");
     };
-    let (reaction, reaction_control, _) = ControlledReaction::new("__inspection_projection__", &[]);
+    let (reaction, reaction_control, _) = ControlledReaction::new(&core.config.id, &[]);
     let GraphError::AdditionRejected {
         addition: reaction, ..
     } = rejected_addition(core.add_reaction_with_handle(reaction).await.unwrap_err())
@@ -1817,7 +1791,7 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
         .build()
         .await
         .unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let scoped = core.computation_plugin_services("separate-graph").unwrap();
     assert!(
         scoped.wal.is_some(),
@@ -2107,8 +2081,8 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         .wait_created()
         .await
         .is_err());
-    let runtime = core.computation_runtime.as_ref().unwrap();
-    runtime.records.write().await.clear();
+    let runtime = core.computation_runtime.as_ref();
+    runtime.cleanup_candidates.write().await.clear();
     let inventory = core.inspect_computation_inventory().await.unwrap();
     let root = ComputationScope::root("__drasi_lib_runtime__");
     let nested = root.nested(query_id.clone());
@@ -2214,9 +2188,9 @@ async fn instance_root_identity_is_rejected_by_native_admission_with_cleanup_own
         .inspector()
         .snapshot()
         .observed
-        .components[&ComponentId::try_new("__inspection_projection__").unwrap()]
-        .failure
-        .is_none());
+        .components
+        .values()
+        .all(|component| component.failure.is_none()));
     core.shutdown().await.unwrap();
     assert!(addition.take().await.is_none());
 }
@@ -2227,7 +2201,7 @@ async fn runtime_factory_validates_captured_services_without_requiring_absent_pr
     let (source, _) = ControlledSource::new("source");
     let handle = core.add_source_with_handle(source).await.unwrap();
     handle.wait_created().await.unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let record = runtime.record("source", "source").await.unwrap();
     let snapshot = runtime.inspector().unwrap().snapshot();
     assert!(!snapshot
@@ -2297,8 +2271,7 @@ async fn auto_start_is_requested_only_for_a_running_instance_and_failures_stay_o
     let source = core.add_source_with_handle(source).await.unwrap();
     source.wait_created().await.unwrap();
     assert_eq!(control.starts.load(Ordering::Acquire), 0);
-    let runtime = core.computation_runtime.as_ref().unwrap();
-    runtime.project().await.unwrap();
+    let runtime = core.computation_runtime.as_ref();
     assert_eq!(
         core.get_source_status("source").await.unwrap(),
         ComponentStatus::Added
@@ -2323,7 +2296,6 @@ async fn auto_start_is_requested_only_for_a_running_instance_and_failures_stay_o
     let bad = component_handle(&core, "bad", "source").await;
     bad.wait_created().await.unwrap();
     assert!(bad.wait_started().await.is_err());
-    runtime.project().await.unwrap();
     assert_eq!(
         core.get_source_status("bad").await.unwrap(),
         ComponentStatus::Error
@@ -2502,7 +2474,6 @@ async fn query_handle_waits_for_bootstrap_completion_and_reports_bootstrap_failu
             let instance = core
                 .computation_runtime
                 .as_ref()
-                .unwrap()
                 .query("query")
                 .await
                 .unwrap();
@@ -2557,7 +2528,7 @@ async fn native_components_share_instance_lifecycle_without_starting_manual_comp
 async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_native_config() {
     let (source, source_control) = ControlledSource::new("ordinary");
     let core = builder().with_source(source).build().await.unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let record = runtime.record("ordinary", "source").await.unwrap();
     let starts = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(NativeServiceFactory {
@@ -2647,40 +2618,54 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
 }
 
 #[tokio::test]
-async fn legacy_addition_errors_and_public_result_signatures_are_unchanged() {
-    let core = DrasiLib::builder()
-        .with_execution_mode(crate::ExecutionMode::ComponentGraph)
-        .build()
+async fn default_builder_is_native_and_preserves_public_result_signatures() {
+    let core = DrasiLib::builder().build().await.unwrap();
+    let (source, control) = ControlledSource::new("added-by-default");
+    core.add_source_with_handle(source)
+        .await
+        .unwrap()
+        .wait_created()
         .await
         .unwrap();
-    let (source, control) = ControlledSource::new("not-added");
-    assert!(matches!(
-        core.add_source_with_handle(source).await,
-        Err(crate::DrasiError::InvalidState { .. })
-    ));
-    assert_eq!(control.initializations.load(Ordering::Acquire), 0);
+    assert_eq!(control.initializations.load(Ordering::Acquire), 1);
     let mut invalid = config("invalid", None);
     invalid.query = "this is not a query".into();
     let result: crate::Result<()> = core.add_query(invalid).await;
     result.unwrap();
     assert!(core.start_query("invalid").await.is_err());
     core.remove_query("invalid").await.unwrap();
+    core.add_query(config("missing", Some("source")))
+        .await
+        .unwrap();
     assert!(core
-        .add_query(config("missing", Some("source")))
+        .computation_component("missing")
+        .unwrap()
+        .wait_created()
         .await
         .is_err());
+    core.remove_query("missing").await.unwrap();
     assert!(core.list_queries().await.unwrap().is_empty());
     let (source, source_control) = ControlledSource::new("source");
     let added: crate::Result<()> = core.add_source(source).await;
     added.unwrap();
-    assert!(source_control.resource_observers.lock().unwrap().is_empty());
+    core.computation_component("source")
+        .unwrap()
+        .wait_created()
+        .await
+        .unwrap();
+    assert!(!source_control.resource_observers.lock().unwrap().is_empty());
     core.add_query(config("query", Some("source")))
         .await
         .unwrap();
     let (reaction, reaction_control, _) = ControlledReaction::new("reaction", &["query"]);
     let added: crate::Result<()> = core.add_reaction(reaction).await;
     added.unwrap();
-    assert!(reaction_control
+    core.computation_component("reaction")
+        .unwrap()
+        .wait_created()
+        .await
+        .unwrap();
+    assert!(!reaction_control
         .resource_observers
         .lock()
         .unwrap()
@@ -2710,7 +2695,7 @@ async fn plugin_origin_is_preserved_only_when_the_host_supplies_an_identity() {
     core.add_reaction_with_metadata(plugin, metadata)
         .await
         .unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     for (id, kind, expected) in [
         ("plugin-source", "source", Some(&expected)),
         ("custom-source", "source", None),
@@ -2743,7 +2728,7 @@ async fn data_subscriptions_track_actual_nodes_and_changed_dependencies() {
         .build()
         .await
         .unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let nodes = runtime.current_records().await.unwrap();
     for id in ["a", "b", "q1", "q2", "reaction"] {
         assert_eq!(nodes[id].node.as_str(), id);
@@ -3080,7 +3065,7 @@ async fn invalid_reaction_constructor_leaves_an_owned_error_node_not_a_ready_ins
     assert_creation_failed(&core, &handle, "duplicate query IDs").await;
     let reactions = core.list_reactions().await.unwrap();
     assert_eq!(reactions, vec![("reaction".into(), ComponentStatus::Error)]);
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let record = runtime.record("reaction", "reaction").await.unwrap();
     let Value::Reaction(reaction) = &record.value else {
         panic!("declared reaction must retain its plugin");
@@ -3143,7 +3128,7 @@ async fn idle_reaction_observes_plugin_failure_and_awaits_stop() {
         .unwrap();
     core.start_query("query").await.unwrap();
     core.start_reaction("reaction").await.unwrap();
-    let mut events = core.component_graph.read().await.subscribe();
+    let mut events = core.subscribe_all_component_events();
     let updates = control.updates.lock().unwrap().clone().unwrap();
     updates
         .send(ComponentUpdate::Status {
@@ -3185,9 +3170,8 @@ async fn cancelled_replacement_caller_still_selects_the_committed_instance() {
     update.abort();
     assert!(update.await.unwrap_err().is_cancelled());
     new_control.release.notify_one();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     replacement.wait_created().await.unwrap();
-    runtime.project().await.unwrap();
     let current = core.source_instance("source").await.unwrap();
     assert!(Arc::ptr_eq(
         &current
@@ -3219,7 +3203,7 @@ async fn retired_query_handles_cannot_operate_on_the_replacement_and_unbound_que
         .await
         .unwrap();
     assert!(old.start().await.is_err());
-    let mut events = core.component_graph.read().await.subscribe();
+    let mut events = core.subscribe_all_component_events();
     core.start_query("query").await.unwrap();
     crate::test_helpers::wait_for_component_status(
         &mut events,
@@ -3245,10 +3229,13 @@ async fn retired_query_handles_cannot_operate_on_the_replacement_and_unbound_que
 async fn declared_references_validate_roles_on_the_committed_node() {
     let (source, _) = ControlledSource::new("source");
     let core = builder().with_source(source).build().await.unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let revision = runtime.inspector().unwrap().snapshot().desired.revision;
     let (reaction, _, _) = ControlledReaction::new("reaction", &["source"]);
-    runtime.declare_reaction(Box::new(reaction)).await.unwrap();
+    core.computation_runtime
+        .declare_reaction(Box::new(reaction))
+        .await
+        .unwrap();
     assert_ne!(
         runtime.inspector().unwrap().snapshot().desired.revision,
         revision
@@ -3347,7 +3334,7 @@ async fn early_query_activation_failure_is_visible_and_bulk_stop_allows_another_
             status: ComponentStatus::Error
         })
     ));
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let record = runtime.record("query", "query").await.unwrap();
     let (_, _, first) = runtime.control_for(&record).unwrap();
     assert!(format!("{:#}", first.failure.as_ref().unwrap().cause).contains("IncompatibleSource"));
@@ -3377,7 +3364,7 @@ async fn running_query_replacement_rebinds_consumers_without_restarting_unaffect
     core.start_query("query").await.unwrap();
     core.start_query("unrelated").await.unwrap();
     core.start_reaction("reaction").await.unwrap();
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let source_token = runtime.record("source", "source").await.unwrap().token;
     let unrelated_token = runtime.record("unrelated", "query").await.unwrap().token;
     insert(&core, "source").await;
@@ -3443,7 +3430,7 @@ async fn quiescing_ordinary_query_pauses_its_independently_driven_graph() {
     insert(&core, "source").await;
     assert_eq!(next(&mut output).await.results.len(), 1);
 
-    let runtime = core.computation_runtime.as_ref().unwrap();
+    let runtime = core.computation_runtime.as_ref();
     let control = runtime.control().unwrap();
     let query = component_handle(&core, "query", "query").await;
     let selected = GraphSelection::Exact(vec![ComponentId::try_new("query").unwrap()]);
@@ -3485,10 +3472,20 @@ async fn quiescing_ordinary_query_pauses_its_independently_driven_graph() {
 
 #[tokio::test]
 async fn ordinary_query_quiescence_current_thread() {
-    quiescing_ordinary_query_pauses_its_independently_driven_graph().await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        quiescing_ordinary_query_pauses_its_independently_driven_graph(),
+    )
+    .await
+    .expect("query quiescence and resume must complete on current_thread");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_query_quiescence_multi_thread() {
-    quiescing_ordinary_query_pauses_its_independently_driven_graph().await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        quiescing_ordinary_query_pauses_its_independently_driven_graph(),
+    )
+    .await
+    .expect("query quiescence and resume must complete on multi_thread");
 }

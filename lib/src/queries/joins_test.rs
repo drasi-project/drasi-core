@@ -111,7 +111,7 @@ mod query_joins_tests {
     async fn create_test_environment() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+        crate::component_graph::ComponentGraph,
     ) {
         let core = crate::test_helpers::managers::empty_core().await;
         (
@@ -124,7 +124,7 @@ mod query_joins_tests {
     /// Helper: register a source in the graph, then provision it in the source manager.
     async fn add_source(
         source_manager: &SourceManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         source: impl crate::sources::Source + 'static,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
@@ -134,7 +134,7 @@ mod query_joins_tests {
     /// Registers placeholder source nodes for any referenced sources not already in the graph.
     async fn add_query(
         manager: &QueryManager,
-        _graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        _graph: &crate::component_graph::ComponentGraph,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.add(config).await
@@ -176,7 +176,7 @@ mod query_joins_tests {
             .unwrap();
 
         // Start the query - it will subscribe directly to sources
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("vehicle-driver-query".to_string())
             .await
@@ -299,7 +299,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("order-restaurant-query".to_string())
             .await
@@ -485,7 +485,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("full-order-query".to_string())
             .await
@@ -614,7 +614,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("non-matching-query".to_string())
             .await
@@ -715,7 +715,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("null-property-query".to_string())
             .await
@@ -820,7 +820,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("product-category-query".to_string())
             .await
@@ -932,7 +932,7 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
-        let mut event_rx = graph.read().await.subscribe();
+        let mut event_rx = graph.subscribe().unwrap();
         query_manager
             .start_query("user-posts-query".to_string())
             .await

@@ -8,12 +8,9 @@ edition.workspace = true
 workspace = true
 
 [features]
-computation = [
-    "drasi-lib/computation",
-    "drasi-index-rocksdb/computation",
-    "drasi-index-garnet/computation",
-]
-computation-middleware-tests = ["computation", "drasi-lib/middleware-unwind"]
+# Requires a Redis-compatible external service (or Docker through the test helper).
+garnet-tests = ["drasi-index-garnet/computation"]
+computation-middleware-tests = ["drasi-lib/middleware-unwind"]
 
 [dependencies]
 # Test dependencies only - this crate has no library code

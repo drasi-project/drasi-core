@@ -1477,8 +1477,9 @@ impl Operations {
             for index in &selected {
                 let id = graph.nodes[*index].descriptor.id();
                 let node = state.components.get_mut(id).expect("selected component");
-                if (force || graph.snapshot.lifecycle_policies[id].auto_start)
-                    && (force || !graph.deferred_activation.contains(id))
+                if (force
+                    || graph.snapshot.lifecycle_policies[id].auto_start
+                        && !graph.deferred_activation.contains(id))
                     && node.realization == RealizationState::Created
                     && node.lifecycle == ComponentLifecycle::Stopped
                 {

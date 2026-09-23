@@ -75,7 +75,7 @@ pub struct ScopedGraphEntityLink {
 }
 
 /// Instance-wide view of host-visible native scopes, including query execution
-/// graphs. Membership comes from graph-owned instances, not the legacy projection.
+/// graphs. Membership comes exclusively from graph-owned instances.
 /// Each scope is a coherent publication; this is not a transaction across graphs.
 /// No runtime handles, resolved credentials or construction recipes are retained.
 #[derive(Debug, Clone)]

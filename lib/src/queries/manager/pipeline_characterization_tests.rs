@@ -14,7 +14,7 @@
 
 //! Characterization tests for the fixed Source -> Continuous Query -> Reaction pipeline.
 //!
-//! These tests pin the legacy manager's transaction and output boundaries:
+//! These tests pin the computation runtime's transaction and output boundaries:
 //! indexes, source progress, and durable output commit together before dispatch.
 //! The historical test names are retained for the pinned runtime-parity corpus.
 
@@ -34,7 +34,7 @@ use bytes::Bytes;
 use drasi_core::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
-        functions::{aggregation::ValueAccumulator, FunctionRegistry},
+        functions::aggregation::ValueAccumulator,
         variable_value::VariableValue,
     },
     interface::{
@@ -44,30 +44,28 @@ use drasi_core::{
         ResultOwner, ResultSequence, ResultSequenceCounter, RowMutation, SessionControl,
         SourceCheckpoint,
     },
-    middleware::MiddlewareTypeRegistry,
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementTimestamp,
         QueryJoin, SourceChange, TimestampRange,
     },
     path_solver::match_path::MatchPath,
-    query::QueryBuilder,
 };
-use drasi_functions_cypher::CypherFunctionSet;
-use drasi_query_cypher::CypherParser;
+use futures::FutureExt;
 use ordered_float::OrderedFloat;
 use serde_json::json;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 use super::*;
 use crate::{
     channels::{
-        ChangeDispatcher, ChangeReceiver, ComponentStatus, QueryResult, ResultDiff, SourceEvent,
-        SourceEventWrapper, SubscriptionResponse,
+        ChangeReceiver, ComponentStatus, QueryResult, ResultDiff, SourceEvent, SourceEventWrapper,
+        SubscriptionResponse,
     },
+    computation::v1::{progress_key, EnvelopeCodec, QueryChangeCodec},
     config::{QueryLanguage, SourceSubscriptionConfig},
     indexes::config::StorageBackendRef,
     profiling::ProfilingMetadata,
-    sources::{SourceBase, SourceBaseParams},
+    sources::{Source, SourceBase, SourceBaseParams},
 };
 
 const SOURCE_ID: &str = "pipeline-source";
@@ -169,6 +167,13 @@ impl TransactionState {
 struct RecordingSessionControl {
     state: Arc<Mutex<TransactionState>>,
     trace: EventTrace,
+    output_gate: Mutex<Option<Arc<CommitGate>>>,
+}
+
+#[derive(Default)]
+struct CommitGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -186,6 +191,22 @@ impl SessionControl for RecordingSessionControl {
     }
 
     async fn commit(&self) -> Result<(), IndexError> {
+        let gate = {
+            let state = self.state.lock().unwrap();
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.outbox != state.committed.outbox)
+            {
+                self.output_gate.lock().unwrap().take()
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         let mut state = self.state.lock().unwrap();
         state.committed = state.pending.take().ok_or_else(|| {
             IndexError::other(std::io::Error::other("test session is not active"))
@@ -833,33 +854,6 @@ impl LiveResultsWriter for RecordingOutputStore {
     }
 }
 
-struct RecordingDispatcher {
-    trace: EventTrace,
-    tx: mpsc::UnboundedSender<Arc<QueryResult>>,
-}
-
-#[async_trait]
-impl ChangeDispatcher<QueryResult> for RecordingDispatcher {
-    async fn dispatch_change(&self, change: Arc<QueryResult>) -> anyhow::Result<()> {
-        self.try_dispatch_change(change)
-    }
-
-    fn try_dispatch_change(&self, change: Arc<QueryResult>) -> anyhow::Result<()> {
-        self.trace.record(TraceEvent::ReactionDispatch {
-            sequence: change.sequence,
-        });
-        self.tx
-            .send(change)
-            .map_err(|_| anyhow::anyhow!("test result receiver dropped"))
-    }
-
-    async fn create_receiver(&self) -> anyhow::Result<Box<dyn ChangeReceiver<QueryResult>>> {
-        Err(anyhow::anyhow!(
-            "recording dispatcher does not expose a ChangeReceiver"
-        ))
-    }
-}
-
 struct CharacterizationBackend {
     trace: EventTrace,
     element_index: Arc<TransactionalIndexes>,
@@ -885,6 +879,7 @@ impl CharacterizationBackend {
             session_control: Arc::new(RecordingSessionControl {
                 state: state.clone(),
                 trace: trace.clone(),
+                output_gate: Mutex::new(None),
             }),
             checkpoint_store: Arc::new(TransactionalCheckpointStore {
                 state: state.clone(),
@@ -897,6 +892,9 @@ impl CharacterizationBackend {
 
 #[async_trait]
 impl IndexBackendPlugin for CharacterizationBackend {
+    fn supports_atomic_query_output(&self) -> bool {
+        true
+    }
     async fn create_indexes(&self, _query_id: &str) -> Result<CreatedIndexes, IndexError> {
         Ok(CreatedIndexes {
             set: IndexSet {
@@ -955,6 +953,9 @@ impl CharacterizationSource {
 
 #[async_trait]
 impl Source for CharacterizationSource {
+    fn supports_replay(&self) -> bool {
+        true
+    }
     fn id(&self) -> &str {
         self.base.get_id()
     }
@@ -1014,115 +1015,64 @@ impl Source for CharacterizationSource {
     async fn remove_position_handle(&self, query_id: &str) {
         self.base.remove_position_handle(query_id).await;
     }
+
+    async fn set_bootstrap_provider(&self, provider: Box<dyn crate::BootstrapProvider>) {
+        self.base.set_bootstrap_provider(provider).await;
+    }
 }
 
 struct PipelineHarness {
-    graph: Arc<RwLock<ComponentGraph>>,
-    update_tx: ComponentUpdateSender,
-    source_manager: Arc<SourceManager>,
-    index_factory: Arc<crate::indexes::IndexFactory>,
-    middleware_registry: Arc<MiddlewareTypeRegistry>,
+    core: crate::DrasiLib,
     subscription_rx: mpsc::UnboundedReceiver<crate::config::SourceSubscriptionSettings>,
 }
 
 impl PipelineHarness {
     async fn new(backend: Arc<CharacterizationBackend>) -> Self {
-        let log_registry = crate::managers::get_or_init_global_registry();
-        let (graph, mut update_rx) = ComponentGraph::new("pipeline-characterization");
-        let update_tx = graph.update_sender();
-        let graph = Arc::new(RwLock::new(graph));
-        let graph_for_updates = graph.clone();
-        tokio::spawn(async move {
-            while let Some(update) = update_rx.recv().await {
-                graph_for_updates.write().await.apply_update(update);
-            }
-        });
-
-        let source_manager = Arc::new(SourceManager::new(
-            "pipeline-characterization",
-            log_registry,
-            graph.clone(),
-            update_tx.clone(),
-        ));
         let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
         let source = CharacterizationSource::new(SOURCE_ID, subscription_tx);
-        graph
-            .write()
-            .await
-            .register_source(SOURCE_ID, HashMap::new())
-            .unwrap();
-        source_manager.provision_source(source).await.unwrap();
-        source_manager
-            .start_source(SOURCE_ID.to_string())
+        let core = crate::DrasiLib::builder()
+            .with_id("pipeline-characterization")
+            .with_index_provider("characterization", backend)
+            .with_source(source)
+            .build()
             .await
             .unwrap();
-
-        graph
-            .write()
-            .await
-            .register_query(QUERY_ID, HashMap::new(), &[SOURCE_ID.to_string()])
-            .unwrap();
-
-        let providers: HashMap<String, Arc<dyn IndexBackendPlugin>> = HashMap::from([(
-            "characterization".to_string(),
-            backend as Arc<dyn IndexBackendPlugin>,
-        )]);
-
+        core.start_source(SOURCE_ID).await.unwrap();
         Self {
-            graph,
-            update_tx,
-            source_manager,
-            index_factory: Arc::new(crate::indexes::IndexFactory::new(vec![], providers)),
-            middleware_registry: Arc::new(MiddlewareTypeRegistry::new()),
+            core,
             subscription_rx,
         }
     }
 
-    async fn start_query(
+    async fn start_query(&self, trace: EventTrace) -> (Arc<dyn Query>, ResultReceiver) {
+        self.start_config(query_config(), trace).await
+    }
+
+    async fn start_config(
         &self,
+        config: QueryConfig,
         trace: EventTrace,
-    ) -> (Arc<DrasiQuery>, mpsc::UnboundedReceiver<Arc<QueryResult>>) {
-        let query = Arc::new(
-            DrasiQuery::new(
-                "pipeline-characterization",
-                query_config(),
-                self.source_manager.clone(),
-                self.index_factory.clone(),
-                self.middleware_registry.clone(),
-                None,
-            )
-            .unwrap(),
-        );
-        query
-            .initialize(crate::context::QueryRuntimeContext::new(
-                "pipeline-characterization",
-                QUERY_ID,
-                self.update_tx.clone(),
-            ))
-            .await;
-
-        let (result_tx, result_rx) = mpsc::unbounded_channel();
-        query
-            .base
-            .dispatchers
-            .write()
+    ) -> (Arc<dyn Query>, ResultReceiver) {
+        if self.core.get_query_config(QUERY_ID).await.is_ok() {
+            self.core.update_query(QUERY_ID, config).await.unwrap();
+        } else {
+            self.core.add_query(config).await.unwrap();
+        }
+        self.core.start_query(QUERY_ID).await.unwrap();
+        self.core
+            .computation_component(QUERY_ID)
+            .unwrap()
+            .wait_started()
             .await
-            .push(Box::new(RecordingDispatcher {
-                trace,
-                tx: result_tx,
-            }));
-
-        let mut status_rx = query.base.status_handle().subscribe_status();
-        query.start().await.unwrap();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            status_rx.wait_for(|status| *status == ComponentStatus::Running),
-        )
-        .await
-        .expect("query should reach Running")
-        .expect("query status channel should remain open");
-
-        (query, result_rx)
+            .unwrap();
+        let query = self
+            .core
+            .query_manager()
+            .get_query_instance(QUERY_ID)
+            .await
+            .unwrap();
+        let receiver = query.subscribe("recording".into()).await.unwrap().receiver;
+        (query, ResultReceiver { receiver, trace })
     }
 
     async fn next_subscription(&mut self) -> crate::config::SourceSubscriptionSettings {
@@ -1133,11 +1083,7 @@ impl PipelineHarness {
     }
 
     async fn inject(&self, change: SourceChange, sequence: u64, source_position: Bytes) {
-        let source = self
-            .source_manager
-            .get_source_instance(SOURCE_ID)
-            .await
-            .unwrap();
+        let source = self.core.source_instance(SOURCE_ID).await.unwrap();
         source
             .as_any()
             .downcast_ref::<CharacterizationSource>()
@@ -1145,6 +1091,20 @@ impl PipelineHarness {
             .inject(change, sequence, source_position)
             .await
             .unwrap();
+    }
+}
+
+struct ResultReceiver {
+    receiver: Box<dyn ChangeReceiver<QueryResult>>,
+    trace: EventTrace,
+}
+impl ResultReceiver {
+    fn try_recv(&mut self) -> Result<Arc<QueryResult>, ()> {
+        self.receiver
+            .recv()
+            .now_or_never()
+            .ok_or(())?
+            .map_err(|_| ())
     }
 }
 
@@ -1194,269 +1154,332 @@ fn variables(entries: &[(&str, VariableValue)]) -> QueryVariables {
         .collect()
 }
 
-async fn next_result(receiver: &mut mpsc::UnboundedReceiver<Arc<QueryResult>>) -> Arc<QueryResult> {
-    tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+async fn next_result(receiver: &mut ResultReceiver) -> Arc<QueryResult> {
+    let result = tokio::time::timeout(Duration::from_secs(5), receiver.receiver.recv())
         .await
         .expect("query result should arrive")
-        .expect("query result channel should remain open")
+        .expect("query result channel should remain open");
+    receiver.trace.record(TraceEvent::ReactionDispatch {
+        sequence: result.sequence,
+    });
+    result
+}
+
+struct CountingBootstrap(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl crate::BootstrapProvider for CountingBootstrap {
+    async fn bootstrap(
+        &self,
+        _: crate::bootstrap::BootstrapRequest,
+        _: &crate::bootstrap::BootstrapContext,
+        _: crate::channels::BootstrapEventSender,
+        _: Option<&crate::SourceSubscriptionSettings>,
+    ) -> anyhow::Result<crate::bootstrap::BootstrapResult> {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        Ok(crate::bootstrap::BootstrapResult::default())
+    }
 }
 
 #[tokio::test]
-async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
-    let backend = CharacterizationBackend::new(false);
-    let trace = backend.trace.clone();
-    let output_store = backend.output_store.clone();
-    let checkpoint_store = backend.checkpoint_store.clone();
-    let output_state = RwLock::new(QueryOutputState::new(16));
-    let output_metrics = Arc::new(QueryOutputMetrics::new());
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
-    let dispatchers: RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>> =
-        RwLock::new(vec![Box::new(RecordingDispatcher {
-            trace: trace.clone(),
-            tx: result_tx,
-        })]);
-    let outbox_writer: Option<Arc<dyn OutboxWriter>> = Some(output_store.clone());
-    let live_results_writer: Option<Arc<dyn LiveResultsWriter>> = Some(output_store.clone());
-    let checkpoint_writer: Option<Arc<dyn CheckpointStore>> = Some(checkpoint_store.clone());
+async fn strict_restart_keeps_sequence_only_checkpoint_output() {
+    let backend = Arc::new(CharacterizationBackend::new(false));
+    let harness = PipelineHarness::new(backend.clone()).await;
+    let (query, mut receiver) = harness.start_query(backend.trace.clone()).await;
+    let source = harness.core.source_instance(SOURCE_ID).await.unwrap();
+    let base = &source
+        .as_any()
+        .downcast_ref::<CharacterizationSource>()
+        .unwrap()
+        .base;
+    base.dispatch_event(SourceEventWrapper::with_sequence(
+        SOURCE_ID.into(),
+        SourceEvent::Change(person_insert("one", "Alice", 1000)),
+        chrono::Utc::now(),
+        1,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_result(&mut receiver).await.sequence, 1);
+    let checkpoint = backend
+        .checkpoint_store
+        .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.sequence, 1);
+    assert!(checkpoint.source_position.is_none());
 
+    query.stop().await.unwrap();
+    backend.trace.clear();
+    query.start().await.unwrap();
+    harness
+        .core
+        .computation_component(QUERY_ID)
+        .unwrap()
+        .wait_started()
+        .await
+        .unwrap();
+    let snapshot = query.fetch_snapshot().await.unwrap();
+    assert_eq!(snapshot.as_of_sequence, 1);
+    assert_eq!(snapshot.to_vec(), vec![json!({"name": "Alice"})]);
+    assert_eq!(query.fetch_outbox(0).await.unwrap().results[0].sequence, 1);
+    assert!(
+        !backend.trace.snapshot().iter().any(|event| matches!(
+            event, TraceEvent::CheckpointStaged { source_id, sequence: 0, .. }
+                if source_id == "\0computation:query-bootstrap:v1"
+        )),
+        "a replay-only restart must not mark a completed bootstrap incomplete"
+    );
+
+    let mut output = query
+        .subscribe("after-restart".into())
+        .await
+        .unwrap()
+        .receiver;
+    base.dispatch_event(SourceEventWrapper::with_sequence(
+        SOURCE_ID.into(),
+        SourceEvent::Change(person_insert("two", "Bob", 2000)),
+        chrono::Utc::now(),
+        2,
+        None,
+    ))
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), output.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.sequence, 2);
+    assert!(matches!(&result.results[..], [ResultDiff::Add { data, .. }]
+        if data == &json!({"name": "Bob"})));
+    harness.core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn strict_reconstruction_bootstraps_without_source_checkpoint() {
+    let backend = Arc::new(CharacterizationBackend::new(false));
+    let bootstraps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for expected in 1..=2 {
+        let mut harness = PipelineHarness::new(backend.clone()).await;
+        harness
+            .core
+            .source_instance(SOURCE_ID)
+            .await
+            .unwrap()
+            .set_bootstrap_provider(Box::new(CountingBootstrap(bootstraps.clone())))
+            .await;
+        let mut config = query_config();
+        config.enable_bootstrap = true;
+        let (query, _) = harness.start_config(config, backend.trace.clone()).await;
+        let subscription = harness.next_subscription().await;
+        assert!(subscription.enable_bootstrap);
+        assert!(subscription.resume_from.is_none());
+        assert!(subscription.resume_sequence.is_none());
+        assert_eq!(bootstraps.load(Ordering::Acquire), expected);
+        assert!(backend
+            .checkpoint_store
+            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(query.fetch_snapshot().await.unwrap().as_of_sequence, 0);
+        harness.core.shutdown().await.unwrap();
+    }
+}
+
+fn decode_result(bytes: &[u8]) -> QueryResult {
+    let mut codec = EnvelopeCodec::new(std::num::NonZeroUsize::new(64 * 1024 * 1024).unwrap());
+    codec.register_schema(QueryChangeCodec::schema()).unwrap();
+    QueryChangeCodec::to_legacy_result(&codec.decode(bytes).unwrap()).unwrap()
+}
+
+fn assert_commit_precedes_dispatch(trace: &[TraceEvent], sequence: u64) {
+    let output = trace
+        .iter()
+        .position(|event| {
+            matches!(event,
+        TraceEvent::OutboxAppendAttempt { sequence: value, .. } if *value == sequence)
+        })
+        .unwrap();
+    let live = trace
+        .iter()
+        .position(|event| matches!(event, TraceEvent::LiveResultsApplyAttempt { .. }))
+        .unwrap();
+    let staged = trace
+        .iter()
+        .position(|event| {
+            matches!(event,
+        TraceEvent::ResultSequenceStaged { sequence: value, .. } if *value == sequence)
+        })
+        .unwrap();
+    let commit = trace
+        .iter()
+        .enumerate()
+        .find(|(index, event)| *index > output && matches!(event, TraceEvent::SessionCommit))
+        .unwrap()
+        .0;
+    let dispatch = trace
+        .iter()
+        .position(|event| {
+            matches!(event,
+        TraceEvent::ReactionDispatch { sequence: value } if *value == sequence)
+        })
+        .unwrap();
+    assert!(
+        output < commit && live < commit && staged < commit && commit < dispatch,
+        "{trace:?}"
+    );
+}
+
+fn assert_native_evaluation_codec() {
+    use crate::computation::v1::{ComponentId, QueryOutputMetadata, StreamId, SystemMetadata};
     let contexts = vec![
         QueryPartEvaluationContext::Adding {
-            after: variables(&[("kind", VariableValue::String("added".to_string()))]),
+            after: variables(&[("kind", VariableValue::String("added".into()))]),
             row_signature: 11,
         },
         QueryPartEvaluationContext::Noop,
         QueryPartEvaluationContext::Updating {
-            before: variables(&[("kind", VariableValue::String("before".to_string()))]),
-            after: variables(&[("kind", VariableValue::String("after".to_string()))]),
+            before: variables(&[("kind", VariableValue::String("before".into()))]),
+            after: variables(&[("kind", VariableValue::String("after".into()))]),
             row_signature: 22,
         },
         QueryPartEvaluationContext::Removing {
-            before: variables(&[("kind", VariableValue::String("removed".to_string()))]),
+            before: variables(&[("kind", VariableValue::String("removed".into()))]),
             row_signature: 33,
         },
         QueryPartEvaluationContext::Aggregation {
             before: Some(variables(&[("total", VariableValue::Integer(1.into()))])),
             after: variables(&[("total", VariableValue::Integer(2.into()))]),
-            grouping_keys: vec!["group".to_string()],
+            grouping_keys: vec!["group".into()],
             default_before: false,
             default_after: false,
             row_signature: 44,
         },
     ];
-
-    backend.session_control.begin().await.unwrap();
-    let staged = stage_durable_query_output(
-        &evaluation_contexts_to_diffs(&contexts),
-        "source-a",
-        "query-a",
-        &output_state,
-        &outbox_writer,
-        &live_results_writer,
-        &checkpoint_writer,
-        ProfilingMetadata::default(),
-    )
-    .await
-    .unwrap();
-    assert!(staged.is_some());
-    assert!(output_store
-        .read_from("query-a", 0)
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(output_store
-        .read_snapshot("query-a")
-        .await
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        checkpoint_store
-            .read_result_sequence("query-a")
-            .await
-            .unwrap(),
-        None
-    );
-    assert_eq!(output_state.read().await.as_of_sequence(), 0);
-    assert!(result_rx.try_recv().is_err());
-    backend.session_control.commit().await.unwrap();
-
-    dispatch_query_results(
+    let metadata = HashMap::from([
+        ("source_id".into(), json!("source-a")),
+        ("processed_by".into(), json!("drasi-core")),
+        ("result_count".into(), json!(4)),
+    ]);
+    let output = QueryChangeCodec::encode_evaluation(
+        None,
+        &ComponentId::try_new("query-a").unwrap(),
+        SystemMetadata::new(StreamId::try_new("query-a/out").unwrap(), 1),
         &contexts,
-        "source-a",
-        "query-a",
-        &output_state,
-        &dispatchers,
-        ProfilingMetadata::default(),
-        &output_metrics,
-        staged,
+        QueryOutputMetadata {
+            query_id: "query-a".into(),
+            source_id: Some("source-a".into()),
+            timestamp: chrono::Utc::now(),
+            metadata: metadata.clone(),
+            profiling: Some(ProfilingMetadata::default()),
+        },
     )
-    .await;
-
-    let result = next_result(&mut result_rx).await;
+    .unwrap()
+    .unwrap();
+    let result = QueryChangeCodec::to_legacy_result(&output).unwrap();
     assert_eq!(result.query_id, "query-a");
     assert_eq!(result.sequence, 1);
+    assert_eq!(result.metadata, metadata);
+    assert_eq!(result.profiling, Some(ProfilingMetadata::default()));
     assert_eq!(
         result.results,
         vec![
             ResultDiff::Add {
-                data: json!({ "kind": "added" }),
-                row_signature: 11,
+                data: json!({"kind": "added"}),
+                row_signature: 11
             },
             ResultDiff::Update {
-                data: json!({ "kind": "after" }),
-                before: json!({ "kind": "before" }),
-                after: json!({ "kind": "after" }),
+                data: json!({"kind": "after"}),
+                before: json!({"kind": "before"}),
+                after: json!({"kind": "after"}),
                 grouping_keys: None,
                 row_signature: 22,
             },
             ResultDiff::Delete {
-                data: json!({ "kind": "removed" }),
-                row_signature: 33,
+                data: json!({"kind": "removed"}),
+                row_signature: 33
             },
             ResultDiff::Aggregation {
-                before: Some(json!({ "total": 1 })),
-                after: json!({ "total": 2 }),
+                before: Some(json!({"total": 1})),
+                after: json!({"total": 2}),
                 row_signature: 44,
             },
         ]
     );
-    assert_eq!(result.metadata["source_id"], json!("source-a"));
-    assert_eq!(result.metadata["processed_by"], json!("drasi-core"));
-    assert_eq!(result.metadata["result_count"], json!(4));
-    assert_eq!(result.profiling, Some(ProfilingMetadata::default()));
-    assert_eq!(
-        trace.snapshot(),
-        vec![
-            TraceEvent::SessionBegin,
-            TraceEvent::OutboxAppendAttempt {
-                query_id: "query-a".to_string(),
-                sequence: 1,
-            },
-            TraceEvent::LiveResultsApplyAttempt {
-                query_id: "query-a".to_string(),
-                mutation_count: 4,
-            },
-            TraceEvent::ResultSequenceStaged {
-                query_id: "query-a".to_string(),
-                sequence: 1,
-            },
-            TraceEvent::SessionCommit,
-            TraceEvent::ReactionDispatch { sequence: 1 },
-        ]
-    );
+}
 
-    let state = output_state.read().await;
-    assert_eq!(state.as_of_sequence(), 1);
-    assert_eq!(state.outbox_len(), 1);
-    assert_eq!(state.results_len(), 3);
-    assert_eq!(state.get_result(&11), Some(&json!({ "kind": "added" })));
-    assert_eq!(state.get_result(&22), Some(&json!({ "kind": "after" })));
-    assert_eq!(state.get_result(&33), None);
-    assert_eq!(state.get_result(&44), Some(&json!({ "total": 2 })));
-    drop(state);
-
-    let persisted = output_store.read_from("query-a", 0).await.unwrap();
-    assert_eq!(persisted.len(), 1);
-    assert_eq!(persisted[0].0, 1);
-    assert_eq!(
-        persisted[0].1,
-        rmp_serde::to_vec(result.as_ref()).unwrap(),
-        "the durable outbox payload must match the dispatched QueryResult"
-    );
-    assert_eq!(
-        checkpoint_store
-            .read_result_sequence("query-a")
+#[tokio::test]
+async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
+    assert_native_evaluation_codec();
+    let backend = Arc::new(CharacterizationBackend::new(false));
+    let harness = PipelineHarness::new(backend.clone()).await;
+    let (query, mut receiver) = harness.start_query(backend.trace.clone()).await;
+    for (sequence, name) in [(1, "Alice"), (2, "Bob")] {
+        backend.trace.clear();
+        let gate = Arc::new(CommitGate::default());
+        *backend.session_control.output_gate.lock().unwrap() = Some(gate.clone());
+        harness
+            .inject(
+                person_insert(&sequence.to_string(), name, sequence * 1000),
+                sequence,
+                Bytes::from(sequence.to_string()),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
             .await
-            .unwrap(),
-        Some(1)
-    );
-
-    let second_contexts = [QueryPartEvaluationContext::Adding {
-        after: variables(&[("kind", VariableValue::String("second".to_string()))]),
-        row_signature: 55,
-    }];
-    let committed_rows = output_store.read_snapshot("query-a").await.unwrap();
-    backend.session_control.begin().await.unwrap();
-    let rolled_back = stage_durable_query_output(
-        &evaluation_contexts_to_diffs(&second_contexts),
-        "source-b",
-        "query-a",
-        &output_state,
-        &outbox_writer,
-        &live_results_writer,
-        &checkpoint_writer,
-        ProfilingMetadata::default(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(rolled_back.sequence, 2);
-    backend.session_control.rollback().unwrap();
-    assert_eq!(
-        output_store.read_from("query-a", 0).await.unwrap(),
-        persisted
-    );
-    assert_eq!(
-        output_store.read_snapshot("query-a").await.unwrap(),
-        committed_rows,
-        "rollback must discard staged live rows as well as the outbox append"
-    );
-    assert_eq!(
-        checkpoint_store
-            .read_result_sequence("query-a")
-            .await
-            .unwrap(),
-        Some(1),
-        "rollback must discard the staged result sequence"
-    );
-    assert_eq!(output_state.read().await.as_of_sequence(), 1);
-    assert!(result_rx.try_recv().is_err());
-
-    backend.session_control.begin().await.unwrap();
-    let staged = stage_durable_query_output(
-        &evaluation_contexts_to_diffs(&second_contexts),
-        "source-b",
-        "query-a",
-        &output_state,
-        &outbox_writer,
-        &live_results_writer,
-        &checkpoint_writer,
-        ProfilingMetadata::default(),
-    )
-    .await
-    .unwrap();
-    backend.session_control.commit().await.unwrap();
-    dispatch_query_results(
-        &second_contexts,
-        "source-b",
-        "query-a",
-        &output_state,
-        &dispatchers,
-        ProfilingMetadata::default(),
-        &output_metrics,
-        staged,
-    )
-    .await;
-
-    let second = next_result(&mut result_rx).await;
-    assert_eq!(second.sequence, 2);
-    assert_eq!(second.metadata["source_id"], json!("source-b"));
-    assert_eq!(
-        output_store
-            .read_from("query-a", 0)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|(sequence, _)| sequence)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
-    assert_eq!(
-        checkpoint_store
-            .read_result_sequence("query-a")
-            .await
-            .unwrap(),
-        Some(2)
-    );
+            .unwrap();
+        assert_eq!(
+            backend
+                .output_store
+                .read_from(QUERY_ID, 0)
+                .await
+                .unwrap()
+                .len(),
+            sequence as usize - 1
+        );
+        assert_eq!(
+            backend.output_store.row_count(QUERY_ID).await.unwrap(),
+            sequence as usize - 1
+        );
+        assert_eq!(
+            backend
+                .checkpoint_store
+                .read_result_sequence(QUERY_ID)
+                .await
+                .unwrap()
+                .unwrap_or(0),
+            sequence - 1
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "uncommitted results must never reach subscribers"
+        );
+        gate.release.notify_one();
+        let result = next_result(&mut receiver).await;
+        assert_eq!(result.sequence, sequence);
+        assert_eq!(result.metadata["source_id"], json!(SOURCE_ID));
+        assert_eq!(result.metadata["processed_by"], json!("drasi-core"));
+        assert_eq!(result.metadata["result_count"], json!(1));
+        assert_commit_precedes_dispatch(&backend.trace.snapshot(), sequence);
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snapshot.as_of_sequence, sequence);
+        assert_eq!(snapshot.to_vec().len(), sequence as usize);
+        let outbox = query.fetch_outbox(sequence - 1).await.unwrap();
+        assert_eq!(outbox.results.len(), 1);
+        assert_eq!(outbox.results[0].results, result.results);
+        assert_eq!(
+            backend
+                .checkpoint_store
+                .read_result_sequence(QUERY_ID)
+                .await
+                .unwrap(),
+            Some(sequence)
+        );
+    }
+    harness.core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1474,7 +1497,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         .await
         .unwrap();
     assert_eq!(initial_result_sequence.unwrap_or(0), 0);
-    let mut status_rx = query.base.status_handle().subscribe_status();
+    let mut events = harness.core.subscribe_all_component_events();
     backend.trace.clear();
 
     let first_position = Bytes::from_static(b"position-1");
@@ -1485,13 +1508,13 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             first_position.clone(),
         )
         .await;
-    tokio::time::timeout(
+    crate::test_helpers::wait_for_component_status(
+        &mut events,
+        QUERY_ID,
+        ComponentStatus::Error,
         Duration::from_secs(5),
-        status_rx.wait_for(|status| *status == ComponentStatus::Error),
     )
-    .await
-    .expect("output persistence failure should fail the query")
-    .expect("query status channel should remain open");
+    .await;
     assert!(
         result_rx.try_recv().is_err(),
         "failed output must not be dispatched"
@@ -1502,7 +1525,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         vec![
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
-                source_id: SOURCE_ID.to_string(),
+                source_id: progress_key("", Some(SOURCE_ID)),
                 sequence: 1,
                 source_position: Some(first_position.clone()),
             },
@@ -1531,7 +1554,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_checkpoint(SOURCE_ID)
+            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
             .await
             .unwrap(),
         None,
@@ -1564,15 +1587,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         initial_result_sequence,
         "failed output writes must not advance the durable result sequence"
     );
-    assert_eq!(query.output_state.read().await.as_of_sequence(), 0);
-    assert_eq!(query.output_state.read().await.results_len(), 0);
-
-    // This harness calls DrasiQuery directly, so establish its required pre-stop state.
-    query
-        .base
-        .status_handle()
-        .set_status(ComponentStatus::Stopping, None)
-        .await;
+    assert_eq!(query.output_metrics().unwrap().snapshot().outbox_size, 0);
     query.stop().await.unwrap();
 
     backend
@@ -1612,7 +1627,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_checkpoint(SOURCE_ID)
+            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
             .await
             .unwrap(),
         Some(SourceCheckpoint::new(1, Some(first_position.clone())))
@@ -1627,7 +1642,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     );
     let persisted = backend.output_store.read_from(QUERY_ID, 0).await.unwrap();
     assert_eq!(persisted.len(), 1);
-    let persisted_result: QueryResult = rmp_serde::from_slice(&persisted[0].1).unwrap();
+    let persisted_result = decode_result(&persisted[0].1);
     assert_eq!(persisted_result.sequence, recovered.sequence);
     assert_eq!(persisted_result.results, recovered.results);
     assert_eq!(persisted_result.timestamp, recovered.timestamp);
@@ -1678,7 +1693,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         vec![
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
-                source_id: SOURCE_ID.to_string(),
+                source_id: progress_key("", Some(SOURCE_ID)),
                 sequence: 2,
                 source_position: Some(Bytes::from_static(b"position-3")),
             },
@@ -1702,7 +1717,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(
         backend
             .checkpoint_store
-            .read_checkpoint(SOURCE_ID)
+            .read_checkpoint(&progress_key("", Some(SOURCE_ID)))
             .await
             .unwrap(),
         Some(SourceCheckpoint::new(
@@ -1732,192 +1747,107 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
     assert_eq!(backend.output_store.row_count(QUERY_ID).await.unwrap(), 2);
 
     restarted_query.stop().await.unwrap();
-    harness
-        .source_manager
-        .stop_source(SOURCE_ID.to_string())
-        .await
-        .unwrap();
-    drop(harness.graph);
+    harness.core.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn due_future_output_is_dispatched_after_core_commit() {
-    let backend = CharacterizationBackend::new(false);
-    let trace = backend.trace.clone();
-    let checkpoint_store = backend.checkpoint_store.clone();
-    let output_store = backend.output_store.clone();
-    let future_queue = backend.future_queue.clone();
-
-    let parser = Arc::new(CypherParser::new(Arc::new(DefaultQueryConfig)));
-    let function_registry = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
-    let query = QueryBuilder::new(
-        "
+    let backend = Arc::new(CharacterizationBackend::new(false));
+    let harness = PipelineHarness::new(backend.clone()).await;
+    let mut config = query_config();
+    config.query = "
         MATCH (o:Order)
         WHERE o.status = 'ready'
           AND drasi.trueFor(sum(o.value) > 1, duration({ seconds: 5 }))
         RETURN sum(o.value) AS value
-        ",
-        parser,
-    )
-    .with_function_registry(function_registry)
-    .with_element_index(backend.element_index.clone())
-    .with_archive_index(backend.element_index.clone())
-    .with_result_index(backend.result_index.clone())
-    .with_future_queue(future_queue.clone())
-    .with_session_control(backend.session_control.clone())
-    .build()
-    .await;
-
-    let initial = query
-        .process_source_change(SourceChange::Insert {
-            element: Element::Node {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new("future-source", "order-1"),
-                    labels: vec!["Order".into()].into(),
-                    effective_from: 1_577_836_800_000,
+        "
+    .into();
+    let (query, mut result_rx) = harness.start_config(config, backend.trace.clone()).await;
+    let gate = Arc::new(CommitGate::default());
+    *backend.session_control.output_gate.lock().unwrap() = Some(gate.clone());
+    backend.trace.clear();
+    harness
+        .inject(
+            SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new(SOURCE_ID, "order-1"),
+                        labels: vec!["Order".into()].into(),
+                        effective_from: 1_577_836_800_000,
+                    },
+                    properties: ElementPropertyMap::from(json!({
+                        "status": "ready",
+                        "value": 2,
+                    })),
                 },
-                properties: ElementPropertyMap::from(json!({
-                    "status": "ready",
-                    "value": 2,
-                })),
             },
-        })
+            1,
+            Bytes::from_static(b"order-position"),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
-    assert!(initial.is_empty());
-    assert!(future_queue.peek_due_time().await.unwrap().is_some());
-
-    let output_state = RwLock::new(QueryOutputState::new(16));
-    let output_metrics = Arc::new(QueryOutputMetrics::new());
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
-    let dispatchers: RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>> =
-        RwLock::new(vec![Box::new(RecordingDispatcher {
-            trace: trace.clone(),
-            tx: result_tx,
-        })]);
-    let outbox_writer: Option<Arc<dyn OutboxWriter>> = Some(output_store.clone());
-    let live_results_writer: Option<Arc<dyn LiveResultsWriter>> = Some(output_store.clone());
-    let checkpoint_writer: Option<Arc<dyn CheckpointStore>> = Some(checkpoint_store.clone());
-
-    let staged = StagedOutputSequence::new();
-    trace.clear();
-    let due = query
-        .process_due_futures_with_hook(|results, source_id| {
-            let diffs = evaluation_contexts_to_diffs(results);
-            let source_id = source_id.to_string();
-            let output_state = &output_state;
-            let outbox_writer = &outbox_writer;
-            let live_results_writer = &live_results_writer;
-            let checkpoint_writer = &checkpoint_writer;
-            let staged = &staged;
-            let backend = &backend;
-            async move {
-                staged.record(
-                    stage_durable_query_output(
-                        &diffs,
-                        &source_id,
-                        "future-query",
-                        output_state,
-                        outbox_writer,
-                        live_results_writer,
-                        checkpoint_writer,
-                        ProfilingMetadata::default(),
-                    )
-                    .await?,
-                )?;
-                assert_eq!(
-                    backend
-                        .future_queue
-                        .state
-                        .lock()
-                        .unwrap()
-                        .committed
-                        .futures
-                        .len(),
-                    1,
-                    "the future pop must not commit ahead of its output"
-                );
-                assert!(backend
-                    .output_store
-                    .read_from("future-query", 0)
-                    .await?
-                    .is_empty());
-                assert!(backend
-                    .output_store
-                    .read_snapshot("future-query")
-                    .await?
-                    .is_empty());
-                assert_eq!(
-                    backend
-                        .checkpoint_store
-                        .read_result_sequence("future-query")
-                        .await?,
-                    None
-                );
-                Ok(())
-            }
-        })
+    assert_eq!(
+        backend
+            .future_queue
+            .state
+            .lock()
+            .unwrap()
+            .committed
+            .futures
+            .len(),
+        1,
+        "the future pop must not commit ahead of its output"
+    );
+    assert!(backend
+        .output_store
+        .read_from(QUERY_ID, 0)
         .await
         .unwrap()
-        .expect("the trueFor evaluation should have queued one future");
-    assert!(!due.results.is_empty());
-    assert!(future_queue.peek_due_time().await.unwrap().is_none());
-    assert!(result_rx.try_recv().is_err());
-    let mut expected_trace = vec![
-        TraceEvent::SessionBegin,
-        TraceEvent::OutboxAppendAttempt {
-            query_id: "future-query".to_string(),
-            sequence: 1,
-        },
-        TraceEvent::LiveResultsApplyAttempt {
-            query_id: "future-query".to_string(),
-            mutation_count: evaluation_contexts_to_diffs(&due.results).len(),
-        },
-        TraceEvent::ResultSequenceStaged {
-            query_id: "future-query".to_string(),
-            sequence: 1,
-        },
-        TraceEvent::SessionCommit,
-    ];
+        .is_empty());
+    assert!(backend
+        .output_store
+        .read_snapshot(QUERY_ID)
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
-        trace.snapshot(),
-        expected_trace,
-        "future evaluation and durable output must commit together before dispatch"
+        backend
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .unwrap()
+            .unwrap_or(0),
+        0
     );
-
-    let staged = staged.take().expect("durable future output was staged");
-    assert_eq!(staged.sequence, 1);
-    dispatch_query_results(
-        &due.results,
-        &due.source_id,
-        "future-query",
-        &output_state,
-        &dispatchers,
-        ProfilingMetadata::default(),
-        &output_metrics,
-        Some(staged),
-    )
-    .await;
+    assert!(result_rx.try_recv().is_err());
+    gate.release.notify_one();
     let dispatched = next_result(&mut result_rx).await;
     assert_eq!(dispatched.sequence, 1);
-    assert_eq!(dispatched.metadata["source_id"], json!("future-source"));
-    expected_trace.push(TraceEvent::ReactionDispatch { sequence: 1 });
-    assert_eq!(trace.snapshot(), expected_trace);
-    let persisted = output_store.read_from("future-query", 0).await.unwrap();
+    assert_eq!(dispatched.metadata["source_id"], json!(SOURCE_ID));
+    assert_commit_precedes_dispatch(&backend.trace.snapshot(), 1);
+    assert!(backend
+        .future_queue
+        .peek_due_time()
+        .await
+        .unwrap()
+        .is_none());
+    let persisted = backend.output_store.read_from(QUERY_ID, 0).await.unwrap();
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].0, 1);
+    assert_eq!(decode_result(&persisted[0].1).results, dispatched.results);
     assert_eq!(
-        persisted[0].1,
-        rmp_serde::to_vec(dispatched.as_ref()).unwrap()
-    );
-    assert_eq!(
-        checkpoint_store
-            .read_result_sequence("future-query")
+        backend
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
             .await
             .unwrap(),
         Some(1)
     );
-    assert_eq!(output_state.read().await.as_of_sequence(), 1);
-    assert_eq!(output_state.read().await.results_len(), 1);
-    assert_eq!(output_store.row_count("future-query").await.unwrap(), 1);
+    let snapshot = query.fetch_snapshot().await.unwrap();
+    assert_eq!(snapshot.as_of_sequence, 1);
+    assert_eq!(snapshot.to_vec(), vec![json!({"value": 2.0})]);
+    assert_eq!(backend.output_store.row_count(QUERY_ID).await.unwrap(), 1);
+    harness.core.shutdown().await.unwrap();
 }
