@@ -397,8 +397,8 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64, #[case] legacy
                 },
             }),
             chrono::Utc::now(),
+            2,
         );
-        event.sequence = Some(2);
         event.source_position = Some(Bytes::from_static(b"pos-2"));
         event_tx
             .read()
