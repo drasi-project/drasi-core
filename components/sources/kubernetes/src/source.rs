@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use drasi_kubernetes_common::config::{
     is_cluster_scoped_kind, AuthMode, KubernetesSourceConfig, ResourceSpec, StartFrom,
@@ -32,17 +32,20 @@ use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{BootstrapProvider, Source};
 use futures::stream::{BoxStream, SelectAll};
 use futures::StreamExt;
-use kube::api::{Api, DynamicObject};
+use kube::api::{Api, DynamicObject, ListParams, WatchParams};
 use kube::core::{ApiResource, GroupVersionKind};
 use kube::runtime::watcher::{self, Event};
+use kube::Client;
 use log::{debug, error, info, warn};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
 const SEEN_UIDS_KEY: &str = "seen_uids";
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct KubernetesSource {
     pub(crate) base: SourceBase,
@@ -95,13 +98,39 @@ impl Source for KubernetesSource {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut task_handle = self.base.task_handle.write().await;
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
         }
+        anyhow::ensure!(
+            task_handle.is_none(),
+            "Kubernetes source '{}' must be stopped before restarting",
+            self.base.id
+        );
 
         let source_id = self.base.id.clone();
         self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting Kubernetes source '{source_id}'");
+
+        let initialization = tokio::time::timeout(STARTUP_TIMEOUT, async {
+            self.config.validate()?;
+            let client = build_client(&self.config).await?;
+            validate_resource_access(&client, &self.config).await?;
+            Ok::<_, anyhow::Error>(client)
+        })
+        .await
+        .context("Kubernetes source initialization timed out after 10 seconds")
+        .and_then(|result| result);
+        let client = match initialization {
+            Ok(client) => client,
+            Err(error) => {
+                error!("Failed to start Kubernetes source '{source_id}': {error:#}");
+                self.base
+                    .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                    .await;
+                return Err(error);
+            }
+        };
 
         let config = self.config.clone();
         let base = self.base.clone_shared();
@@ -124,10 +153,17 @@ impl Source for KubernetesSource {
             component_type = "source"
         );
 
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Kubernetes source started".to_string()),
+            )
+            .await;
         let task = tokio::spawn(
             async move {
                 let run_result =
-                    run_source_stream(&source_id, config, base, state_store, shutdown_rx).await;
+                    run_source_stream(&source_id, config, client, base, state_store, shutdown_rx)
+                        .await;
 
                 if let Err(e) = run_result {
                     error!("Kubernetes source task failed for '{source_id}': {e}");
@@ -146,18 +182,56 @@ impl Source for KubernetesSource {
             .instrument(span),
         );
 
-        self.base.set_task_handle(task).await;
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("Kubernetes source started".to_string()),
-            )
-            .await;
+        *task_handle = Some(task);
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await?;
+        let mut task_handle = self.base.task_handle.write().await;
+        if self.base.get_status().await != ComponentStatus::Stopped {
+            self.base.set_status(ComponentStatus::Stopping, None).await;
+        }
+        if let Some(shutdown) = self.base.shutdown_tx.write().await.take() {
+            let _ = shutdown.send(());
+        }
+
+        let mut task_error = None;
+        if let Some(mut task) = task_handle.take() {
+            let result = match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!(
+                        "Kubernetes source '{}' did not stop within 5 seconds; aborting",
+                        self.base.id
+                    );
+                    task.abort();
+                    task.await
+                }
+            };
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    task_error = Some(anyhow::Error::new(error));
+                }
+            }
+        }
+        self.base.clear_dispatchers().await;
+
+        if let Some(error) = task_error {
+            let error = error.context(format!(
+                "Kubernetes source '{}' task failed during shutdown",
+                self.base.id
+            ));
+            error!("{error:#}");
+            self.base
+                .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                .await;
+            return Err(error);
+        }
+        anyhow::ensure!(
+            self.base.get_status().await != ComponentStatus::Error,
+            "Kubernetes source '{}' failed while shutting down; see the component error",
+            self.base.id
+        );
         self.base
             .set_status(
                 ComponentStatus::Stopped,
@@ -367,14 +441,120 @@ fn build_watch_targets(config: &KubernetesSourceConfig) -> Vec<WatchTarget> {
     targets
 }
 
+fn target_api(client: Client, target: &WatchTarget) -> Result<Api<DynamicObject>> {
+    let (group, version) = parse_api_version(&target.api_version)?;
+    let gvk = GroupVersionKind::gvk(&group, &version, &target.kind);
+    let api_resource = ApiResource::from_gvk(&gvk);
+    Ok(match &target.namespace {
+        Some(namespace) => Api::namespaced_with(client, namespace, &api_resource),
+        None => Api::all_with(client, &api_resource),
+    })
+}
+
+fn is_fatal_api_error(error: &kube::Error) -> bool {
+    matches!(error, kube::Error::Api(response) if is_fatal_status(response.code))
+}
+
+fn is_fatal_status(code: u16) -> bool {
+    matches!(code, 400 | 401 | 403 | 404 | 422)
+}
+
+fn is_fatal_watch_error(error: &watcher::Error) -> bool {
+    match error {
+        watcher::Error::InitialListFailed(error)
+        | watcher::Error::WatchStartFailed(error)
+        | watcher::Error::WatchFailed(error) => is_fatal_api_error(error),
+        watcher::Error::WatchError(response) => is_fatal_status(response.code),
+        _ => false,
+    }
+}
+
+async fn validate_resource_access(client: &Client, config: &KubernetesSourceConfig) -> Result<()> {
+    for target in build_watch_targets(config) {
+        let api = target_api(client.clone(), &target)?;
+        let mut list_params = ListParams::default().limit(1);
+        let mut watch_params = WatchParams::default().timeout(5);
+        if let Some(selector) = &config.label_selector {
+            list_params = list_params.labels(selector);
+            watch_params = watch_params.labels(selector);
+        }
+        if let Some(selector) = &config.field_selector {
+            list_params = list_params.fields(selector);
+            watch_params = watch_params.fields(selector);
+        }
+
+        loop {
+            let result = async {
+                let list = api
+                    .list(&list_params)
+                    .await
+                    .with_context(|| format!("Cannot list Kubernetes resource {}", target.key()))?;
+                let resource_version = list
+                    .metadata
+                    .resource_version
+                    .context("Kubernetes list response has no resourceVersion")?;
+                // List and watch are distinct RBAC permissions. Check both before Running.
+                // Api::watch defers HTTP errors to the first stream item. Inspect
+                // the response headers without waiting for a resource event.
+                let request = kube::core::Request::new(api.resource_url())
+                    .watch(&watch_params, &resource_version)?;
+                let response = client
+                    .send(request.map(kube::client::Body::from))
+                    .await
+                    .with_context(|| {
+                        format!("Cannot watch Kubernetes resource {}", target.key())
+                    })?;
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let bytes = response.into_body().collect_bytes().await?;
+                    let mut response =
+                        match serde_json::from_slice::<kube::error::ErrorResponse>(&bytes) {
+                            Ok(response) => response,
+                            Err(error) => {
+                                warn!(
+                                    "Non-JSON Kubernetes watch error response ({status}): {error}"
+                                );
+                                kube::error::ErrorResponse {
+                                    status: "Failure".to_string(),
+                                    message: String::from_utf8_lossy(&bytes).into_owned(),
+                                    reason: status.to_string(),
+                                    code: status.as_u16(),
+                                }
+                            }
+                        };
+                    response.code = status.as_u16();
+                    return Err(kube::Error::Api(response)).with_context(|| {
+                        format!("Cannot watch Kubernetes resource {}", target.key())
+                    });
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => break,
+                Err(error)
+                    if error
+                        .downcast_ref::<kube::Error>()
+                        .is_some_and(|error| !is_fatal_api_error(error)) =>
+                {
+                    warn!("Retrying Kubernetes resource access: {error:#}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_source_stream(
     source_id: &str,
     config: KubernetesSourceConfig,
+    client: Client,
     base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
-    let client = build_client(&config).await?;
     let targets = build_watch_targets(&config);
 
     let target_count = targets.len();
@@ -393,13 +573,7 @@ async fn run_source_stream(
     for target in &targets {
         init_done.insert(target.key(), !matches!(config.start_from, StartFrom::Now));
 
-        let (group, version) = parse_api_version(&target.api_version)?;
-        let gvk = GroupVersionKind::gvk(&group, &version, &target.kind);
-        let api_resource = ApiResource::from_gvk(&gvk);
-        let api: Api<DynamicObject> = match &target.namespace {
-            Some(ns) => Api::namespaced_with(client.clone(), ns, &api_resource),
-            None => Api::all_with(client.clone(), &api_resource),
-        };
+        let api = target_api(client.clone(), target)?;
 
         let mut watch_cfg = watcher::Config::default();
         if let Some(label_selector) = &config.label_selector {
@@ -420,6 +594,8 @@ async fn run_source_stream(
 
     loop {
         tokio::select! {
+            biased;
+
             _ = &mut shutdown_rx => {
                 info!("Kubernetes source '{source_id}' received shutdown signal");
                 break;
@@ -501,6 +677,11 @@ async fn run_source_stream(
                         }
                     }
                     Err(e) => {
+                        if is_fatal_watch_error(&e) {
+                            return Err(e).with_context(|| {
+                                format!("Fatal Kubernetes watcher error for {target_key}")
+                            });
+                        }
                         warn!("Kubernetes watcher error for {target_key}: {e}");
                     }
                 }
