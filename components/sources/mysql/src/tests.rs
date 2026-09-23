@@ -86,6 +86,153 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    mod lifecycle {
+        use super::*;
+        use bytes::Bytes;
+        use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
+        use drasi_lib::channels::BootstrapEventSender;
+        use drasi_lib::config::SourceSubscriptionSettings;
+        use std::time::Duration;
+
+        struct InvalidBoundaryBootstrap;
+
+        #[async_trait]
+        impl BootstrapProvider for InvalidBoundaryBootstrap {
+            async fn bootstrap(
+                &self,
+                _request: BootstrapRequest,
+                _context: &BootstrapContext,
+                _event_tx: BootstrapEventSender,
+                _settings: Option<&SourceSubscriptionSettings>,
+            ) -> Result<BootstrapResult> {
+                Ok(BootstrapResult {
+                    event_count: 0,
+                    source_position: Some(Bytes::from_static(b"invalid boundary")),
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn stop_cleans_up_after_replication_failure() {
+            let source = MySqlSourceBuilder::new("failed-source")
+                .with_host("127.0.0.1")
+                .with_database("test")
+                .with_user("test")
+                .with_bootstrap_provider(InvalidBoundaryBootstrap)
+                .build()
+                .unwrap();
+
+            for _ in 0..2 {
+                source.start().await.unwrap();
+                let mut subscription = source
+                    .subscribe(SourceSubscriptionSettings {
+                        source_id: source.id().to_string(),
+                        query_id: "test-query".to_string(),
+                        enable_bootstrap: true,
+                        nodes: Default::default(),
+                        relations: Default::default(),
+                        resume_from: None,
+                        resume_sequence: None,
+                        request_position_handle: false,
+                    })
+                    .await
+                    .unwrap();
+                let mut status = source.base.status_handle().subscribe_status();
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    status.wait_for(|status| *status == ComponentStatus::Error),
+                )
+                .await
+                .expect("invalid bootstrap boundary must fail the replication task")
+                .unwrap();
+                assert!(source.base.task_handle.read().await.is_some());
+
+                source.stop().await.unwrap();
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                assert!(source.base.task_handle.read().await.is_none());
+                assert!(source.subscriber_resume_positions.read().await.is_empty());
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
+                        .await
+                        .expect("stop must close the subscription")
+                        .is_err()
+                );
+                source.stop().await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn stop_joins_replication_task_before_returning() {
+            let source = MySqlSourceBuilder::new("stopping-source")
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+            for _ in 0..2 {
+                source.start().await.unwrap();
+                assert_eq!(source.status().await, ComponentStatus::Running);
+                let task = source
+                    .base
+                    .task_handle
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .abort_handle();
+                source.stop().await.unwrap();
+                assert!(
+                    task.is_finished(),
+                    "stop must await the aborted replication task"
+                );
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                source.stop().await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn stop_reports_unexpected_task_failure_after_cleanup() {
+            let source = MySqlSourceBuilder::new("panicked-source")
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+            source.start().await.unwrap();
+            let failed = tokio::spawn(async { panic!("simulated replication task panic") });
+            while !failed.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let previous = source
+                .base
+                .task_handle
+                .write()
+                .await
+                .replace(failed)
+                .unwrap();
+            previous.abort();
+            assert!(previous.await.unwrap_err().is_cancelled());
+            let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+
+            let error = source
+                .stop()
+                .await
+                .expect_err("task panic must be surfaced");
+            assert!(error
+                .downcast_ref::<tokio::task::JoinError>()
+                .unwrap()
+                .is_panic());
+            assert_eq!(source.status().await, ComponentStatus::Error);
+            assert!(source.base.task_handle.read().await.is_none());
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            source.stop().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+    }
+
     mod position_comparator_tests {
         use bytes::Bytes;
         use drasi_lib::sources::PositionComparator;
