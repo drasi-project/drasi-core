@@ -151,7 +151,219 @@ pub(super) fn compute_source_ranks(source_count: usize) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::convert_variable_value_to_json;
+    use super::*;
+    use drasi_core::in_memory_index::{
+        in_memory_live_results_writer::InMemoryLiveResultsWriter,
+        in_memory_outbox_writer::InMemoryOutboxWriter,
+    };
+    use serde_json::json;
+
+    const SIGNATURE: u64 = 13_660_005_145_781_501_189;
+
+    fn test_output_stores() -> DurableOutputStores {
+        DurableOutputStores {
+            checkpoint_store: Arc::new(InMemoryCheckpointStore::new()),
+            outbox_writer: Some(Arc::new(InMemoryOutboxWriter::new())),
+            live_results_writer: Some(Arc::new(InMemoryLiveResultsWriter::new())),
+        }
+    }
+
+    fn update_diff(grouping_keys: Option<Vec<String>>) -> ResultDiff {
+        ResultDiff::Update {
+            data: json!({"id": "node", "value": 2}),
+            before: json!({"id": "node", "value": 1}),
+            after: json!({"id": "node", "value": 2}),
+            grouping_keys,
+            row_signature: SIGNATURE,
+        }
+    }
+
+    async fn stage_test_output(
+        diffs: &[ResultDiff],
+        state: &RwLock<QueryOutputState>,
+        stores: &DurableOutputStores,
+    ) -> QueryResult {
+        let result = stage_durable_query_output(
+            diffs,
+            "source",
+            "query",
+            state,
+            &stores.outbox_writer,
+            &stores.live_results_writer,
+            &Some(stores.checkpoint_store.clone()),
+            crate::profiling::ProfilingMetadata::with_source_timestamp(123),
+        )
+        .await
+        .expect("stage production output")
+        .expect("nonempty durable output");
+        state
+            .write()
+            .await
+            .apply_committed_sequence(result.sequence, diffs, result.clone());
+        result
+    }
+
+    #[rstest::rstest]
+    #[case::absent(None)]
+    #[case::present(Some(vec!["id".to_string()]))]
+    #[case::empty(Some(Vec::new()))]
+    #[tokio::test]
+    async fn persisted_update_grouping_keys_round_trip(#[case] grouping_keys: Option<Vec<String>>) {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let added = stage_test_output(
+            &[ResultDiff::Add {
+                data: json!({"id": "node", "value": 1}),
+                row_signature: SIGNATURE,
+            }],
+            &state,
+            &stores,
+        )
+        .await;
+        let updated = stage_test_output(&[update_diff(grouping_keys)], &state, &stores).await;
+
+        let (rows, entries, sequence, generation) = load_durable_output("query", &stores, 10)
+            .await
+            .expect("production output must hydrate");
+        assert_eq!((sequence, generation), (2, 0));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[&SIGNATURE], json!({"id": "node", "value": 2}));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        for (restored, original) in entries.iter().zip([added, updated]) {
+            assert_eq!(
+                serde_json::to_value(restored.as_ref()).unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_other_result_variants_round_trip() {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let result = stage_test_output(
+            &[
+                ResultDiff::Aggregation {
+                    before: None,
+                    after: json!({"count": 1}),
+                    row_signature: SIGNATURE,
+                },
+                ResultDiff::Aggregation {
+                    before: Some(json!({"count": 1})),
+                    after: json!({"count": 2}),
+                    row_signature: SIGNATURE,
+                },
+                ResultDiff::Delete {
+                    data: json!({"count": 2}),
+                    row_signature: SIGNATURE,
+                },
+                ResultDiff::Noop,
+            ],
+            &state,
+            &stores,
+        )
+        .await;
+        let (rows, entries, sequence, _) = load_durable_output("query", &stores, 10).await.unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(sequence, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(entries[0].as_ref()).unwrap(),
+            serde_json::to_value(result).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_valid_compact_records_and_new_named_updates_remain_readable() {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let writer = stores.outbox_writer.as_ref().unwrap();
+        let mut expected = Vec::new();
+        for diff in [
+            ResultDiff::Add {
+                data: json!({"id": "node", "value": 1}),
+                row_signature: SIGNATURE,
+            },
+            update_diff(Some(vec!["id".to_string()])),
+            update_diff(Some(Vec::new())),
+        ] {
+            let result = stage_test_output(&[diff], &state, &stores).await;
+            // Replace the payload with the pre-fix writer's compact encoding.
+            writer
+                .append(
+                    "query",
+                    result.sequence,
+                    &rmp_serde::to_vec(&result).unwrap(),
+                )
+                .await
+                .unwrap();
+            expected.push(result);
+        }
+        let (rows, entries, sequence, generation) =
+            load_durable_output("query", &stores, 10).await.unwrap();
+        assert_eq!(sequence, 3);
+        state
+            .write()
+            .await
+            .hydrate(rows, entries, sequence, generation);
+        expected.push(stage_test_output(&[update_diff(None)], &state, &stores).await);
+
+        // Named records also support omitting QueryResult's optional profiling field.
+        let mut unprofiled = stage_test_output(&[ResultDiff::Noop], &state, &stores).await;
+        unprofiled.profiling = None;
+        writer
+            .append(
+                "query",
+                unprofiled.sequence,
+                &rmp_serde::to_vec_named(&unprofiled).unwrap(),
+            )
+            .await
+            .unwrap();
+        expected.push(unprofiled);
+
+        let (_, entries, sequence, _) = load_durable_output("query", &stores, 10).await.unwrap();
+        assert_eq!(sequence, 5);
+        assert_eq!(entries.len(), expected.len());
+        for (restored, original) in entries.iter().zip(expected) {
+            assert_eq!(
+                serde_json::to_value(restored.as_ref()).unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_malformed_compact_update_fails_without_discarding_records() {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let result = stage_test_output(&[update_diff(None)], &state, &stores).await;
+        let bytes = rmp_serde::to_vec(&result).unwrap();
+        let writer = stores.outbox_writer.as_ref().unwrap();
+        writer.append("query", 1, &bytes).await.unwrap();
+
+        let error = load_durable_output("query", &stores, 10)
+            .await
+            .expect_err("the writer fix does not repair malformed legacy records");
+        match error {
+            DurableOutputInconsistency::CorruptOutbox { sequence, message } => {
+                assert_eq!(sequence, 1);
+                assert!(message.contains("expected a sequence"), "{message}");
+                assert!(message.contains(&SIGNATURE.to_string()), "{message}");
+            }
+            other => panic!("expected a visible outbox decode failure, got {other}"),
+        }
+        assert_eq!(
+            writer.read_from("query", 0).await.unwrap(),
+            vec![(1, bytes)]
+        );
+    }
+
     use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
     use drasi_core::evaluation::variable_value::{
         duration::Duration as VarDuration, zoned_datetime::ZonedDateTime as VarZonedDateTime,
@@ -476,7 +688,8 @@ async fn stage_durable_query_output(
     );
 
     if let Some(writer) = outbox_writer {
-        let data = rmp_serde::to_vec(&query_result).map_err(|e| {
+        // Named fields prevent omitted optional fields from shifting subsequent values.
+        let data = rmp_serde::to_vec_named(&query_result).map_err(|e| {
             output_persist_error(format!(
                 "Query '{query_id}' failed to serialize result seq={next_seq} for outbox: {e}"
             ))

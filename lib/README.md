@@ -934,6 +934,26 @@ let query = Query::cypher("q1")
 
 If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap** — and the recovery policy activates.
 
+#### Persisted Outbox Compatibility
+
+New persisted `QueryResult` records use named-field MessagePack encoding, so omitted
+optional fields (including `Update.grouping_keys`) cannot shift subsequent values.
+The existing reader also accepts valid older compact records, including inserts
+and updates with present grouping keys (including an empty list). Valid compact
+and named records can coexist in a retained outbox; no reader or result schema
+change is required. Compact records must still have their positional fields
+intact; this compatibility guarantee does not extend to malformed compact records
+with other omitted fields, such as `QueryResult.profiling`.
+
+This writer fix does **not** repair older compact updates with omitted grouping
+keys. Those malformed records still fail visibly during query startup under
+`RecoveryPolicy::Strict`; they are not silently dropped or reconstructed. Recovery
+requires an explicit rebuild decision with replay/bootstrap data available and
+downstream checkpoint consequences considered. The existing opt-in query
+`AutoReset` policy rebuilds output **and** indexes/checkpoints; clearing only the
+outbox is not a safe migration. This change performs no automatic migration and
+does not change recovery policies.
+
 ### Result Format
 
 Reactions receive `QueryResult` values containing `ResultDiff` items:
