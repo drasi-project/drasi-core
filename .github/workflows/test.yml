@@ -24,5 +24,6 @@ jobs:
         .github/scripts/package-visibility.test.sh
         .github/scripts/release-with-retry.test.sh
         cargo run -p xtask -- check-publish-dependency-cycles
+        make build-native-network-plugin
         cargo test --workspace --exclude drasi-host-sdk
         make test-host-sdk

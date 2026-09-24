@@ -22,6 +22,7 @@ pub(crate) struct GraphRegistrySnapshot {
     pub desired: Arc<GraphSnapshot>,
     pub observed: Arc<ObservedGraph>,
     resources: BTreeMap<ResourceId, specification::WeakResourceHandle>,
+    configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
 }
 
 impl GraphRegistrySnapshot {
@@ -29,15 +30,24 @@ impl GraphRegistrySnapshot {
         desired: &GraphSnapshot,
         observed: Arc<ObservedGraph>,
         resources: &BTreeMap<ResourceId, ResourceHandle>,
+        configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
     ) -> Self {
         Self {
             desired: Arc::new(desired.clone()),
             observed,
+            configurations,
             resources: resources
                 .iter()
                 .map(|(id, handle)| (id.clone(), handle.downgrade()))
                 .collect(),
         }
+    }
+
+    pub(crate) fn configuration_snapshot(&self) -> GraphResult<GraphConfigurationSnapshot> {
+        Ok(GraphConfigurationSnapshot {
+            topology: self.desired.select(super::super::GraphSelection::All)?,
+            configurations: self.configurations.clone(),
+        })
     }
 
     pub(crate) fn resource(&self, id: &ResourceId) -> GraphResult<ResourceHandle> {
@@ -60,6 +70,11 @@ pub(super) fn publish(graph: &ComputationGraph) {
             &graph.snapshot,
             graph.observed(),
             &graph.resource_handles,
+            graph
+                .ids
+                .iter()
+                .map(|(id, index)| (id.clone(), graph.components[*index].configuration()))
+                .collect(),
         )));
 }
 
@@ -77,6 +92,12 @@ pub(super) fn publish_observed(
 impl GraphControl {
     pub(crate) fn registry_snapshot(&self) -> Arc<GraphRegistrySnapshot> {
         self.registry.borrow().clone()
+    }
+
+    /// Capture topology and component configuration from one graph publication.
+    /// Does not quiesce components, poll their getters, or serialize queued data.
+    pub fn configuration_snapshot(&self) -> GraphResult<GraphConfigurationSnapshot> {
+        self.registry_snapshot().configuration_snapshot()
     }
 }
 

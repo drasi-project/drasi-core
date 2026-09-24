@@ -42,6 +42,8 @@ struct Package {
     publish: Option<Vec<String>>,
     #[serde(default)]
     dependencies: Vec<Dependency>,
+    #[serde(default)]
+    metadata: serde_json::Value,
 }
 
 #[derive(Deserialize, Clone)]
@@ -58,6 +60,7 @@ struct DiscoveryResult {
     target_directory: PathBuf,
     workspace_root: PathBuf,
     sdk_version: String,
+    computation_sdk_version: Option<String>,
     core_version: String,
     lib_version: String,
 }
@@ -66,6 +69,8 @@ struct PluginInfo {
     package: Package,
     plugin_type: String,
     kind: String,
+    abi_family: Option<String>,
+    abi_version: Option<String>,
 }
 
 /// Metadata JSON written alongside each built plugin binary for OCI publishing.
@@ -77,6 +82,12 @@ struct PluginArtifactMetadata {
     plugin_type: String,
     version: String,
     sdk_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    abi_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    abi_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
     core_version: String,
     lib_version: String,
     target_triple: String,
@@ -107,9 +118,59 @@ fn parse_plugin_type_kind(crate_name: &str) -> Option<(String, String)> {
     None
 }
 
-fn is_dynamic_plugin(package: &Package) -> bool {
-    package.features.contains_key("dynamic-plugin")
-        && parse_plugin_type_kind(&package.name).is_some()
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct ComputationPluginDeclaration {
+    abi_family: String,
+    abi_version: String,
+    kind: String,
+}
+
+fn dynamic_plugin_info(package: Package) -> Result<Option<PluginInfo>, String> {
+    if !package.features.contains_key("dynamic-plugin") {
+        return Ok(None);
+    }
+    if let Some(metadata) = package.metadata.get("drasi-plugin") {
+        let declaration: ComputationPluginDeclaration = serde_json::from_value(metadata.clone())
+            .map_err(|error| format!("{}: invalid drasi-plugin metadata: {error}", package.name))?;
+        if declaration.abi_family != "computation" {
+            return Err(format!(
+                "{}: unsupported ABI family {}",
+                package.name, declaration.abi_family
+            ));
+        }
+        let version: Vec<_> = declaration.abi_version.split('.').collect();
+        if version.len() != 3 || version.iter().any(|part| part.parse::<u32>().is_err()) {
+            return Err(format!(
+                "{}: ABI version must be major.minor.patch",
+                package.name
+            ));
+        }
+        if declaration.kind.is_empty()
+            || !declaration
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(format!("{}: invalid computation plugin kind", package.name));
+        }
+        return Ok(Some(PluginInfo {
+            package,
+            plugin_type: "computation".into(),
+            kind: declaration.kind,
+            abi_family: Some(declaration.abi_family),
+            abi_version: Some(declaration.abi_version),
+        }));
+    }
+    Ok(
+        parse_plugin_type_kind(&package.name).map(|(plugin_type, kind)| PluginInfo {
+            package,
+            plugin_type,
+            kind,
+            abi_family: None,
+            abi_version: None,
+        }),
+    )
 }
 
 fn host_target_triple() -> String {
@@ -166,6 +227,11 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .find(|p| p.name == "drasi-plugin-sdk")
         .map(|p| p.version.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let computation_sdk_version = metadata
+        .packages
+        .iter()
+        .find(|p| p.name == "drasi-computation-plugin-sdk")
+        .map(|p| p.version.clone());
     let core_version = metadata
         .packages
         .iter()
@@ -179,27 +245,28 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .map(|p| p.version.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let plugin_names: BTreeSet<String> = metadata
+    let plugins: Vec<_> = metadata
         .packages
         .iter()
-        .filter(|p| is_dynamic_plugin(p))
-        .map(|p| p.name.clone())
-        .collect();
-    let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
-
-    let plugins = metadata
-        .packages
-        .into_iter()
-        .filter(is_dynamic_plugin)
-        .filter_map(|p| {
-            let (plugin_type, kind) = parse_plugin_type_kind(&p.name)?;
-            Some(PluginInfo {
-                package: p,
-                plugin_type,
-                kind,
-            })
+        .cloned()
+        .filter_map(|package| match dynamic_plugin_info(package) {
+            Ok(info) => info,
+            Err(error) => {
+                eprintln!("Invalid dynamic plugin declaration: {error}");
+                std::process::exit(1);
+            }
         })
         .collect();
+    if computation_sdk_version.is_none() && plugins.iter().any(|plugin| plugin.abi_family.is_some())
+    {
+        eprintln!("Computation plugins require drasi-computation-plugin-sdk in the Cargo dependency graph");
+        std::process::exit(1);
+    }
+    let plugin_names: BTreeSet<_> = plugins
+        .iter()
+        .map(|plugin| plugin.package.name.clone())
+        .collect();
+    let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
 
     DiscoveryResult {
         plugins,
@@ -207,6 +274,7 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         target_directory: metadata.target_directory,
         workspace_root: metadata.workspace_root,
         sdk_version,
+        computation_sdk_version,
         core_version,
         lib_version,
     }
@@ -749,7 +817,20 @@ fn build_plugins(args: &[String]) {
             kind: info.kind.clone(),
             plugin_type: info.plugin_type.clone(),
             version: info.package.version.clone(),
-            sdk_version: result.sdk_version.clone(),
+            sdk_version: if info.abi_family.is_some() {
+                result
+                    .computation_sdk_version
+                    .clone()
+                    .expect("native SDK checked during discovery")
+            } else {
+                result.sdk_version.clone()
+            },
+            abi_family: info.abi_family.clone(),
+            abi_version: info.abi_version.clone(),
+            filename: info
+                .abi_family
+                .as_ref()
+                .map(|_| format!("{lib_name}.{lib_ext}")),
             core_version: result.core_version.clone(),
             lib_version: result.lib_version.clone(),
             target_triple: target_triple.clone(),
@@ -1221,6 +1302,15 @@ async fn publish_single_plugin(
         "io.drasi.plugin.sdk-version".to_string(),
         plugin.metadata.sdk_version.clone(),
     );
+    if let Some(family) = &plugin.metadata.abi_family {
+        annotations.insert("io.drasi.plugin.abi-family".into(), family.clone());
+    }
+    if let Some(version) = &plugin.metadata.abi_version {
+        annotations.insert("io.drasi.plugin.abi-version".into(), version.clone());
+    }
+    if let Some(filename) = &plugin.metadata.filename {
+        annotations.insert("io.drasi.plugin.filename".into(), filename.clone());
+    }
     annotations.insert(
         "io.drasi.plugin.core-version".to_string(),
         plugin.metadata.core_version.clone(),
@@ -1338,6 +1428,7 @@ mod tests {
             license: None,
             publish: if publishable { None } else { Some(Vec::new()) },
             dependencies,
+            metadata: serde_json::Value::Null,
         }
     }
 
@@ -1347,6 +1438,46 @@ mod tests {
             req: req.to_string(),
             kind: kind.map(str::to_string),
             path: Some(PathBuf::from(name)),
+        }
+    }
+
+    #[test]
+    fn explicit_computation_plugin_metadata_is_independent_of_legacy_categories() {
+        let mut native = package("drasi-custom-native-fixture", false, vec![]);
+        native.features.insert("dynamic-plugin".into(), vec![]);
+        native.metadata = serde_json::json!({
+            "drasi-plugin": {"abi-family":"computation", "abi-version":"1.0.0", "kind":"fixture"}
+        });
+        let info = dynamic_plugin_info(native).unwrap().expect("native plugin");
+        assert_eq!(info.plugin_type, "computation");
+        assert_eq!(info.kind, "fixture");
+        assert_eq!(info.abi_family.as_deref(), Some("computation"));
+        assert_eq!(info.abi_version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn legacy_plugin_discovery_keeps_existing_names_and_has_no_native_abi_metadata() {
+        let mut legacy = package("drasi-source-mock", true, vec![]);
+        legacy.features.insert("dynamic-plugin".into(), vec![]);
+        let info = dynamic_plugin_info(legacy).unwrap().expect("legacy plugin");
+        assert_eq!(info.plugin_type, "source");
+        assert_eq!(info.kind, "mock");
+        assert!(info.abi_family.is_none());
+        assert!(info.abi_version.is_none());
+    }
+
+    #[test]
+    fn invalid_native_declarations_are_errors_not_silently_skipped_packages() {
+        for metadata in [
+            serde_json::json!({"abi-family":"unknown", "abi-version":"1.0.0", "kind":"fixture"}),
+            serde_json::json!({"abi-family":"computation", "abi-version":"bad", "kind":"fixture"}),
+            serde_json::json!({"abi-family":"computation", "abi-version":"1.0.0", "kind":"../fixture"}),
+            serde_json::json!({"abi-family":"computation", "kind":"fixture"}),
+        ] {
+            let mut native = package("drasi-custom-native-fixture", false, vec![]);
+            native.features.insert("dynamic-plugin".into(), vec![]);
+            native.metadata = serde_json::json!({"drasi-plugin":metadata});
+            assert!(dynamic_plugin_info(native).is_err());
         }
     }
 

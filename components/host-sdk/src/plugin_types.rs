@@ -25,6 +25,7 @@ pub enum PluginCategory {
     Bootstrap,
     IdentityProvider,
     SecretStore,
+    Computation,
 }
 
 impl std::fmt::Display for PluginCategory {
@@ -35,6 +36,7 @@ impl std::fmt::Display for PluginCategory {
             PluginCategory::Bootstrap => write!(f, "bootstrap"),
             PluginCategory::IdentityProvider => write!(f, "identity-provider"),
             PluginCategory::SecretStore => write!(f, "secret_store"),
+            PluginCategory::Computation => write!(f, "computation"),
         }
     }
 }

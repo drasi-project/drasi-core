@@ -28,8 +28,10 @@ use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt}
 use tokio::sync::{mpsc, watch};
 
 mod addition;
+mod configuration;
 mod controller;
 pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
+pub use configuration::{CapturedComponentConfiguration, GraphConfigurationSnapshot};
 mod registry;
 mod resources;
 pub(crate) use registry::GraphRegistrySnapshot;
@@ -349,6 +351,9 @@ pub struct GraphSnapshot {
     pub specifications: BTreeMap<ComponentId, ComponentSpecification>,
     pub external_bindings: BTreeMap<ComponentId, Arc<str>>,
     pub resources: BTreeMap<ResourceId, ResourceSpecification>,
+    /// Host-supplied construction recipes. These are privileged configuration,
+    /// not properties inferred from arbitrary provider objects.
+    pub resource_configurations: BTreeMap<ResourceId, serde_json::Value>,
     pub unbound_relationships: Arc<[DesiredRelationship]>,
     /// Host-declared control-only adjacency.
     pub control_connections: Arc<[(ComponentId, ComponentId)]>,
@@ -533,6 +538,7 @@ pub struct ComputationGraphBuilder {
     lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
     relationship_policies: BTreeMap<EdgeDefinition, RelationshipPolicy>,
     resources: BTreeMap<ResourceId, ResourceSpecification>,
+    resource_configurations: BTreeMap<ResourceId, serde_json::Value>,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
     input_merge: BTreeMap<ComponentId, InputMergePolicy>,
     unbound_relationships: Vec<DesiredRelationship>,
@@ -575,6 +581,24 @@ impl ComputationGraphBuilder {
             .is_some()
         {
             return Err(topology("duplicate resource specification"));
+        }
+        Ok(self)
+    }
+
+    pub fn resource_configuration(
+        mut self,
+        resource: ResourceId,
+        configuration: serde_json::Value,
+    ) -> GraphResult<Self> {
+        if !configuration.is_object() {
+            return Err(topology("resource configuration must be an object"));
+        }
+        if self
+            .resource_configurations
+            .insert(resource, configuration)
+            .is_some()
+        {
+            return Err(topology("duplicate resource configuration"));
         }
         Ok(self)
     }
@@ -654,6 +678,15 @@ impl ComputationGraphBuilder {
 
     pub fn build(self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
+        if self
+            .resource_configurations
+            .keys()
+            .any(|id| !self.resources.contains_key(id))
+        {
+            return Err(topology(
+                "resource configuration names an undeclared resource",
+            ));
+        }
         if self.components.is_empty() && !self.allow_empty {
             return Err(topology("graph must be nonempty"));
         }
@@ -915,6 +948,7 @@ impl ComputationGraphBuilder {
                 })
                 .collect(),
             resources: self.resources,
+            resource_configurations: self.resource_configurations,
             unbound_relationships: self.unbound_relationships.into(),
             control_connections: Arc::from([]),
             subscriptions: Arc::from([]),
@@ -939,10 +973,23 @@ impl ComputationGraphBuilder {
                 }
             })
             .collect();
+        let components: Vec<_> = self
+            .components
+            .into_iter()
+            .enumerate()
+            .map(|(index, component)| {
+                controller::InstanceSlot::new(component, ComponentGeneration(index as u64 + 1))
+            })
+            .collect();
+        let configurations = ids
+            .iter()
+            .map(|(id, index)| (id.clone(), components[*index].configuration()))
+            .collect();
         let registry = watch::channel(Arc::new(GraphRegistrySnapshot::new(
             &snapshot,
             Arc::new(observed.clone()),
             &self.resource_handles,
+            configurations,
         )))
         .0;
         Ok(ComputationGraph {
@@ -958,14 +1005,7 @@ impl ComputationGraphBuilder {
             desired: watch::channel(Arc::new(snapshot.clone())).0,
             snapshot,
             observed: watch::channel(Arc::new(observed)).0,
-            components: self
-                .components
-                .into_iter()
-                .enumerate()
-                .map(|(index, component)| {
-                    controller::InstanceSlot::new(component, ComponentGeneration(index as u64 + 1))
-                })
-                .collect(),
+            components,
             providers: self
                 .edges
                 .into_iter()
@@ -1149,6 +1189,7 @@ impl ComputationGraph {
             lifecycle_policies: BTreeMap::new(),
             relationship_policies: BTreeMap::new(),
             resources: BTreeMap::new(),
+            resource_configurations: BTreeMap::new(),
             resource_handles: BTreeMap::new(),
             input_merge: BTreeMap::new(),
             unbound_relationships: Vec::new(),
@@ -1165,6 +1206,10 @@ impl ComputationGraph {
 
     pub fn snapshot(&self) -> &GraphSnapshot {
         &self.snapshot
+    }
+
+    pub fn configuration_snapshot(&self) -> GraphResult<GraphConfigurationSnapshot> {
+        self.registry.borrow().configuration_snapshot()
     }
 
     pub fn state(&self) -> GraphState {

@@ -80,7 +80,8 @@ fn validate_pipeline(names: &BTreeSet<&str>, pipeline: &[String]) -> anyhow::Res
 
 /// Middleware definitions and their execution order, using the query middleware
 /// configuration format. All connected producers use the same pipeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MiddlewareTransformerDefinition {
     pub id: ComponentId,
     pub output_stream: StreamId,
@@ -500,6 +501,18 @@ impl MiddlewareTransformer {
 impl ComputationComponent for MiddlewareTransformer {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        let mut configuration = serde_json::json!({
+            "stream": self.definition.output_stream,
+            "middleware": self.definition.middleware,
+            "pipeline": self.definition.pipeline,
+        });
+        if let Some(durable) = &self.durable {
+            configuration["durability"] = serde_json::to_value(durable.options())?;
+        }
+        Ok(configuration)
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {

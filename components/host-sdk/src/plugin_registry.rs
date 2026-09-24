@@ -112,6 +112,7 @@ pub struct PluginRegistry {
     identity_providers:
         HashMap<String, DescriptorRegistration<dyn IdentityProviderPluginDescriptor>>,
     secret_stores: HashMap<String, DescriptorRegistration<dyn SecretStorePluginDescriptor>>,
+    computation_plugins: std::collections::BTreeMap<String, Arc<crate::computation::NativePlugin>>,
     /// Monotonically increasing counter incremented on every mutation.
     /// Used by OpenAPI cache invalidation and other version-sensitive consumers.
     version: u64,
@@ -126,6 +127,7 @@ impl PluginRegistry {
             bootstrappers: HashMap::new(),
             identity_providers: HashMap::new(),
             secret_stores: HashMap::new(),
+            computation_plugins: std::collections::BTreeMap::new(),
             version: 0,
         }
     }
@@ -133,6 +135,63 @@ impl PluginRegistry {
     /// Current mutation version. Incremented on every register operation.
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    pub fn register_computation_plugin(
+        &mut self,
+        plugin: Arc<crate::computation::NativePlugin>,
+    ) -> anyhow::Result<Vec<crate::plugin_types::PluginKindEntry>> {
+        let id = computation_plugin_id(plugin.metadata());
+        anyhow::ensure!(
+            !self.computation_plugins.contains_key(&id),
+            "native plugin {id} is already registered"
+        );
+        let mut factories = self.computation_factory_registry()?;
+        plugin.register_factories(&mut factories)?;
+        let kinds = plugin
+            .factories()
+            .iter()
+            .map(|factory| crate::plugin_types::PluginKindEntry {
+                category: crate::plugin_types::PluginCategory::Computation,
+                kind: factory.metadata().implementation.name.to_string(),
+                config_version: factory.metadata().configuration_version.to_string(),
+                config_schema_name: factory.metadata().implementation.name.to_string(),
+            })
+            .collect();
+        self.computation_plugins.insert(id, plugin);
+        self.version += 1;
+        Ok(kinds)
+    }
+
+    pub fn computation_plugin_metadata(&self) -> Vec<crate::computation::PluginMetadata> {
+        self.computation_plugins
+            .values()
+            .map(|plugin| plugin.metadata().clone())
+            .collect()
+    }
+
+    pub fn computation_factory_registry(
+        &self,
+    ) -> anyhow::Result<drasi_lib::computation::v1::FactoryRegistry> {
+        let mut registry = drasi_lib::computation::v1::FactoryRegistry::standard();
+        for plugin in self.computation_plugins.values() {
+            plugin.register_factories(&mut registry)?;
+        }
+        Ok(registry)
+    }
+
+    pub fn transactional_transformer_registry(
+        &self,
+        middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
+    ) -> anyhow::Result<Arc<drasi_lib::computation::v1::TransactionalTransformerRegistry>> {
+        let mut registry =
+            drasi_lib::computation::v1::TransactionalTransformerRegistry::standard(middleware);
+        for plugin in self.computation_plugins.values() {
+            for factory in plugin.transactional_factories() {
+                registry.register(factory)?;
+            }
+        }
+        Ok(Arc::new(registry))
     }
 
     /// Register a source plugin descriptor.
@@ -511,6 +570,7 @@ impl PluginRegistry {
             && self.bootstrappers.is_empty()
             && self.identity_providers.is_empty()
             && self.secret_stores.is_empty()
+            && self.computation_plugins.is_empty()
     }
 
     /// Returns the total number of registered descriptors.
@@ -520,7 +580,21 @@ impl PluginRegistry {
             + self.bootstrappers.len()
             + self.identity_providers.len()
             + self.secret_stores.len()
+            + self
+                .computation_plugins
+                .values()
+                .map(|plugin| plugin.factories().len())
+                .sum::<usize>()
     }
+}
+
+/// Native registration identity includes the ABI family and package version.
+/// Graph specifications keep the plugin's original implementation identity.
+pub fn computation_plugin_id(metadata: &crate::computation::PluginMetadata) -> String {
+    format!(
+        "computation:{}@{}",
+        metadata.plugin.id, metadata.plugin.version
+    )
 }
 
 impl Default for PluginRegistry {
@@ -537,6 +611,10 @@ impl std::fmt::Debug for PluginRegistry {
             .field("bootstrappers", &self.bootstrapper_kinds())
             .field("identity_providers", &self.identity_provider_kinds())
             .field("secret_stores", &self.secret_store_kinds())
+            .field(
+                "computation_plugins",
+                &self.computation_plugins.keys().collect::<Vec<_>>(),
+            )
             .field("version", &self.version)
             .finish()
     }

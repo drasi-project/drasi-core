@@ -42,6 +42,17 @@ pub struct GraphProducerIdentity {
 }
 
 impl GraphProducerIdentity {
+    /// A new incarnation for a source whose position is lost on reconstruction.
+    /// Persistent consumers must not treat this as a restart-stable stream.
+    pub fn volatile(
+        scope: String,
+        graph_id: String,
+        component_id: ComponentId,
+        stream: StreamId,
+    ) -> anyhow::Result<Self> {
+        Self::new(scope, graph_id, component_id, stream, false)
+    }
+
     pub(super) fn new(
         scope: String,
         graph_id: String,
@@ -106,7 +117,9 @@ impl GraphProducerProgress {
         self.sequence
     }
 
-    pub(super) fn annotate(
+    /// Attach the immediate producer's logical position. This preserves its
+    /// declared volatility and validates that it owns this output stream.
+    pub fn annotate(
         envelope: &mut ChangeEnvelope,
         identity: &GraphProducerIdentity,
         sequence: u64,

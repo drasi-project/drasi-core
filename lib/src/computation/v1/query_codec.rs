@@ -326,6 +326,12 @@ impl QueryChangeCodec {
         })
     }
 
+    /// Project typed row values to the established query JSON representation
+    /// without constructing a legacy QueryResult or source/reaction adapter.
+    pub fn row_values_to_json(values: &QueryVariables) -> serde_json::Value {
+        typed_change::query_variables_to_json(values)
+    }
+
     fn decode_snapshot_row(
         query_id: &str,
         record: &Record,

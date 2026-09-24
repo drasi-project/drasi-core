@@ -49,6 +49,7 @@ pub(super) struct InstanceSlot {
     id: ComponentId,
     generation: ComponentGeneration,
     value: Mutex<Option<Instance>>,
+    configuration: Mutex<super::CapturedComponentConfiguration>,
 }
 
 struct Instance {
@@ -70,9 +71,11 @@ impl InstanceSlot {
         component: Component,
         generation: ComponentGeneration,
     ) -> Arc<Self> {
+        let configuration = component.capture_configuration();
         Arc::new(Self {
             id,
             generation,
+            configuration: Mutex::new(configuration),
             value: Mutex::new(Some(Instance {
                 component,
                 sequences: BTreeMap::new(),
@@ -81,6 +84,24 @@ impl InstanceSlot {
                 attempted: false,
             })),
         })
+    }
+
+    pub(super) fn configuration(&self) -> super::CapturedComponentConfiguration {
+        match self.configuration.lock() {
+            Ok(configuration) => configuration.clone(),
+            Err(error) => {
+                log::error!(
+                    "Component configuration publication is poisoned: {}",
+                    self.id
+                );
+                super::CapturedComponentConfiguration::Unavailable {
+                    reason: format!(
+                        "configuration publication for {} is poisoned: {error}",
+                        self.id
+                    ),
+                }
+            }
+        }
     }
 
     fn take(self: &Arc<Self>) -> GraphResult<InstanceLease> {
@@ -100,6 +121,24 @@ impl InstanceSlot {
 struct InstanceLease {
     slot: Arc<InstanceSlot>,
     value: Option<Instance>,
+}
+
+impl InstanceLease {
+    fn refresh_configuration(&self) {
+        let captured = self.component.capture_configuration();
+        match self.slot.configuration.lock() {
+            Ok(mut configuration) => *configuration = captured,
+            Err(error) => {
+                log::error!(
+                    "Component configuration publication is poisoned: {}",
+                    self.slot.id
+                );
+                *error.into_inner() = super::CapturedComponentConfiguration::Unavailable {
+                    reason: format!("configuration publication for {} is poisoned", self.slot.id),
+                };
+            }
+        }
+    }
 }
 
 impl Deref for InstanceLease {
@@ -691,6 +730,7 @@ async fn deploy(
             match result {
                 Ok(constructed) => {
                     lease.component = constructed.0;
+                    lease.refresh_configuration();
                     let invalid = if lease.component.role() != node.role {
                         Err(topology(
                             "constructed component role differs from its factory specification",
@@ -1377,6 +1417,7 @@ impl Operations {
                                 source: error.source,
                             })?;
                         lease.component = constructed.0;
+                        lease.refresh_configuration();
                     } else if matches!(lease.component, Component::Unresolved(_)) {
                         return Err(super::addition::validation_failure(
                             node.descriptor.id(),

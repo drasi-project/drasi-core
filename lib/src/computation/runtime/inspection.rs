@@ -284,14 +284,21 @@ impl Runtime {
     pub(crate) async fn configuration_snapshot(
         &self,
     ) -> anyhow::Result<crate::config::snapshot::ConfigurationSnapshot> {
+        let publication = self.control()?.registry_snapshot();
+        self.configuration_snapshot_at(&publication).await
+    }
+
+    pub(crate) async fn configuration_snapshot_at(
+        &self,
+        publication: &GraphRegistrySnapshot,
+    ) -> anyhow::Result<crate::config::snapshot::ConfigurationSnapshot> {
         use crate::{
             component_graph::{GraphEdge, RelationshipKind},
             config::snapshot::{
                 ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot, SourceSnapshot,
             },
         };
-        let publication = self.control()?.registry_snapshot();
-        let records = self.records_at(&publication).await?;
+        let records = self.records_at(publication).await?;
         let mut snapshot = ConfigurationSnapshot {
             instance_id: self.config.id.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),

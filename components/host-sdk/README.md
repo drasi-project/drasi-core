@@ -62,6 +62,65 @@ The result is that the rest of the server code works with normal Rust trait obje
 
 ## Usage
 
+### Native ComputationGraph plugins
+
+The independent `computation` module loads native graph factories without changing
+the legacy ABI 0.15:
+
+```rust,ignore
+use drasi_host_sdk::computation;
+use drasi_lib::computation::v1::FactoryRegistry;
+
+let mut factories = FactoryRegistry::standard();
+if let Some(plugin) = computation::try_load(path)? {
+    plugin.register_factories(&mut factories)?;
+    // Serializable plugin/factory/schema/capability discovery.
+    let metadata = plugin.metadata();
+    // Optional explicit participants for a TransactionalTransformerRegistry:
+    let participants = plugin.transactional_factories();
+} else {
+    // Neither native symbol exists: legacy discovery may continue here.
+}
+```
+
+`try_load` returns an error, **not** `None`, for partial native entry points, bad
+headers, missing metadata, incompatible versions/targets/schemas or unsupported
+capabilities. Do not fall back to legacy registration after such an error.
+`load` requires this native family. Native libraries are pinned for process
+lifetime, including identified candidates whose initialization fails; hot
+unloading is unsupported.
+
+`NativeFactory` implements the existing `ComponentFactory` and, for explicitly
+opted-in factories, `TransactionalTransformerFactory`. Its `specification(id,
+configuration)` helper builds an exact graph recipe with plugin provenance;
+`create_component` is configuration-only. Proxies implement the real native
+source/transformer/sink/service interfaces. `configuration()` reads the actual
+component, not a second mutable registry. The graph publishes configuration at
+construction boundaries rather than invoking getters during in-flight data;
+native ABI 1.0 does not support in-place reconfiguration. The graph retains
+submitted specifications for pending/failed construction.
+
+The graph polls all asynchronous operations and owns cancellation. Native control
+operations use separate callbacks rather than waiting behind mutable data calls.
+Step-scoped transaction requests are serviced inside the host's actual borrowed
+`TransactionContext`, through a revocable mailbox with no commit API. No Rust
+future, trait object, task-local, `Arc` or `Bytes` ownership crosses the C ABI.
+See the [native SDK](../computation-plugin-sdk/README.md) for authoring,
+ownership and explicitly unsupported query/recovery/resource capabilities.
+
+For a directory containing both families, use
+`PluginLoader::load_all_families` and match `LoadedPluginFamily::Legacy` or
+`LoadedPluginFamily::Computation`. It opens each candidate once, preserves
+reported loading failures, and never falls back after a malformed native
+declaration. Verification/allowlisting must happen before this call, as before.
+The existing `load_all`/`load_plugin_from_path` interfaces remain legacy-only.
+
+`PluginRegistry::register_computation_plugin` retains native factories under a
+family/version-qualified registration identity. The graph factory registry and
+optional transactional transformer registry can then be obtained from that
+same host registry. Native metadata exposes each factory's role, ports, schemas,
+configuration version and actual capabilities.
+
 ### Loading plugins
 
 ```rust

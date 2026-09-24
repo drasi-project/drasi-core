@@ -606,6 +606,10 @@ impl ComputationComponent for TransactionTransformer {
         &self.prepared.descriptor
     }
 
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({"transaction": self.definition}))
+    }
+
     async fn start(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.failed.load(Ordering::Acquire),

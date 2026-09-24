@@ -99,9 +99,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-llvm-cov-core-
 
+      - name: Build native network test library
+        run: make build-native-network-plugin
+
       - name: Generate core coverage
         env:
           REDIS_URL: redis://localhost:6379
+          DRASI_NATIVE_NETWORK_PLUGIN: ${{ github.workspace }}/target/debug/libdrasi_computation_network.so
         run: |
           cargo llvm-cov --workspace \
             --exclude drasi-host-sdk \

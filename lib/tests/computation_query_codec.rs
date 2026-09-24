@@ -274,3 +274,81 @@ fn row_identity_is_scoped_by_query_and_metadata_cannot_relabel_a_foreign_set() {
         Err(QueryCodecError::InvalidRow)
     ));
 }
+
+#[test]
+fn direct_network_row_projection_matches_the_existing_result_json_contract() {
+    for value in [
+        VariableValue::Integer(Integer::from(u64::MAX)),
+        VariableValue::Integer(Integer::from(i64::MIN)),
+        VariableValue::Float(Float::from(12.25)),
+        VariableValue::Float(Float::from(f64::INFINITY)),
+        VariableValue::Float(Float::from(f64::NAN)),
+        VariableValue::Date(NaiveDate::from_ymd_opt(2026, 9, 23).expect("date")),
+        VariableValue::List(vec![VariableValue::from(1), VariableValue::Null]),
+        VariableValue::Object(BTreeMap::from([("nested".into(), VariableValue::from(2))])),
+    ] {
+        let values = variables(value);
+        let envelope = QueryChangeCodec::encode_evaluation(
+            None,
+            &ComponentId::try_new("query").expect("id"),
+            SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), 1),
+            &[QueryPartEvaluationContext::Adding {
+                after: values.clone(),
+                row_signature: 42,
+            }],
+            QueryOutputMetadata {
+                query_id: "query".into(),
+                source_id: Some("source".into()),
+                timestamp: chrono::Utc::now(),
+                metadata: HashMap::new(),
+                profiling: None,
+            },
+        )
+        .expect("encode")
+        .expect("output");
+        let legacy = QueryChangeCodec::to_legacy_result(&envelope).expect("legacy projection");
+        let [ResultDiff::Add { data, .. }] = legacy.results.as_slice() else {
+            panic!("expected one added row");
+        };
+        assert_eq!(&QueryChangeCodec::row_values_to_json(&values), data);
+    }
+}
+
+#[test]
+fn native_volatile_producer_identity_preserves_scope_and_rejects_wrong_output_streams() {
+    let component = ComponentId::try_new("source").expect("component");
+    let stream = StreamId::try_new("source/out").expect("stream");
+    let first = GraphProducerIdentity::volatile(
+        "instance".into(),
+        "graph".into(),
+        component.clone(),
+        stream.clone(),
+    )
+    .expect("volatile identity");
+    let rebuilt = GraphProducerIdentity::volatile(
+        "instance".into(),
+        "graph".into(),
+        component,
+        stream.clone(),
+    )
+    .expect("new incarnation");
+    assert!(!first.persistent());
+    assert_ne!(first.incarnation(), rebuilt.incarnation());
+    assert_eq!(first.construction_scope(), "instance");
+    let mut envelope = GraphChangeCodec::encode_changes(&[], stream, 1, None).expect("envelope");
+    GraphProducerProgress::annotate(&mut envelope, &first, 1).expect("progress");
+    let progress = GraphProducerProgress::from_envelope(&envelope)
+        .expect("decode")
+        .expect("progress");
+    assert_eq!(progress.identity(), &first);
+    assert_eq!(progress.sequence(), 1);
+    let mut wrong = GraphChangeCodec::encode_changes(
+        &[],
+        StreamId::try_new("different/out").expect("stream"),
+        1,
+        None,
+    )
+    .expect("different envelope");
+    assert!(GraphProducerProgress::annotate(&mut wrong, &first, 1).is_err());
+    assert!(GraphProducerProgress::annotate(&mut envelope, &first, 0).is_err());
+}

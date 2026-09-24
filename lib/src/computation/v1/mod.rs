@@ -155,6 +155,7 @@
 pub use super::instance::{
     ComputationCleanupError, ComputationHandle, ComputationInfo, ComputationOptions,
 };
+pub use super::instance_ops::{InstanceConfigurationSnapshot, RegisteredComputationConfiguration};
 
 mod bounded_pipe;
 mod broadcast_pipe;

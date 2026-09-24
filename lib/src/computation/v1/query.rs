@@ -86,7 +86,8 @@ pub enum ComputationQueryLanguage {
     Gql,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContinuousQueryDefinition {
     pub graph_id: String,
     pub id: ComponentId,
@@ -1216,6 +1217,27 @@ impl Drop for ContinuousQueryTransformer {
 impl ComputationComponent for ContinuousQueryTransformer {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "query": self.definition.query,
+            "language": match self.definition.language {
+                ComputationQueryLanguage::Cypher => "cypher",
+                ComputationQueryLanguage::Gql => "gql",
+            },
+            "stream": self.definition.output_stream,
+            "outbox_capacity": self.definition.outbox_capacity,
+            "execution": self.execution,
+            "recovery": match self.options.recovery {
+                QueryRecoveryPolicy::Strict => "strict",
+                QueryRecoveryPolicy::AutoReset => "auto_reset",
+            },
+            "publication": match self.options.publication {
+                QueryPublicationMode::Atomic => "atomic",
+                QueryPublicationMode::NonAtomic => "non_atomic",
+            },
+        }))
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {

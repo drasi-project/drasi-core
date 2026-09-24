@@ -6,6 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk \
+       build-native-network-plugin test-native-network \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
        publish-all publish-all-dry-run \
@@ -17,6 +18,8 @@ help:
 	@echo "  clippy                    - Run cargo clippy with same configuration as CI"
 	@echo "  build-test-plugins        - Build cdylib plugins needed for host-sdk integration tests"
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
+	@echo "  build-native-network-plugin - Build the native network test library"
+	@echo "  test-native-network       - Build the native library and run wire/loopback tests"
 	@echo "  build-plugins             - Build all dynamic plugins (debug)"
 	@echo "  build-plugins-release     - Build all dynamic plugins (release)"
 	@echo "  list-plugins              - List all discovered dynamic plugin crates"
@@ -52,6 +55,7 @@ build-test-plugins:
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+	cargo build --lib -p drasi-computation-standard --features drasi-computation-standard/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
 	@for ext in dylib so dll; do \
@@ -61,12 +65,14 @@ build-test-plugins:
 		         target/debug/libdrasi_reaction_snapshot_test.$$ext \
 		         target/debug/libdrasi_identity_test.$$ext \
 		         target/debug/libdrasi_bootstrap_scriptfile.$$ext \
+		         target/debug/libdrasi_computation_standard.$$ext \
 		         target/debug/drasi_source_mock.$$ext \
 		         target/debug/drasi_reaction_log.$$ext \
 		         target/debug/drasi_reaction_sse.$$ext \
 		         target/debug/drasi_reaction_snapshot_test.$$ext \
 		         target/debug/drasi_identity_test.$$ext \
-		         target/debug/drasi_bootstrap_scriptfile.$$ext; do \
+		         target/debug/drasi_bootstrap_scriptfile.$$ext \
+		         target/debug/drasi_computation_standard.$$ext; do \
 			[ -f "$$f" ] && cp "$$f" $(PLUGIN_OUT_DIR)/ || true; \
 		done; \
 	done
@@ -75,8 +81,14 @@ build-test-plugins:
 # Build test plugins, then run host-sdk integration tests.
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
-	cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1
+	cargo test -p drasi-host-sdk --test integration_test --test native_computation_pipeline -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
+
+build-native-network-plugin:
+	cargo build --lib -p drasi-computation-network --features drasi-computation-network/dynamic-plugin
+
+test-native-network: build-native-network-plugin
+	cargo test -p drasi-computation-network
 
 # Deterministic cross-cdylib layout-mismatch regression for issue #602.
 #

@@ -28,7 +28,9 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::callbacks::{self, CallbackContext};
-use crate::loader::{load_plugin_from_path, plugin_kind_from_filename, LoadedPlugin};
+use crate::loader::{
+    load_plugin_family_from_path, plugin_kind_from_filename, LoadedPlugin, LoadedPluginFamily,
+};
 use crate::plugin_registry::PluginRegistry;
 use crate::plugin_types::{PluginCategory, PluginEvent, PluginKindEntry, PluginStatus};
 
@@ -254,11 +256,41 @@ impl PluginLifecycleManager {
             ),
         };
 
-        let loaded = load_plugin_from_path(path, log_ctx, log_cb, lifecycle_ctx, lifecycle_cb)?;
-
-        let kinds = self.register_loaded_plugin(&plugin_id, loaded).await;
-
-        Ok((plugin_id, kinds))
+        match load_plugin_family_from_path(path, log_ctx, log_cb, lifecycle_ctx, lifecycle_cb)? {
+            LoadedPluginFamily::Legacy(loaded) => {
+                let kinds = self.register_loaded_plugin(&plugin_id, loaded).await;
+                Ok((plugin_id, kinds))
+            }
+            LoadedPluginFamily::Computation { plugin, .. } => {
+                let plugin_id = crate::plugin_registry::computation_plugin_id(plugin.metadata());
+                let version = plugin.metadata().plugin.version.to_string();
+                let metadata_info = format!(
+                    "family=computation sdk={} plugin={}",
+                    plugin.metadata().abi_version,
+                    version
+                );
+                let kinds = self
+                    .registry
+                    .write()
+                    .await
+                    .register_computation_plugin(plugin)?;
+                self.loaded_plugins.write().await.insert(
+                    plugin_id.clone(),
+                    LoadedPluginState {
+                        plugin_id: plugin_id.clone(),
+                        status: PluginStatus::Loaded,
+                        kinds: kinds.clone(),
+                        metadata_info: Some(metadata_info),
+                    },
+                );
+                let _ = self.event_tx.send(PluginEvent::Loaded {
+                    plugin_id: plugin_id.clone(),
+                    version,
+                    kinds: kinds.clone(),
+                });
+                Ok((plugin_id, kinds))
+            }
+        }
     }
 
     /// Update a plugin's status (for use by the orchestrator layer).

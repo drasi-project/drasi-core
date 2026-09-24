@@ -79,6 +79,8 @@ pub struct DesiredTopology {
     pub components: Vec<DesiredComponent>,
     pub relationships: Vec<DesiredRelationship>,
     pub resources: Vec<ResourceSpecification>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_configurations: BTreeMap<ResourceId, serde_json::Value>,
     pub requirements: PipeRequirements,
     /// Desired links crossing an exact/subset selection boundary are explicit.
     pub boundary_relationships: Vec<DesiredRelationship>,
@@ -214,12 +216,25 @@ impl DesiredTopology {
         if self.version != 1 {
             return Err(topology("unsupported desired topology version"));
         }
+        if self
+            .resource_configurations
+            .keys()
+            .any(|id| !self.resources.iter().any(|resource| &resource.id == id))
+        {
+            return Err(topology(
+                "resource configuration names an undeclared resource",
+            ));
+        }
         let mut builder = ComputationGraph::builder(self.graph_id.as_str())
             .requirements(self.requirements.clone());
         builder.allow_empty = self.allow_incomplete;
         builder.unbound_relationships = self.boundary_relationships.clone();
         for resource in &self.resources {
             builder = builder.declare_resource(resource.clone())?;
+            if let Some(configuration) = self.resource_configurations.get(&resource.id) {
+                builder =
+                    builder.resource_configuration(resource.id.clone(), configuration.clone())?;
+            }
             if let Some(handle) = bindings.resources.remove(&resource.id) {
                 builder = builder.provide_resource(resource.id.clone(), handle)?;
             }
@@ -478,6 +493,12 @@ impl GraphSnapshot {
                 .iter()
                 .filter(|(id, _)| resources.contains(*id))
                 .map(|(_, spec)| spec.clone())
+                .collect(),
+            resource_configurations: self
+                .resource_configurations
+                .iter()
+                .filter(|(id, _)| resources.contains(*id))
+                .map(|(id, configuration)| (id.clone(), configuration.clone()))
                 .collect(),
             requirements: self.requirements.clone(),
             boundary_relationships,

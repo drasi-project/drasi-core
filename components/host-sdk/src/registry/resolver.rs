@@ -74,7 +74,7 @@ impl<'a> PluginResolver<'a> {
                         .await
                         .context("failed to get digest")?;
 
-                    let filename = self.derive_filename(&annotations);
+                    let filename = self.derive_filename(&annotations)?;
 
                     return Ok(ResolvedPlugin {
                         reference: format!("{}/{}@{}", parsed.registry, parsed.repository, digest),
@@ -83,6 +83,8 @@ impl<'a> PluginResolver<'a> {
                             .get(annotations::SDK_VERSION)
                             .cloned()
                             .unwrap_or_default(),
+                        abi_family: annotations.get(annotations::ABI_FAMILY).cloned(),
+                        abi_version: annotations.get(annotations::ABI_VERSION).cloned(),
                         core_version: annotations
                             .get(annotations::CORE_VERSION)
                             .cloned()
@@ -186,7 +188,7 @@ impl<'a> PluginResolver<'a> {
                                 .await
                                 .context("failed to get digest")?;
 
-                            let filename = self.derive_filename(&ann);
+                            let filename = self.derive_filename(&ann)?;
 
                             return Ok(ResolvedPlugin {
                                 reference: format!(
@@ -198,6 +200,8 @@ impl<'a> PluginResolver<'a> {
                                     .get(annotations::SDK_VERSION)
                                     .cloned()
                                     .unwrap_or_default(),
+                                abi_family: ann.get(annotations::ABI_FAMILY).cloned(),
+                                abi_version: ann.get(annotations::ABI_VERSION).cloned(),
                                 core_version: ann
                                     .get(annotations::CORE_VERSION)
                                     .cloned()
@@ -247,6 +251,14 @@ impl<'a> PluginResolver<'a> {
 
     /// Check if a plugin's annotations indicate compatibility with the host.
     fn is_compatible(&self, ann: &std::collections::BTreeMap<String, String>) -> bool {
+        if ann.contains_key(annotations::ABI_FAMILY)
+            || ann.contains_key(annotations::ABI_VERSION)
+            || ann
+                .get(annotations::PLUGIN_TYPE)
+                .is_some_and(|kind| kind == "computation")
+        {
+            return native_compatible(ann, &self.host_info.target_triple);
+        }
         let checks = [
             (annotations::SDK_VERSION, &self.host_info.sdk_version),
             (annotations::CORE_VERSION, &self.host_info.core_version),
@@ -276,6 +288,20 @@ impl<'a> PluginResolver<'a> {
         ann: &std::collections::BTreeMap<String, String>,
         reference: &str,
     ) -> Result<()> {
+        if ann.contains_key(annotations::ABI_FAMILY)
+            || ann.contains_key(annotations::ABI_VERSION)
+            || ann
+                .get(annotations::PLUGIN_TYPE)
+                .is_some_and(|kind| kind == "computation")
+        {
+            anyhow::ensure!(
+                native_compatible(ann, &self.host_info.target_triple),
+                "plugin {reference} requires a supported explicit computation ABI and matching target; host ABI={}, target={}",
+                drasi_computation_plugin_abi::ABI_VERSION,
+                self.host_info.target_triple,
+            );
+            return Ok(());
+        }
         let checks = [
             ("SDK", annotations::SDK_VERSION, &self.host_info.sdk_version),
             (
@@ -312,7 +338,13 @@ impl<'a> PluginResolver<'a> {
     }
 
     /// Derive the expected binary filename from annotations.
-    fn derive_filename(&self, ann: &std::collections::BTreeMap<String, String>) -> String {
+    fn derive_filename(&self, ann: &std::collections::BTreeMap<String, String>) -> Result<String> {
+        if ann
+            .get(annotations::ABI_FAMILY)
+            .is_some_and(|family| family == "computation")
+        {
+            return native_filename(ann);
+        }
         let kind = ann
             .get(annotations::PLUGIN_KIND)
             .cloned()
@@ -335,8 +367,40 @@ impl<'a> PluginResolver<'a> {
         };
 
         let prefix = if is_windows { "" } else { "lib" };
-        format!("{prefix}{crate_name}.{ext}")
+        Ok(format!("{prefix}{crate_name}.{ext}"))
     }
+}
+
+fn native_filename(annotations: &std::collections::BTreeMap<String, String>) -> Result<String> {
+    let filename = annotations
+        .get(annotations::FILENAME)
+        .context("native plugin artifact omitted its filename")?;
+    let mut components = std::path::Path::new(filename).components();
+    anyhow::ensure!(
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none()
+            && !filename.contains(['\\', '\0', ':']),
+        "native plugin artifact filename must be a single file name",
+    );
+    Ok(filename.clone())
+}
+
+fn native_compatible(
+    annotations: &std::collections::BTreeMap<String, String>,
+    target: &str,
+) -> bool {
+    annotations
+        .get(annotations::ABI_FAMILY)
+        .is_some_and(|family| family == "computation")
+        && annotations
+            .get(annotations::PLUGIN_TYPE)
+            .is_some_and(|kind| kind == "computation")
+        && annotations
+            .get(annotations::ABI_VERSION)
+            .is_some_and(|version| version == drasi_computation_plugin_abi::ABI_VERSION)
+        && annotations
+            .get(annotations::TARGET_TRIPLE)
+            .is_some_and(|plugin_target| plugin_target == target)
 }
 
 /// Check if two semver strings match on major.minor.
@@ -350,6 +414,62 @@ fn major_minor_match(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_artifact_filenames_preserve_custom_crate_names_but_not_paths() {
+        let valid = std::collections::BTreeMap::from([(
+            annotations::FILENAME.into(),
+            "libdrasi_custom_native_fixture.dylib".into(),
+        )]);
+        assert_eq!(
+            native_filename(&valid).unwrap(),
+            "libdrasi_custom_native_fixture.dylib"
+        );
+        assert!(native_filename(&Default::default()).is_err());
+        for filename in [
+            "",
+            "..",
+            "../plugin.so",
+            "/plugin.so",
+            "nested/plugin.so",
+            "C:plugin.dll",
+            "plugin\0.so",
+            "nested\\plugin.dll",
+        ] {
+            let annotations =
+                std::collections::BTreeMap::from([(annotations::FILENAME.into(), filename.into())]);
+            assert!(native_filename(&annotations).is_err(), "{filename:?}");
+        }
+    }
+
+    #[test]
+    fn computation_compatibility_uses_its_abi_not_legacy_rust_package_versions() {
+        let target = "aarch64-apple-darwin";
+        let mut annotations = std::collections::BTreeMap::from([
+            (annotations::ABI_FAMILY.into(), "computation".into()),
+            (
+                annotations::ABI_VERSION.into(),
+                drasi_computation_plugin_abi::ABI_VERSION.into(),
+            ),
+            (annotations::PLUGIN_TYPE.into(), "computation".into()),
+            (annotations::TARGET_TRIPLE.into(), target.into()),
+            (annotations::SDK_VERSION.into(), "99.1.0".into()),
+            (annotations::CORE_VERSION.into(), "98.2.0".into()),
+            (annotations::LIB_VERSION.into(), "97.3.0".into()),
+        ]);
+        assert!(native_compatible(&annotations, target));
+        assert!(!native_compatible(&annotations, "x86_64-unknown-linux-gnu"));
+        annotations.remove(annotations::ABI_VERSION);
+        assert!(!native_compatible(&annotations, target));
+        annotations.insert(annotations::ABI_VERSION.into(), "99.0.0".into());
+        assert!(!native_compatible(&annotations, target));
+        annotations.insert(
+            annotations::ABI_VERSION.into(),
+            drasi_computation_plugin_abi::ABI_VERSION.into(),
+        );
+        annotations.insert(annotations::ABI_FAMILY.into(), "unknown".into());
+        assert!(!native_compatible(&annotations, target));
+    }
 
     #[test]
     fn test_major_minor_match() {

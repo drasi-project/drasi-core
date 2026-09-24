@@ -1,0 +1,33 @@
+[package]
+name = "drasi-computation-standard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native ComputationGraph counter, middleware, capture and transactional arithmetic components"
+readme = "README.md"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "1.0.0"
+kind = "standard"
+
+[dependencies]
+drasi-computation-plugin-sdk = { workspace = true }
+drasi-core = { workspace = true }
+drasi-lib = { workspace = true }
+drasi-middleware = { workspace = true, features = ["map", "relabel"] }
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "fs", "io-util"] }
+
+[lints]
+workspace = true

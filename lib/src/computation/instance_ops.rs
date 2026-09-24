@@ -18,7 +18,136 @@ use super::v1::{
 };
 use crate::{DrasiError, DrasiLib, Result};
 
+/// A separately registered user graph and its instance startup policy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisteredComputationConfiguration {
+    pub options: ComputationOptions,
+    pub graph: super::v1::GraphConfigurationSnapshot,
+}
+
+/// Complete user configuration, excluding generated query-internal graphs.
+/// The existing source/query/reaction representation is retained under `instance`.
+/// Configurations may contain secrets and must be stored as privileged data.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceConfigurationSnapshot {
+    pub version: u32,
+    pub instance: crate::ConfigurationSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_components: Option<super::v1::GraphConfigurationSnapshot>,
+    #[serde(default)]
+    pub graphs: Vec<RegisteredComputationConfiguration>,
+}
+
 impl DrasiLib {
+    /// Snapshot ordinary and native component configuration without pausing
+    /// processing. Concurrent reconfiguration is detected and retried; a busy
+    /// instance reports an error rather than returning a mixed configuration.
+    pub async fn snapshot_computation_configuration(
+        &self,
+    ) -> Result<InstanceConfigurationSnapshot> {
+        use super::v1::GraphSelection;
+        use std::{collections::BTreeSet, sync::Arc};
+
+        self.state_guard.require_initialized()?;
+        let control = self.computation_control()?;
+        for _ in 0..3 {
+            let root = control.registry_snapshot();
+            let handles = self.computation_registry.list().await?;
+            let publications: Vec<_> = handles
+                .iter()
+                .map(|handle| handle.control().registry_snapshot())
+                .collect();
+            let instance = match self
+                .computation_runtime
+                .configuration_snapshot_at(&root)
+                .await
+            {
+                Ok(instance) => instance,
+                Err(error) if !Arc::ptr_eq(&root, &control.registry_snapshot()) => {
+                    log::debug!(
+                        "Retrying instance configuration after concurrent change: {error:#}"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(DrasiError::from(error)),
+            };
+            let ordinary: BTreeSet<_> = instance
+                .sources
+                .iter()
+                .map(|source| source.id.as_str())
+                .chain(instance.queries.iter().map(|query| query.id.as_str()))
+                .chain(
+                    instance
+                        .reactions
+                        .iter()
+                        .map(|reaction| reaction.id.as_str()),
+                )
+                .collect();
+            let native_ids: BTreeSet<_> = root
+                .desired
+                .nodes
+                .iter()
+                .map(|node| node.descriptor.id())
+                .filter(|id| !ordinary.contains(id.as_str()))
+                .cloned()
+                .collect();
+            let native_components = if native_ids.is_empty() {
+                None
+            } else {
+                let mut snapshot = root.configuration_snapshot().map_err(anyhow::Error::from)?;
+                snapshot.topology = root
+                    .desired
+                    .select(GraphSelection::Exact(native_ids.iter().cloned().collect()))
+                    .map_err(anyhow::Error::from)?;
+                snapshot
+                    .configurations
+                    .retain(|id, _| native_ids.contains(id));
+                Some(snapshot)
+            };
+            let mut graphs = Vec::new();
+            for (handle, publication) in handles.iter().zip(&publications) {
+                if publication.desired.id == root.desired.id {
+                    continue;
+                }
+                graphs.push(RegisteredComputationConfiguration {
+                    options: ComputationOptions {
+                        auto_start: handle.info().auto_start,
+                    },
+                    graph: publication
+                        .configuration_snapshot()
+                        .map_err(anyhow::Error::from)?,
+                });
+            }
+            let current = self.computation_registry.list().await?;
+            if current.len() != handles.len()
+                || current
+                    .iter()
+                    .zip(&handles)
+                    .any(|(left, right)| !left.same_instance(right))
+                || !Arc::ptr_eq(&root, &control.registry_snapshot())
+                || handles
+                    .iter()
+                    .zip(&publications)
+                    .any(|(handle, publication)| {
+                        !Arc::ptr_eq(publication, &handle.control().registry_snapshot())
+                    })
+            {
+                continue;
+            }
+            return Ok(InstanceConfigurationSnapshot {
+                version: 1,
+                instance,
+                native_components,
+                graphs,
+            });
+        }
+        Err(DrasiError::invalid_state(
+            "instance configuration changed during snapshot; retry after reconfiguration completes",
+        ))
+    }
+
     /// Access the instance controller for explicit port connections and inspection.
     pub fn computation_control(&self) -> Result<super::v1::GraphControl> {
         self.state_guard.require_initialized()?;

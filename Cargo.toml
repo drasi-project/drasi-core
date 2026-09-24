@@ -112,6 +112,14 @@ members = [
   # Plugin SDK
   "components/plugin-sdk",
 
+  # Native ComputationGraph plugin family (independent of the legacy ABI)
+  "components/computation-plugin-abi",
+  "components/computation-plugin-sdk",
+
+  # Native ComputationGraph plugins
+  "components/computation-plugins/standard",
+  "components/computation-plugins/network",
+
   # Host SDK (host-side plugin loading and proxy types)
   "components/host-sdk",
 
@@ -159,6 +167,9 @@ drasi-identity-aws = { version = "0.2.7", path = "components/identity/aws" }
 drasi-lib = { version = "0.9.2", path = "lib" }
 drasi-ffi-primitives = { version = "0.11.2", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.11.2", path = "components/plugin-sdk" }
+drasi-computation-plugin-abi = { version = "0.11.2", path = "components/computation-plugin-abi" }
+drasi-computation-plugin-sdk = { version = "0.11.2", path = "components/computation-plugin-sdk" }
+drasi-computation-network = { version = "0.11.2", path = "components/computation-plugins/network" }
 drasi-host-sdk = { version = "0.11.2", path = "components/host-sdk" }
 
 # Common dependencies

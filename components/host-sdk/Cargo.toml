@@ -16,6 +16,8 @@ drasi-ffi-primitives = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-core = { workspace = true }
 drasi-plugin-sdk = { workspace = true }
+drasi-computation-plugin-abi = { workspace = true }
+drasi-computation-plugin-sdk = { workspace = true }
 libloading = "0.8"
 async-trait = "0.1"
 anyhow = "1.0"
@@ -52,6 +54,7 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+drasi-index-rocksdb = { workspace = true }
 tempfile = "3"
 libloading = "0.8"
 rmp-serde = "1"

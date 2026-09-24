@@ -46,6 +46,20 @@ jobs:
       - name: Show Rust toolchain
         run: rustup show
 
+      - name: Install Protobuf compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Protobuf compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install Protobuf compiler (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
       - name: Cache Cargo registry
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
@@ -80,6 +94,8 @@ jobs:
           cargo build --lib -p drasi-reaction-snapshot-test
           cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
           cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+          cargo build --lib -p drasi-computation-standard --features drasi-computation-standard/dynamic-plugin
+          cargo build --lib -p drasi-computation-network --features drasi-computation-network/dynamic-plugin
 
       - name: Copy plugins to test directory
         shell: bash
@@ -87,7 +103,7 @@ jobs:
           mkdir -p target/debug/plugins
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_standard drasi_computation_network; do
             SRC="target/debug/${PREFIX}${name}.${EXT}"
             if [ -f "$SRC" ]; then
               cp "$SRC" target/debug/plugins/
@@ -103,7 +119,7 @@ jobs:
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
           MISSING=0
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_standard drasi_computation_network; do
             FILE="target/debug/plugins/${PREFIX}${name}.${EXT}"
             if [ ! -f "$FILE" ]; then
               echo "ERROR: Expected plugin not found: $FILE"
@@ -115,10 +131,16 @@ jobs:
             ls -la target/debug/plugins/ || true
             exit 1
           fi
-          echo "All 6 test plugins verified."
+          echo "All 8 test plugins verified."
 
       - name: Run host-sdk FFI integration tests
         shell: bash
         env:
           RUST_BACKTRACE: full
-        run: cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1 --nocapture
+        run: cargo test -p drasi-host-sdk --test integration_test --test native_computation_pipeline -- --test-threads=1 --nocapture
+
+      - name: Run native network FFI loopback and wire tests
+        shell: bash
+        env:
+          RUST_BACKTRACE: full
+        run: cargo test -p drasi-computation-network --test network_loopback --test wire_contract -- --nocapture

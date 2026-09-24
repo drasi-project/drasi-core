@@ -198,6 +198,10 @@ fn index_error(error: anyhow::Error) -> IndexError {
 }
 
 impl TransformStore {
+    pub fn options(&self) -> &DurableMiddlewareOptions {
+        &self.options
+    }
+
     pub fn new(
         indexes: ComputationIndexes,
         definition: &MiddlewareTransformerDefinition,

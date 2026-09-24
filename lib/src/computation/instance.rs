@@ -30,7 +30,8 @@ use super::v1::{
 };
 use crate::error::{DrasiError, Result};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ComputationOptions {
     pub auto_start: bool,
 }
@@ -387,6 +388,10 @@ pub struct ComputationHandle {
 }
 
 impl ComputationHandle {
+    pub(super) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.entry, &other.entry)
+    }
+
     pub fn id(&self) -> &str {
         &self.entry.id
     }

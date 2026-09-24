@@ -473,7 +473,9 @@ either gives permission to use that behaviour, not a capability the source lacks
 
 Descriptor factories validate kind/configuration version and available schema.
 The host must first safely load and version-check dynamic plugins. The existing
-C ABI has not been changed by ComputationGraph. Task-scoped secret resolution
+Source/Reaction ABI remains at 0.15; the earlier recovery update distinguished
+an absent resume sequence from an explicit sequence zero. Native graph plugins
+use a different ABI family. Task-scoped secret resolution
 for in-process creation does not replace a dynamic plugin's injected resolver.
 
 Export does not recover construction recipes by reading resolved secret-bearing
@@ -481,6 +483,88 @@ Export does not recover construction recipes by reading resolved secret-bearing
 The dynamic SourceProxy forwards the loaded plugin's replay capability and
 position-handle removal calls. Replay therefore depends on the actual plugin;
 dynamic loading by itself neither supplies nor rules out replay support.
+
+## Native dynamic plugins
+
+The [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
+[native SDK](../../components/computation-plugin-sdk/README.md) are separate from
+the existing Source/Reaction plugin interface. ABI 1.0 loads sources,
+transformers, sinks and services directly into graph-native proxies; it does not
+translate them back into the older component model.
+
+Use `drasi_host_sdk::computation::load` when a native library is required.
+`PluginLoader::load_all_families` shares candidate discovery with legacy loading
+and selects the family from exported symbols and validated metadata. Missing
+native symbols permit the legacy path; a partial or invalid native declaration
+is an error, never an instruction to interpret its memory as another ABI.
+Native metadata, wire version, table size, target, schemas and capabilities are
+checked before instances are used. Artifact resolution compares native ABI
+compatibility independently of the legacy SDK/core/lib Rust package versions.
+
+Native factories retain implementation/plugin versions and configuration
+schemas. `NativeFactory::specification` supplies the graph definition, and
+`PluginRegistry::computation_factory_registry` combines native factories with
+the standard graph factories. The graph owns scheduling and cancellation;
+operations cross the boundary as poll/wake/cancel handles and owned serialized
+buffers. Control notifications do not wait behind mutable data processing.
+Libraries remain loaded for the process lifetime.
+
+The SDK's optional `TransactionalComponent` interface adds a borrowed
+`NativeTransactionContext`. It exposes step-local values/elements through the
+host's active transaction, not the Rust transaction object itself. The host
+rejects failed, cancelled or unfinished state requests before a step succeeds.
+Participants cannot commit, retain a usable transaction after the call, or
+schedule independent transaction work.
+
+ABI 1.0 deliberately does not claim native query snapshot/outbox interfaces,
+source recovery-progress handles, arbitrary provider injection, in-place
+reconfiguration, or safe library unloading. Unsupported capabilities are
+rejected. Existing query implementations and durable source adapters remain
+available in mixed graphs; this does not confer durability on a volatile native
+source.
+
+The [native network plugin](../../components/computation-plugins/network/README.md)
+provides HTTP and gRPC sources and query-result sinks for standard Server
+performance workloads. It reuses the existing external wire contracts, not
+Source/Reaction runtime adapters. Sources mark their nonpersistent streams with
+`GraphProducerIdentity::volatile` and `GraphProducerProgress::annotate`;
+persistent consumers still reject an unrecoverable upstream. Sinks use
+`QueryChangeCodec::row_values_to_json` for the established outward JSON
+projection without manufacturing legacy query results. Adaptive batching,
+bootstrap and source replay are not supplied by these initial network factories.
+
+## Configuration snapshots
+
+`snapshot_configuration()` retains the ordinary source/query/reaction API.
+For the complete user configuration, use:
+
+```rust,ignore
+let snapshot = drasi.snapshot_computation_configuration().await?;
+let json = serde_json::to_string_pretty(&snapshot)?;
+```
+
+The versioned result contains `instance` (the ordinary configuration),
+`native_components` (native additions to the root), and `graphs` (separately
+registered graphs plus their startup policies). Generated query-internal graphs
+are not duplicated as independent user configuration.
+
+Each graph includes its desired topology and a configuration entry for every
+component: submitted values before construction, captured values from the
+component getter, or an explicit unavailability reason. Factory definitions
+remain present when creation fails. Captures occur at construction and
+reconfiguration boundaries, so snapshotting does not borrow a component from an
+in-flight processing call. Collection detects concurrent graph/instance changes
+and retries; sustained changes produce an explicit retry error.
+
+`DesiredTopology::resource_configurations` retains host-supplied provider recipes.
+It does not inspect arbitrary provider objects or transfer ownership. Recipes
+for replaced/rebound resources are discarded rather than kept with a different
+live object. Missing recipes and external component/pipe bindings must be
+provided by the restoring host, or reported as incomplete configuration.
+
+These exports may contain secret-bearing configuration. They are not the public
+topology-as-data view and must be protected like configuration files. They do
+not include query rows, queued events, checkpoint data or a storage migration.
 
 ## Inspection schema
 

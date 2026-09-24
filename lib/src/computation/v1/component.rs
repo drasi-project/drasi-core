@@ -63,6 +63,20 @@ pub struct OutputEnvelope {
 #[async_trait]
 pub trait ComputationComponent: Send + Sync {
     fn descriptor(&self) -> &ComponentDescriptor;
+    /// Configuration values, not live processing state. Identity, lifecycle
+    /// policy and external resource bindings are recorded by the graph.
+    /// Values may change only through construction or reconfiguration, not
+    /// through processing, so the host can publish them at those boundaries.
+    ///
+    /// Persistence may contain secrets; this is not a redacted inspection API.
+    /// An opaque externally supplied component must report that configuration
+    /// is unavailable rather than return an empty, apparently complete object.
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!(
+            "component {} does not expose its configuration; retain its external binding",
+            self.descriptor().id()
+        )
+    }
     /// Supplies a generation-bound sender. This is optional for components that
     /// do not originate control notifications.
     fn bind_control(&mut self, _control: super::ComponentControl) {}

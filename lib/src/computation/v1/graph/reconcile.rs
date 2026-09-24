@@ -396,6 +396,7 @@ pub(super) fn preview(
                 {
                     if prior != spec {
                         resources.insert(spec.id.clone());
+                        desired.resource_configurations.remove(&spec.id);
                     }
                     *prior = spec.clone();
                 } else {
@@ -408,6 +409,7 @@ pub(super) fn preview(
                     return Err(topology(format!("resource {id} was not declared")));
                 }
                 resources.insert(id.clone());
+                desired.resource_configurations.remove(id);
             }
             DesiredMutation::RemoveResource { resource, policy } => {
                 let users = resource_users(&desired, resource);
@@ -440,6 +442,7 @@ pub(super) fn preview(
                 }
                 let before = desired.resources.len();
                 desired.resources.retain(|spec| &spec.id != resource);
+                desired.resource_configurations.remove(resource);
                 if before == desired.resources.len() {
                     return Err(topology("unknown resource"));
                 }
@@ -1738,6 +1741,15 @@ fn commit_desired(
         .iter()
         .map(|spec| (spec.id.clone(), spec.clone()))
         .collect();
+    graph.snapshot.resource_configurations = plan
+        .desired
+        .resource_configurations
+        .iter()
+        .filter(|(id, _)| {
+            graph.snapshot.resources.contains_key(*id) && !plan.resources.contains(*id)
+        })
+        .map(|(id, configuration)| (id.clone(), configuration.clone()))
+        .collect();
     graph.snapshot.lifecycle_policies = plan
         .desired
         .components
@@ -2001,6 +2013,7 @@ async fn realize(
             })
             .await;
         }
+        lease.refresh_configuration();
         match created {
             Ok(()) => {
                 update(graph, |state| {
