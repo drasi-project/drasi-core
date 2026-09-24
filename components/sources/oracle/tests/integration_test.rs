@@ -904,6 +904,7 @@ async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> R
             nodes: HashSet::from(["drasi_products".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: true,
         };
         let response = source

@@ -19,6 +19,7 @@ use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
 use crate::{MySqlBootstrapConfig, MySqlBootstrapProvider, TableKeyConfig};
+use drasi_mysql_common::SslModeDto;
 
 // ── DTO types ────────────────────────────────────────────────────────────────
 
@@ -69,15 +70,22 @@ pub struct MySqlBootstrapConfigDto {
     #[serde(default)]
     pub tables: Vec<String>,
 
+    /// SSL/TLS mode. Defaults to `if_available`.
+    #[serde(default)]
+    #[schema(value_type = SslModeDto)]
+    pub ssl_mode: ConfigValue<SslModeDto>,
+
     #[serde(default)]
     #[schema(value_type = Vec<bootstrap::mysql::MySqlTableKeyConfig>)]
     pub table_keys: Vec<MySqlTableKeyConfigDto>,
 }
 
+// SSL mode DTO (`SslModeDto`) is shared from `drasi-mysql-common`.
+
 // ── Descriptor ───────────────────────────────────────────────────────────────
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(MySqlBootstrapConfigDto, MySqlTableKeyConfigDto,)))]
+#[openapi(components(schemas(MySqlBootstrapConfigDto, MySqlTableKeyConfigDto, SslModeDto,)))]
 struct MySqlBootstrapSchemas;
 
 /// Plugin descriptor for the MySQL bootstrap provider.
@@ -132,6 +140,10 @@ impl BootstrapPluginDescriptor for MySqlBootstrapDescriptor {
             user: mapper.resolve_string(&dto.user).await?,
             password: mapper.resolve_string(&dto.password).await?,
             tables: dto.tables,
+            ssl_mode: mapper
+                .resolve_typed::<SslModeDto>(&dto.ssl_mode)
+                .await?
+                .into(),
             table_keys,
         };
 

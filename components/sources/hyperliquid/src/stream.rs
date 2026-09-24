@@ -22,8 +22,6 @@ use crate::mapping::{
 use crate::rest::HyperliquidRestClient;
 use crate::types::{FundingSnapshot, L2Book, Liquidation, Trade, WsMessage};
 use anyhow::{anyhow, Result};
-use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
-use drasi_lib::profiling;
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -47,7 +45,7 @@ pub struct WsStreamParams {
     pub ws_url: String,
     pub config: HyperliquidSourceConfig,
     pub coins: Vec<String>,
-    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    pub base: SourceBase,
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
     pub stream_state: StreamState,
     pub shutdown_rx: watch::Receiver<bool>,
@@ -58,7 +56,7 @@ pub struct FundingPollParams {
     pub source_id: String,
     pub rest_client: HyperliquidRestClient,
     pub config: HyperliquidSourceConfig,
-    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    pub base: SourceBase,
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
     pub stream_state: StreamState,
     pub shutdown_rx: watch::Receiver<bool>,
@@ -112,7 +110,7 @@ pub async fn run_ws_stream(params: WsStreamParams) -> Result<()> {
         ws_url,
         config,
         coins,
-        dispatchers,
+        base,
         state_store,
         stream_state,
         mut shutdown_rx,
@@ -151,7 +149,7 @@ pub async fn run_ws_stream(params: WsStreamParams) -> Result<()> {
                                 Some(Ok(Message::Text(text))) => {
                                     if let Err(e) = handle_ws_message(
                                         &source_id,
-                                        &dispatchers,
+                                        &base,
                                         &state_store,
                                         &stream_state,
                                         &coin_filter,
@@ -268,7 +266,7 @@ where
 
 async fn handle_ws_message(
     source_id: &str,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     stream_state: &StreamState,
     coin_filter: &Option<HashSet<String>>,
@@ -299,7 +297,7 @@ async fn handle_ws_message(
                 }
 
                 let changes = map_trade_to_changes(source_id, &trade)?;
-                dispatch_changes(source_id, dispatchers, changes).await;
+                dispatch_changes(source_id, base, changes).await;
             }
         }
         "l2Book" => {
@@ -317,7 +315,7 @@ async fn handle_ws_message(
                 let mut initialized = stream_state.initialized.write().await;
                 map_order_book_to_changes(source_id, &book, &mut initialized)?
             };
-            dispatch_changes(source_id, dispatchers, changes).await;
+            dispatch_changes(source_id, base, changes).await;
         }
         "allMids" => {
             let mids_value = msg
@@ -335,7 +333,7 @@ async fn handle_ws_message(
                 let mut initialized = stream_state.initialized.write().await;
                 map_mid_prices_to_changes(source_id, &filtered, &mut initialized, timestamp)?
             };
-            dispatch_changes(source_id, dispatchers, changes).await;
+            dispatch_changes(source_id, base, changes).await;
         }
         "liquidations" => {
             let liquidations: Vec<Liquidation> = serde_json::from_value(msg.data)?;
@@ -349,7 +347,7 @@ async fn handle_ws_message(
                     }
                 }
                 let changes = map_liquidation_to_changes(source_id, &liquidation)?;
-                dispatch_changes(source_id, dispatchers, changes).await;
+                dispatch_changes(source_id, base, changes).await;
             }
         }
         _ => {
@@ -418,25 +416,13 @@ async fn should_emit_trade(
     should_emit
 }
 
-async fn dispatch_changes(
+pub(crate) async fn dispatch_changes(
     source_id: &str,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     changes: Vec<drasi_core::models::SourceChange>,
 ) {
     for change in changes {
-        let mut profiling = profiling::ProfilingMetadata::new();
-        profiling.source_send_ns = Some(profiling::timestamp_ns());
-
-        let wrapper = SourceEventWrapper::with_profiling(
-            source_id.to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-            profiling,
-        );
-
-        if let Err(e) =
-            SourceBase::dispatch_from_task(dispatchers.clone(), wrapper, source_id).await
-        {
+        if let Err(e) = base.dispatch_source_change(change).await {
             debug!("[{source_id}] Dispatch failed (no subscribers): {e}");
         }
     }
@@ -447,7 +433,7 @@ pub async fn run_funding_poll(params: FundingPollParams) -> Result<()> {
         source_id,
         rest_client,
         config,
-        dispatchers,
+        base,
         state_store,
         stream_state,
         mut shutdown_rx,
@@ -510,7 +496,7 @@ pub async fn run_funding_poll(params: FundingPollParams) -> Result<()> {
                         // Locks dropped — safe to .await on persist and dispatch.
                         for (changes, coin, snapshot) in to_dispatch {
                             persist_funding_snapshot(&state_store, &source_id, &coin, &snapshot).await;
-                            dispatch_changes(&source_id, &dispatchers, changes).await;
+                            dispatch_changes(&source_id, &base, changes).await;
                         }
                     }
                     Err(e) => {

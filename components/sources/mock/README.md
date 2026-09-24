@@ -14,6 +14,7 @@ The Mock Source is a synthetic data generator for testing, development, and demo
 - Three data generation modes: Counter, SensorReading, and Generic
 - Configurable generation intervals (milliseconds to seconds)
 - Realistic sensor behavior (INSERT on first reading, UPDATE thereafter)
+- Optional live `CONNECTED_TO` sensor mesh (`DataType::sensor_reading_mesh`)
 - Builder pattern for fluent construction
 - Built-in test utilities for unit testing
 - Zero external dependencies
@@ -69,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
 |-----------|-------------------|----------------|
 | `Counter` | Sequential, predictable values for testing ordering | Always INSERT |
 | `SensorReading` | Realistic IoT simulation with updates to existing entities | INSERT then UPDATE |
+| `SensorReading` + mesh | Same sensors plus a live `CONNECTED_TO` mesh | Nodes INSERT/UPDATE; edges INSERT/UPDATE/DELETE |
 | `Generic` | Random data for general testing | Always INSERT |
 
 ## Usage Examples
@@ -93,6 +95,12 @@ use drasi_source_mock::{MockSource, DataType};
 // Simulates 10 sensors reporting temperature and humidity
 let source = MockSource::builder("sensors")
     .with_data_type(DataType::sensor_reading(10))
+    .with_interval_ms(2000)
+    .build()?;
+
+// Same sensors plus a live CONNECTED_TO mesh (ring + chords)
+let mesh = MockSource::builder("sensors")
+    .with_data_type(DataType::sensor_reading_mesh(10))
     .with_interval_ms(2000)
     .build()?;
 ```
@@ -195,6 +203,21 @@ Properties:
 ```
 
 **Key behavior**: First reading for each sensor → INSERT. Subsequent readings → UPDATE.
+
+When `mesh` is true (`DataType::sensor_reading_mesh(n)`), the source also emits
+`CONNECTED_TO` relationships between sensors after all sensors have been seen:
+
+```
+Label: CONNECTED_TO
+Element ID: mesh_ring_{i} / mesh_chord_{k}
+From/To: sensor_{i} → sensor_{j}  (same source_id as the nodes)
+Properties:
+  - strength: Float (0.3 - 1.0)
+```
+
+Edge `strength` updates over time and chords are occasionally deleted and rewired
+so graph widgets can show live topology changes. Existing configs omit `mesh` and
+stay node-only.
 
 **Example output:**
 ```json
@@ -411,7 +434,7 @@ Error: sensor_count cannot be 0
 
 ## Limitations
 
-- Generates nodes only (no relationships/edges)
+- Generates nodes by default; relationships only when SensorReading `mesh` is enabled
 - Fixed schemas per data type (not customizable)
 - Only SensorReading supports UPDATE events
 - Counter resets on restart; seen sensors persist across stop/start cycles

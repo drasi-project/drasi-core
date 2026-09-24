@@ -17,25 +17,27 @@
 //! Uses a dedicated `outbox` column family with keys formatted as:
 //! `{query_id}:{sequence_u64_be}` (8-byte big-endian suffix for ordered iteration).
 //!
-//! Writes are standalone (not part of the session transaction) since outbox
-//! persistence happens after the index transaction commits.
+//! When a session is active, `append` stages into that transaction so outbox
+//! entries commit atomically with index writes, source checkpoints, live
+//! results, and the result sequence. Outside a session (tests, wipe/trim)
+//! writes go directly to the DB.
 
 use std::sync::Arc;
 
-use crate::IndexDb;
+use crate::{IndexDb, RocksDbSessionState};
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, OutboxWriter};
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode};
 use tokio::task;
 
 /// Column family name for outbox data.
 pub(crate) const OUTBOX_CF: &str = "outbox";
 
 /// Returns the column family descriptor for the outbox CF.
-pub(crate) fn outbox_cf_descriptor() -> ColumnFamilyDescriptor {
-    let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
-    ColumnFamilyDescriptor::new(OUTBOX_CF, opts)
+pub(crate) fn outbox_cf_descriptor(options: &crate::RocksIndexOptions) -> ColumnFamilyDescriptor {
+    let block_cache = options.memory_budget().block_cache();
+    let opts = crate::cf_options::base_cf_options(block_cache);
+    crate::sizing::descriptor(OUTBOX_CF, opts, options)
 }
 
 /// Build the outbox key: `{query_id}\x00{sequence_be_bytes}`.
@@ -69,14 +71,93 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// RocksDB-backed outbox writer.
 ///
 /// Stores serialized query results in a column family with ordered keys
-/// for efficient range reads and trimming.
+/// for efficient range reads and trimming. Shares `RocksDbSessionState`
+/// with the rest of the query so `append` can join the outer transaction.
 pub struct RocksDbOutboxWriter {
     db: Arc<IndexDb>,
+    session_state: Arc<RocksDbSessionState>,
 }
 
 impl RocksDbOutboxWriter {
-    pub fn new(db: Arc<IndexDb>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
+        Self { db, session_state }
+    }
+}
+
+fn delete_keys(
+    db: &IndexDb,
+    session_state: &RocksDbSessionState,
+    require_session: bool,
+    cf: &impl rocksdb::AsColumnFamilyRef,
+    keys: &[Vec<u8>],
+) -> Result<(), IndexError> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    if require_session {
+        session_state.with_txn(|txn| {
+            for key in keys {
+                txn.delete_cf(cf, key).map_err(IndexError::other)?;
+            }
+            Ok(())
+        })
+    } else {
+        for key in keys {
+            db.delete_cf(cf, key).map_err(IndexError::other)?;
+        }
+        Ok(())
+    }
+}
+
+fn collect_prefix_keys(
+    iter: impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
+    prefix: &[u8],
+    retain_from: Option<u64>,
+) -> Result<Vec<Vec<u8>>, IndexError> {
+    let mut keys = Vec::new();
+    for item in iter {
+        match item {
+            Ok((key, _)) => {
+                if !key.starts_with(prefix) {
+                    break;
+                }
+                match retain_from {
+                    Some(retain_from) => match sequence_from_key(&key, prefix.len()) {
+                        Some(seq) if seq < retain_from => keys.push(key.to_vec()),
+                        Some(_) => break,
+                        None => {}
+                    },
+                    None => keys.push(key.to_vec()),
+                }
+            }
+            Err(e) => return Err(IndexError::other(e)),
+        }
+    }
+    Ok(keys)
+}
+
+fn collect_keys_for_trim(
+    db: &IndexDb,
+    session_state: &RocksDbSessionState,
+    require_session: bool,
+    cf: &impl rocksdb::AsColumnFamilyRef,
+    prefix: &[u8],
+    retain_from: Option<u64>,
+) -> Result<Vec<Vec<u8>>, IndexError> {
+    if require_session {
+        session_state.with_txn(|txn| {
+            collect_prefix_keys(
+                txn.iterator_cf(cf, IteratorMode::From(prefix, rocksdb::Direction::Forward)),
+                prefix,
+                retain_from,
+            )
+        })
+    } else {
+        collect_prefix_keys(
+            db.iterator_cf(cf, IteratorMode::From(prefix, rocksdb::Direction::Forward)),
+            prefix,
+            retain_from,
+        )
     }
 }
 
@@ -84,12 +165,22 @@ impl RocksDbOutboxWriter {
 impl OutboxWriter for RocksDbOutboxWriter {
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let key = make_key(query_id, sequence);
         let data = data.to_vec();
+        // Capture intent before spawn_blocking: if this append was scheduled
+        // inside a session, cancellation/rollback must not fall back to a
+        // standalone write after the txn is gone.
+        let require_session = session_state.has_active_session()?;
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            db.put_cf(&cf, &key, &data).map_err(IndexError::other)
+            if require_session {
+                session_state
+                    .with_txn(|txn| txn.put_cf(&cf, &key, &data).map_err(IndexError::other))
+            } else {
+                db.put_cf(&cf, &key, &data).map_err(IndexError::other)
+            }
         })
         .await
         .map_err(IndexError::other)?
@@ -194,40 +285,52 @@ impl OutboxWriter for RocksDbOutboxWriter {
         .map_err(IndexError::other)?
     }
 
-    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+    async fn trim_before(&self, query_id: &str, retain_from: u64) -> Result<usize, IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let prefix = make_prefix(query_id);
+        let require_session = session_state.has_active_session()?;
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-
-            // First, count total entries
-            let iter = db.iterator_cf(
+            let keys = collect_keys_for_trim(
+                &db,
+                &session_state,
+                require_session,
                 &cf,
-                IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-            );
-            let mut keys: Vec<Vec<u8>> = Vec::new();
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        keys.push(key.to_vec());
-                    }
-                    Err(e) => return Err(IndexError::other(e)),
-                }
-            }
+                &prefix,
+                Some(retain_from),
+            )?;
+            let removed = keys.len();
+            delete_keys(&db, &session_state, require_session, &cf, &keys)?;
+            Ok(removed)
+        })
+        .await
+        .map_err(IndexError::other)?
+    }
 
+    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+        let db = self.db.clone();
+        let session_state = self.session_state.clone();
+        let prefix = make_prefix(query_id);
+        let require_session = session_state.has_active_session()?;
+
+        task::spawn_blocking(move || {
+            let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
+            let keys =
+                collect_keys_for_trim(&db, &session_state, require_session, &cf, &prefix, None)?;
             let total = keys.len();
             if total <= capacity {
                 return Ok(0);
             }
-
             let to_remove = total - capacity;
-            for key in keys.iter().take(to_remove) {
-                db.delete_cf(&cf, key).map_err(IndexError::other)?;
-            }
+            delete_keys(
+                &db,
+                &session_state,
+                require_session,
+                &cf,
+                &keys[..to_remove],
+            )?;
             Ok(to_remove)
         })
         .await

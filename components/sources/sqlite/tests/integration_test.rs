@@ -21,6 +21,7 @@ use std::time::Duration;
 use drasi_bootstrap_sqlite::{SqliteBootstrapProvider, TableKeyConfig as BootstrapTableKeyConfig};
 use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_lib::channels::ResultDiff;
+use drasi_lib::channels::SourceEvent;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::Source;
 use drasi_lib::{DrasiLib, Query};
@@ -375,6 +376,7 @@ async fn sqlite_bootstrap_loads_existing_rows() {
         nodes: HashSet::from(["sensors".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
 
@@ -511,4 +513,82 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
     assert!(saw_device_query, "did not receive devices query result");
 
     core.stop().await.unwrap();
+}
+
+/// Every change the SQLite CDC background task emits must carry a
+/// framework-assigned, strictly increasing `sequence` (issue #828). The SQLite
+/// source has no durability, so before migrating from the unstamped
+/// `dispatch_from_task` helper to `dispatch_event`, these events had
+/// `sequence = None`. This subscribes directly to the source's change stream
+/// and asserts the sequences are stamped and monotonic.
+#[tokio::test]
+#[ignore]
+async fn sqlite_emitted_changes_have_monotonic_sequence() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("sequence.db");
+
+    let source = SqliteSource::builder("sqlite-seq-source")
+        .with_path(db_path.to_string_lossy().to_string())
+        .with_table_keys(vec![TableKeyConfig {
+            table: "items".to_string(),
+            key_columns: vec!["id".to_string()],
+        }])
+        .build()
+        .unwrap();
+    let handle = source.handle();
+
+    source.start().await.unwrap();
+    sleep(Duration::from_millis(100)).await;
+
+    // Subscribe for live change events (no bootstrap).
+    let settings = SourceSubscriptionSettings {
+        source_id: "sqlite-seq-source".to_string(),
+        enable_bootstrap: false,
+        query_id: "sqlite-seq-query".to_string(),
+        nodes: HashSet::from(["items".to_string()]),
+        relations: HashSet::new(),
+        resume_from: None,
+        resume_sequence: None,
+        request_position_handle: false,
+    };
+    let response = source.subscribe(settings).await.unwrap();
+    let mut rx = response.receiver;
+
+    handle
+        .execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT);")
+        .await
+        .unwrap();
+    let insert_count = 5u64;
+    for i in 1..=insert_count {
+        handle
+            .execute(&format!(
+                "INSERT INTO items(id, name) VALUES ({i}, 'item-{i}')"
+            ))
+            .await
+            .unwrap();
+    }
+
+    // Collect the emitted change events and assert every one carries a
+    // strictly increasing framework sequence.
+    let mut sequences = Vec::new();
+    while (sequences.len() as u64) < insert_count {
+        let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for change event")
+            .expect("change stream closed unexpectedly");
+        // Only count data changes (skip any control events).
+        if matches!(event.event, SourceEvent::Change(_)) {
+            sequences.push(event.sequence);
+        }
+    }
+
+    source.stop().await.unwrap();
+
+    // Sequences must be present, unique, and strictly increasing.
+    for pair in sequences.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "sequences must be strictly increasing, got {sequences:?}"
+        );
+    }
 }

@@ -325,7 +325,7 @@ fn categorize_error(error_str_lower: &str) -> &'static str {
 fn latest_item_timestamp(batch: &[ProtoQueryResultItem]) -> Option<prost_types::Timestamp> {
     batch
         .iter()
-        .filter_map(|item| item.timestamp.clone())
+        .filter_map(|item| item.timestamp)
         .max_by(|a, b| {
             a.seconds
                 .cmp(&b.seconds)

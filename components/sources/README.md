@@ -106,10 +106,10 @@ context later and again in [Appendix B](#appendix-b--glossary).
 | Term | What it is |
 |------|------------|
 | **`SourceChange`** | The graph mutation you emit: an `Insert`, `Update`, or `Delete` of a node or relation. |
-| **`SourceEventWrapper`** | The envelope `SourceBase` dispatches: a `SourceChange` plus sequence, timestamp, and optional `source_position`. |
+| **`SourceEventWrapper`** | The envelope used by sources and downstream consumers: an event, timestamp, required `sequence: u64`, and optional `source_position`. |
 | **`SourceBase`** | The helper you embed in your source struct. It owns subscriptions, dispatch, status, sequencing, replay, and shutdown. |
 | **Bootstrap** | The initial snapshot a query receives before live changes, produced by a `BootstrapProvider` — separately from streaming. |
-| **Framework sequence** | A monotonic `u64` that `SourceBase` stamps on every event, used for ordering and query checkpoints. |
+| **Event sequence** | A source-local monotonic `u64` supplied by the source or allocated with `SourceBase::next_sequence()`, used for ordering and query checkpoints. |
 | **Source position** | Opaque bytes you attach to an event identifying an upstream replay position (an offset, an LSN, a WAL sequence). |
 | **Replay** | Re-serving events from a persisted position after a restart so a resuming query misses nothing. |
 | **State store** | A key/value store `drasi-lib` provides so your source can persist small state (cursors, seen-IDs) across restarts ([§8](#using-the-state-store-to-survive-restarts)). |
@@ -119,7 +119,8 @@ context later and again in [Appendix B](#appendix-b--glossary).
 
 1. **Sources are active producers.** A Source owns the connection, listener,
    poller, consumer, or in-memory API that ingests data from an external system.
-   It pushes `SourceEventWrapper` values to the runtime through `SourceBase`.
+    It pushes `SourceEventWrapper` values to the runtime through `SourceBase`, which
+    preserves their required sequence numbers.
 
 2. **Queries subscribe to Sources.** Sources do not know query text and do not
    evaluate Cypher / GQL. The runtime calls `subscribe(settings)` for each query that
@@ -129,7 +130,7 @@ context later and again in [Appendix B](#appendix-b--glossary).
 3. **The emitted shape is fixed.** Sources may transform external payloads into a
    graph model, but after that transformation they always emit the same Drasi
    data contract: `SourceChange::Insert`, `Update`, or `Delete` wrapped in
-   `SourceEventWrapper`. Sources do not use reaction-style output templates.
+   a `SourceEventWrapper`. Sources do not use reaction-style output templates.
 
 4. **Resilience is part of the Source contract.** A Source must be explicit about
    whether it can replay from a persisted position. Native-log sources use
@@ -648,7 +649,8 @@ Typical Source lifecycle:
 2. **Initialize** — runtime calls `initialize(SourceRuntimeContext)`.
 3. **Start** — connect to external systems and spawn ingestion tasks.
 4. **Subscribe** — queries call `subscribe(settings)` and receive event channels.
-5. **Stream** — source dispatches live `SourceEventWrapper` values.
+5. **Stream** — source dispatches live `SourceEventWrapper` values with required
+    sequence numbers through `SourceBase`.
 6. **Stop** — signal tasks, wait briefly, abort if necessary, clear stale
    channel-mode dispatchers.
 7. **Deprovision** — optional permanent cleanup when a source is deleted with
@@ -679,8 +681,8 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
     pub resume_from: Option<Bytes>,
+    pub resume_sequence: Option<u64>,
     pub request_position_handle: bool,
-    pub last_sequence: Option<u64>,
 }
 ```
 
@@ -690,8 +692,9 @@ The settings are important:
   the query actually needs.
 - `resume_from` contains opaque source-position bytes from a prior checkpoint.
   Only the Source knows how to interpret them.
-- `last_sequence` lets `SourceBase` keep framework sequence numbers monotonic
-  after restart.
+- `resume_sequence` carries the last source-local sequence the query
+  checkpointed, so `SourceBase` keeps framework sequence numbers monotonic
+  after restart (it raises its counter to `resume_sequence + 1`).
 - `request_position_handle` asks replay-capable sources for a shared
   `Arc<AtomicU64>` so the query can report its durably processed sequence.
 
@@ -994,7 +997,7 @@ subscribe(query B, enable_bootstrap = true, resume_from = None)
     ↓
 on_subscriptions_complete()
     ↓
-dispatch live SourceEventWrapper values
+dispatch live SourceEventWrapper values with required sequence numbers
 ```
 
 Restart with query checkpoint:
@@ -1004,7 +1007,7 @@ initialize(context)
     ↓
 start()
     ↓
-subscribe(query, resume_from = Some(source_position), last_sequence = Some(seq))
+subscribe(query, resume_from = Some(source_position), resume_sequence = Some(seq))
     ↓
 source validates/rewinds/replays
     ↓
@@ -1182,7 +1185,8 @@ self.base.dispatch_source_change(change).await?;
 ```
 
 Use `dispatch_event()` when you need to attach `source_position` or custom
-profiling metadata:
+profiling metadata. Build a `SourceEventWrapper` with a required sequence,
+using your own monotonic ordinal or `SourceBase::next_sequence()`:
 
 ```rust,ignore
 use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
@@ -1191,6 +1195,7 @@ let mut wrapper = SourceEventWrapper::new(
     self.base.id.clone(),
     SourceEvent::Change(change),
     chrono::Utc::now(),
+    self.base.next_sequence(),
 );
 wrapper.set_source_position(bytes::Bytes::from(lsn.to_be_bytes().to_vec()));
 self.base.dispatch_event(wrapper).await?;
@@ -1198,6 +1203,11 @@ self.base.dispatch_event(wrapper).await?;
 
 Use `dispatch_events_batch()` when a poll cycle or database read produces many
 events and all can be dispatched together.
+
+Serialize allocation and dispatch together when multiple tasks produce events
+for one source, including batch construction. `next_sequence()` allocates a
+unique number but does not reserve dispatch order. `dispatch_source_change()`
+and `broadcast_control()` handle allocation and dispatch under one ordering lock.
 
 ### Position helpers
 
@@ -1321,7 +1331,8 @@ Map external types deliberately:
 
 ### `SourceEventWrapper`
 
-`SourceBase` dispatches `SourceEventWrapper` values:
+Source authors and downstream consumers use the same envelope. Its `sequence`
+field and both constructors (`new` and `with_profiling`) require a `u64`:
 
 ```rust,ignore
 pub struct SourceEventWrapper {
@@ -1329,15 +1340,33 @@ pub struct SourceEventWrapper {
     pub event: SourceEvent,
     pub timestamp: DateTime<Utc>,
     pub profiling: Option<ProfilingMetadata>,
-    pub sequence: Option<u64>,
+    pub sequence: u64,
     pub source_position: Option<Bytes>,
 }
 ```
 
-`SourceBase::dispatch_event()` assigns `sequence` when it is `None`. Sources
-should set `source_position` before dispatch when the event has a replayable
-upstream position. `source_position` is opaque to the framework and must be no
-larger than 64 KB for checkpoint persistence.
+The source supplies `sequence`, either from its own source-local monotonic
+ordinal (such as a WAL append index) or from `SourceBase::next_sequence()`.
+Dispatch preserves this value and advances the fallback allocator past it.
+Sequences start at one and live events must be dispatched in increasing order.
+Native positions such as LSNs or partition offsets are not necessarily unique
+per event; keep them in `source_position` unless they also satisfy the sequence
+contract. Resume floors and WAL-head restoration advance the fallback counter
+but cannot correct a source's own sequence generator.
+
+Set `source_position` before dispatch when the
+event has a replayable upstream position. `source_position` is opaque to the
+framework and must be no larger than 64 KB for checkpoint persistence.
+
+> **Source-author checklist** — the fastest way is the right way:
+> 1. Obtain a source-local monotonic sequence or call `base.next_sequence()`.
+>    Pass it to `SourceEventWrapper::new` or `with_profiling`.
+> 2. If the event has a replayable upstream cursor, attach it with
+>    `wrapper.set_source_position(bytes)`.
+> 3. Call `base.dispatch_event(wrapper)` or `dispatch_events_batch(wrappers)`.
+>    Serialize steps 1 through 3 across concurrent producers.
+> 4. On replay, preserve durable sequence values. For native-position sources
+>    using the fallback allocator, allocate above the restored resume floor.
 
 ### Why there is no source templating
 
@@ -1391,6 +1420,7 @@ let mut wrapper = SourceEventWrapper::new(
     source_id.clone(),
     SourceEvent::Change(change),
     chrono::Utc::now(),
+    base.next_sequence(),
 );
 wrapper.set_source_position(bytes::Bytes::from(offset.to_be_bytes().to_vec()));
 base.dispatch_event(wrapper).await?;
@@ -2671,8 +2701,8 @@ fn settings(query_id: &str) -> SourceSubscriptionSettings {
         nodes: HashSet::from(["Order".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
-        last_sequence: None,
     }
 }
 
@@ -2710,7 +2740,7 @@ Replay-capable sources need explicit tests for:
 - resume from an available position
 - resume from a pruned/unavailable position
 - bootstrap skipped when `resume_from` is present
-- `last_sequence` advances `SourceBase` sequence generation
+- `resume_sequence` advances `SourceBase` sequence generation
 - position handles pin upstream feedback
 - dropping/removing position handles advances the minimum confirmed position
 - source-position comparator filters duplicate replay events
@@ -2903,9 +2933,9 @@ restart can dispatch events to dead receivers and silently lose data.
 
 Several source types cross the dynamic plugin FFI boundary. If you modify
 `Source`, `SourceSubscriptionSettings`, `SubscriptionResponse`,
-`SourceEventWrapper`, `BootstrapEvent`, `SourceChange`, `ComponentStatus`, or
-`DispatchMode`, update the plugin SDK/host SDK mappings and bump the FFI SDK
-version.
+`SourceEventWrapper`, `BootstrapEvent`, `SourceChange`,
+`ComponentStatus`, or `DispatchMode`, update the plugin SDK/host SDK mappings and
+bump the FFI SDK version.
 
 ---
 
@@ -2926,8 +2956,8 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
     pub resume_from: Option<Bytes>,
+    pub resume_sequence: Option<u64>,
     pub request_position_handle: bool,
-    pub last_sequence: Option<u64>,
 }
 ```
 
@@ -2957,7 +2987,7 @@ pub struct SourceEventWrapper {
     pub event: SourceEvent,
     pub timestamp: DateTime<Utc>,
     pub profiling: Option<ProfilingMetadata>,
-    pub sequence: Option<u64>,
+    pub sequence: u64,
     pub source_position: Option<Bytes>,
 }
 ```
@@ -3045,8 +3075,8 @@ pub enum CapacityPolicy {
 | Bootstrap | Initial data snapshot for a query. |
 | Streaming | Live change delivery after subscription. |
 | `SourceChange` | Insert, update, or delete graph mutation consumed by the query engine. |
-| `SourceEventWrapper` | Envelope around `SourceChange` with source ID, timestamp, sequence, source position, and profiling metadata. |
-| Framework sequence | Monotonic `u64` assigned by `SourceBase` for ordering and query checkpoints. |
+| `SourceEventWrapper` | Source and downstream event envelope with a required `sequence: u64`. |
+| Event sequence | Source-local monotonic `u64`, supplied by the source or allocated by `SourceBase`, for ordering and query checkpoints. |
 | Source position | Opaque bytes owned by the Source that identify an upstream replay position. |
 | Position handle | Shared atomic used by a query to report its last durably processed framework sequence back to the Source. |
 | Replay | Serving events from a prior persisted source position after restart or resubscription. |

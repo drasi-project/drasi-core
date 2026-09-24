@@ -179,6 +179,11 @@ impl RocksDbSessionState {
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))
     }
 
+    /// Whether a session transaction is currently open.
+    pub(crate) fn has_active_session(&self) -> Result<bool, IndexError> {
+        Ok(self.lock()?.txn.is_some())
+    }
+
     /// Execute `f` against the active session transaction.
     /// Returns an error if no session is active.
     pub(crate) fn with_txn<R>(
@@ -304,15 +309,12 @@ impl std::error::Error for SessionStateError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element_index::RocksIndexOptions;
     use crate::open_unified_db;
+    use crate::RocksIndexOptions;
 
     fn setup_test_db() -> (tempfile::TempDir, Arc<IndexDb>) {
         let dir = tempfile::TempDir::new().expect("failed to create temp dir");
-        let options = RocksIndexOptions {
-            archive_enabled: false,
-            direct_io: false,
-        };
+        let options = RocksIndexOptions::new(false, false, crate::RocksDbMemoryBudget::default());
         let db = open_unified_db(dir.path().to_str().expect("path"), "test", &options)
             .expect("failed to open db");
         (dir, db)

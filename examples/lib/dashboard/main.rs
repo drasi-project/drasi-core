@@ -29,15 +29,14 @@
 //! ## Architecture
 //!
 //! ```text
-//! MockSource (10 sensors, 2 s interval)
-//!   └─► 4 Cypher Queries ──► Dashboard Reaction (port 3000)
+//! MockSource (10 sensors + live mesh, 2 s interval)
+//!   └─► 5 Cypher Queries ──► Dashboard Reaction (port 3000)
 //! ```
 //!
 //! The MockSource generates random temperature (20–30 °C) and humidity (40–60 %)
-//! readings for 10 virtual sensors every 2 seconds.  Four continuous queries
-//! slice the data in different ways and feed a predefined dashboard with six
-//! widgets — including a markdown widget that uses `{{#if}}` conditionals to
-//! render status emojis.
+//! readings for 10 virtual sensors every 2 seconds, plus a live `CONNECTED_TO`
+//! mesh. Five continuous queries slice the data and feed a predefined dashboard
+//! with seven widgets — including a node-link graph of the sensor mesh.
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -60,17 +59,18 @@ async fn main() -> Result<()> {
     // Step 1: Create Mock Source
     // =========================================================================
     // Generates random temperature + humidity readings for 10 virtual sensors
-    // every 2 seconds.  First reading per sensor → INSERT, subsequent → UPDATE.
+    // every 2 seconds, plus a live CONNECTED_TO mesh. First reading per sensor
+    // → INSERT, subsequent → UPDATE. Mesh edges appear after all sensors exist.
 
     let mock_source = MockSource::builder("sensors")
-        .with_data_type(DataType::sensor_reading(10))
+        .with_data_type(DataType::sensor_reading_mesh(10))
         .with_interval_ms(2000)
         .build()?;
 
     // =========================================================================
     // Step 2: Define Queries
     // =========================================================================
-    // Four queries over the same source, each feeding a different widget type.
+    // Five queries over the same source, each feeding a different widget type.
 
     // Query 1: All Sensors — full table of current readings
     let all_sensors = Query::cypher("all-sensors")
@@ -129,6 +129,21 @@ async fn main() -> Result<()> {
         .auto_start(true)
         .build();
 
+    // Query 5: every sensor is a node; OPTIONAL MATCH keeps disconnected sensors
+    let sensor_mesh = Query::cypher("sensor-mesh")
+        .query(
+            r#"
+            MATCH (a:SensorReading)
+            OPTIONAL MATCH (a)-[r:CONNECTED_TO]->(b:SensorReading)
+            RETURN a.sensor_id AS node,
+                   b.sensor_id AS connects_to,
+                   r.strength AS weight
+        "#,
+        )
+        .from_source("sensors")
+        .auto_start(true)
+        .build();
+
     // =========================================================================
     // Step 3: Create Dashboard Reaction with a predefined dashboard
     // =========================================================================
@@ -143,7 +158,12 @@ async fn main() -> Result<()> {
                 id: "w-table-all".to_string(),
                 widget_type: "table".to_string(),
                 title: "All Sensors".to_string(),
-                grid: WidgetGrid { x: 0, y: 0, w: 8, h: 4 },
+                grid: WidgetGrid {
+                    x: 0,
+                    y: 0,
+                    w: 8,
+                    h: 4,
+                },
                 config: serde_json::json!({
                     "queryId": "all-sensors",
                     "columns": ["sensor_id", "temperature", "humidity", "timestamp"]
@@ -154,7 +174,12 @@ async fn main() -> Result<()> {
                 id: "w-kpi-total".to_string(),
                 widget_type: "kpi".to_string(),
                 title: "Sensors Online".to_string(),
-                grid: WidgetGrid { x: 8, y: 0, w: 4, h: 2 },
+                grid: WidgetGrid {
+                    x: 8,
+                    y: 0,
+                    w: 4,
+                    h: 2,
+                },
                 config: serde_json::json!({
                     "queryId": "all-sensors",
                     "valueField": "sensor_id",
@@ -167,7 +192,12 @@ async fn main() -> Result<()> {
                 id: "w-kpi-hot".to_string(),
                 widget_type: "kpi".to_string(),
                 title: "🔥 Hot Alerts".to_string(),
-                grid: WidgetGrid { x: 8, y: 2, w: 4, h: 2 },
+                grid: WidgetGrid {
+                    x: 8,
+                    y: 2,
+                    w: 4,
+                    h: 2,
+                },
                 config: serde_json::json!({
                     "queryId": "hot-sensors",
                     "valueField": "sensor_id",
@@ -180,7 +210,12 @@ async fn main() -> Result<()> {
                 id: "w-bar-temp".to_string(),
                 widget_type: "bar_chart".to_string(),
                 title: "Temperature by Sensor".to_string(),
-                grid: WidgetGrid { x: 0, y: 4, w: 6, h: 4 },
+                grid: WidgetGrid {
+                    x: 0,
+                    y: 4,
+                    w: 6,
+                    h: 4,
+                },
                 config: serde_json::json!({
                     "queryId": "sensor-overview",
                     "categoryField": "sensor_id",
@@ -192,7 +227,12 @@ async fn main() -> Result<()> {
                 id: "w-gauge-max".to_string(),
                 widget_type: "gauge".to_string(),
                 title: "Max Temperature".to_string(),
-                grid: WidgetGrid { x: 6, y: 4, w: 3, h: 4 },
+                grid: WidgetGrid {
+                    x: 6,
+                    y: 4,
+                    w: 3,
+                    h: 4,
+                },
                 config: serde_json::json!({
                     "queryId": "sensor-overview",
                     "valueField": "temperature",
@@ -206,7 +246,12 @@ async fn main() -> Result<()> {
                 id: "w-md-status".to_string(),
                 widget_type: "text".to_string(),
                 title: "Environment Status".to_string(),
-                grid: WidgetGrid { x: 9, y: 4, w: 3, h: 4 },
+                grid: WidgetGrid {
+                    x: 9,
+                    y: 4,
+                    w: 3,
+                    h: 4,
+                },
                 config: serde_json::json!({
                     "queryId": "sensor-overview",
                     "template": concat!(
@@ -234,6 +279,25 @@ async fn main() -> Result<()> {
                     )
                 }),
             },
+            // ── Graph: live sensor mesh ─────────────────────────────────
+            DashboardWidget {
+                id: "w-graph-mesh".to_string(),
+                widget_type: "graph".to_string(),
+                title: "Sensor Mesh".to_string(),
+                grid: WidgetGrid {
+                    x: 0,
+                    y: 8,
+                    w: 12,
+                    h: 6,
+                },
+                config: serde_json::json!({
+                    "queryId": "sensor-mesh",
+                    "nodeField": "node",
+                    "connectsToField": "connects_to",
+                    "valueField": "weight",
+                    "layout": "force"
+                }),
+            },
         ],
     );
 
@@ -242,6 +306,7 @@ async fn main() -> Result<()> {
         .with_query("hot-sensors")
         .with_query("humid-sensors")
         .with_query("sensor-overview")
+        .with_query("sensor-mesh")
         .with_host("0.0.0.0")
         .with_port(3000)
         .with_dashboard(predefined_dashboard)
@@ -258,6 +323,7 @@ async fn main() -> Result<()> {
             .with_query(hot_sensors)
             .with_query(humid_sensors)
             .with_query(sensor_overview)
+            .with_query(sensor_mesh)
             .with_reaction(dashboard_reaction)
             .build()
             .await?,
@@ -270,12 +336,13 @@ async fn main() -> Result<()> {
     println!("├──────────────────────────────────────────────┤");
     println!("│ 🌐 Dashboard UI: http://localhost:3000        │");
     println!("├──────────────────────────────────────────────┤");
-    println!("│ Mock Source: 10 sensors, readings every 2 s   │");
+    println!("│ Mock Source: 10 sensors + mesh, every 2 s     │");
     println!("│ Queries:                                      │");
     println!("│   • all-sensors     — Full table              │");
     println!("│   • hot-sensors     — Temperature > 27 °C     │");
     println!("│   • humid-sensors   — Humidity > 50 %         │");
     println!("│   • sensor-overview — Aggregation stats       │");
+    println!("│   • sensor-mesh     — CONNECTED_TO graph      │");
     println!("├──────────────────────────────────────────────┤");
     println!("│ Press Ctrl+C to stop                          │");
     println!("└──────────────────────────────────────────────┘\n");

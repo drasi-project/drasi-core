@@ -174,7 +174,17 @@ pub struct SourceBase {
     /// This is a vector of dispatchers that send source events to all registered
     /// subscribers (queries). When a source produces a change event, it broadcasts
     /// it to all dispatchers in this vector.
-    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    ///
+    /// Intentionally `pub(crate)`: source authors must **not** dispatch through
+    /// the raw dispatcher list, because that bypasses timestamp ordering,
+    /// sequence-floor tracking and `source_position` validation. Dispatch via
+    /// [`dispatch_event`](Self::dispatch_event),
+    /// [`dispatch_events_batch`](Self::dispatch_events_batch), or
+    /// [`dispatch_source_change`](Self::dispatch_source_change) — and use
+    /// [`clone_shared`](Self::clone_shared) to move an owned `SourceBase` into a
+    /// background task.
+    pub(crate) dispatchers:
+        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
     /// State store provider (extracted from context for convenience)
@@ -199,17 +209,12 @@ pub struct SourceBase {
     /// `request_position_handle == true`.
     position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
     /// Monotonically increasing counter for assigning event sequences.
-    /// The framework stamps every dispatched event with this sequence.
+    /// Used when a source does not supply its own sequence number.
     next_sequence: Arc<AtomicU64>,
-    /// Serializes the *sequence-assignment → timestamp-normalization → enqueue*
-    /// window per source so that events reach subscribers in the same order as
-    /// their assigned sequence numbers.
-    ///
-    /// Without this, two concurrent `dispatch_event` / `dispatch_events_batch`
-    /// calls can assign sequences in one order but reach the query-side
-    /// priority queue in the opposite order. `SequenceDedup` then treats the
-    /// later-delivered, lower-numbered event as an already-processed replay and
-    /// silently drops it (issue #640).
+    /// Serializes timestamp normalization and enqueue per source. Convenience
+    /// dispatch methods also allocate their sequence under this lock (#640).
+    /// Explicit-wrapper producers must serialize allocation and dispatch
+    /// themselves so `SequenceDedup` does not discard reordered live events.
     ///
     /// The guarded value is the last timestamp stamped on a dispatched event.
     /// The priority queue is a min-heap keyed on the wrapper timestamp, so each
@@ -595,11 +600,73 @@ impl SourceBase {
         map.clear();
     }
 
-    /// Reset the sequence counter, typically after recovering from a checkpoint.
-    /// The next dispatched event will receive `sequence + 1`.
+    /// Allocate the next source-local sequence number, starting at one.
+    ///
+    /// Sources without their own monotonic sequence can use this when building
+    /// an event. Serialize allocation and dispatch together across producers;
+    /// allocating a number alone does not reserve its place in dispatch order.
+    pub fn next_sequence(&self) -> u64 {
+        self.next_sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The single choke point that advances the per-source sequence counter,
+    /// owning the restart-monotonicity invariant for all callers.
+    ///
+    /// Sets `next_sequence` to at least `floor` using `fetch_max`, so it **never
+    /// lowers** the counter regardless of how many times or in what order it is
+    /// called. Both floor-raising mechanisms funnel through here:
+    /// - WAL-head/checkpoint restore in a source's `start()`
+    ///   (see [`set_next_sequence`](Self::set_next_sequence)), and
+    /// - the resuming-query checkpoint floor applied on subscribe
+    ///   (see [`raise_sequence_floor`](Self::raise_sequence_floor)).
+    ///
+    /// Because every path shares this one `fetch_max`, correctness does not
+    /// depend on call ordering between them: whichever floor is highest wins.
+    ///
+    /// Returns the previous counter value (for logging/diagnostics).
+    fn raise_next_sequence(&self, floor: u64) -> u64 {
+        self.next_sequence.fetch_max(floor, Ordering::Relaxed)
+    }
+
+    /// Raise the sequence counter to at least `sequence + 1`, typically after
+    /// recovering from a WAL-head/checkpoint restore. The next dispatched event
+    /// will receive at least `sequence + 1`.
+    ///
+    /// Funnels through [`raise_next_sequence`](Self::raise_next_sequence), so it
+    /// **never lowers** the counter and composes safely with the resume-floor
+    /// applied on subscribe regardless of ordering.
     pub fn set_next_sequence(&self, sequence: u64) {
-        self.next_sequence
-            .store(sequence.saturating_add(1), Ordering::Relaxed);
+        self.raise_next_sequence(sequence.saturating_add(1));
+    }
+
+    /// Raise the per-source sequence counter to a floor derived from a resuming
+    /// query's checkpointed sequence, so framework-filled sequences after a
+    /// restart stay strictly above that query's dedup high-water.
+    ///
+    /// `resume_sequence` is the last confirmed sequence `N`; the next event must
+    /// be `> N`, so the counter floor is `N + 1`. When multiple queries resume
+    /// with different floors, the highest one wins (per-subscriber position
+    /// filtering handles the overlap). A `None` `resume_sequence` (fresh start, or
+    /// a sequence-as-position source that restores via WAL-head instead) is a
+    /// no-op: the counter is left untouched.
+    ///
+    /// Funnels through [`raise_next_sequence`](Self::raise_next_sequence), so it
+    /// is idempotent: calling it more than once per subscription — or from more
+    /// than one subscribe path — is harmless. The subscribe paths
+    /// (`subscribe_with_bootstrap_context`, `subscribe_with_replay`) each call it
+    /// once, and every concrete `Source::subscribe()` routes to exactly one of
+    /// those.
+    fn raise_sequence_floor(&self, settings: &crate::config::SourceSubscriptionSettings) {
+        if let Some(resume_seq) = settings.resume_sequence {
+            let floor = resume_seq.saturating_add(1);
+            let prev = self.raise_next_sequence(floor);
+            if floor > prev {
+                debug!(
+                    "[{}] Raised next_sequence floor to {} for resuming query '{}' (was {})",
+                    self.id, floor, settings.query_id, prev
+                );
+            }
+        }
     }
 
     /// Returns whether a bootstrap provider is configured for this source.
@@ -840,6 +907,11 @@ impl SourceBase {
             settings.request_position_handle
         );
 
+        // Restart monotonicity: raise the per-source sequence counter to at least
+        // the resuming query's checkpointed sequence + 1, so framework-filled
+        // sequences after a restart are not dropped by the query's dedup filter.
+        self.raise_sequence_floor(settings);
+
         // Record that an initial bootstrap was requested so each CDC source's
         // start task knows to wait for the snapshot boundary. Set *before* the
         // dispatcher is registered below so it is visible once the task's
@@ -962,6 +1034,11 @@ impl SourceBase {
             settings.query_id, source_type, self.id, resume_seq
         );
 
+        // Restart monotonicity: raise the sequence counter to the resuming query's
+        // checkpointed sequence + 1. Complementary to the WAL-head restore below;
+        // whichever floor is higher wins.
+        self.raise_sequence_floor(settings);
+
         // Hold dispatchers write lock to block live dispatch during setup.
         // This ensures no live events reach the new subscriber before replay.
         let mut dispatchers = self.dispatchers.write().await;
@@ -1001,7 +1078,7 @@ impl SourceBase {
             Vec::new()
         };
 
-        // Build replay wrappers
+        // Build replay events (already stamped with their WAL sequence)
         let replay_wrappers: std::collections::VecDeque<
             std::sync::Arc<crate::channels::events::SourceEventWrapper>,
         > = replay_events
@@ -1011,7 +1088,7 @@ impl SourceBase {
                     source_id: self.id.clone(),
                     event: crate::channels::events::SourceEvent::Change(change),
                     timestamp: chrono::Utc::now(),
-                    sequence: Some(seq),
+                    sequence: seq,
                     source_position: Some(bytes::Bytes::from(seq.to_be_bytes().to_vec())),
                     profiling: None,
                 })
@@ -1198,24 +1275,24 @@ impl SourceBase {
     ///
     /// This method handles the common pattern of:
     /// - Creating profiling metadata with timestamp
-    /// - Wrapping the change in a SourceEventWrapper
-    /// - Dispatching to all subscribers
+    /// - Wrapping the change in a [`SourceEventWrapper`] with an allocated sequence
+    /// - Dispatching to all subscribers in sequence order
     /// - Handling the no-subscriber case gracefully
     pub async fn dispatch_source_change(&self, change: SourceChange) -> Result<()> {
         // Create profiling metadata
         let mut profiling = profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(profiling::timestamp_ns());
 
-        // Create event wrapper
+        let last_dispatch_ts = self.dispatch_order.lock().await;
         let wrapper = SourceEventWrapper::with_profiling(
             self.id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
             profiling,
+            self.next_sequence(),
         );
 
-        // Dispatch event
-        self.dispatch_event(wrapper).await
+        self.dispatch_event_ordered(wrapper, last_dispatch_ts).await
     }
 
     /// Maximum allowed size for source position bytes (64KB).
@@ -1248,13 +1325,23 @@ impl SourceBase {
         next
     }
 
-    /// Dispatch a SourceEventWrapper to all subscribers.
+    /// Dispatch an event without changing its sequence number.
     ///
-    /// This is a generic method for dispatching any SourceEvent.
-    /// It handles Arc-wrapping for zero-copy sharing and logs
-    /// when there are no subscribers.
-    /// The framework stamps every event with a monotonic sequence number.
-    pub async fn dispatch_event(&self, mut wrapper: SourceEventWrapper) -> Result<()> {
+    /// The allocator is advanced past the supplied sequence. Sources must
+    /// serialize sequence allocation and dispatch across concurrent producers
+    /// so live events arrive in increasing sequence order. For data changes
+    /// needing automatic allocation, [`Self::dispatch_source_change`] handles
+    /// both operations under the dispatch-order lock.
+    pub async fn dispatch_event(&self, wrapper: SourceEventWrapper) -> Result<()> {
+        let last_dispatch_ts = self.dispatch_order.lock().await;
+        self.dispatch_event_ordered(wrapper, last_dispatch_ts).await
+    }
+
+    async fn dispatch_event_ordered(
+        &self,
+        mut wrapper: SourceEventWrapper,
+        mut last_dispatch_ts: tokio::sync::MutexGuard<'_, chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
         // Warn about oversized source positions; the checkpoint layer will
         // enforce the limit and preserve the last good position.
         if let Some(ref pos) = wrapper.source_position {
@@ -1269,21 +1356,7 @@ impl SourceBase {
             }
         }
 
-        // Serialize the sequence-assignment → timestamp-normalization → enqueue
-        // window per source. Holding this guard across the dispatch loop
-        // guarantees the event with sequence N is fully enqueued before N+1 is
-        // assigned, so concurrent dispatches reach subscribers in sequence order
-        // and SequenceDedup never mistakes a reordered event for a replay (#640).
-        let mut last_dispatch_ts = self.dispatch_order.lock().await;
-
-        // Framework assigns the monotonic sequence (skip if pre-set by WAL)
-        if let Some(seq) = wrapper.sequence {
-            // Pre-set by WAL — advance counter to maintain monotonicity
-            self.next_sequence
-                .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
-        } else {
-            wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
-        }
+        self.set_next_sequence(wrapper.sequence);
 
         // Keep per-source timestamps strictly increasing in sequence order so
         // the timestamp-keyed priority queue cannot reorder same-source events.
@@ -1291,11 +1364,11 @@ impl SourceBase {
             Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
         // Record sequence→source_position mapping for confirmed-position lookups.
-        if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
+        if let Some(ref pos) = wrapper.source_position {
             self.sequence_position_map
                 .write()
                 .await
-                .insert(seq, pos.clone());
+                .insert(wrapper.sequence, pos.clone());
         }
 
         debug!("[{}] Dispatching event: {:?}", self.id, &wrapper);
@@ -1365,6 +1438,8 @@ impl SourceBase {
     /// the entire batch. This is more efficient than calling
     /// [`dispatch_event()`](Self::dispatch_event) per-event when the source
     /// processes multiple rows per poll cycle.
+    /// Sequences are preserved. Allocate and dispatch each batch in source
+    /// order, serializing producers just as for [`Self::dispatch_event`].
     pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
         if events.is_empty() {
             return Ok(());
@@ -1391,13 +1466,7 @@ impl SourceBase {
                 }
             }
 
-            // Framework assigns the monotonic sequence (skip if pre-set by WAL)
-            if let Some(seq) = wrapper.sequence {
-                self.next_sequence
-                    .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
-            } else {
-                wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
-            }
+            self.set_next_sequence(wrapper.sequence);
 
             // Keep per-source timestamps strictly increasing in sequence order
             // so the timestamp-keyed priority queue preserves that order.
@@ -1405,11 +1474,11 @@ impl SourceBase {
                 Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
             // Record sequence→source_position mapping for confirmed-position lookups.
-            if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
+            if let Some(ref pos) = wrapper.source_position {
                 self.sequence_position_map
                     .write()
                     .await
-                    .insert(seq, pos.clone());
+                    .insert(wrapper.sequence, pos.clone());
             }
 
             debug!("[{}] Dispatching event (batch): {:?}", self.id, &wrapper);
@@ -1477,12 +1546,14 @@ impl SourceBase {
 
     /// Broadcast SourceControl events
     pub async fn broadcast_control(&self, control: SourceControl) -> Result<()> {
+        let last_dispatch_ts = self.dispatch_order.lock().await;
         let wrapper = SourceEventWrapper::new(
             self.id.clone(),
             SourceEvent::Control(control),
             chrono::Utc::now(),
+            self.next_sequence(),
         );
-        self.dispatch_event(wrapper).await
+        self.dispatch_event_ordered(wrapper, last_dispatch_ts).await
     }
 
     /// Create a test subscription to this source (async, fallible)
@@ -1514,57 +1585,6 @@ impl SourceBase {
         self.try_test_subscribe()
             .await
             .expect("Failed to create test subscription receiver")
-    }
-
-    /// Helper function to dispatch events from spawned tasks (unstamped).
-    ///
-    /// This is a static helper that can be used from spawned async tasks that don't
-    /// have access to `self`. It manually iterates through dispatchers and sends the event.
-    ///
-    /// **Important**: This method does NOT stamp a monotonic sequence number and
-    /// does NOT validate `source_position` size. Events dispatched through this
-    /// method will not be checkpoint-tracked. This is acceptable for sources that
-    /// do not support replay (`supports_replay() == false`).
-    ///
-    /// # For recoverable/checkpointed sources
-    ///
-    /// Use [`clone_shared()`](Self::clone_shared) to obtain a `SourceBase` that
-    /// can be moved into spawned tasks, then call [`dispatch_event()`](Self::dispatch_event)
-    /// which stamps sequences and validates positions:
-    ///
-    /// ```ignore
-    /// let base = self.base.clone_shared();
-    /// tokio::spawn(async move {
-    ///     base.dispatch_event(wrapper).await.ok();
-    /// });
-    /// ```
-    ///
-    /// # Arguments
-    /// * `dispatchers` - Arc to the dispatchers list (from `self.base.dispatchers.clone()`)
-    /// * `wrapper` - The event wrapper to dispatch
-    /// * `source_id` - Source ID for logging
-    pub async fn dispatch_from_task(
-        dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-        wrapper: SourceEventWrapper,
-        source_id: &str,
-    ) -> Result<()> {
-        debug!(
-            "[{}] Dispatching event from task: {:?}",
-            source_id, &wrapper
-        );
-
-        // Arc-wrap for zero-copy sharing across dispatchers
-        let arc_wrapper = Arc::new(wrapper);
-
-        // Send to all dispatchers
-        let dispatchers_guard = dispatchers.read().await;
-        for dispatcher in dispatchers_guard.iter() {
-            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                debug!("[{source_id}] Failed to dispatch event from task: {e}");
-            }
-        }
-
-        Ok(())
     }
 
     /// Handle common stop functionality
@@ -1881,6 +1901,7 @@ mod tests {
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from,
+            resume_sequence: None,
             request_position_handle,
         }
     }
@@ -2175,7 +2196,8 @@ mod tests {
     // dispatch_events_batch tests
     // =========================================================================
 
-    fn make_event(source_id: &str, position: Option<&[u8]>) -> SourceEventWrapper {
+    fn make_event(base: &SourceBase, position: Option<&[u8]>) -> SourceEventWrapper {
+        let source_id = base.get_id();
         let change = drasi_core::models::SourceChange::Insert {
             element: drasi_core::models::Element::Node {
                 metadata: drasi_core::models::ElementMetadata {
@@ -2186,13 +2208,14 @@ mod tests {
                 properties: drasi_core::models::ElementPropertyMap::new(),
             },
         };
-        let mut wrapper = SourceEventWrapper::new(
+        let mut draft = SourceEventWrapper::new(
             source_id.to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            base.next_sequence(),
         );
-        wrapper.source_position = position.map(|p| bytes::Bytes::from(p.to_vec()));
-        wrapper
+        draft.source_position = position.map(|p| bytes::Bytes::from(p.to_vec()));
+        draft
     }
 
     #[tokio::test]
@@ -2203,7 +2226,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_events_batch_stamps_monotonic_sequences() {
+    async fn supplied_sequence_is_preserved_and_advances_allocator() {
+        for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
+            let base = SourceBase::new(
+                SourceBaseParams::new("supplied-sequence").with_dispatch_mode(mode),
+            )
+            .unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+            let mut event = make_event(&base, Some(b"position-42"));
+            event.sequence = 42;
+            let mut profiling = profiling::ProfilingMetadata::new();
+            profiling.source_send_ns = Some(123);
+            event.profiling = Some(profiling);
+            let expected_change = event.event.clone();
+
+            base.dispatch_event(event).await.unwrap();
+
+            let received = receiver.recv().await.unwrap();
+            assert_eq!(received.sequence, 42);
+            assert_eq!(received.event, expected_change);
+            assert_eq!(
+                received.source_position.as_deref(),
+                Some(b"position-42".as_slice())
+            );
+            assert_eq!(
+                received.profiling.as_ref().unwrap().source_send_ns,
+                Some(123)
+            );
+            assert_eq!(base.clone_shared().next_sequence(), 43);
+
+            let mut replay = make_event(&base, None);
+            replay.sequence = 7;
+            base.dispatch_event(replay).await.unwrap();
+            assert_eq!(receiver.recv().await.unwrap().sequence, 7);
+            assert_eq!(base.next_sequence(), 45);
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_preserves_supplied_sequences_and_generated_sequence_floor() {
+        for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
+            let base =
+                SourceBase::new(SourceBaseParams::new("supplied-batch").with_dispatch_mode(mode))
+                    .unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+            let mut first = make_event(&base, Some(b"first"));
+            first.sequence = 100;
+            let mut second = make_event(&base, Some(b"second"));
+            second.sequence = 150;
+
+            base.dispatch_events_batch(vec![first, second])
+                .await
+                .unwrap();
+            assert_eq!(receiver.recv().await.unwrap().sequence, 100);
+            assert_eq!(receiver.recv().await.unwrap().sequence, 150);
+
+            let generated = make_event(&base, Some(b"generated"));
+            assert_eq!(generated.sequence, 151);
+            base.dispatch_event(generated).await.unwrap();
+            assert_eq!(receiver.recv().await.unwrap().sequence, 151);
+            assert_eq!(base.next_sequence(), 152);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_events_batch_preserves_allocated_sequences() {
         let params = SourceBaseParams::new("batch-seq").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
@@ -2211,9 +2298,9 @@ mod tests {
         let mut receiver = base.create_streaming_receiver().await.unwrap();
 
         let events = vec![
-            make_event("batch-seq", Some(b"\x01")),
-            make_event("batch-seq", Some(b"\x02")),
-            make_event("batch-seq", Some(b"\x03")),
+            make_event(&base, Some(b"\x01")),
+            make_event(&base, Some(b"\x02")),
+            make_event(&base, Some(b"\x03")),
         ];
 
         base.dispatch_events_batch(events).await.unwrap();
@@ -2222,9 +2309,9 @@ mod tests {
         let e2 = receiver.recv().await.unwrap();
         let e3 = receiver.recv().await.unwrap();
 
-        let s1 = e1.sequence.expect("event 1 must have sequence");
-        let s2 = e2.sequence.expect("event 2 must have sequence");
-        let s3 = e3.sequence.expect("event 3 must have sequence");
+        let s1 = e1.sequence;
+        let s2 = e2.sequence;
+        let s3 = e3.sequence;
 
         assert_eq!(s2, s1 + 1, "sequences must be monotonically increasing");
         assert_eq!(s3, s2 + 1, "sequences must be monotonically increasing");
@@ -2313,10 +2400,8 @@ mod tests {
             let mut dropped = 0usize;
             for _ in 0..EVENTS_PER_TRIAL {
                 let event = receiver.recv().await.unwrap();
-                let seq = event
-                    .sequence
-                    .expect("dispatched event must have a sequence");
-                if dedup.should_skip("concurrent-src", Some(seq)) {
+                let seq = event.sequence;
+                if dedup.should_skip("concurrent-src", seq) {
                     dropped += 1;
                     continue;
                 }
@@ -2366,7 +2451,7 @@ mod tests {
         const EVENTS_PER_BATCH: u64 = 3;
         const TRIALS: usize = 20;
 
-        let make_batch = || {
+        let make_batch = |base: &SourceBase| {
             (0..EVENTS_PER_BATCH)
                 .map(|_| {
                     let change = drasi_core::models::SourceChange::Insert {
@@ -2386,6 +2471,7 @@ mod tests {
                         "concurrent-batch-src".to_string(),
                         SourceEvent::Change(change),
                         chrono::Utc::now(),
+                        base.next_sequence(),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2397,11 +2483,14 @@ mod tests {
             let base = SourceBase::new(params).unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
 
+            let producer_order = Arc::new(tokio::sync::Mutex::new(()));
             let mut handles = Vec::new();
             for _ in 0..BATCHES_PER_TRIAL {
                 let dispatch_base = base.clone_shared();
-                let batch = make_batch();
+                let producer_order = producer_order.clone();
                 handles.push(tokio::spawn(async move {
+                    let _guard = producer_order.lock().await;
+                    let batch = make_batch(&dispatch_base);
                     dispatch_base.dispatch_events_batch(batch).await.unwrap();
                 }));
             }
@@ -2415,10 +2504,8 @@ mod tests {
             let mut dropped = 0usize;
             for _ in 0..total {
                 let event = receiver.recv().await.unwrap();
-                let seq = event
-                    .sequence
-                    .expect("dispatched event must have a sequence");
-                if dedup.should_skip("concurrent-batch-src", Some(seq)) {
+                let seq = event.sequence;
+                if dedup.should_skip("concurrent-batch-src", seq) {
                     dropped += 1;
                     continue;
                 }
@@ -2456,10 +2543,7 @@ mod tests {
         let mut rx1 = base.create_streaming_receiver().await.unwrap();
         let mut rx2 = base.create_streaming_receiver().await.unwrap();
 
-        let events = vec![
-            make_event("batch-fanout", Some(b"\x01")),
-            make_event("batch-fanout", Some(b"\x02")),
-        ];
+        let events = vec![make_event(&base, Some(b"\x01")), make_event(&base, Some(b"\x02"))];
 
         base.dispatch_events_batch(events).await.unwrap();
 
@@ -2483,13 +2567,12 @@ mod tests {
 
         // Create an event with a position larger than MAX_SOURCE_POSITION_BYTES
         let big_pos = vec![0xAA; SourceBase::MAX_SOURCE_POSITION_BYTES + 1];
-        let events = vec![make_event("batch-oversize", Some(&big_pos))];
+        let events = vec![make_event(&base, Some(&big_pos))];
 
         // Should succeed (warn but not error)
         base.dispatch_events_batch(events).await.unwrap();
 
         let received = rx.recv().await.unwrap();
-        assert!(received.sequence.is_some(), "event must still be stamped");
         assert_eq!(
             received.source_position.as_ref().map(|p| p.len()),
             Some(SourceBase::MAX_SOURCE_POSITION_BYTES + 1),
@@ -2520,7 +2603,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Dispatch event at position [0x00, 0x03] — before rx1's resume
-        let event = make_event("pos-filter", Some(&[0x00, 0x03]));
+        let event = make_event(&base, Some(&[0x00, 0x03]));
         base.dispatch_event(event).await.unwrap();
 
         // rx2 should receive it (no filter)
@@ -2551,7 +2634,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event at [0x00, 0x06] — past resume
-        let event = make_event("pos-filter2", Some(&[0x00, 0x06]));
+        let event = make_event(&base, Some(&[0x00, 0x06]));
         base.dispatch_event(event).await.unwrap();
 
         let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx1.recv())
@@ -2580,7 +2663,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x03]));
 
         // First event at [0x00, 0x04] — past resume, advances high-water mark
-        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x04])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x04])))
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
@@ -2596,7 +2679,7 @@ mod tests {
         }
 
         // Subsequent event at LOWER position should be suppressed (rewind protection)
-        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x01])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x01])))
             .await
             .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
@@ -2606,7 +2689,7 @@ mod tests {
         );
 
         // Event at HIGHER position should flow through
-        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x06])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x06])))
             .await
             .unwrap();
         let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -2636,7 +2719,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event at exactly [0x00, 0x05] — should be suppressed
-        base.dispatch_event(make_event("pos-equal", Some(&[0x00, 0x05])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x05])))
             .await
             .unwrap();
 
@@ -2663,7 +2746,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event at [0x00, 0x03] — normally suppressed, but no comparator
-        base.dispatch_event(make_event("no-cmp", Some(&[0x00, 0x03])))
+        base.dispatch_event(make_event(&base, Some(&[0x00, 0x03])))
             .await
             .unwrap();
 
@@ -2696,9 +2779,9 @@ mod tests {
         }
 
         let events = vec![
-            make_event("pos-batch", Some(&[0x00, 0x01])), // before both
-            make_event("pos-batch", Some(&[0x00, 0x03])), // past rx2, before rx1
-            make_event("pos-batch", Some(&[0x00, 0x06])), // past both
+            make_event(&base, Some(&[0x00, 0x01])), // before both
+            make_event(&base, Some(&[0x00, 0x03])), // past rx2, before rx1
+            make_event(&base, Some(&[0x00, 0x06])), // past both
         ];
         base.dispatch_events_batch(events).await.unwrap();
 
@@ -2752,9 +2835,7 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x00, 0x05]));
 
         // Event with no source_position
-        base.dispatch_event(make_event("pos-none", None))
-            .await
-            .unwrap();
+        base.dispatch_event(make_event(&base, None)).await.unwrap();
 
         let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
@@ -2774,7 +2855,7 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         let lsn: u64 = 0x1234;
-        base.dispatch_event(make_event("spm-1", Some(&lsn.to_be_bytes())))
+        base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
             .await
             .unwrap();
 
@@ -2791,9 +2872,7 @@ mod tests {
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
-        base.dispatch_event(make_event("spm-none", None))
-            .await
-            .unwrap();
+        base.dispatch_event(make_event(&base, None)).await.unwrap();
 
         let map = base.sequence_position_map.read().await;
         assert!(map.is_empty());
@@ -2810,7 +2889,7 @@ mod tests {
 
         // Dispatch 3 events with known LSNs
         for lsn in [100u64, 200, 300] {
-            base.dispatch_event(make_event("cssp-1", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -2849,7 +2928,7 @@ mod tests {
 
         // Dispatch 3 events
         for lsn in [100u64, 200, 300] {
-            base.dispatch_event(make_event("cssp-2q", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -2872,7 +2951,7 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         for lsn in [10u64, 20, 30, 40, 50] {
-            base.dispatch_event(make_event("prune-1", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -2893,7 +2972,7 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         for lsn in [10u64, 20] {
-            base.dispatch_event(make_event("prune-all", Some(&lsn.to_be_bytes())))
+            base.dispatch_event(make_event(&base, Some(&lsn.to_be_bytes())))
                 .await
                 .unwrap();
         }
@@ -2913,6 +2992,7 @@ mod tests {
             source_id: "ph-init".to_string(),
             enable_bootstrap: false,
             resume_from: Some(Bytes::from_static(&[0x00, 0x01])),
+            resume_sequence: None,
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -2941,6 +3021,7 @@ mod tests {
             source_id: "ph-no-ls".to_string(),
             enable_bootstrap: true,
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -2962,9 +3043,9 @@ mod tests {
         let _rx = base.create_streaming_receiver().await.unwrap();
 
         let events = vec![
-            make_event("spm-batch", Some(&100u64.to_be_bytes())),
-            make_event("spm-batch", Some(&200u64.to_be_bytes())),
-            make_event("spm-batch", None), // no position
+            make_event(&base, Some(&100u64.to_be_bytes())),
+            make_event(&base, Some(&200u64.to_be_bytes())),
+            make_event(&base, None), // no position
         ];
 
         base.dispatch_events_batch(events).await.unwrap();
@@ -2995,13 +3076,13 @@ mod tests {
             .insert(0, Bytes::from_static(&[0x10]));
 
         // Source dispatches events at [0x20] and [0x30] — both past A's resume
-        base.dispatch_event(make_event("rewind", Some(&[0x20])))
+        base.dispatch_event(make_event(&base, Some(&[0x20])))
             .await
             .unwrap();
         let ev = rx_a.recv().await.unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
 
-        base.dispatch_event(make_event("rewind", Some(&[0x30])))
+        base.dispatch_event(make_event(&base, Some(&[0x30])))
             .await
             .unwrap();
         let ev = rx_a.recv().await.unwrap();
@@ -3017,7 +3098,7 @@ mod tests {
         // Source REWINDS — replays from [0x20] again
         // A should NOT see these (high-water is at [0x30])
         // B should see [0x20] (past its resume_from [0x10])
-        base.dispatch_event(make_event("rewind", Some(&[0x20])))
+        base.dispatch_event(make_event(&base, Some(&[0x20])))
             .await
             .unwrap();
 
@@ -3036,7 +3117,7 @@ mod tests {
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
 
         // Replay [0x30] — A should NOT see it, B should
-        base.dispatch_event(make_event("rewind", Some(&[0x30])))
+        base.dispatch_event(make_event(&base, Some(&[0x30])))
             .await
             .unwrap();
 
@@ -3053,7 +3134,7 @@ mod tests {
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x30]);
 
         // New event [0x40] — BOTH should see it
-        base.dispatch_event(make_event("rewind", Some(&[0x40])))
+        base.dispatch_event(make_event(&base, Some(&[0x40])))
             .await
             .unwrap();
 
@@ -3083,7 +3164,7 @@ mod tests {
         // No resume_from set
 
         // Dispatch event — should be delivered (no filter)
-        base.dispatch_event(make_event("hwm-new", Some(&[0x10])))
+        base.dispatch_event(make_event(&base, Some(&[0x10])))
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
@@ -3099,7 +3180,7 @@ mod tests {
         }
 
         // Rewind: event at [0x05] should be suppressed
-        base.dispatch_event(make_event("hwm-new", Some(&[0x05])))
+        base.dispatch_event(make_event(&base, Some(&[0x05])))
             .await
             .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
@@ -3124,7 +3205,7 @@ mod tests {
         // Lifecycle 1: a subscriber processes an event and gets a high-water
         // mark at [0x30] on dispatcher index 0.
         let mut rx = base.create_streaming_receiver().await.unwrap();
-        base.dispatch_event(make_event("clear-hwm", Some(&[0x30])))
+        base.dispatch_event(make_event(&base, Some(&[0x30])))
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
@@ -3149,7 +3230,7 @@ mod tests {
         // the reset, the stale [0x30] mark would suppress an earlier replayed
         // event at [0x20]; with the reset it must be delivered.
         let mut rx2 = base.create_streaming_receiver().await.unwrap();
-        base.dispatch_event(make_event("clear-hwm", Some(&[0x20])))
+        base.dispatch_event(make_event(&base, Some(&[0x20])))
             .await
             .unwrap();
         let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
@@ -3157,5 +3238,302 @@ mod tests {
             .expect("event should be delivered, not suppressed by stale mark")
             .unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
+    }
+
+    // =========================================================================
+    // Restart monotonicity: resume_sequence floor (issue #827)
+    // =========================================================================
+
+    fn resume_seq_settings(
+        source_id: &str,
+        query_id: &str,
+        resume_sequence: Option<u64>,
+    ) -> crate::config::SourceSubscriptionSettings {
+        crate::config::SourceSubscriptionSettings {
+            source_id: source_id.to_string(),
+            enable_bootstrap: false,
+            query_id: query_id.to_string(),
+            nodes: Default::default(),
+            relations: Default::default(),
+            resume_from: None,
+            resume_sequence,
+            request_position_handle: true,
+        }
+    }
+
+    /// A native-cursor source restarted after a checkpoint at N must produce its
+    /// next framework-filled sequence at N+1 (strictly above the dedup high-water),
+    /// so freshly stamped events are not wrongly dropped on replay.
+    #[tokio::test]
+    async fn test_resume_sequence_raises_counter_on_subscribe() {
+        let params = SourceBaseParams::new("resume-seq").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-seq", "q1", Some(500)), "test")
+            .await
+            .unwrap();
+
+        // Next dispatched event is stamped with the floor N+1 = 501, not 1.
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&501),
+            "next filled-in sequence must be resume_sequence + 1 (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            map.keys().all(|&s| s > 500),
+            "no sequence may be <= the checkpointed sequence"
+        );
+    }
+
+    /// The floor is applied with `fetch_max`: a later resuming query with a lower
+    /// checkpoint must never lower the counter, and the highest floor wins.
+    #[tokio::test]
+    async fn test_resume_sequence_floor_never_lowers_and_takes_max() {
+        let params = SourceBaseParams::new("resume-max").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        // First query resumes at 500 → floor 501.
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q1", Some(500)), "test")
+            .await
+            .unwrap();
+        // Second query resumes lower (100) → must not lower the counter.
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q2", Some(100)), "test")
+            .await
+            .unwrap();
+        // Third query resumes higher (800) → floor raised to 801.
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q3", Some(800)), "test")
+            .await
+            .unwrap();
+
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&801),
+            "counter must take the max floor across resuming queries (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Without a resume_sequence (fresh start, or sequence-as-position sources
+    /// that rely on WAL-head restore), the counter is untouched and stamping
+    /// starts at 1 — no double-advance.
+    #[tokio::test]
+    async fn test_no_resume_sequence_leaves_counter_at_default() {
+        let params = SourceBaseParams::new("resume-none").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-none", "q1", None), "test")
+            .await
+            .unwrap();
+
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&1),
+            "without resume_sequence the counter must start at 1 (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// `set_next_sequence` (WAL-head restore) must never lower the counter, so a
+    /// later restore reporting a lower head cannot undo an already-applied
+    /// resume floor and reintroduce a restart-monotonicity regression.
+    #[tokio::test]
+    async fn test_set_next_sequence_never_lowers() {
+        let params = SourceBaseParams::new("set-seq-max").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        // Restore to head 500 → next event should be 501.
+        base.set_next_sequence(500);
+        // A subsequent lower restore must be ignored (fetch_max).
+        base.set_next_sequence(100);
+
+        base.dispatch_event(make_event(&base, Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&501),
+            "set_next_sequence must never lower the counter (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The two floor-raising mechanisms — `set_next_sequence` (WAL-head restore)
+    /// and `raise_sequence_floor` (resume-on-subscribe) — must compose regardless
+    /// of call order, since nothing sequences them. Interleave them with values
+    /// on both sides and confirm the highest floor always wins.
+    #[tokio::test]
+    async fn test_floor_mechanisms_compose_regardless_of_order() {
+        // Order A: WAL-head restore first (300), then a higher resume floor (600).
+        let base_a = SourceBase::new(
+            SourceBaseParams::new("order-a").with_dispatch_mode(DispatchMode::Channel),
+        )
+        .unwrap();
+        let _rx_a = base_a.create_streaming_receiver().await.unwrap();
+        base_a.set_next_sequence(300); // floor 301
+        base_a.raise_sequence_floor(&resume_seq_settings("order-a", "q", Some(599))); // floor 600
+        base_a
+            .dispatch_event(make_event(&base_a, Some(&[0x01])))
+            .await
+            .unwrap();
+        assert!(
+            base_a.sequence_position_map.read().await.contains_key(&600),
+            "higher resume floor applied after a lower WAL-head restore must win"
+        );
+
+        // Order B: resume floor first (600), then a lower WAL-head restore (300).
+        let base_b = SourceBase::new(
+            SourceBaseParams::new("order-b").with_dispatch_mode(DispatchMode::Channel),
+        )
+        .unwrap();
+        let _rx_b = base_b.create_streaming_receiver().await.unwrap();
+        base_b.raise_sequence_floor(&resume_seq_settings("order-b", "q", Some(599))); // floor 600
+        base_b.set_next_sequence(300); // floor 301 — must be ignored
+        base_b
+            .dispatch_event(make_event(&base_b, Some(&[0x01])))
+            .await
+            .unwrap();
+        assert!(
+            base_b.sequence_position_map.read().await.contains_key(&600),
+            "a lower WAL-head restore after a higher resume floor must not lower the counter"
+        );
+    }
+
+    /// The resume floor must also be applied on the WAL-replay subscribe path
+    /// (`subscribe_with_replay`), not only the bootstrap path. A minimal WAL stub
+    /// with an empty log lets us drive that path and confirm the floor is raised.
+    #[tokio::test]
+    async fn test_resume_sequence_raises_counter_on_replay_subscribe() {
+        struct EmptyWal;
+
+        #[async_trait]
+        impl crate::wal::WalProvider for EmptyWal {
+            async fn register(
+                &self,
+                _source_id: &str,
+                _config: crate::wal::WriteAheadLogConfig,
+            ) -> Result<(), crate::wal::WalError> {
+                Ok(())
+            }
+            async fn append(
+                &self,
+                _source_id: &str,
+                _event: &drasi_core::models::SourceChange,
+            ) -> Result<u64, crate::wal::WalError> {
+                Ok(0)
+            }
+            async fn read_from(
+                &self,
+                _source_id: &str,
+                _sequence: u64,
+            ) -> Result<Vec<(u64, drasi_core::models::SourceChange)>, crate::wal::WalError>
+            {
+                Ok(Vec::new())
+            }
+            async fn prune_up_to(
+                &self,
+                _source_id: &str,
+                _sequence: u64,
+            ) -> Result<u64, crate::wal::WalError> {
+                Ok(0)
+            }
+            async fn head_sequence(&self, _source_id: &str) -> Result<u64, crate::wal::WalError> {
+                Ok(0)
+            }
+            async fn oldest_sequence(
+                &self,
+                _source_id: &str,
+            ) -> Result<Option<u64>, crate::wal::WalError> {
+                Ok(None)
+            }
+            async fn event_count(&self, _source_id: &str) -> Result<u64, crate::wal::WalError> {
+                Ok(0)
+            }
+            async fn delete_wal(&self, _source_id: &str) -> Result<(), crate::wal::WalError> {
+                Ok(())
+            }
+        }
+
+        let base = SourceBase::new(
+            SourceBaseParams::new("replay-floor").with_dispatch_mode(DispatchMode::Channel),
+        )
+        .unwrap();
+        let wal = EmptyWal;
+
+        base.subscribe_with_replay(
+            &resume_seq_settings("replay-floor", "q1", Some(700)),
+            &wal,
+            700,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        base.dispatch_event(make_event(&base, Some(&[0xCD])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&701),
+            "replay subscribe path must raise the floor to resume_sequence + 1 (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// End-to-end regression proof for #827: after a restart resume, the sequences
+    /// SourceBase *fills in* for a source that omits them must land strictly above
+    /// the query's checkpoint, so the real `SequenceDedup` filter does not drop
+    /// them as stale replays. This exercises the actual bug, not just the plumbing.
+    #[tokio::test]
+    async fn test_filled_sequences_survive_dedup_after_restart() {
+        let source_id = "dedup-restart";
+        // Query checkpointed sequence 500 before restart.
+        let checkpoint: u64 = 500;
+
+        let base = SourceBase::new(
+            SourceBaseParams::new(source_id).with_dispatch_mode(DispatchMode::Channel),
+        )
+        .unwrap();
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+
+        // Resume: the query hands its checkpoint back, raising the counter floor.
+        base.subscribe_with_bootstrap(
+            &resume_seq_settings(source_id, "q1", Some(checkpoint)),
+            "test",
+        )
+        .await
+        .unwrap();
+
+        // Seed the dedup filter exactly as the query manager does on resume.
+        let dedup = crate::queries::SequenceDedup::new(
+            std::iter::once((source_id.to_string(), checkpoint)).collect(),
+        );
+
+        // The source omits its own sequence; SourceBase fills one in on dispatch.
+        for _ in 0..3 {
+            base.dispatch_event(make_event(&base, Some(&[0x01])))
+                .await
+                .unwrap();
+            let ev = rx.recv().await.unwrap();
+            let seq = ev.sequence;
+            assert!(
+                seq > checkpoint,
+                "filled-in sequence {seq} must exceed checkpoint {checkpoint}"
+            );
+            assert!(
+                !dedup.should_skip(source_id, ev.sequence),
+                "post-restart event (seq {seq}) must NOT be dropped by dedup (checkpoint {checkpoint})"
+            );
+        }
     }
 }

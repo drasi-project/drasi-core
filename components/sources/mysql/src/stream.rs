@@ -24,7 +24,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
 use mysql_async::prelude::{Query, Queryable};
-use mysql_async::{BinlogStream, BinlogStreamRequest, Conn, OptsBuilder, Row, SslOpts};
+use mysql_async::{BinlogStream, BinlogStreamRequest, Conn, OptsBuilder, Row};
 use mysql_common::binlog::events::{
     BinlogEventHeader, Event, EventData, RowsEventData, TableMapEvent,
 };
@@ -35,8 +35,9 @@ use tokio::sync::RwLock;
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
+use drasi_mysql_common::connect_with_ssl_mode;
 
-use crate::config::{MySqlSourceConfig, SslMode, StartPosition};
+use crate::config::{MySqlSourceConfig, StartPosition};
 use crate::decoder::MySqlDecoder;
 use crate::types::ReplicationState;
 
@@ -189,56 +190,19 @@ impl ReplicationStream {
         &mut self,
         start_position: &StartPosition,
     ) -> Result<BinlogStream> {
-        match self.config.ssl_mode {
-            SslMode::IfAvailable => match self
-                .connect_binlog_stream_with_ssl(start_position, Some(self.relaxed_ssl_opts()))
-                .await
-            {
-                Ok(stream) => Ok(stream),
-                Err(ssl_error) => {
-                    warn!(
-                        "SSL connection attempt failed for source {}, retrying without SSL: {ssl_error}",
-                        self.source_id
-                    );
-                    self.connect_binlog_stream_with_ssl(start_position, None)
-                        .await
-                        .context("Failed to connect without SSL after SSL fallback")
-                }
-            },
-            SslMode::Disabled => {
-                self.connect_binlog_stream_with_ssl(start_position, None)
-                    .await
-            }
-            SslMode::Require => {
-                self.connect_binlog_stream_with_ssl(start_position, Some(self.relaxed_ssl_opts()))
-                    .await
-            }
-            SslMode::RequireVerifyCa => {
-                self.connect_binlog_stream_with_ssl(start_position, Some(self.verify_ca_ssl_opts()))
-                    .await
-            }
-            SslMode::RequireVerifyFull => {
-                self.connect_binlog_stream_with_ssl(start_position, Some(SslOpts::default()))
-                    .await
-            }
-        }
-    }
+        let build_opts = || {
+            OptsBuilder::default()
+                .ip_or_hostname(&self.config.host)
+                .tcp_port(self.config.port)
+                .user(Some(&self.config.user))
+                .pass(Some(&self.config.password))
+                .db_name(Some(&self.config.database))
+                .prefer_socket(Some(false))
+        };
 
-    async fn connect_binlog_stream_with_ssl(
-        &mut self,
-        start_position: &StartPosition,
-        ssl_opts: Option<SslOpts>,
-    ) -> Result<BinlogStream> {
-        let opts = OptsBuilder::default()
-            .ip_or_hostname(&self.config.host)
-            .tcp_port(self.config.port)
-            .user(Some(&self.config.user))
-            .pass(Some(&self.config.password))
-            .db_name(Some(&self.config.database))
-            .prefer_socket(Some(false))
-            .ssl_opts(ssl_opts);
-
-        let mut conn = Conn::new(opts).await?;
+        let mut conn = connect_with_ssl_mode(build_opts, self.config.ssl_mode)
+            .await
+            .context("Failed to connect to MySQL for binlog replication")?;
         self.configure_heartbeat(&mut conn).await?;
 
         let resolved = self
@@ -442,14 +406,14 @@ impl ReplicationStream {
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            self.base.next_sequence(),
         );
 
         // Attach the current replication position for checkpoint recovery
         wrapper
             .set_source_position(self.position_bytes_with_timestamp(self.current_event_timestamp));
 
-        SourceBase::dispatch_from_task(self.base.dispatchers.clone(), wrapper, &self.source_id)
-            .await
+        self.base.dispatch_event(wrapper).await
     }
 
     async fn flush_transaction(&mut self, header: &BinlogEventHeader) -> Result<()> {
@@ -467,14 +431,10 @@ impl ReplicationStream {
                     self.source_id.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
+                    self.base.next_sequence(),
                 );
                 wrapper.set_source_position(position_bytes.clone());
-                SourceBase::dispatch_from_task(
-                    self.base.dispatchers.clone(),
-                    wrapper,
-                    &self.source_id,
-                )
-                .await?;
+                self.base.dispatch_event(wrapper).await?;
             }
         }
 
@@ -593,16 +553,6 @@ impl ReplicationStream {
         }
     }
 
-    fn relaxed_ssl_opts(&self) -> SslOpts {
-        SslOpts::default()
-            .with_danger_accept_invalid_certs(true)
-            .with_danger_skip_domain_validation(true)
-    }
-
-    fn verify_ca_ssl_opts(&self) -> SslOpts {
-        SslOpts::default().with_danger_skip_domain_validation(true)
-    }
-
     async fn close_stream(stream: BinlogStream) {
         if let Err(err) = stream.close().await {
             debug!("Failed to close MySQL binlog stream cleanly: {err}");
@@ -627,4 +577,134 @@ fn parse_gtid_set(gtid: &str) -> Result<Vec<Sid<'static>>> {
     }
 
     Ok(sids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
+    use drasi_lib::sources::base::SourceBaseParams;
+    use mysql_common::binlog::consts::{EventFlags, EventType};
+    use std::sync::Arc as TestArc;
+
+    fn insert_change(source_id: &str, id: &str) -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source_id, id),
+                    labels: TestArc::from(vec![TestArc::from("Row")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::new(),
+            },
+        }
+    }
+
+    fn test_stream(source_id: &str) -> ReplicationStream {
+        // ReplicationStream::new does not open a DB connection — only run() does —
+        // so we can exercise the dispatch helpers directly without MySQL.
+        let config = MySqlSourceConfig {
+            host: "localhost".to_string(),
+            port: 3306,
+            database: "test_db".to_string(),
+            user: "test_user".to_string(),
+            password: "test_password".to_string(),
+            tables: vec![],
+            ssl_mode: crate::config::SslMode::IfAvailable,
+            table_keys: vec![],
+            start_position: StartPosition::FromEnd,
+            server_id: 1,
+            heartbeat_interval_seconds: 30,
+        };
+        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        ReplicationStream::new(
+            config,
+            source_id.to_string(),
+            base,
+            StdArc::new(AtomicBool::new(false)),
+            StdArc::new(RwLock::new(HashMap::new())),
+        )
+    }
+
+    /// mysql is a native-cursor source: it sets `source_position` from the binlog
+    /// cursor but leaves `sequence` unset, relying on the framework to stamp it.
+    /// This verifies `push_change` (the immediate, unbuffered dispatch path)
+    /// stamps a strictly increasing framework `sequence` on every event while
+    /// preserving the binlog `source_position` (issue #828 / #817).
+    #[tokio::test]
+    async fn push_change_stamps_sequence_and_preserves_position() {
+        let source_id = "mysql-seq-source";
+        let mut stream = test_stream(source_id);
+        let mut rx = stream.base.test_subscribe().await;
+
+        let count = 3u64;
+        for i in 1..=count {
+            stream
+                .push_change(insert_change(source_id, &format!("row-{i}")))
+                .await
+                .expect("push_change should succeed");
+        }
+
+        for expected_seq in 1..=count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            assert_eq!(
+                event.sequence, expected_seq,
+                "framework must stamp a monotonic sequence even for a native-cursor source"
+            );
+            assert!(
+                event.source_position.is_some(),
+                "binlog source_position must be preserved through dispatch_event"
+            );
+        }
+    }
+
+    /// The transaction-buffered path (`flush_transaction`) must likewise stamp a
+    /// unique, increasing sequence on each buffered row while carrying the shared
+    /// commit `source_position`.
+    #[tokio::test]
+    async fn flush_transaction_stamps_unique_sequences() {
+        let source_id = "mysql-txn-source";
+        let mut stream = test_stream(source_id);
+        let mut rx = stream.base.test_subscribe().await;
+
+        // Buffer several changes as a transaction, then flush them together.
+        stream.ensure_transaction_buffer();
+        let count = 4u64;
+        for i in 1..=count {
+            stream
+                .push_change(insert_change(source_id, &format!("txn-row-{i}")))
+                .await
+                .expect("buffered push_change should succeed");
+        }
+
+        // log_pos = 0 makes flush_transaction keep the current binlog position.
+        let header =
+            BinlogEventHeader::new(0, EventType::UNKNOWN_EVENT, 0, 0, 0, EventFlags::empty());
+        stream
+            .flush_transaction(&header)
+            .await
+            .expect("flush_transaction should succeed");
+
+        let mut sequences = Vec::new();
+        for _ in 0..count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            assert!(
+                event.source_position.is_some(),
+                "commit source_position must be preserved"
+            );
+            sequences.push(event.sequence);
+        }
+
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3, 4],
+            "buffered transaction rows must get unique, strictly increasing sequences"
+        );
+    }
 }

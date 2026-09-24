@@ -223,6 +223,7 @@ export const WIDGET_TYPES = [
   "kpi",
   "text",
   "map",
+  "graph",
 ];
 
 // ─── Widget type metadata for picker ────────────────────────
@@ -275,6 +276,12 @@ export const WIDGET_TYPE_META = {
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>`,
     color: "#2dd4bf",
   },
+  graph: {
+    name: "Graph",
+    description: "Nodes from query rows; arrows when a neighbor is present",
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="7" r="3"/><circle cx="8" cy="18" r="3"/><circle cx="18" cy="17" r="3"/><line x1="8.7" y1="7.5" x2="15.3" y2="7.5"/><line x1="7.2" y1="8.8" x2="8.8" y2="15.2"/><line x1="16.5" y1="9.6" x2="17.2" y2="14.2"/><line x1="10.8" y1="17.4" x2="15.2" y2="17.2"/></svg>`,
+    color: "#fb923c",
+  },
 };
 
 // ─── Default widget config per type ─────────────────────────
@@ -289,6 +296,18 @@ export function getDefaultConfig(widgetType) {
     case "kpi": return { ...base, valueField: "value", label: "KPI", aggregation: "last", filterField: "", filterValue: "" };
     case "text": return { ...base, template: "## Hello\n\n{{#each rows}}\n- **{{this.name}}**: {{this.value}}\n{{/each}}" };
     case "map": return { ...base, latField: "lat", lngField: "lng", valueField: "value" };
+    case "graph": return {
+      ...base,
+      nodeField: "node",
+      connectsToField: "connects_to",
+      nodeLabelField: "",
+      connectsToLabelField: "",
+      nodeCategoryField: "",
+      connectsToCategoryField: "",
+      edgeLabelField: "",
+      valueField: "",
+      layout: "force",
+    };
     default: return base;
   }
 }
@@ -309,6 +328,7 @@ export function createDefaultWidget(widgetType, index = 0) {
     kpi: { w: 3, h: 3 },
     text: { w: 4, h: 4 },
     map: { w: 6, h: 5 },
+    graph: { w: 8, h: 6 },
   };
   const size = sizes[widgetType] || { w: 4, h: 4 };
   return {
@@ -458,10 +478,13 @@ function asRows(rt) {
   return Array.isArray(rt?.rows) ? rt.rows : [];
 }
 
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function getLatestValue(rt, field) {
@@ -546,11 +569,133 @@ function getThemeColors() {
   };
 }
 
+export function asCoord(value) {
+  if (Array.isArray(value)) value = value[0];
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function sizeChartHost(container) {
+  const item = container.closest(".grid-stack-item");
+  if (!item) return false;
+  const content = item.querySelector(":scope > .grid-stack-item-content") || item;
+  const header = item.querySelector(".widget-header");
+  const top = (header?.offsetHeight || 0) + 8;
+  const w = content.clientWidth - 16;
+  const h = content.clientHeight - top - 8;
+  if (w < 80 || h < 80) return false;
+  const body = container.parentElement;
+  if (body) {
+    body.style.position = "static";
+    body.style.overflow = "visible";
+  }
+  container.style.position = "absolute";
+  container.style.left = "8px";
+  container.style.right = "8px";
+  container.style.top = `${top}px`;
+  container.style.bottom = "8px";
+  container.style.width = `${w}px`;
+  container.style.height = `${h}px`;
+  return true;
+}
+
+function scaleStoredGraphPositions(container, sx, sy) {
+  const positions = container.__graphPositions;
+  if (!positions || !(Number.isFinite(sx) && Number.isFinite(sy))) return;
+  if (sx === 1 && sy === 1) return;
+  for (const [id, pos] of positions) {
+    if (!pos) continue;
+    const x = asCoord(pos.x);
+    const y = asCoord(pos.y);
+    if (x == null || y == null) continue;
+    positions.set(id, { x: x * sx, y: y * sy });
+  }
+}
+
+function observeChartSize(container) {
+  if (typeof ResizeObserver === "undefined" || container.__chartRo) return;
+  const item = container.parentElement?.closest(".grid-stack-item")
+    || container.parentElement?.closest(".grid-stack-item-content")
+    || container;
+  container.__chartRo = new ResizeObserver(() => {
+    if (!sizeChartHost(container)) return;
+    const inst = getChart(container);
+    if (!inst) return;
+    const prev = container.__chartSize;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    if (prev && prev.w > 0 && prev.h > 0 && (prev.w !== w || prev.h !== h)) {
+      scaleStoredGraphPositions(container, w / prev.w, h / prev.h);
+    }
+    container.__chartSize = { w, h };
+    inst.resize();
+    const series = inst.getOption()?.series?.[0];
+    if (series?.type !== "graph" || !container.__graphPositions) return;
+    const positions = container.__graphPositions;
+    inst.setOption({
+      animation: false,
+      series: [{
+        layout: "none",
+        data: (series.data || []).map((node) => {
+          const pos = node && node.id != null ? positions.get(String(node.id)) : null;
+          return pos ? { ...node, x: pos.x, y: pos.y } : node;
+        }),
+      }],
+    });
+  });
+  container.__chartRo.observe(item);
+}
+
+function getChartHost(container) {
+  let host = container.__chartHost;
+  if (host && host.isConnected) {
+    syncHostSize(container, host);
+    return host;
+  }
+  host = document.createElement("div");
+  host.className = "widget-chart-host";
+  container.replaceChildren(host);
+  container.__chartHost = host;
+  syncHostSize(container, host);
+  return host;
+}
+
+function syncHostSize(container, host) {
+  if (!host) return;
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  if (w > 0) host.style.width = `${w}px`;
+  if (h > 0) host.style.height = `${h}px`;
+}
+
+function chartNeedsRebuild(chart, host) {
+  if (!chart || chart.isDisposed?.()) return true;
+  if (!host.querySelector("canvas")) return true;
+  return chart.getWidth() < 80 || chart.getHeight() < 80;
+}
+
 function getChart(container) {
-  const existing = chartInstances.get(container);
-  if (existing) return existing;
-  const chart = window.echarts.init(container, getEChartsTheme());
+  const ready = sizeChartHost(container);
+  let host = getChartHost(container);
+  let existing = chartInstances.get(container);
+  if (existing && (existing.isDisposed?.() || (ready && chartNeedsRebuild(existing, host)))) {
+    if (!existing.isDisposed?.()) existing.dispose();
+    chartInstances.delete(container);
+    container.__chartHost = null;
+    host = getChartHost(container);
+    existing = null;
+  }
+  if (existing) {
+    existing.resize();
+    return existing;
+  }
+  const chart = window.echarts.init(host, getEChartsTheme());
   chartInstances.set(container, chart);
+  if (ready) {
+    container.__chartSize = { w: container.clientWidth, h: container.clientHeight };
+  }
+  observeChartSize(container);
   return chart;
 }
 
@@ -565,7 +710,8 @@ export function reThemeAllCharts() {
   for (const [container, chart] of chartInstances.entries()) {
     const opts = chart.getOption();
     chart.dispose();
-    const newChart = window.echarts.init(container, theme);
+    const host = getChartHost(container);
+    const newChart = window.echarts.init(host, theme);
     newChart.setOption(opts);
     chartInstances.set(container, newChart);
   }
@@ -580,6 +726,10 @@ export function disposeWidgetChart(container) {
     chart.dispose();
     chartInstances.delete(chartEl);
   }
+  if (chartEl?.__chartRo) {
+    chartEl.__chartRo.disconnect();
+    delete chartEl.__chartRo;
+  }
 }
 
 // ─── Renderers ──────────────────────────────────────────────
@@ -592,6 +742,7 @@ function renderLineChart(widget, runtime, container) {
   const bounded = rows.slice(Math.max(0, rows.length - maxPts));
 
   const chart = getChart(container);
+  if (!chart) return;
   chart.setOption({
     grid: { left: 48, right: 16, top: 16, bottom: 32 },
     tooltip: { trigger: "axis" },
@@ -616,6 +767,7 @@ function renderBarChart(widget, runtime, container) {
   const valFields = widget.config?.valueFields ?? ["value"];
 
   const chart = getChart(container);
+  if (!chart) return;
   chart.setOption({
     grid: { left: 48, right: 16, top: 16, bottom: 32 },
     tooltip: { trigger: "axis" },
@@ -638,6 +790,7 @@ function renderPieChart(widget, runtime, container) {
   const valF = widget.config?.valueField ?? "value";
 
   const chart = getChart(container);
+  if (!chart) return;
   const tc = getThemeColors();
   chart.setOption({
     tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
@@ -659,6 +812,7 @@ function renderGauge(widget, runtime, container) {
   const value = getAggregatedValue(runtime, valF, mode, widget.config?.filterField, widget.config?.filterValue);
 
   const chart = getChart(container);
+  if (!chart) return;
   const tc = getThemeColors();
   chart.setOption({
     series: [{
@@ -678,6 +832,507 @@ function renderGauge(widget, runtime, container) {
   }, true);
 }
 
+function fieldOr(value, fallback) {
+  return value ? value : fallback;
+}
+
+function nodeSymbolSize(value) {
+  if (!Number.isFinite(value)) return 28;
+  return Math.max(16, Math.min(48, 16 + value));
+}
+
+function isPlainObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isRelationCell(value) {
+  return isPlainObject(value) && (value.$in_node != null || value.$out_node != null);
+}
+
+function isNodeCell(value) {
+  return isPlainObject(value) && value.$metadata != null && !isRelationCell(value);
+}
+
+function idFromRef(ref) {
+  if (ref == null) return null;
+  const text = String(ref).replace(/^\(/, "").split(",")[0].trim();
+  if (!text) return null;
+  const match = text.match(/^([^:]*):(.*)$/);
+  return match ? match[2].trim() : text;
+}
+
+function scalarId(value) {
+  if (value == null || value === "") return null;
+  if (isRelationCell(value)) return null;
+  if (isNodeCell(value)) {
+    return value.sensor_id ?? value.id ?? value.name ?? idFromRef(value.$metadata);
+  }
+  if (isPlainObject(value)) {
+    const nested = value.sensor_id ?? value.id ?? value.name;
+    return nested == null || nested === "" ? null : String(nested);
+  }
+  return String(value);
+}
+
+function cellLabel(value, fallbackId) {
+  if (isNodeCell(value) || isPlainObject(value)) {
+    const label = value.name ?? value.sensor_id ?? value.id;
+    if (label != null && String(label) !== "") return String(label);
+  }
+  return fallbackId != null ? String(fallbackId) : "";
+}
+
+function numericCell(value) {
+  if (value == null) return null;
+  if (isPlainObject(value)) {
+    const nested = value.strength ?? value.weight ?? value.value;
+    return Number.isFinite(Number(nested)) ? Number(nested) : null;
+  }
+  return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function graphMapping(config = {}) {
+  return {
+    nodeField: config.nodeField ?? config.sourceField ?? "",
+    connectsToField: config.connectsToField ?? config.targetField ?? "",
+    nodeLabelField: config.nodeLabelField ?? config.sourceLabelField ?? "",
+    connectsToLabelField: config.connectsToLabelField ?? config.targetLabelField ?? "",
+    nodeCategoryField: config.nodeCategoryField ?? config.sourceCategoryField ?? "",
+    connectsToCategoryField: config.connectsToCategoryField ?? config.targetCategoryField ?? "",
+    edgeLabelField: config.edgeLabelField || "",
+    valueField: config.valueField || "",
+  };
+}
+
+function fieldsForRow(row, config = {}) {
+  const mapping = graphMapping(config);
+  if (mapping.nodeField || mapping.connectsToField) {
+    return {
+      nodeField: mapping.nodeField,
+      connectsToField: mapping.connectsToField,
+    };
+  }
+  if (!row || typeof row !== "object") return { nodeField: "", connectsToField: "" };
+  const values = Object.values(row);
+  if (values.some((value) => isNodeCell(value) || isRelationCell(value))) {
+    return { nodeField: "", connectsToField: "" };
+  }
+  const keys = Object.keys(row);
+  if (keys.includes("node") || keys.includes("connects_to")) {
+    return {
+      nodeField: keys.includes("node") ? "node" : "",
+      connectsToField: keys.includes("connects_to") ? "connects_to" : "",
+    };
+  }
+  if (keys.includes("source") || keys.includes("target")) {
+    return {
+      nodeField: keys.includes("source") ? "source" : "",
+      connectsToField: keys.includes("target") ? "target" : "",
+    };
+  }
+  if (keys.includes("from") || keys.includes("to")) {
+    return {
+      nodeField: keys.includes("from") ? "from" : "",
+      connectsToField: keys.includes("to") ? "to" : "",
+    };
+  }
+  return { nodeField: "", connectsToField: "" };
+}
+
+/**
+ * Describe how one query row becomes a node and optional connection.
+ */
+export function describeGraphRow(row, config = {}) {
+  const mapping = graphMapping(config);
+  const { nodeField, connectsToField } = fieldsForRow(row, config);
+  const nodeLabelField = fieldOr(mapping.nodeLabelField, nodeField);
+  const connectsToLabelField = fieldOr(mapping.connectsToLabelField, connectsToField);
+  const edgeLabelField = mapping.edgeLabelField;
+  const valueField = mapping.valueField;
+
+  let fromId = nodeField ? scalarId(row?.[nodeField]) : null;
+  let toId = connectsToField ? scalarId(row?.[connectsToField]) : null;
+
+  if (!fromId && !toId && row && typeof row === "object") {
+    let rel = null;
+    const nodes = [];
+    for (const value of Object.values(row)) {
+      if (isRelationCell(value)) rel = value;
+      else if (isNodeCell(value)) nodes.push(value);
+    }
+    if (rel) {
+      fromId = idFromRef(rel.$in_node);
+      toId = idFromRef(rel.$out_node);
+    } else if (nodes[0]) {
+      fromId = scalarId(nodes[0]);
+    }
+  }
+
+  if (!fromId && !toId) return { ok: false, reason: "missing-node" };
+
+  let weight = null;
+  if (valueField) weight = numericCell(row?.[valueField]);
+  const edgeLabel = edgeLabelField && row?.[edgeLabelField] != null
+    ? String(row[edgeLabelField])
+    : null;
+
+  if (fromId && toId) {
+    return {
+      ok: true,
+      kind: "edge",
+      fromId,
+      toId,
+      fromLabel: String(row?.[nodeLabelField] != null && row[nodeLabelField] !== ""
+        ? (isPlainObject(row[nodeLabelField]) ? cellLabel(row[nodeLabelField], fromId) : row[nodeLabelField])
+        : fromId),
+      toLabel: String(row?.[connectsToLabelField] != null && row[connectsToLabelField] !== ""
+        ? (isPlainObject(row[connectsToLabelField]) ? cellLabel(row[connectsToLabelField], toId) : row[connectsToLabelField])
+        : toId),
+      weight,
+      edgeLabel,
+    };
+  }
+
+  const onlyId = fromId || toId;
+  const onlyLabelField = fromId ? nodeLabelField : connectsToLabelField;
+  const rawLabel = row?.[onlyLabelField];
+  return {
+    ok: true,
+    kind: "node",
+    fromId: onlyId,
+    toId: null,
+    fromLabel: String(rawLabel != null && rawLabel !== ""
+      ? (isPlainObject(rawLabel) ? cellLabel(rawLabel, onlyId) : rawLabel)
+      : onlyId),
+    toLabel: "",
+    weight,
+    edgeLabel: null,
+  };
+}
+
+/**
+ * Map query result rows to an ECharts graph model.
+ * Each row adds a node. A connection is added only when both ends are present.
+ * Isolated nodes (no neighbor) stay on the graph.
+ */
+export function rowsToGraph(rows, config = {}) {
+  const mapping = graphMapping(config);
+  const nodeCategoryField = mapping.nodeCategoryField;
+  const connectsToCategoryField = mapping.connectsToCategoryField;
+  const edgeLabelField = mapping.edgeLabelField;
+  const valueField = mapping.valueField;
+
+  const nodes = new Map();
+  const linkKeys = new Set();
+  const links = [];
+
+  function upsertNode(id, label, category, value) {
+    if (id == null || String(id) === "") return null;
+    const key = String(id);
+    const existing = nodes.get(key) || { id: key, name: key };
+    if (label != null && String(label) !== "") existing.name = String(label);
+    if (category != null && String(category) !== "") existing.categoryName = String(category);
+    if (value != null && Number.isFinite(Number(value))) existing.value = Number(value);
+    nodes.set(key, existing);
+    return key;
+  }
+
+  function addLink(sourceId, targetId, edgeLabel, value) {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const key = `${sourceId}\0${targetId}\0${edgeLabel ?? ""}`;
+    if (linkKeys.has(key)) return;
+    linkKeys.add(key);
+    const link = { source: sourceId, target: targetId };
+    if (edgeLabel != null && edgeLabel !== "") {
+      link.label = { show: true, formatter: String(edgeLabel) };
+    }
+    if (value != null && Number.isFinite(Number(value))) link.value = Number(value);
+    links.push(link);
+  }
+
+  function ingestElementCell(value) {
+    if (isRelationCell(value)) {
+      const fromId = idFromRef(value.$in_node);
+      const toId = idFromRef(value.$out_node);
+      const weight = numericCell(value);
+      upsertNode(fromId);
+      upsertNode(toId);
+      addLink(fromId, toId, null, weight);
+      return;
+    }
+    if (isNodeCell(value)) {
+      upsertNode(scalarId(value), cellLabel(value), Array.isArray(value.labels) ? value.labels[0] : undefined);
+    }
+  }
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || typeof row !== "object") continue;
+
+    for (const value of Object.values(row)) ingestElementCell(value);
+
+    const { nodeField, connectsToField } = fieldsForRow(row, config);
+    const nodeLabelField = fieldOr(mapping.nodeLabelField, nodeField);
+    const connectsToLabelField = fieldOr(mapping.connectsToLabelField, connectsToField);
+    const rawNode = nodeField ? row[nodeField] : undefined;
+    const rawConnectsTo = connectsToField ? row[connectsToField] : undefined;
+    const nodeId = scalarId(rawNode);
+    const connectsToId = scalarId(rawConnectsTo);
+    const value = valueField ? numericCell(row[valueField]) : undefined;
+    const edgeLabel = edgeLabelField && row[edgeLabelField] != null
+      ? String(row[edgeLabelField])
+      : undefined;
+
+    if (nodeId) {
+      upsertNode(
+        nodeId,
+        isPlainObject(row[nodeLabelField]) ? cellLabel(row[nodeLabelField], nodeId) : row[nodeLabelField],
+        nodeCategoryField ? row[nodeCategoryField] : undefined,
+        value,
+      );
+    }
+    if (connectsToId) {
+      upsertNode(
+        connectsToId,
+        isPlainObject(row[connectsToLabelField]) ? cellLabel(row[connectsToLabelField], connectsToId) : row[connectsToLabelField],
+        connectsToCategoryField ? row[connectsToCategoryField] : undefined,
+        value,
+      );
+    }
+    if (nodeId && connectsToId) addLink(nodeId, connectsToId, edgeLabel, value);
+  }
+
+  const categories = [];
+  const categoryIndex = new Map();
+  for (const node of nodes.values()) {
+    if (!node.categoryName || categoryIndex.has(node.categoryName)) continue;
+    categoryIndex.set(node.categoryName, categories.length);
+    categories.push({ name: node.categoryName });
+  }
+
+  const nodeList = Array.from(nodes.values()).map((node) => ({
+    id: node.id,
+    name: node.name,
+    value: node.value,
+    category: node.categoryName != null ? categoryIndex.get(node.categoryName) : undefined,
+    symbolSize: nodeSymbolSize(node.value),
+  }));
+
+  return { nodes: nodeList, links, categories };
+}
+
+function placeOnCircle(ids, positions, cx, cy, radius) {
+  if (ids.length === 1) {
+    positions.set(ids[0], { x: cx, y: cy });
+    return;
+  }
+  for (let i = 0; i < ids.length; i++) {
+    const angle = (2 * Math.PI * i) / ids.length - Math.PI / 2;
+    positions.set(ids[i], {
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle),
+    });
+  }
+}
+
+function runStaticForce(ids, _links, positions, width, height, cx, cy) {
+  const n = ids.length;
+  if (n < 2) return;
+  const minX = 48;
+  const maxX = Math.max(minX + 8, width - 72);
+  const minY = 32;
+  const maxY = Math.max(minY + 8, height - 32);
+  const minDist = Math.max(28, Math.min(width, height) * 0.12);
+  const maxStep = 12;
+
+  for (let iter = 0; iter < 40; iter++) {
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = positions.get(ids[i]);
+        const b = positions.get(ids[j]);
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist < 1e-6) {
+          const angle = (2 * Math.PI * i) / n;
+          dx = Math.cos(angle);
+          dy = Math.sin(angle);
+          dist = minDist;
+        }
+        if (dist >= minDist) continue;
+        const force = Math.min((minDist - dist) * 0.35, maxStep);
+        const ux = dx / dist;
+        const uy = dy / dist;
+        a.x += ux * force;
+        a.y += uy * force;
+        b.x -= ux * force;
+        b.y -= uy * force;
+      }
+    }
+
+    for (const id of ids) {
+      const p = positions.get(id);
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+        p.x = cx;
+        p.y = cy;
+      }
+      p.x = Math.min(maxX, Math.max(minX, p.x));
+      p.y = Math.min(maxY, Math.max(minY, p.y));
+    }
+  }
+}
+
+/**
+ * Assign stable pixel positions. Existing nodes keep their coordinates;
+ * only first layout and newly seen nodes move.
+ */
+export function layoutGraphNodes(nodes, links, width, height, prevPositions = new Map(), mode = "force") {
+  const w = Math.max(Number(width) || 0, 160);
+  const h = Math.max(Number(height) || 0, 120);
+  const cx = w / 2;
+  const cy = h / 2;
+  const radius = Math.min(w, h) * 0.36;
+  const positions = new Map();
+  const ids = (Array.isArray(nodes) ? nodes : []).map((n) => String(n.id));
+
+  for (const id of ids) {
+    const prev = prevPositions.get(id);
+    if (prev && Number.isFinite(prev.x) && Number.isFinite(prev.y)) {
+      positions.set(id, { x: prev.x, y: prev.y });
+    }
+  }
+
+  const missing = ids.filter((id) => !positions.has(id));
+  if (missing.length === 0) return positions;
+
+  if (positions.size === 0) {
+    const ordered = [...ids].sort((a, b) => a.localeCompare(b));
+    placeOnCircle(ordered, positions, cx, cy, radius);
+    if (mode !== "circular") {
+      runStaticForce(ordered, Array.isArray(links) ? links : [], positions, w, h, cx, cy);
+      const broken = ordered.some((id) => {
+        const p = positions.get(id);
+        return !p || !Number.isFinite(p.x) || !Number.isFinite(p.y);
+      });
+      if (broken) placeOnCircle(ordered, positions, cx, cy, radius);
+    }
+    return positions;
+  }
+
+  for (const id of missing) {
+    const neighbors = (Array.isArray(links) ? links : [])
+      .filter((link) => String(link.source) === id || String(link.target) === id)
+      .map((link) => positions.get(String(link.source) === id ? link.target : link.source))
+      .filter((pos) => pos && Number.isFinite(pos.x) && Number.isFinite(pos.y));
+    if (neighbors.length > 0) {
+      const x = neighbors.reduce((sum, pos) => sum + pos.x, 0) / neighbors.length + 28;
+      const y = neighbors.reduce((sum, pos) => sum + pos.y, 0) / neighbors.length + 16;
+      positions.set(id, { x, y });
+    } else {
+      positions.set(id, { x: cx, y: cy });
+    }
+  }
+  return positions;
+}
+
+function harvestGraphPositions(container, chart) {
+  const positions = new Map();
+  const prev = container.__graphPositions;
+  if (prev instanceof Map) {
+    for (const [id, pos] of prev) {
+      const x = asCoord(pos?.x);
+      const y = asCoord(pos?.y);
+      if (x != null && y != null) positions.set(String(id), { x, y });
+    }
+  }
+  const series = chart && !chart.isDisposed?.() ? chart.getOption()?.series?.[0] : null;
+  if (Array.isArray(series?.data)) {
+    for (const node of series.data) {
+      const x = asCoord(node?.x);
+      const y = asCoord(node?.y);
+      if (node && node.id != null && x != null && y != null) {
+        positions.set(String(node.id), { x, y });
+      }
+    }
+  }
+  container.__graphPositions = positions;
+  return positions;
+}
+
+function renderGraph(widget, runtime, container) {
+  const rows = asRows(runtime);
+  const mode = widget.config?.layout === "circular" ? "circular" : "force";
+  const graph = rowsToGraph(rows, widget.config ?? {});
+  const chart = getChart(container);
+  const tc = getThemeColors();
+  if (!chart || !sizeChartHost(container)) {
+    const tries = (container.__graphSizeRetry || 0) + 1;
+    container.__graphSizeRetry = tries;
+    if (tries <= 12) {
+      requestAnimationFrame(() => renderGraph(widget, runtime, container));
+      return;
+    }
+    console.warn("Graph widget container never received a usable size; skipping render.", container);
+    return;
+  }
+  container.__graphSizeRetry = 0;
+  chart.resize();
+
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  if (w < 80 || h < 80) return;
+  const prevSize = container.__chartSize;
+  if (prevSize && prevSize.w > 0 && prevSize.h > 0 && (prevSize.w !== w || prevSize.h !== h)) {
+    scaleStoredGraphPositions(container, w / prevSize.w, h / prevSize.h);
+  }
+  container.__chartSize = { w, h };
+
+  const prevPositions = harvestGraphPositions(container, chart);
+  const positions = layoutGraphNodes(graph.nodes, graph.links, w, h, prevPositions, mode);
+  container.__graphPositions = positions;
+
+  const data = graph.nodes.map((node) => {
+    const pos = positions.get(node.id);
+    const x = asCoord(pos?.x);
+    const y = asCoord(pos?.y);
+    return x != null && y != null ? { ...node, x, y } : node;
+  });
+
+  chart.setOption({
+    animation: false,
+    animationDurationUpdate: 0,
+    tooltip: {
+      trigger: "item",
+      formatter: (p) => {
+        if (p.dataType === "edge") {
+          const label = p.data?.label?.formatter ?? "";
+          const value = p.data?.value;
+          return `${escapeHtml(p.data.source)} → ${escapeHtml(p.data.target)}${label ? `<br/>${escapeHtml(label)}` : ""}${value != null ? `<br/>value: ${escapeHtml(value)}` : ""}`;
+        }
+        const value = p.data?.value;
+        return `${escapeHtml(p.data?.name ?? p.name)}${value != null ? `<br/>value: ${escapeHtml(value)}` : ""}`;
+      },
+    },
+    legend: graph.categories.length > 0 ? [{ data: graph.categories.map((c) => c.name) }] : undefined,
+    series: [{
+      type: "graph",
+      layout: "none",
+      roam: true,
+      draggable: true,
+      top: 8,
+      bottom: 8,
+      left: 8,
+      right: 8,
+      categories: graph.categories,
+      data,
+      links: graph.links,
+      label: { show: true, position: "right", color: tc.textSecondary, fontSize: 11 },
+      lineStyle: { color: "source", curveness: 0.15, opacity: 0.7 },
+      emphasis: { focus: "adjacency", lineStyle: { width: 3 } },
+      color: CHART_COLORS,
+    }],
+  }, { replaceMerge: ["series"] });
+}
+
 function renderMap(widget, runtime, container) {
   const rows = asRows(runtime);
   const latF = widget.config?.latField ?? "lat";
@@ -685,6 +1340,7 @@ function renderMap(widget, runtime, container) {
   const valF = widget.config?.valueField ?? "value";
 
   const chart = getChart(container);
+  if (!chart) return;
   chart.setOption({
     tooltip: { trigger: "item", formatter: (p) => `lng: ${p.value[0]}<br/>lat: ${p.value[1]}<br/>value: ${p.value[2]}` },
     xAxis: { type: "value", name: "lng" },
@@ -838,5 +1494,6 @@ export function renderWidget(widget, runtime, container) {
     case "pie_chart": renderPieChart(widget, runtime, chartEl); break;
     case "gauge": renderGauge(widget, runtime, chartEl); break;
     case "map": renderMap(widget, runtime, chartEl); break;
+    case "graph": renderGraph(widget, runtime, chartEl); break;
   }
 }

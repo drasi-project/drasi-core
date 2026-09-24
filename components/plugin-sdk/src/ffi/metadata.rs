@@ -44,7 +44,13 @@ use super::types::FfiStr;
 ///   async workers). `FfiBootstrapResult` also carries optional provider
 ///   error text (`error_ptr`/`error_len`/`error_drop_fn`) so failures
 ///   surface with their message instead of only a negative code.
-pub const FFI_SDK_VERSION: &str = "0.13.0";
+/// - `0.14.0`: `SourceVtable::subscribe_fn` gained a trailing
+///   `resume_sequence: u64` parameter (`0` when absent) so the host can hand
+///   the last checkpointed framework sequence back to out-of-process sources,
+///   which raise their sequence counter above it for restart monotonicity
+///   (#827). This changes the subscribe call contract, so old plugins must be
+///   rejected by the loader's major.minor check.
+pub const FFI_SDK_VERSION: &str = "0.14.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

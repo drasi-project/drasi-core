@@ -14,6 +14,61 @@
 
 //! Shared configuration types for MySQL plugins.
 
+/// SSL mode for MySQL connections.
+///
+/// Shared by the MySQL source and bootstrap plugins. The actual TLS negotiation
+/// is performed by [`crate::connect::connect_with_ssl_mode`]. A rustls TLS
+/// backend is always compiled in, so every mode below is available at runtime.
+///
+/// # Certificate verification
+///
+/// The TLS backend is rustls. [`SslMode::IfAvailable`] and [`SslMode::Require`]
+/// negotiate TLS **without** certificate verification (they accept self-signed
+/// certs and skip hostname checks), so they only protect against passive
+/// eavesdroppers, not an active man-in-the-middle. The verifying variants
+/// authenticate the server: [`SslMode::RequireVerifyCa`] verifies the
+/// certificate chain but skips hostname validation, and
+/// [`SslMode::RequireVerifyFull`] performs full chain **and** hostname
+/// verification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SslMode {
+    /// Disable SSL encryption — always connect in plaintext.
+    Disabled,
+    /// Try SSL but fall back to an unencrypted connection if it fails
+    /// (opportunistic TLS, equivalent to MySQL's `--ssl-mode=PREFERRED`).
+    ///
+    /// TLS is attempted **without** certificate or hostname verification
+    /// (invalid certs accepted, hostname checks skipped), falling back to
+    /// plaintext on error.
+    ///
+    /// # Security
+    ///
+    /// This mode is **not** safe against an active network attacker. Because it
+    /// silently downgrades to plaintext when the TLS handshake fails, an attacker
+    /// who disrupts the handshake (TCP reset, forged TLS alert) can strip TLS and
+    /// force a plaintext connection — exposing credentials and query data — while
+    /// only a `warn`-level log records the fallback. Use [`SslMode::Require`] (or
+    /// a verifying variant) in any environment where credentials must be
+    /// protected against active attackers.
+    #[default]
+    IfAvailable,
+    /// Require an encrypted connection, but **without** certificate or hostname
+    /// verification (accepts self-signed certs, skips hostname checks).
+    ///
+    /// Equivalent to MySQL's `--ssl-mode=REQUIRED`. Provides transport
+    /// encryption but **not** server authentication: it protects against passive
+    /// eavesdropping but **not** an active man-in-the-middle attacker who can
+    /// present any certificate. Use [`SslMode::RequireVerifyCa`] or
+    /// [`SslMode::RequireVerifyFull`] when server authenticity matters.
+    Require,
+    /// Require SSL with CA (certificate chain) verification, but **skip** hostname
+    /// validation.
+    RequireVerifyCa,
+    /// Require SSL with full verification: CA (certificate chain) **and** hostname
+    /// validation.
+    RequireVerifyFull,
+}
+
 /// Table key configuration for MySQL sources and bootstrappers.
 ///
 /// Maps a table name to the columns that form its primary key,

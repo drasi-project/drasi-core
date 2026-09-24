@@ -36,7 +36,7 @@ let source = MySqlReplicationSource::builder("mysql-source")
 | `user` | `String` | **(Required)** | Database user with replication privileges |
 | `password` | `String` | `""` | Database password |
 | `tables` | `Vec<String>` | `[]` | List of tables to monitor |
-| `sslMode` | `SslMode` | `disabled` | SSL mode: `disabled`, `if_available`, `require`, `require_verify_ca`, `require_verify_full` |
+| `sslMode` | `SslMode` | `if_available` | SSL mode: `disabled`, `if_available`, `require`, `require_verify_ca`, `require_verify_full` (see [SSL Modes](#ssl-modes)) |
 | `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration (see below) |
 | `startPosition` | `StartPosition` | `from_end` | Where to start replication: `from_start`, `from_end`, `from_position`, or `from_gtid` |
 | `serverId` | `u32` | Auto-generated | MySQL server ID for the replication connection. Auto-generated from source instance ID if not specified. |
@@ -48,6 +48,23 @@ let source = MySqlReplicationSource::builder("mysql-source")
 |-------|------|-------------|
 | `table` | `String` | Table name |
 | `keyColumns` | `Vec<String>` | Column names to use as primary key |
+
+### SSL Modes
+
+TLS support (rustls) is always compiled in — there is no feature flag to enable.
+`sslMode` maps 1:1 to MySQL's `--ssl-mode`:
+
+| Value | MySQL `--ssl-mode` | TLS | Verifies |
+|-------|--------------------|-----|----------|
+| `disabled` | `DISABLED` | no | — |
+| `if_available` (default) | `PREFERRED` | opportunistic; falls back to plaintext | no |
+| `require` | `REQUIRED` | required | no (encrypt-only) |
+| `require_verify_ca` | `VERIFY_CA` | required | CA chain (skips hostname) |
+| `require_verify_full` | `VERIFY_IDENTITY` | required | CA chain + hostname |
+
+`if_available` and `require` skip certificate verification (matching MySQL), so they
+protect against passive eavesdropping but not an active man-in-the-middle. Use
+`require_verify_ca` or `require_verify_full` when server authenticity matters.
 
 ## Limitations
 

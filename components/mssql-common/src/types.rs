@@ -12,17 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Type conversion from MS SQL to Drasi ElementValue
+//! Type conversion from MS SQL to Drasi ElementValue.
+//!
+//! This is the single source of truth used by both the MSSQL bootstrap provider
+//! and the CDC/source path so snapshot and live values stay consistent.
 
 use anyhow::Result;
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use drasi_core::models::ElementValue;
 use std::sync::Arc;
 use tiberius::Row;
 
-/// Extract a column value from a row by index and convert to ElementValue
+/// Extract a column value from a row by index and convert to ElementValue.
 ///
-/// Uses column type metadata to select the correct conversion, consistent with
-/// the bootstrapper's `convert_column_value` approach.
+/// Uses column type metadata to select the correct conversion. Bootstrap and
+/// CDC both call this function so the same stored value always yields the same
+/// `ElementValue`.
 pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
     use tiberius::ColumnType;
 
@@ -70,6 +75,14 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
                 Ok(ElementValue::Null)
             }
         }
+        // MONEY/SMALLMONEY decode as ColumnData::F64 in tiberius (scaled int / 1e4).
+        ColumnType::Money | ColumnType::Money4 => {
+            if let Ok(Some(val)) = row.try_get::<f64, _>(col_idx) {
+                Ok(ElementValue::Float(ordered_float::OrderedFloat(val)))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
         ColumnType::BigVarChar
         | ColumnType::BigChar
         | ColumnType::NVarchar
@@ -92,14 +105,32 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
         ColumnType::Datetime
         | ColumnType::Datetime2
         | ColumnType::Datetime4
-        | ColumnType::Datetimen
-        | ColumnType::Daten => {
-            if let Ok(Some(val)) = row.try_get::<chrono::NaiveDateTime, _>(col_idx) {
-                Ok(ElementValue::String(Arc::from(
-                    val.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
-                )))
-            } else if let Ok(Some(val)) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(col_idx) {
-                Ok(ElementValue::String(Arc::from(val.to_rfc3339())))
+        | ColumnType::Datetimen => {
+            if let Ok(Some(val)) = row.try_get::<NaiveDateTime, _>(col_idx) {
+                Ok(ElementValue::LocalDateTime(val))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        ColumnType::DatetimeOffsetn => {
+            if let Ok(Some(val)) = row.try_get::<DateTime<FixedOffset>, _>(col_idx) {
+                Ok(ElementValue::ZonedDateTime(val))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        // ElementValue has no bare Date variant; match Postgres and emit a string.
+        ColumnType::Daten => {
+            if let Ok(Some(val)) = row.try_get::<NaiveDate, _>(col_idx) {
+                Ok(ElementValue::String(Arc::from(val.to_string())))
+            } else {
+                Ok(ElementValue::Null)
+            }
+        }
+        // ElementValue has no bare Time variant; match Postgres and emit a string.
+        ColumnType::Timen => {
+            if let Ok(Some(val)) = row.try_get::<NaiveTime, _>(col_idx) {
+                Ok(ElementValue::String(Arc::from(val.to_string())))
             } else {
                 Ok(ElementValue::Null)
             }
@@ -147,6 +178,7 @@ pub fn value_to_string(value: &ElementValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{FixedOffset, NaiveDate, TimeZone};
 
     #[test]
     fn test_value_to_string() {
@@ -163,5 +195,30 @@ mod tests {
     fn test_value_to_string_float() {
         let val = ElementValue::Float(ordered_float::OrderedFloat(2.14));
         assert_eq!(value_to_string(&val), "2.14");
+    }
+
+    #[test]
+    fn test_value_to_string_local_datetime() {
+        let dt = NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_milli_opt(10, 30, 45, 123)
+            .unwrap();
+        assert_eq!(
+            value_to_string(&ElementValue::LocalDateTime(dt)),
+            "2024-06-15 10:30:45.123"
+        );
+    }
+
+    #[test]
+    fn test_value_to_string_zoned_datetime() {
+        let offset = FixedOffset::east_opt(5 * 3600).unwrap();
+        let dt = offset
+            .with_ymd_and_hms(2024, 6, 15, 10, 30, 45)
+            .single()
+            .unwrap();
+        assert_eq!(
+            value_to_string(&ElementValue::ZonedDateTime(dt)),
+            dt.to_rfc3339()
+        );
     }
 }

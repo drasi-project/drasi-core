@@ -43,6 +43,10 @@ impl MssqlConfig {
         config.port(self.port);
         config.authentication(tiberius::AuthMethod::sql_server(&self.user, &self.password));
         config.database(&self.database);
+        // Match production default (EncryptionMode::NotSupported). Required/On TLS
+        // fails on macOS against SQL Server's self-signed certs (native-tls rejects
+        // long validity periods / closes the handshake).
+        config.encryption(tiberius::EncryptionLevel::NotSupported);
         if self.trust_server_certificate {
             config.trust_cert();
         }
@@ -117,51 +121,50 @@ pub async fn setup_mssql() -> Result<MssqlGuard> {
 
 async fn setup_mssql_raw() -> Result<(ContainerAsync<GenericImage>, MssqlConfig)> {
     let password = "YourStrong@Passw0rd";
-    let (image_name, image_tag, accept_eula, init_delay, privileged) =
-        if cfg!(target_arch = "aarch64") {
-            (
-                "mcr.microsoft.com/azure-sql-edge",
-                "latest",
-                "1",
-                20000,
-                true,
-            )
-        } else {
-            (
-                "mcr.microsoft.com/mssql/server",
-                "2022-latest",
-                "Y",
-                15000,
-                false,
-            )
-        };
+    // Full SQL Server is required for CDC (SQL Agent). On Apple Silicon use the
+    // linux/amd64 image under emulation rather than Azure SQL Edge, which lacks
+    // a usable Agent/CDC path for these tests.
+    let init_delay = if cfg!(target_arch = "aarch64") {
+        45_000
+    } else {
+        15_000
+    };
 
-    let mut image = GenericImage::new(image_name, image_tag)
+    let mut image = GenericImage::new("mcr.microsoft.com/mssql/server", "2022-latest")
         .with_exposed_port(1433.tcp())
-        .with_env_var("ACCEPT_EULA", accept_eula)
-        .with_env_var("MSSQL_SA_PASSWORD", password);
+        .with_env_var("ACCEPT_EULA", "Y")
+        .with_env_var("MSSQL_SA_PASSWORD", password)
+        .with_env_var("MSSQL_PID", "Developer")
+        .with_env_var("MSSQL_AGENT_ENABLED", "true");
 
-    if !cfg!(target_arch = "aarch64") {
-        image = image
-            .with_env_var("MSSQL_PID", "Developer")
-            .with_env_var("MSSQL_AGENT_ENABLED", "true");
-    }
-    if privileged {
-        image = image.with_privileged(true);
+    if cfg!(target_arch = "aarch64") {
+        image = image.with_platform("linux/amd64");
     }
 
     let container = image.start().await?;
     let host_port = container.get_host_port_ipv4(1433.tcp()).await?;
-    let host = container.get_host().await?.to_string();
+    // Prefer 127.0.0.1 over localhost to avoid IPv6 (::1) resolution issues on macOS
+    // when Docker only publishes the IPv4 port mapping.
+    let reported_host = container.get_host().await?.to_string();
+    let host = if reported_host == "localhost" || reported_host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        reported_host
+    };
 
     let config = MssqlConfig {
-        host,
+        host: host.clone(),
         port: host_port,
         database: "master".to_string(),
         user: "sa".to_string(),
         password: password.to_string(),
         trust_server_certificate: true,
     };
+
+    eprintln!(
+        "MSSQL testcontainer started at {}:{} (init_delay_ms={init_delay})",
+        config.host, config.port
+    );
 
     tokio::time::sleep(Duration::from_millis(init_delay)).await;
     wait_for_mssql_ready(&config).await?;
@@ -170,15 +173,29 @@ async fn setup_mssql_raw() -> Result<(ContainerAsync<GenericImage>, MssqlConfig)
 }
 
 async fn wait_for_mssql_ready(config: &MssqlConfig) -> Result<()> {
-    let max_retries = 30;
+    // Emulated linux/amd64 SQL Server on Apple Silicon can take several minutes.
+    let max_retries = 90;
     let retry_delay = Duration::from_secs(3);
+    let mut last_err = None;
 
     for attempt in 1..=max_retries {
-        if let Ok(mut client) = config.connect().await {
-            if let Ok(stream) = client.query("SELECT 1", &[]).await {
-                if stream.into_results().await.is_ok() {
-                    return Ok(());
+        match config.connect().await {
+            Ok(mut client) => match client.query("SELECT 1", &[]).await {
+                Ok(stream) => {
+                    if stream.into_results().await.is_ok() {
+                        eprintln!("MSSQL ready after attempt {attempt}");
+                        return Ok(());
+                    }
+                    last_err = Some(anyhow!("SELECT 1 returned no usable results"));
                 }
+                Err(e) => last_err = Some(anyhow!("query failed: {e}")),
+            },
+            Err(e) => last_err = Some(anyhow!("connect failed: {e}")),
+        }
+
+        if attempt == 1 || attempt % 10 == 0 {
+            if let Some(err) = &last_err {
+                eprintln!("MSSQL readiness attempt {attempt}/{max_retries}: {err}");
             }
         }
 
@@ -188,7 +205,12 @@ async fn wait_for_mssql_ready(config: &MssqlConfig) -> Result<()> {
     }
 
     Err(anyhow!(
-        "MSSQL failed to become ready after {max_retries} attempts"
+        "MSSQL failed to become ready after {max_retries} attempts (host={} port={}): {}",
+        config.host,
+        config.port,
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
     ))
 }
 

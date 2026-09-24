@@ -66,58 +66,8 @@ pub struct MySqlSourceConfigDto {
     pub heartbeat_interval_seconds: ConfigValue<u64>,
 }
 
-/// SSL mode DTO (mirrors [`SslMode`]).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = source::mysql::SslMode)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum SslModeDto {
-    #[default]
-    Disabled,
-    IfAvailable,
-    Require,
-    RequireVerifyCa,
-    RequireVerifyFull,
-}
-
-impl FromStr for SslModeDto {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "disabled" => Ok(SslModeDto::Disabled),
-            "if_available" | "ifavailable" => Ok(SslModeDto::IfAvailable),
-            "require" => Ok(SslModeDto::Require),
-            "require_verify_ca" | "requireverifyca" => Ok(SslModeDto::RequireVerifyCa),
-            "require_verify_full" | "requireverifyfull" => Ok(SslModeDto::RequireVerifyFull),
-            _ => Err(format!("Invalid SSL mode: {s}")),
-        }
-    }
-}
-
-impl From<SslModeDto> for SslMode {
-    fn from(dto: SslModeDto) -> Self {
-        match dto {
-            SslModeDto::Disabled => SslMode::Disabled,
-            SslModeDto::IfAvailable => SslMode::IfAvailable,
-            SslModeDto::Require => SslMode::Require,
-            SslModeDto::RequireVerifyCa => SslMode::RequireVerifyCa,
-            SslModeDto::RequireVerifyFull => SslMode::RequireVerifyFull,
-        }
-    }
-}
-
-impl From<&SslMode> for SslModeDto {
-    fn from(mode: &SslMode) -> Self {
-        match mode {
-            SslMode::Disabled => SslModeDto::Disabled,
-            SslMode::IfAvailable => SslModeDto::IfAvailable,
-            SslMode::Require => SslModeDto::Require,
-            SslMode::RequireVerifyCa => SslModeDto::RequireVerifyCa,
-            SslMode::RequireVerifyFull => SslModeDto::RequireVerifyFull,
-        }
-    }
-}
+/// SSL mode DTO (mirrors [`SslMode`]), shared from `drasi-mysql-common`.
+pub use drasi_mysql_common::SslModeDto;
 
 /// Start position DTO (mirrors [`StartPosition`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]

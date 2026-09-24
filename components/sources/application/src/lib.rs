@@ -177,6 +177,7 @@ pub struct ApplicationSourceHandle {
     source_id: String,
     /// Shared WAL reference — populated when the source is started with durability enabled
     wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
+    enqueue_order: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ApplicationSourceHandle {
@@ -185,6 +186,7 @@ impl ApplicationSourceHandle {
     /// If WAL durability is enabled, the event is persisted to the WAL before
     /// being acknowledged (returned Ok). This ensures the WAL-before-ACK guarantee.
     pub async fn send(&self, change: SourceChange) -> Result<()> {
+        let _enqueue_guard = self.enqueue_order.lock().await;
         // WAL append before ACK (if durability is enabled)
         let wal_seq = {
             let wal_guard = self.wal.read().await;
@@ -360,6 +362,8 @@ pub struct ApplicationSource {
     app_tx: mpsc::Sender<InternalEvent>,
     /// WAL provider for durable event persistence (shared with handles for WAL-before-ACK)
     wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
+    /// Serializes WAL append and enqueue across all source handles.
+    enqueue_order: Arc<tokio::sync::Mutex<()>>,
     /// Handle to the WAL pruning background task (if running)
     prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -402,11 +406,13 @@ impl ApplicationSource {
 
         // Shared WAL reference — populated later in start() when durability is enabled
         let shared_wal = Arc::new(tokio::sync::RwLock::new(None));
+        let enqueue_order = Arc::new(tokio::sync::Mutex::new(()));
 
         let handle = ApplicationSourceHandle {
             tx: app_tx.clone(),
             source_id: id.clone(),
             wal: shared_wal.clone(),
+            enqueue_order: enqueue_order.clone(),
         };
 
         let source = Self {
@@ -415,6 +421,7 @@ impl ApplicationSource {
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
             app_tx,
             wal: shared_wal,
+            enqueue_order,
             prune_task: tokio::sync::RwLock::new(None),
         };
 
@@ -430,6 +437,7 @@ impl ApplicationSource {
             tx: self.app_tx.clone(),
             source_id: self.base.id.clone(),
             wal: self.wal.clone(),
+            enqueue_order: self.enqueue_order.clone(),
         }
     }
 
@@ -442,7 +450,7 @@ impl ApplicationSource {
             .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
 
         let source_name = self.base.id.clone();
-        let base_dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let reporter = self.base.status_handle();
         let source_id = self.base.id.clone();
 
@@ -485,22 +493,16 @@ impl ApplicationSource {
                         SourceEvent::Change(event.change),
                         chrono::Utc::now(),
                         profiling,
+                        event.wal_seq.unwrap_or_else(|| base.next_sequence()),
                     );
 
                     // Use pre-assigned WAL sequence from handle (WAL-before-ACK)
                     if let Some(seq) = event.wal_seq {
-                        wrapper.sequence = Some(seq);
                         wrapper.source_position =
                             Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                     }
 
-                    if let Err(e) = SourceBase::dispatch_from_task(
-                        base_dispatchers.clone(),
-                        wrapper,
-                        &source_name,
-                    )
-                    .await
-                    {
+                    if let Err(e) = base.dispatch_event(wrapper).await {
                         debug!("Failed to dispatch change (no subscribers): {e}");
                     }
                 }
@@ -666,25 +668,39 @@ impl Source for ApplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        // If WAL is enabled and subscriber is resuming, use WAL replay
+        // Replay when the query asked to resume, or when bootstrap is
+        // requested but no provider is configured (WAL-only application
+        // sources). A configured provider must still run on a restart
+        // with no checkpoint — resume_sequence=0 would skip it.
         let wal_guard = self.wal.read().await;
-        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
-            // Decode resume_from as big-endian u64 sequence
-            if resume_from.len() >= 8 {
-                let resume_seq =
-                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
+        if let Some(wal) = wal_guard.as_ref() {
+            let resume_seq = if let Some(ref resume_from) = settings.resume_from {
+                if resume_from.len() >= 8 {
+                    Some(u64::from_be_bytes(
+                        resume_from[..8].try_into().unwrap_or_default(),
+                    ))
+                } else {
+                    drop(wal_guard);
+                    return Err(anyhow::anyhow!(
+                        "Invalid resume_from position: expected at least 8 bytes, got {}",
+                        resume_from.len()
+                    ));
+                }
+            } else {
+                settings.resume_sequence
+            };
+            let replay_seq = match resume_seq {
+                Some(seq) => Some(seq),
+                None if settings.enable_bootstrap && !self.base.has_bootstrap_provider() => Some(0),
+                None => None,
+            };
+            if let Some(seq) = replay_seq {
                 let wal_clone = wal.clone();
                 drop(wal_guard);
                 return self
                     .base
-                    .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "Application")
+                    .subscribe_with_replay(&settings, wal_clone.as_ref(), seq, "Application")
                     .await;
-            } else {
-                drop(wal_guard);
-                return Err(anyhow::anyhow!(
-                    "Invalid resume_from position: expected at least 8 bytes, got {}",
-                    resume_from.len()
-                ));
             }
         }
         drop(wal_guard);
