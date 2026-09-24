@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use drasi_computation_plugin_abi as abi;
 use drasi_computation_plugin_sdk::{
     metadata::FactoryMetadata,
-    transport::{checked_table, take_reply, take_status, Failure, OperationFuture},
+    transport::{checked_table, take_reply, take_status, Failure, OperationFuture, ReceivedBytes},
     wire::{self, InstanceMetadata},
 };
 use drasi_lib::computation::v1::*;
@@ -87,7 +87,7 @@ impl RemoteComponent {
             Ok(OperationFuture::new(operation)?)
         }
     }
-    pub(super) async fn call(&self, code: u32, input: &[u8]) -> anyhow::Result<Vec<u8>> {
+    pub(super) async fn call(&self, code: u32, input: &[u8]) -> anyhow::Result<ReceivedBytes> {
         Ok(self.begin(code, input, None)?.await?)
     }
     pub(super) async fn unit(&self, code: u32, input: &[u8]) -> anyhow::Result<()> {
@@ -117,7 +117,7 @@ pub struct NativeComponentProxy {
     pub(super) inner: Arc<RemoteComponent>,
     descriptor: ComponentDescriptor,
     metadata: FactoryMetadata,
-    pub(super) codec: Arc<EnvelopeCodec>,
+    pub(super) codec: Arc<BinaryEnvelopeCodec>,
     schemas: Vec<Arc<Schema>>,
     pending: bool,
 }
@@ -126,7 +126,7 @@ impl NativeComponentProxy {
         raw: abi::ComponentHandle,
         metadata: FactoryMetadata,
         id: &ComponentId,
-        codec: Arc<EnvelopeCodec>,
+        codec: Arc<BinaryEnvelopeCodec>,
         schemas: Vec<Arc<Schema>>,
         plugin: Arc<PluginOwner>,
     ) -> anyhow::Result<Self> {
@@ -151,7 +151,8 @@ impl NativeComponentProxy {
         &self.metadata
     }
     async fn outputs(&mut self, code: u32, input: &[u8]) -> anyhow::Result<Vec<OutputEnvelope>> {
-        let result: wire::OutputBatch = wire::decode(&self.inner.call(code, input).await?)?;
+        let reply = self.inner.call(code, input).await?;
+        let result: wire::OutputBatch<'_> = wire::decode(&reply)?;
         anyhow::ensure!(
             !result.pending || self.metadata.capabilities.continuations,
             "native component returned undeclared continuation work"
@@ -258,8 +259,8 @@ impl ComputationComponent for NativeComponentProxy {
 #[async_trait]
 impl EnvelopeSource for NativeComponentProxy {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
-        let output: Option<wire::Envelope> =
-            wire::decode(&self.inner.call(abi::operation::NEXT, &[]).await?)?;
+        let reply = self.inner.call(abi::operation::NEXT, &[]).await?;
+        let output: Option<wire::Envelope<'_>> = wire::decode(&reply)?;
         let output = output
             .map(|output| output.into_output(&self.codec))
             .transpose()?;

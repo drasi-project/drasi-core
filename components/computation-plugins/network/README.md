@@ -3,8 +3,10 @@
 `drasi-computation-network` provides four native ComputationGraph factories for
 standard HTTP/gRPC performance comparisons. Plugin identity is
 `drasi-computation-network`; native ABI is **1.0.0**, independently of its workspace
-package version. Each implementation has version `"1"` and configuration version
-`1`. The legacy Source/Reaction/Bootstrap ABI **0.15.0** is unchanged.
+package version. Native wire version is **2**, using binary computation envelopes
+and bulk MessagePack buffers. Rebuild prototype wire-version-1 native libraries.
+Each implementation has version `"1"` and configuration version `1`. The legacy
+Source/Reaction/Bootstrap ABI **0.15.0** is unchanged.
 
 | Factory | Native role | Port/schema |
 |---|---|---|

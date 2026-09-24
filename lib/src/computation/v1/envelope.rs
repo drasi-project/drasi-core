@@ -78,6 +78,10 @@ impl ContextEntry {
     pub fn value(&self) -> ContextValue {
         self.inner.value.clone()
     }
+
+    pub(super) fn value_ref(&self) -> &ContextValue {
+        &self.inner.value
+    }
 }
 
 /// Read-only view of an envelope's branch-local annotation list.

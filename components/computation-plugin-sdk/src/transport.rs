@@ -150,9 +150,46 @@ impl Drop for BufferGuard {
     }
 }
 
+/// Local owner of a producer-allocated, immutable FFI byte buffer.
+/// Borrow it for decoding; dropping it invokes the producer's release callback.
+pub struct ReceivedBytes(BufferGuard);
+
+// The ABI permits immutable buffers and their release callbacks on any thread.
+unsafe impl Send for ReceivedBytes {}
+unsafe impl Sync for ReceivedBytes {}
+
+impl std::ops::Deref for ReceivedBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        let bytes = &self.0 .0;
+        if bytes.len == 0 {
+            &[]
+        } else {
+            // take_bytes validated the complete buffer before constructing us.
+            unsafe { std::slice::from_raw_parts(bytes.data, bytes.len) }
+        }
+    }
+}
+
+impl AsRef<[u8]> for ReceivedBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::fmt::Debug for ReceivedBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReceivedBytes")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
 /// # Safety
 /// The buffer and its producer-side release function must obey the ABI contract.
-pub unsafe fn take_bytes(bytes: OwnedBytes, limit: usize) -> Result<Vec<u8>, Failure> {
+pub unsafe fn take_bytes(bytes: OwnedBytes, limit: usize) -> Result<ReceivedBytes, Failure> {
     let guard = BufferGuard(bytes);
     let bytes = &guard.0;
     let canonical_empty = bytes.data.is_null()
@@ -164,7 +201,7 @@ pub unsafe fn take_bytes(bytes: OwnedBytes, limit: usize) -> Result<Vec<u8>, Fai
             "native owned buffer has no producer-side owner/release",
         ));
     }
-    Ok(unsafe {
+    unsafe {
         borrowed_bytes(
             BorrowedBytes {
                 data: bytes.data,
@@ -172,8 +209,8 @@ pub unsafe fn take_bytes(bytes: OwnedBytes, limit: usize) -> Result<Vec<u8>, Fai
             },
             limit,
         )?
-    }
-    .to_vec())
+    };
+    Ok(ReceivedBytes(guard))
 }
 
 /// # Safety
@@ -196,7 +233,7 @@ pub unsafe fn take_status(status: Status) -> Result<(), Failure> {
 
 /// # Safety
 /// Both buffers transfer ownership and must obey their producer's contract.
-pub unsafe fn take_reply(reply: Reply) -> Result<Vec<u8>, Failure> {
+pub unsafe fn take_reply(reply: Reply) -> Result<ReceivedBytes, Failure> {
     let result = unsafe { take_status(reply.status) };
     let payload = unsafe { take_bytes(reply.payload, abi::MAX_MESSAGE_BYTES) };
     result?;
@@ -438,7 +475,7 @@ impl OperationFuture {
     }
 }
 impl Future for OperationFuture {
-    type Output = Result<Vec<u8>, Failure>;
+    type Output = Result<ReceivedBytes, Failure>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.done {
             return Poll::Ready(Err(Failure::protocol(
@@ -450,7 +487,7 @@ impl Future for OperationFuture {
         let table = unsafe { &*self.handle.vtable };
         let polled = unsafe { table.poll.expect("validated")(self.handle.state, &wake) };
         let reply = unsafe { take_reply(polled.reply) };
-        if polled.state == abi::POLL_PENDING && reply.as_ref().is_ok_and(Vec::is_empty) {
+        if polled.state == abi::POLL_PENDING && reply.as_ref().is_ok_and(|bytes| bytes.is_empty()) {
             return Poll::Pending;
         }
         self.done = true;
@@ -512,7 +549,7 @@ mod tests {
             std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_pending())).await
         );
         send.send(()).unwrap();
-        assert_eq!(future.await.unwrap(), vec![1, 2, 3]);
+        assert_eq!(future.await.unwrap().as_ref(), &[1, 2, 3]);
     }
 
     #[tokio::test]
@@ -563,8 +600,9 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), operation)
                 .await
                 .unwrap()
-                .unwrap(),
-            vec![7]
+                .unwrap()
+                .as_ref(),
+            &[7]
         );
     }
 
@@ -617,5 +655,108 @@ mod tests {
         }
         .is_err());
         assert_eq!(RELEASES.load(Ordering::SeqCst), 2);
+    }
+
+    struct CountedBuffer {
+        bytes: Vec<u8>,
+        released: Arc<AtomicUsize>,
+    }
+
+    fn counted_buffer(bytes: Vec<u8>, released: &Arc<AtomicUsize>) -> OwnedBytes {
+        let owner = Box::new(CountedBuffer {
+            bytes,
+            released: released.clone(),
+        });
+        OwnedBytes {
+            data: owner.bytes.as_ptr(),
+            len: owner.bytes.len(),
+            context: Box::into_raw(owner).cast(),
+            release: Some(release_counted_buffer),
+        }
+    }
+
+    unsafe extern "C" fn release_counted_buffer(context: *mut c_void) {
+        let owner = unsafe { Box::from_raw(context.cast::<CountedBuffer>()) };
+        owner.released.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn received_payload_borrows_producer_allocation_until_release_on_another_thread() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let original = counted_buffer(vec![0, 127, 128, 255], &released);
+        let pointer = original.data;
+        let received = unsafe { take_bytes(original, 4) }.unwrap();
+        assert_eq!(received.as_ptr(), pointer, "no intermediate receive copy");
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        std::thread::spawn(move || {
+            assert_eq!(received.as_ref(), &[0, 127, 128, 255]);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn producer_buffer_is_released_on_decode_error_and_unwind() {
+        for unwind in [false, true] {
+            let released = Arc::new(AtomicUsize::new(0));
+            let original = counted_buffer(vec![0xc6, 255, 255, 255, 255], &released);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let received = unsafe { take_bytes(original, 64) }.unwrap();
+                assert!(crate::wire::decode::<String>(&received).is_err());
+                assert_eq!(released.load(Ordering::SeqCst), 0);
+                if unwind {
+                    panic!("consumer failed while holding the producer buffer");
+                }
+            }));
+            assert_eq!(result.is_err(), unwind);
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn oversized_null_and_empty_buffers_release_exactly_once() {
+        for case in ["oversized", "null", "empty"] {
+            let released = Arc::new(AtomicUsize::new(0));
+            let mut original = counted_buffer(
+                if case == "empty" {
+                    Vec::new()
+                } else {
+                    vec![1, 2, 3]
+                },
+                &released,
+            );
+            if case == "null" {
+                original.data = std::ptr::null();
+            }
+            let received = unsafe { take_bytes(original, if case == "oversized" { 2 } else { 3 }) };
+            assert_eq!(received.is_ok(), case == "empty", "{case}");
+            drop(received);
+            assert_eq!(released.load(Ordering::SeqCst), 1, "{case}");
+        }
+        assert!(unsafe { take_bytes(OwnedBytes::empty(), 0) }
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn foreign_reply_release_is_not_skipped_when_status_reports_failure() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let error = counted_buffer(
+            serde_json::to_vec(&Failure::cancelled()).unwrap(),
+            &released,
+        );
+        let payload = counted_buffer(vec![1, 2, 3], &released);
+        let result = unsafe {
+            take_reply(Reply {
+                status: Status {
+                    code: status::CANCELLED,
+                    error,
+                },
+                payload,
+            })
+        };
+        assert_eq!(result.unwrap_err().code, status::CANCELLED);
+        assert_eq!(released.load(Ordering::SeqCst), 2);
     }
 }

@@ -206,7 +206,7 @@ struct RemoteValidator {
     plugin: Arc<PluginOwner>,
 }
 impl RemoteValidator {
-    fn validate(&self, request: wire::RecordValidation) -> Result<(), RecordValidationError> {
+    fn validate(&self, request: wire::RecordValidation<'_>) -> Result<(), RecordValidationError> {
         let execute = || -> anyhow::Result<()> {
             let bytes = wire::encode(&request)?;
             unsafe {
@@ -228,10 +228,10 @@ impl RecordValidator for RemoteValidator {
     ) -> Result<(), RecordValidationError> {
         self.validate(wire::RecordValidation {
             schema: schema.clone(),
-            namespace: identity.namespace().to_owned(),
-            identity: identity.value().to_vec(),
+            namespace: std::borrow::Cow::Borrowed(identity.namespace()),
+            identity: std::borrow::Cow::Borrowed(identity.value()),
             image: None,
-            payload: Vec::new(),
+            payload: std::borrow::Cow::Borrowed(&[]),
         })
     }
     fn validate(
@@ -243,14 +243,14 @@ impl RecordValidator for RemoteValidator {
     ) -> Result<(), RecordValidationError> {
         self.validate(wire::RecordValidation {
             schema: schema.clone(),
-            namespace: identity.namespace().to_owned(),
-            identity: identity.value().to_vec(),
+            namespace: std::borrow::Cow::Borrowed(identity.namespace()),
+            identity: std::borrow::Cow::Borrowed(identity.value()),
             image: Some(match image {
                 RecordImage::Full => 0,
                 RecordImage::Patch => 1,
                 RecordImage::Partial => 2,
             }),
-            payload: payload.to_vec(),
+            payload: std::borrow::Cow::Borrowed(payload),
         })
     }
 }

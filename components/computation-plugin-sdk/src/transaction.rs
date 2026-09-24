@@ -9,7 +9,7 @@ use crate::{
 use async_trait::async_trait;
 use drasi_core::models::{Element, ElementReference, ElementValue};
 use drasi_lib::computation::v1::{
-    ChangeEnvelope, ChangeSetRef, ComponentId, EnvelopeCodec, Schema, Transformer,
+    BinaryEnvelopeCodec, ChangeEnvelope, ChangeSetRef, ComponentId, Schema, Transformer,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
@@ -57,13 +57,13 @@ impl Drop for RetainedTransaction {
 pub struct NativeTransactionContext<'a> {
     step: &'a ComponentId,
     transaction: &'a RetainedTransaction,
-    codec: &'a EnvelopeCodec,
+    codec: &'a BinaryEnvelopeCodec,
 }
 impl<'a> NativeTransactionContext<'a> {
     pub(crate) fn new(
         step: &'a ComponentId,
         transaction: &'a RetainedTransaction,
-        codec: &'a EnvelopeCodec,
+        codec: &'a BinaryEnvelopeCodec,
     ) -> Self {
         Self {
             step,
@@ -126,12 +126,12 @@ impl<'a> NativeTransactionContext<'a> {
         changes: ChangeSetRef,
     ) -> anyhow::Result<ChangeEnvelope> {
         let output = input.derive(input.id().clone(), changes, input.system().as_ref().clone());
-        let bytes: Vec<u8> = self
+        let bytes: serde_bytes::ByteBuf = self
             .call(
                 abi::transaction::DERIVE,
                 &wire::DeriveRequest {
-                    input: self.codec.encode(input)?.to_vec(),
-                    output: self.codec.encode(&output)?.to_vec(),
+                    input: self.codec.encode(input)?.into(),
+                    output: self.codec.encode(&output)?.into(),
                 },
             )
             .await?;

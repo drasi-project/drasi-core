@@ -509,6 +509,14 @@ operations cross the boundary as poll/wake/cancel handles and owned serialized
 buffers. Control notifications do not wait behind mutable data processing.
 Libraries remain loaded for the process lifetime.
 
+Native wire version 2 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
+The binary transport preserves the complete envelope and runs the same registered
+record validators; it does not strip context, lineage or recovery metadata.
+Producer-owned reply buffers remain alive during decoding and are released
+exactly once by their producer. Borrowed asynchronous inputs still require an
+owned copy. The stored JSON `EnvelopeCodec` format and legacy ABI 0.15 are unchanged.
+The initial native wire-version-1 prototype is rejected; rebuild native libraries.
+
 The SDK's optional `TransactionalComponent` interface adds a borrowed
 `NativeTransactionContext`. It exposes step-local values/elements through the
 host's active transaction, not the Rust transaction object itself. The host

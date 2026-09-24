@@ -17,7 +17,7 @@ pub struct NativeFactory {
     descriptor: FactoryDescriptor,
     raw: abi::FactoryHandle,
     _plugin: Arc<PluginOwner>,
-    codec: Arc<EnvelopeCodec>,
+    codec: Arc<BinaryEnvelopeCodec>,
     schemas: Vec<Arc<Schema>>,
 }
 unsafe impl Send for NativeFactory {}
@@ -27,7 +27,7 @@ impl NativeFactory {
         metadata: FactoryMetadata,
         raw: abi::FactoryHandle,
         plugin: Arc<PluginOwner>,
-        codec: Arc<EnvelopeCodec>,
+        codec: Arc<BinaryEnvelopeCodec>,
         schemas: Vec<Arc<Schema>>,
     ) -> anyhow::Result<Self> {
         let table = unsafe { checked_table(raw.vtable)? };

@@ -1,8 +1,10 @@
 # Native ComputationGraph plugin SDK
 
 This is a separate plugin family, not a replacement or layout change to the
-Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **1.0.0**,
-independent of workspace package versions. Legacy ABI **0.15.0** is unchanged.
+Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **1.0.0**
+with native **wire version 2**, independent of workspace package versions.
+Legacy ABI **0.15.0** is unchanged. Rebuild native plugins with this SDK; the
+unreleased JSON-envelope wire prototype (version 1) is explicitly rejected.
 
 ## Authoring
 
@@ -92,6 +94,13 @@ participants must not start workers. Host and plugin task-locals never cross the
 
 All buffer/handle frees run in their producer. Rust `Future`, trait-object, `Arc`,
 `Bytes`, allocator and runtime representations never cross the C boundary.
+`OperationFuture` returns a local `ReceivedBytes` owner: it borrows the producer's
+immutable allocation for decoding and calls its release function exactly once on
+drop, including decode failure and unwinding. The allocation remains valid even
+after the completed operation is released and can be released on another thread.
+Decoded envelopes own their data; borrowed wire views never escape that owner.
+Input admitted through `begin` is still copied because its one-call
+`BorrowedBytes` lifetime cannot cover deferred asynchronous processing.
 Wake/control/state callback contexts use producer-side retain/release functions.
 Retained callbacks remain valid after operation cancellation or component release,
 and revoked capabilities reject further calls. Exported functions and future polls
@@ -102,18 +111,39 @@ hot-unload promise. Native plugins are trusted in-process code, not a sandbox.
 
 ## Envelopes and schemas
 
-Metadata and configuration are UTF-8 JSON. Operation messages are versioned named
-MessagePack records containing serialized bytes. Envelope bytes retain the existing
-`EnvelopeCodec` format, including full schema descriptors, typed images, sequence,
-stream, annotations and lineage. Transaction-transform inputs/outputs are directly
-encoded envelope bytes. Exact descriptor equality, not fingerprints alone, selects
-a schema. Host-side decoding calls the producer's executable record validator
-through the C table; no permissive opaque-record validator is substituted.
+Metadata and configuration are UTF-8 JSON. Native wire version 2 uses named
+MessagePack records and bulk MessagePack binary buffers, not JSON envelopes or
+per-byte integer arrays. `BinaryEnvelopeCodec` encodes the full schema descriptor,
+typed images, sequence, stream, source position, context identity, annotations
+and lineage. It is separate from the unchanged persisted JSON `EnvelopeCodec`;
+there is no storage migration. Transaction-transform inputs/outputs are directly
+encoded binary envelopes. Transaction derivation and record-validation RPCs also
+use bulk binary buffers.
+
+Encoding borrows immutable record/context data instead of cloning payloads into
+temporary storage frames. Decoding borrows strings and opaque byte fields from the
+received frame, then constructs validated, fully owned computation objects.
+Exact descriptor equality, not fingerprints alone, selects a schema. Host-side
+decoding still calls the producer's executable record validator through the C
+table; no permissive opaque-record validator or local replacement is substituted.
 
 Every port's schema must be supplied to `PluginDefinition::new`, including standard
 graph-change/query-row schemas when used. No data is delivered to undeclared ports
 or decoded under mismatched schemas. Metadata is limited to 1 MiB and operation
-messages/envelopes to 64 MiB; exceeding limits is an error.
+messages/envelopes to 64 MiB; exceeding limits is an error, including during
+encoding rather than after allocating an oversized message. Framing rejects
+truncation, trailing values, impossible declared lengths and excessive nesting
+before deserialization can reserve collections from untrusted lengths.
+
+The binary envelope is a named map with `format: 2`, `id`, `change_set`, `schema`,
+`operations`, `system`, `lineage`, `context_identity` and `annotations`.
+Identities contain `namespace` and binary `value`; schemas contain `id`, `version`,
+`encoding` and binary `definition`. Operations retain the `Add`, `Update` and
+`Delete` variants and their ordinals. Record image kinds are `0` full, `1` patch,
+and `2` partial. Timestamps retain their RFC3339 representation and full precision.
+Lineage and annotations are transmitted newest first; decoding restores their
+original semantics, including duplicate annotation keys. Unknown fields, tags,
+versions, schemas and invalid record/change-set contracts fail explicitly.
 
 ## Control
 

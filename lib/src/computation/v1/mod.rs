@@ -157,6 +157,7 @@ pub use super::instance::{
 };
 pub use super::instance_ops::{InstanceConfigurationSnapshot, RegisteredComputationConfiguration};
 
+mod binary_codec;
 mod bounded_pipe;
 mod broadcast_pipe;
 mod codec;
@@ -224,6 +225,10 @@ mod source_progress;
 mod wal_source;
 pub use source_progress::*;
 
+pub use binary_codec::{
+    decode_bounded_messagepack, encode_bounded_messagepack, BinaryEnvelopeCodec,
+    BinaryEnvelopeCodecError,
+};
 pub use bounded_pipe::*;
 pub use broadcast_pipe::*;
 pub use codec::*;

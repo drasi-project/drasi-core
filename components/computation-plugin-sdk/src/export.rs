@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use drasi_lib::computation::v1::{
-    ComputationComponent, ComputationService, EnvelopeCodec, EnvelopeSink, EnvelopeSource,
+    BinaryEnvelopeCodec, ComputationComponent, ComputationService, EnvelopeSink, EnvelopeSource,
     PluginIdentity, PortDirection, Record, RecordImage, RecordReference, Schema, Transformer,
     WakeupSource,
 };
@@ -141,7 +141,7 @@ impl PluginDefinition {
 
 struct PluginState {
     definition: PluginDefinition,
-    codec: Arc<EnvelopeCodec>,
+    codec: Arc<BinaryEnvelopeCodec>,
 }
 
 /// Immutable export backing. Keep it alive while metadata pointers or plugin
@@ -207,6 +207,7 @@ unsafe fn state_ref<'a, T>(state: *mut c_void) -> Result<&'a T, Failure> {
     Ok(unsafe { &*state.cast::<T>() })
 }
 unsafe fn copy_input(input: BorrowedBytes) -> Result<Vec<u8>, Failure> {
+    // begin returns before its operation runs; the caller's borrow ends there.
     Ok(unsafe { transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)? }.to_vec())
 }
 
@@ -281,9 +282,14 @@ unsafe extern "C" fn validate_record(state: *mut c_void, input: BorrowedBytes) -
                     2 => RecordImage::Partial,
                     _ => return Err(Failure::protocol("unknown native record image")),
                 };
-                Record::try_new(schema, identity, image, request.payload.into())
-                    .map_err(anyhow::Error::from)
-                    .map_err(Failure::from)?;
+                Record::try_new(
+                    schema,
+                    identity,
+                    image,
+                    bytes::Bytes::copy_from_slice(&request.payload),
+                )
+                .map_err(anyhow::Error::from)
+                .map_err(Failure::from)?;
             }
         }
         Ok(())
@@ -303,7 +309,7 @@ struct Instance {
     component: tokio::sync::Mutex<Component>,
     metadata: InstanceMetadata,
     factory: FactoryMetadata,
-    codec: Arc<EnvelopeCodec>,
+    codec: Arc<BinaryEnvelopeCodec>,
     control: ControlSender,
     control_handler: Option<Arc<dyn NativeControlHandler>>,
     wakeup: Option<Arc<dyn WakeupSource>>,
@@ -763,7 +769,7 @@ async fn execute(
                 output.changes().schema() == step.transaction_output_schema().descriptor(),
                 "native transaction output schema mismatch"
             );
-            return Ok(instance.codec.encode(&output)?.to_vec());
+            return Ok(instance.codec.encode(&output)?);
         }
         _ => anyhow::bail!("unsupported native operation"),
     }

@@ -422,27 +422,36 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
     let original = envelope(&ComponentId::try_new("input").unwrap(), 1);
     let bytes = blocked.codec.encode(&original).unwrap();
     assert_eq!(blocked.codec.decode(&bytes).unwrap().id(), original.id());
-    let mut bad: Value = serde_json::from_slice(&bytes).unwrap();
-    bad["operations"][0]["Add"]["after"]["bytes"] = json!([1, 2, 3]);
+    let ChangeOperation::Added { after, .. } = &original.changes().operations()[0] else {
+        unreachable!()
+    };
+    let payload = after.payload();
+    let position = bytes
+        .windows(payload.len())
+        .position(|window| window == payload.as_ref())
+        .unwrap();
+    let mut bad = bytes.clone();
+    bad[position..position + payload.len()].fill(255);
     assert!(
-        blocked
-            .codec
-            .decode(&serde_json::to_vec(&bad).unwrap())
-            .is_err(),
+        blocked.codec.decode(&bad).is_err(),
         "remote producer validator rejects malformed typed record bytes"
     );
-    let mut bad: Value = serde_json::from_slice(&bytes).unwrap();
-    bad["schema"]["definition"] = json!([255]);
-    assert!(blocked
-        .codec
-        .decode(&serde_json::to_vec(&bad).unwrap())
-        .is_err());
-    let mut bad: Value = serde_json::from_slice(&bytes).unwrap();
-    bad["format"] = json!(123);
-    assert!(blocked
-        .codec
-        .decode(&serde_json::to_vec(&bad).unwrap())
-        .is_err());
+    let definition = original.changes().schema().definition();
+    let position = bytes
+        .windows(definition.len())
+        .position(|window| window == definition.as_ref())
+        .unwrap();
+    let mut bad = bytes.clone();
+    bad[position..position + definition.len()].fill(255);
+    assert!(blocked.codec.decode(&bad).is_err());
+    let field = b"\xa6format";
+    let position = bytes
+        .windows(field.len())
+        .position(|window| window == field)
+        .unwrap();
+    let mut bad = bytes.clone();
+    bad[position + field.len()] = 123;
+    assert!(blocked.codec.decode(&bad).is_err());
     let mut transformer = plugin.factories()[1]
         .create_component(
             ComponentId::try_new("t").unwrap(),
@@ -458,6 +467,30 @@ async fn native_failures_cancellation_and_schema_validation_are_not_success() {
         .await
         .is_err());
     transformer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deferred_native_operation_owns_input_after_the_begin_call_returns() {
+    let plugin = plugin();
+    let mut sink = plugin.factories()[2]
+        .create_component(ComponentId::try_new("owned-input").unwrap(), json!({}))
+        .unwrap();
+    sink.start().await.unwrap();
+    let input = InputEnvelope {
+        port: PortId::try_new("in").unwrap(),
+        envelope: envelope(&ComponentId::try_new("input").unwrap(), 1),
+    };
+    let mut bytes =
+        sdk::wire::encode(&sdk::wire::Envelope::input(&input, &sink.codec).unwrap()).unwrap();
+    let operation = sink
+        .inner
+        .begin(abi::operation::HANDLE, &bytes, None)
+        .unwrap();
+    bytes.fill(255);
+    drop(bytes);
+    assert!(operation.await.unwrap().is_empty());
+    assert_eq!(sink.configuration().unwrap()["seen"], 1);
+    sink.stop().await.unwrap();
 }
 
 struct NotifyingSink {
@@ -652,6 +685,25 @@ fn rejects_missing_or_incompatible_native_metadata_before_entry() {
     let error = unsafe { NativePlugin::from_entry_points(bad_metadata, must_not_enter) }
         .unwrap_err_string();
     assert!(error.contains("incompatible native computation ABI header"));
+
+    const OLD_MANIFEST: &[u8] = br#"{"abi_version":"1.0.0","wire_version":1,"plugin":{"id":"old-native","version":"1"},"factories":[],"schemas":[]}"#;
+    static OLD_WIRE: SharedMetadata = SharedMetadata(abi::Metadata {
+        header: abi::Header::new::<abi::Metadata>(),
+        target: abi::BorrowedBytes {
+            data: sdk::metadata::TARGET.as_ptr(),
+            len: sdk::metadata::TARGET.len(),
+        },
+        manifest: abi::BorrowedBytes {
+            data: OLD_MANIFEST.as_ptr(),
+            len: OLD_MANIFEST.len(),
+        },
+    });
+    unsafe extern "C" fn old_wire_metadata() -> *const abi::Metadata {
+        &OLD_WIRE.0
+    }
+    let error = unsafe { NativePlugin::from_entry_points(old_wire_metadata, must_not_enter) }
+        .unwrap_err_string();
+    assert!(error.contains("unsupported native plugin ABI or wire format"));
 }
 
 trait ErrorString {

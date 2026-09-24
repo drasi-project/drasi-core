@@ -26,7 +26,7 @@ pub const ABI_VERSION: &str = "1.0.0";
 pub const ABI_MAJOR: u16 = 1;
 pub const ABI_MINOR: u16 = 0;
 pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4731; // DRASICG1
-pub const WIRE_VERSION: u32 = 1;
+pub const WIRE_VERSION: u32 = 2;
 pub const METADATA_SYMBOL: &[u8] = b"drasi_computation_plugin_metadata\0";
 pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
@@ -100,6 +100,9 @@ impl BorrowedBytes {
 /// Ownership is transferred, not shared. Invoke `release(context)` exactly once,
 /// even for an error or an unread payload. Never free `data` on the receiving side.
 /// The canonical empty buffer has null data/context and no release function.
+/// Nonempty data remains immutable and valid until release. The receiver may
+/// borrow it for decoding and move ownership between threads; release must be
+/// callable on any thread, independently of the originating operation's lifetime.
 #[repr(C)]
 pub struct OwnedBytes {
     pub data: *const u8,
@@ -161,7 +164,7 @@ impl Reply {
 }
 
 /// Both byte strings are immutable for the lifetime of the loaded library.
-/// Manifest is required UTF-8 JSON PluginMetadata with wire_version == 1.
+/// Manifest is required UTF-8 JSON PluginMetadata with wire_version == WIRE_VERSION.
 #[repr(C)]
 pub struct Metadata {
     pub header: Header,

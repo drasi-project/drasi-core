@@ -71,18 +71,26 @@ impl EnvelopeCodec {
         Ok(())
     }
 
-    fn schema(&self, descriptor: &SchemaDescriptor) -> Result<&Schema, EnvelopeCodecError> {
-        let key = (
-            descriptor.id().as_str().to_owned(),
-            descriptor.version().value(),
-        );
-        let schema = self
-            .schemas
+    pub(super) fn lookup_schema(
+        &self,
+        id: &str,
+        version: u32,
+    ) -> Result<&Schema, EnvelopeCodecError> {
+        let key = (id.to_owned(), version);
+        self.schemas
             .get(&key)
             .ok_or_else(|| EnvelopeCodecError::Schema {
                 id: key.0,
                 version: key.1,
-            })?;
+            })
+            .map(AsRef::as_ref)
+    }
+
+    pub(super) fn schema(
+        &self,
+        descriptor: &SchemaDescriptor,
+    ) -> Result<&Schema, EnvelopeCodecError> {
+        let schema = self.lookup_schema(descriptor.id().as_str(), descriptor.version().value())?;
         validate_schema(schema.descriptor(), descriptor)?;
         Ok(schema)
     }

@@ -11,7 +11,7 @@ use drasi_computation_plugin_sdk::{
     wire,
 };
 use drasi_core::models::{Element, ElementReference, ElementValue};
-use drasi_lib::computation::v1::{ChangeEnvelope, EnvelopeCodec, TransactionContext};
+use drasi_lib::computation::v1::{BinaryEnvelopeCodec, ChangeEnvelope, TransactionContext};
 use std::{
     ffi::c_void,
     sync::{
@@ -77,7 +77,7 @@ impl StepScope {
     async fn serve(
         &mut self,
         context: &TransactionContext<'_>,
-        codec: &EnvelopeCodec,
+        codec: &BinaryEnvelopeCodec,
     ) -> anyhow::Result<()> {
         while let Some(request) = self.requests.recv().await {
             if request.response.is_closed() || !self.state.active.load(Ordering::Acquire) {
@@ -225,7 +225,7 @@ pub(super) async fn run(
 
 async fn apply(
     context: &TransactionContext<'_>,
-    codec: &EnvelopeCodec,
+    codec: &BinaryEnvelopeCodec,
     code: u32,
     input: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
@@ -261,11 +261,7 @@ async fn apply(
             let request: wire::DeriveRequest = wire::decode(input)?;
             let input = codec.decode(&request.input)?;
             let output = codec.decode(&request.output)?;
-            wire::encode(
-                &codec
-                    .encode(&context.derive(&input, output.changes().clone())?)?
-                    .to_vec(),
-            )
+            wire::encode_buffer(&codec.encode(&context.derive(&input, output.changes().clone())?)?)
         }
         _ => anyhow::bail!("unsupported native transaction state operation"),
     }

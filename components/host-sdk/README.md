@@ -90,6 +90,12 @@ capabilities. Do not fall back to legacy registration after such an error.
 lifetime, including identified candidates whose initialization fails; hot
 unloading is unsupported.
 
+Native ABI 1.0 uses wire version 2: bounded MessagePack and bulk binary envelope
+buffers. Version-1 prototype native libraries must be rebuilt and are rejected
+before plugin entry. Native response buffers remain producer-owned while being
+decoded, then are released through their callback; graph envelopes contain
+fully owned local values. Legacy ABI 0.15 and persisted JSON envelopes are unchanged.
+
 `NativeFactory` implements the existing `ComponentFactory` and, for explicitly
 opted-in factories, `TransactionalTransformerFactory`. Its `specification(id,
 configuration)` helper builds an exact graph recipe with plugin provenance;
