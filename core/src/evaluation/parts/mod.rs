@@ -33,7 +33,26 @@ use super::{
 use drasi_query_ast::ast::{ProjectionClause, QueryPart};
 use hashers::jenkins::spooky_hash::SpookyHasher;
 
-use super::context::{QueryPartEvaluationContext, QueryVariables};
+use super::context::{query_variables_unchanged, QueryPartEvaluationContext, QueryVariables};
+
+fn aggregation_snapshot_hash(grouping_keys: &[String], variables: &QueryVariables) -> u64 {
+    let mut hash = SpookyHasher::default();
+    variables.len().hash(&mut hash);
+    for (name, value) in variables {
+        name.hash(&mut hash);
+        if grouping_keys
+            .iter()
+            .any(|key| key.as_str() == name.as_ref())
+        {
+            // Snapshot/default reconciliation must not mistake a representation
+            // change in a group key for a different materialized contribution.
+            value.hash_for_groupby(&mut hash);
+        } else {
+            value.hash(&mut hash);
+        }
+    }
+    hash.finish()
+}
 
 pub struct QueryPartEvaluator {
     expression_evaluator: Arc<ExpressionEvaluator>,
@@ -132,7 +151,8 @@ impl QueryPartEvaluator {
                 }
             }
             QueryPartEvaluationContext::Updating { before, after, .. } => {
-                if before == after && !change_context.is_future_reprocess {
+                if query_variables_unchanged(&before, &after) && !change_context.is_future_reprocess
+                {
                     return Ok(vec![QueryPartEvaluationContext::Noop]);
                 };
 
@@ -347,7 +367,11 @@ impl QueryPartEvaluator {
                 ..
             } => {
                 if let Some(before) = &before {
-                    if before == &after && !change_context.is_future_reprocess && !default_before {
+                    if query_variables_unchanged(before, &after)
+                        && !change_context.is_future_reprocess
+                        && !default_before
+                        && !default_after
+                    {
                         return Ok(vec![QueryPartEvaluationContext::Noop]);
                     }
                 };
@@ -359,9 +383,7 @@ impl QueryPartEvaluator {
                         if !default_before {
                             true
                         } else {
-                            let mut before_hash = SpookyHasher::default();
-                            before.hash(&mut before_hash);
-                            let before_hash = before_hash.finish();
+                            let before_hash = aggregation_snapshot_hash(&grouping_keys, before);
                             match self
                                 .result_index
                                 .get(&result_key, &ResultOwner::PartCurrent(part_num))
@@ -385,9 +407,7 @@ impl QueryPartEvaluator {
                     None => false,
                 };
 
-                let mut after_hash = SpookyHasher::default();
-                after.hash(&mut after_hash);
-                let after_hash = after_hash.finish();
+                let after_hash = aggregation_snapshot_hash(&grouping_keys, &after);
 
                 let should_apply = {
                     if !default_after {
@@ -576,17 +596,25 @@ impl QueryPartEvaluator {
                         )
                         .await?),
                     _ => {
-                        if before_filtered || !should_revert {
-                            Ok(vec![QueryPartEvaluationContext::Adding {
-                                after: next_after,
-                                row_signature: 0,
-                            }])
-                        } else {
-                            Ok(vec![QueryPartEvaluationContext::Updating {
+                        // Contributions reflect filters AND PartCurrent/PartDefault
+                        // reconciliation: keep, retract, introduce, or neither.
+                        let had_contribution = !before_filtered && should_revert;
+                        let has_contribution = should_apply;
+                        match (had_contribution, has_contribution) {
+                            (true, true) => Ok(vec![QueryPartEvaluationContext::Updating {
                                 before: next_before.unwrap_or_default(),
                                 after: next_after,
                                 row_signature: 0,
-                            }])
+                            }]),
+                            (true, false) => Ok(vec![QueryPartEvaluationContext::Removing {
+                                before: next_before.unwrap_or_default(),
+                                row_signature: 0,
+                            }]),
+                            (false, true) => Ok(vec![QueryPartEvaluationContext::Adding {
+                                after: next_after,
+                                row_signature: 0,
+                            }]),
+                            (false, false) => Ok(vec![QueryPartEvaluationContext::Noop]),
                         }
                     }
                 }
@@ -648,7 +676,7 @@ impl QueryPartEvaluator {
     }
 
     /// Reconciles values crossing from one group to another
-    #[allow(clippy::too_many_arguments, clippy::unwrap_used)]
+    #[allow(clippy::too_many_arguments)]
     async fn reconcile_crossing_aggregate(
         &self,
         part: &QueryPart,
@@ -660,22 +688,28 @@ impl QueryPartEvaluator {
         snapshot: Option<QueryVariables>,
         change_context: &ChangeContext,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
-        if before_in.is_none() || before_out.is_none() {
-            return Ok(vec![QueryPartEvaluationContext::Aggregation {
-                before: before_out,
-                after: after_out,
-                grouping_keys,
-                default_before: false,
-                default_after: false,
-                row_signature: 0,
-            }]);
-        }
-        let before_in = before_in.unwrap();
-        let before_out = before_out.unwrap();
+        let (before_in, before_out) = match (before_in, before_out) {
+            (Some(before_in), Some(before_out)) => (before_in, before_out),
+            (_, before_out) => {
+                return Ok(vec![QueryPartEvaluationContext::Aggregation {
+                    before: before_out,
+                    after: after_out,
+                    grouping_keys,
+                    default_before: false,
+                    default_after: false,
+                    row_signature: 0,
+                }]);
+            }
+        };
 
         let mut grouping_match = true;
         for gk in &grouping_keys {
-            if before_out.get(gk.as_str()) != after_out.get(gk.as_str()) {
+            let values_match = match (before_out.get(gk.as_str()), after_out.get(gk.as_str())) {
+                (Some(before), Some(after)) => before.eq_for_groupby(after),
+                (None, None) => true,
+                _ => false,
+            };
+            if !values_match {
                 grouping_match = false;
                 break;
             }
@@ -697,7 +731,9 @@ impl QueryPartEvaluator {
                 before: snapshot,
                 after: after_out,
                 grouping_keys: grouping_keys.clone(),
-                default_before: false,
+                // The destination snapshot may be populated. Downstream current
+                // state determines whether it has a contribution to replace.
+                default_before: true,
                 default_after: false,
                 row_signature: 0,
             },
@@ -715,7 +751,9 @@ impl QueryPartEvaluator {
                 },
                 grouping_keys: grouping_keys.clone(),
                 default_before: false,
-                default_after: false,
+                // Reconcile the drained source against its downstream baseline;
+                // a remaining non-default source contribution still applies.
+                default_after: true,
                 row_signature: 0,
             },
         ])
