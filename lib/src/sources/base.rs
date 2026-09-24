@@ -2323,7 +2323,7 @@ mod tests {
 
         let mut last = chrono::DateTime::<Utc>::MIN_UTC;
 
-        let t1 = chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+        let t1 = chrono::DateTime::from_timestamp_micros(1_771_000_000_000_000).unwrap();
         let r1 = SourceBase::next_monotonic_timestamp(&mut last, t1);
         assert_eq!(r1, t1, "a candidate ahead of `last` is used verbatim");
         assert_eq!(last, t1);
@@ -2344,6 +2344,29 @@ mod tests {
         let r4 = SourceBase::next_monotonic_timestamp(&mut last, much_later);
         assert_eq!(r4, much_later);
         assert!(r4 > r3);
+    }
+
+    #[test]
+    fn next_monotonic_timestamp_advances_within_the_same_microsecond() {
+        use chrono::{DateTime, Duration, Utc};
+
+        for micros in [-1, 0, 1_771_000_000_999_999] {
+            let aligned = DateTime::from_timestamp_micros(micros).unwrap();
+            let mut last = DateTime::<Utc>::MIN_UTC;
+            let first = SourceBase::next_monotonic_timestamp(
+                &mut last,
+                aligned + Duration::nanoseconds(123),
+            );
+            assert_eq!(first, aligned);
+
+            let second = SourceBase::next_monotonic_timestamp(
+                &mut last,
+                aligned + Duration::nanoseconds(999),
+            );
+            assert_eq!(second, aligned + Duration::microseconds(1));
+            assert_eq!(second.timestamp_micros(), first.timestamp_micros() + 1);
+            assert_eq!(last, second);
+        }
     }
 
     /// Regression test for issue #640: dispatching changes concurrently on a
