@@ -1318,3 +1318,238 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
         "test_mysql_full_restart_picks_up_offline_changes timed out"
     );
 }
+
+fn row_resume_settings(
+    position: Option<bytes::Bytes>,
+    sequence: Option<u64>,
+) -> SourceSubscriptionSettings {
+    SourceSubscriptionSettings {
+        source_id: "mysql-bulk".to_string(),
+        query_id: "bulk-query".to_string(),
+        enable_bootstrap: position.is_none(),
+        nodes: ["items".to_string()].into_iter().collect(),
+        relations: Default::default(),
+        resume_from: position,
+        resume_sequence: sequence,
+        request_position_handle: false,
+    }
+}
+
+async fn receive_native_changes(
+    subscription: &mut drasi_lib::channels::SubscriptionResponse,
+    count: usize,
+) -> Vec<std::sync::Arc<drasi_lib::channels::SourceEventWrapper>> {
+    let mut events = Vec::new();
+    for _ in 0..count {
+        let event = timeout(Duration::from_secs(20), subscription.receiver.recv())
+            .await
+            .expect("timed out receiving every row in the MySQL transaction")
+            .expect("MySQL subscription closed unexpectedly");
+        assert!(matches!(event.event, SourceEvent::Change(_)));
+        events.push(event);
+    }
+    events
+}
+
+fn native_changed_ids(
+    events: &[std::sync::Arc<drasi_lib::channels::SourceEventWrapper>],
+) -> Vec<i64> {
+    let mut ids: Vec<_> = events
+        .iter()
+        .map(|event| {
+            let SourceEvent::Change(change) = &event.event else {
+                panic!("expected a MySQL row change");
+            };
+            element_id_int(&change.get_reference().element_id).expect("integer item key")
+        })
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[tokio::test]
+#[ignore = "requires an owned MySQL testcontainer"]
+async fn test_mysql_multi_row_transactions_and_partial_resume() {
+    timeout(Duration::from_secs(240), async {
+        let (_container, port) = setup_mysql_container().await;
+        prepare_mysql_database(port).await;
+        let mut conn = test_conn(port).await;
+        let bootstrap = MySqlBootstrapProvider::builder()
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_ssl_mode(SslMode::Disabled)
+            .with_tables(vec!["items".to_string()])
+            .build()
+            .unwrap();
+        let source = MySqlReplicationSource::builder("mysql-bulk")
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_ssl_mode(SslMode::Disabled)
+            .with_tables(vec!["items".to_string()])
+            .with_bootstrap_provider(bootstrap)
+            .build()
+            .unwrap();
+        let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
+        source
+            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+                "mysql-bulk-test",
+                "mysql-bulk",
+                None,
+                updates,
+                None,
+            ))
+            .await;
+        source.start().await.unwrap();
+        let mut subscription = source
+            .subscribe(row_resume_settings(None, None))
+            .await
+            .unwrap();
+        let bootstrap_result = subscription
+            .bootstrap_result_receiver
+            .take()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bootstrap_result.event_count, 0);
+        assert!(bootstrap_result.source_position.is_some());
+
+        conn.query_drop(
+            "INSERT INTO items (id, name, value) VALUES \
+             (1, 'one', 10), (2, 'two', 20), (3, 'three', 30), (4, 'four', 40)",
+        )
+        .await
+        .unwrap();
+        let inserts = receive_native_changes(&mut subscription, 4).await;
+        assert_eq!(native_changed_ids(&inserts), vec![1, 2, 3, 4]);
+        for (offset, event) in inserts.iter().enumerate() {
+            assert!(matches!(
+                &event.event,
+                SourceEvent::Change(SourceChange::Insert { .. })
+            ));
+            let position: serde_json::Value =
+                serde_json::from_slice(event.source_position.as_ref().unwrap()).unwrap();
+            assert_eq!(position["row_offset"], offset as u64);
+            assert!(
+                position["transaction_start_position"].as_u64().unwrap()
+                    < position["binlog_position"].as_u64().unwrap()
+            );
+            assert!(position["gtid_set"].as_str().is_some());
+        }
+
+        for checkpoint in [0, 1] {
+            source.stop().await.unwrap();
+            source.start().await.unwrap();
+            let saved = &inserts[checkpoint];
+            subscription = source
+                .subscribe(row_resume_settings(
+                    saved.source_position.clone(),
+                    Some(saved.sequence),
+                ))
+                .await
+                .unwrap();
+            let remaining = receive_native_changes(&mut subscription, 3 - checkpoint).await;
+            for (replayed, original) in remaining.iter().zip(&inserts[checkpoint + 1..]) {
+                assert_eq!(replayed.source_position, original.source_position);
+                assert!(replayed.sequence > saved.sequence);
+            }
+            assert!(
+                timeout(Duration::from_millis(100), subscription.receiver.recv())
+                    .await
+                    .is_err(),
+                "replay must not duplicate any already processed rows"
+            );
+        }
+
+        source.stop().await.unwrap();
+        source.start().await.unwrap();
+        subscription = source
+            .subscribe(row_resume_settings(
+                inserts[3].source_position.clone(),
+                Some(inserts[3].sequence),
+            ))
+            .await
+            .unwrap();
+        conn.query_drop("UPDATE items SET name = 'bulk-updated'")
+            .await
+            .unwrap();
+        let updates = receive_native_changes(&mut subscription, 4).await;
+        assert_eq!(native_changed_ids(&updates), vec![1, 2, 3, 4]);
+        assert!(updates.iter().all(|event| matches!(
+            event.event,
+            SourceEvent::Change(SourceChange::Update { .. })
+        )));
+
+        conn.query_drop("START TRANSACTION").await.unwrap();
+        conn.query_drop("UPDATE items SET name = 'first-statement' WHERE id IN (1, 2)")
+            .await
+            .unwrap();
+        conn.query_drop("UPDATE items SET name = 'second-statement' WHERE id IN (3, 4)")
+            .await
+            .unwrap();
+        conn.query_drop("COMMIT").await.unwrap();
+        let statements = receive_native_changes(&mut subscription, 4).await;
+        assert_eq!(native_changed_ids(&statements), vec![1, 2, 3, 4]);
+        for (offset, event) in statements.iter().enumerate() {
+            let position: serde_json::Value =
+                serde_json::from_slice(event.source_position.as_ref().unwrap()).unwrap();
+            assert_eq!(position["row_offset"], offset as u64);
+        }
+
+        conn.query_drop("DELETE FROM items").await.unwrap();
+        let deletes = receive_native_changes(&mut subscription, 4).await;
+        assert_eq!(native_changed_ids(&deletes), vec![1, 2, 3, 4]);
+        assert!(deletes.iter().all(|event| matches!(
+            event.event,
+            SourceEvent::Change(SourceChange::Delete { .. })
+        )));
+        let previous_position: serde_json::Value =
+            serde_json::from_slice(deletes[3].source_position.as_ref().unwrap()).unwrap();
+
+        let mut admin = Conn::new(
+            mysql_async::OptsBuilder::default()
+                .ip_or_hostname("127.0.0.1")
+                .tcp_port(port)
+                .user(Some("root"))
+                .pass(Some("root"))
+                .db_name(Some("test")),
+        )
+        .await
+        .unwrap();
+        admin.query_drop("FLUSH BINARY LOGS").await.unwrap();
+        admin.disconnect().await.unwrap();
+        conn.query_drop(
+            "INSERT INTO items (id, name, value) VALUES (5, 'five', 50), (6, 'six', 60)",
+        )
+        .await
+        .unwrap();
+        let rotated = receive_native_changes(&mut subscription, 2).await;
+        assert_eq!(native_changed_ids(&rotated), vec![5, 6]);
+        let position: serde_json::Value =
+            serde_json::from_slice(rotated[0].source_position.as_ref().unwrap()).unwrap();
+        assert_ne!(position["binlog_file"], previous_position["binlog_file"]);
+
+        source.stop().await.unwrap();
+        source.start().await.unwrap();
+        subscription = source
+            .subscribe(row_resume_settings(
+                rotated[0].source_position.clone(),
+                Some(rotated[0].sequence),
+            ))
+            .await
+            .unwrap();
+        let remaining = receive_native_changes(&mut subscription, 1).await;
+        assert_eq!(native_changed_ids(&remaining), vec![6]);
+        assert_eq!(remaining[0].source_position, rotated[1].source_position);
+        source.stop().await.unwrap();
+        conn.disconnect().await.unwrap();
+    })
+    .await
+    .expect("MySQL bulk transaction/replay test timed out");
+}
