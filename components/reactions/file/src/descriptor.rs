@@ -107,6 +107,49 @@ fn map_write_mode(dto: WriteModeDto) -> WriteMode {
     }
 }
 
+fn template_spec_to_dto(spec: &crate::TemplateSpec) -> TemplateSpecDto {
+    TemplateSpecDto {
+        template: spec.template.clone(),
+    }
+}
+
+fn query_config_to_dto(config: &crate::QueryConfig) -> QueryConfigDto {
+    QueryConfigDto {
+        added: config.added.as_ref().map(template_spec_to_dto),
+        updated: config.updated.as_ref().map(template_spec_to_dto),
+        deleted: config.deleted.as_ref().map(template_spec_to_dto),
+    }
+}
+
+fn write_mode_to_dto(mode: &WriteMode) -> WriteModeDto {
+    match mode {
+        WriteMode::Append => WriteModeDto::Append,
+        WriteMode::Overwrite => WriteModeDto::Overwrite,
+        WriteMode::PerChange => WriteModeDto::PerChange,
+    }
+}
+
+/// Reconstructs the configuration DTO from a typed [`FileReactionConfig`].
+///
+/// Used by `FileReaction::properties()` to faithfully serialize the
+/// configuration when no raw config JSON was captured by the descriptor.
+pub(crate) fn config_to_dto(config: &crate::FileReactionConfig) -> FileReactionConfigDto {
+    FileReactionConfigDto {
+        output_path: Some(ConfigValue::Static(config.output_path.clone())),
+        write_mode: Some(write_mode_to_dto(&config.write_mode)),
+        filename_template: config
+            .filename_template
+            .as_ref()
+            .map(|t| ConfigValue::Static(t.clone())),
+        routes: config
+            .routes
+            .iter()
+            .map(|(k, v)| (k.clone(), query_config_to_dto(v)))
+            .collect(),
+        default_template: config.default_template.as_ref().map(query_config_to_dto),
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     FileReactionConfigDto,
@@ -179,7 +222,8 @@ impl ReactionPluginDescriptor for FileReactionDescriptor {
             builder = builder.with_route(query_id, crate::QueryConfig::from(config));
         }
 
-        let reaction = builder.build()?;
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
         Ok(Box::new(reaction))
     }
 }
