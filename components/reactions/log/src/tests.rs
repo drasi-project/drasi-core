@@ -419,4 +419,307 @@ mod tests {
             ReactionRecoveryPolicy::AutoSkipGap
         );
     }
+
+    #[test]
+    fn test_config_validate_ok() {
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
+                updated: None,
+                deleted: None,
+            }),
+        };
+        assert!(config.validate(&["query1".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn test_config_validate_rejects_invalid_template() {
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new("{{unclosed")),
+                updated: None,
+                deleted: None,
+            }),
+        };
+        let err = config
+            .validate(&["query1".to_string()])
+            .expect_err("expected invalid template error");
+        assert!(err.to_string().contains("Invalid"));
+    }
+
+    #[test]
+    fn test_config_validate_rejects_unmatched_route() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "missing".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
+                updated: None,
+                deleted: None,
+            },
+        );
+        let config = LogReactionConfig {
+            routes,
+            default_template: None,
+        };
+        let err = config
+            .validate(&["query1".to_string()])
+            .expect_err("expected unmatched route error");
+        assert!(err
+            .to_string()
+            .contains("does not match any subscribed query"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_config() {
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
+                updated: None,
+                deleted: None,
+            }),
+        };
+
+        let reaction = LogReaction::builder("test-with-config")
+            .with_query("query1")
+            .with_config(config)
+            .build()
+            .unwrap();
+
+        assert_eq!(reaction.id(), "test-with-config");
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+    }
+
+    // --- Rendering tests -------------------------------------------------
+
+    use crate::render::{build_handlebars, render_diff};
+    use drasi_lib::channels::ResultDiff;
+    use serde_json::{json, Value};
+
+    fn empty_metadata() -> Value {
+        Value::Object(serde_json::Map::new())
+    }
+
+    #[test]
+    fn test_render_template_populates_standard_context_keys() {
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new(
+                    "q={{query_id}} n={{query_name}} op={{operation}} ts={{timestamp}} \
+                     seq={{sequence_id}} meta={{json metadata}} after={{after.id}}",
+                )),
+                updated: None,
+                deleted: None,
+            }),
+        };
+        let hb = build_handlebars();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("tenant".to_string(), json!("acme"));
+        let diff = ResultDiff::Add {
+            data: json!({"id": 7}),
+            row_signature: 0,
+        };
+
+        let line = render_diff(
+            &config,
+            &hb,
+            "source.sensors",
+            "2026-06-18T00:00:00+00:00",
+            42,
+            &Value::Object(metadata),
+            &diff,
+        )
+        .expect("ADD should render a line");
+
+        assert_eq!(
+            line,
+            "q=source.sensors n=source.sensors op=ADD ts=2026-06-18T00:00:00+00:00 \
+             seq=42 meta={\"tenant\":\"acme\"} after=7"
+        );
+    }
+
+    #[test]
+    fn test_render_resolves_last_dotted_segment_route() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "sensors".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("[SENSOR] {{after.id}}")),
+                updated: None,
+                deleted: None,
+            },
+        );
+        let config = LogReactionConfig {
+            routes,
+            default_template: None,
+        };
+        let hb = build_handlebars();
+        let diff = ResultDiff::Add {
+            data: json!({"id": "abc"}),
+            row_signature: 0,
+        };
+
+        let line = render_diff(
+            &config,
+            &hb,
+            "source.sensors",
+            "2026-06-18T00:00:00+00:00",
+            1,
+            &empty_metadata(),
+            &diff,
+        )
+        .expect("ADD should render a line");
+
+        assert_eq!(line, "[SENSOR] abc");
+    }
+
+    #[test]
+    fn test_render_per_query_route_takes_precedence_over_default() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "query1".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("[ROUTE] {{after.id}}")),
+                updated: None,
+                deleted: None,
+            },
+        );
+        let config = LogReactionConfig {
+            routes,
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new("[DEFAULT] {{after.id}}")),
+                updated: None,
+                deleted: None,
+            }),
+        };
+        let hb = build_handlebars();
+        let diff = ResultDiff::Add {
+            data: json!({"id": 1}),
+            row_signature: 0,
+        };
+
+        let line = render_diff(
+            &config,
+            &hb,
+            "query1",
+            "2026-06-18T00:00:00+00:00",
+            1,
+            &empty_metadata(),
+            &diff,
+        )
+        .unwrap();
+
+        assert_eq!(line, "[ROUTE] 1");
+    }
+
+    #[test]
+    fn test_render_without_template_uses_builtin_default() {
+        let config = LogReactionConfig::default();
+        let hb = build_handlebars();
+        let diff = ResultDiff::Update {
+            data: json!({}),
+            before: json!({"v": 1}),
+            after: json!({"v": 2}),
+            grouping_keys: None,
+            row_signature: 0,
+        };
+
+        let line = render_diff(
+            &config,
+            &hb,
+            "query1",
+            "2026-06-18T00:00:00+00:00",
+            1,
+            &empty_metadata(),
+            &diff,
+        )
+        .unwrap();
+
+        assert_eq!(line, "[UPDATE] {\"v\":1} -> {\"v\":2}");
+    }
+
+    #[test]
+    fn test_render_failure_falls_back_to_default_line() {
+        // An unknown helper triggers a Handlebars render error regardless of
+        // the input data, so the reaction must fall back to the default line.
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new("{{unknown_helper after}}")),
+                updated: None,
+                deleted: None,
+            }),
+        };
+        let hb = build_handlebars();
+        let diff = ResultDiff::Add {
+            data: json!({"id": 9}),
+            row_signature: 0,
+        };
+
+        let line = render_diff(
+            &config,
+            &hb,
+            "query1",
+            "2026-06-18T00:00:00+00:00",
+            1,
+            &empty_metadata(),
+            &diff,
+        )
+        .unwrap();
+
+        assert_eq!(line, "[ADD] {\"id\":9}");
+    }
+
+    #[test]
+    fn test_render_noop_is_skipped() {
+        let config = LogReactionConfig::default();
+        let hb = build_handlebars();
+        let rendered = render_diff(
+            &config,
+            &hb,
+            "query1",
+            "2026-06-18T00:00:00+00:00",
+            1,
+            &empty_metadata(),
+            &ResultDiff::Noop,
+        );
+        assert!(rendered.is_none());
+    }
+
+    #[test]
+    fn test_render_aggregation_uses_updated_template() {
+        let config = LogReactionConfig {
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: None,
+                updated: Some(TemplateSpec::new(
+                    "[AGG] op={{operation}} after={{after.total}}",
+                )),
+                deleted: None,
+            }),
+        };
+        let hb = build_handlebars();
+        let diff = ResultDiff::Aggregation {
+            before: Some(json!({"total": 1})),
+            after: json!({"total": 5}),
+            row_signature: 0,
+        };
+
+        let line = render_diff(
+            &config,
+            &hb,
+            "query1",
+            "2026-06-18T00:00:00+00:00",
+            1,
+            &empty_metadata(),
+            &diff,
+        )
+        .unwrap();
+
+        assert_eq!(line, "[AGG] op=UPDATE after=5");
+    }
 }
