@@ -151,7 +151,12 @@ impl DrasiLib {
         )
     }
 
-    /// Stop a running query
+    /// Stop a running, starting, or failed query.
+    ///
+    /// Queries in `Error` may still own subscriptions and processing tasks. This
+    /// performs their normal cleanup before reporting `Stopped`; it does not
+    /// remove the query or discard its persisted state. Stopping an already
+    /// stopped query returns an error.
     ///
     /// # Example
     /// ```no_run
