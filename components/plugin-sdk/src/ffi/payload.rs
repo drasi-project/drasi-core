@@ -332,8 +332,13 @@ mod tests {
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
     };
-    use drasi_lib::channels::events::SourceEvent;
+    use drasi_lib::{
+        channels::events::SourceEvent,
+        sources::{SourceBase, SourceBaseParams},
+        DispatchMode,
+    };
     use std::sync::Arc;
+    use tokio::sync::{Barrier, Mutex};
 
     fn sample_node() -> Element {
         let mut props = ElementPropertyMap::new();
@@ -377,6 +382,63 @@ mod tests {
             decoded.timestamp.timestamp_micros(),
             wrapper.timestamp.timestamp_micros()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_source_dispatch_order_survives_ffi_roundtrip() {
+        for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
+            let base = SourceBase::new(SourceBaseParams::new("ffi-order").with_dispatch_mode(mode))
+                .unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+            let barrier = Arc::new(Barrier::new(3));
+            let producer_order = Arc::new(Mutex::new(()));
+            let timestamp = DateTime::from_timestamp_micros(1_771_000_000_999_999).unwrap();
+
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let dispatch_base = base.clone_shared();
+                let dispatch_barrier = barrier.clone();
+                let producer_order = producer_order.clone();
+                handles.push(tokio::spawn(async move {
+                    dispatch_barrier.wait().await;
+                    // Explicit-sequence producers must serialize allocation and dispatch.
+                    let _guard = producer_order.lock().await;
+                    let wrapper = SourceEventWrapper::new(
+                        "ffi-order".to_string(),
+                        SourceEvent::Change(SourceChange::Insert {
+                            element: sample_node(),
+                        }),
+                        timestamp,
+                        dispatch_base.next_sequence(),
+                    );
+                    dispatch_base.dispatch_event(wrapper).await.unwrap();
+                }));
+            }
+
+            barrier.wait().await;
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            let mut decoded = Vec::new();
+            for _ in 0..2 {
+                let received = receiver.recv().await.unwrap();
+                let payload = SourceEventPayload::from_wrapper(&received);
+                let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
+                let event = decode_source_event_payload(&bytes).expect("decode");
+                assert_eq!(event.sequence, received.sequence);
+                decoded.push(event);
+            }
+
+            assert!(
+                decoded[0].sequence < decoded[1].sequence,
+                "SourceBase must enqueue events in assigned sequence order"
+            );
+            assert!(
+                decoded[0].timestamp.timestamp_micros() < decoded[1].timestamp.timestamp_micros(),
+                "the plugin ABI must preserve the per-source dispatch order key"
+            );
+        }
     }
 
     #[test]
