@@ -15,6 +15,8 @@
 use super::VariableValue;
 use serde::ser::{Serialize, Serializer};
 
+// Preserve the legacy Serde encodings; variants without one return an error.
+// Query-result presentation in drasi-lib is a separate conversion contract.
 impl Serialize for VariableValue {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

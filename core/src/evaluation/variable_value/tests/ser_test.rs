@@ -22,7 +22,11 @@ use crate::{
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime};
 use drasi_query_ast::ast::UnaryExpression;
 use serde_json::json;
-use std::{collections::BTreeMap, io, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io::{self, Write},
+    sync::Arc,
+};
 
 #[test]
 fn test_serializing_integer() {
@@ -90,6 +94,7 @@ fn test_serializing_object() {
     assert_eq!(ser_value, json!(expected));
 }
 
+// Ordered sentinels expose whether serialization continues past the failing middle entry.
 fn object_with_value(value: VariableValue) -> VariableValue {
     VariableValue::Object(BTreeMap::from([
         ("a_before".to_owned(), VariableValue::Bool(true)),
@@ -98,6 +103,7 @@ fn object_with_value(value: VariableValue) -> VariableValue {
     ]))
 }
 
+// The shared Serialize implementation must report the same error across all four formats.
 fn assert_serialization_error(value: &VariableValue, expected: &str) {
     assert_eq!(
         serde_json::to_value(value)
@@ -125,6 +131,7 @@ fn assert_serialization_error(value: &VariableValue, expected: &str) {
     );
 }
 
+// Inner errors must propagate through lists, objects, and their nested combinations.
 fn assert_nested_serialization_error(value: VariableValue, expected: &str) {
     let list = VariableValue::List(vec![
         VariableValue::Null,
@@ -192,6 +199,15 @@ fn test_serializing_unsupported_variants_returns_error() {
             "Element",
             VariableValue::Element(Arc::new(Element::Node {
                 metadata: metadata.clone(),
+                properties: Default::default(),
+            })),
+        ),
+        (
+            "Element",
+            VariableValue::Element(Arc::new(Element::Relation {
+                metadata: metadata.clone(),
+                in_node: ElementReference::new("private-source", "private-in-node"),
+                out_node: ElementReference::new("private-source", "private-out-node"),
                 properties: Default::default(),
             })),
         ),
@@ -265,31 +281,69 @@ fn test_serializing_non_finite_float_returns_error() {
     }
 }
 
-#[test]
-fn test_serializing_object_propagates_serializer_entry_error() {
-    #[derive(Default)]
-    struct FailOnceWriter {
-        bytes: Vec<u8>,
-        failed: bool,
-    }
+#[derive(Default)]
+struct FailOnceWriter {
+    bytes: Vec<u8>,
+    fail_at: usize,
+    failed: bool,
+}
 
-    impl io::Write for FailOnceWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            // Fail during serialize_entry, but allow later writes (including map.end).
-            if bytes == b"b_value" && !self.failed {
+impl Write for FailOnceWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let len = if self.failed {
+            bytes.len()
+        } else {
+            if self.bytes.len() == self.fail_at {
                 self.failed = true;
                 return Err(io::Error::other("injected map entry failure"));
             }
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
+            // Short writes stop at the fault position regardless of input chunk boundaries.
+            bytes.len().min(self.fail_at - self.bytes.len())
+        };
+        self.bytes.extend_from_slice(&bytes[..len]);
+        Ok(len)
     }
 
-    let mut writer = FailOnceWriter::default();
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn test_fail_once_writer_is_chunk_independent() {
+    let bytes = b"before|after";
+    let fail_at = b"before".len();
+    for chunk_size in 1..=bytes.len() {
+        let mut writer = FailOnceWriter {
+            fail_at,
+            ..Default::default()
+        };
+        let error = bytes
+            .chunks(chunk_size)
+            .try_for_each(|chunk| writer.write_all(chunk))
+            .expect_err("every chunk size must encounter the injected failure");
+        assert!(writer.failed);
+        assert_eq!(error.to_string(), "injected map entry failure");
+        assert_eq!(writer.bytes, &bytes[..fail_at]);
+        writer.write_all(&bytes[fail_at..]).unwrap();
+        assert_eq!(
+            writer.bytes, bytes,
+            "writes after the one-shot fault must succeed"
+        );
+    }
+}
+
+#[test]
+// An entry's I/O error stops later entries and map.end; an already-written prefix is allowed.
+fn test_serializing_object_propagates_serializer_entry_error() {
+    let prefix = b"{\"a_before\":true,\"b_";
+    let mut writer = FailOnceWriter {
+        fail_at: prefix.len(),
+        ..Default::default()
+    };
     let result = serde_json::to_writer(
         &mut writer,
         &object_with_value(VariableValue::Integer(42.into())),
@@ -303,7 +357,7 @@ fn test_serializing_object_propagates_serializer_entry_error() {
     assert!(error.is_io());
     assert_eq!(error.to_string(), "injected map entry failure");
     assert!(writer.failed);
-    assert_eq!(writer.bytes, b"{\"a_before\":true,\"");
+    assert_eq!(writer.bytes, prefix);
 }
 
 #[test]
