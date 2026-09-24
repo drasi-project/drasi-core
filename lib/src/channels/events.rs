@@ -26,6 +26,23 @@ pub trait Timestamped {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
 }
 
+/// Sequence used to break timestamp ties, within each source for query queues.
+pub trait Sequenced {
+    fn sequence(&self) -> u64;
+}
+
+impl Sequenced for SourceEventWrapper {
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+}
+
+impl Sequenced for QueryResult {
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+}
+
 /// Type of Drasi component
 ///
 /// Used for identifying component types in events and monitoring.
