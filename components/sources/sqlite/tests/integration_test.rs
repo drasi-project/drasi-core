@@ -578,10 +578,7 @@ async fn sqlite_emitted_changes_have_monotonic_sequence() {
             .expect("change stream closed unexpectedly");
         // Only count data changes (skip any control events).
         if matches!(event.event, SourceEvent::Change(_)) {
-            let seq = event
-                .sequence
-                .expect("SQLite change event must carry a framework sequence");
-            sequences.push(seq);
+            sequences.push(event.sequence);
         }
     }
 

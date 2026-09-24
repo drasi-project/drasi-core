@@ -365,6 +365,7 @@ impl Source for GrpcSource {
             instance_id: instance_id.clone(),
             base: self.base.clone_shared(),
             wal: wal_ref.clone(),
+            dispatch_order: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         let svc = SourceServiceServer::new(service);
@@ -529,10 +530,11 @@ struct GrpcSourceService {
     source_id: String,
     /// Instance ID for log routing isolation
     instance_id: String,
-    /// Owned SourceBase for dispatching events (stamps sequences, tracks positions)
+    /// Owned SourceBase for allocating sequences and dispatching events
     base: SourceBase,
     /// WAL provider for durable persistence (if durability is enabled)
     wal: Option<Arc<dyn WalProvider>>,
+    dispatch_order: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[tonic::async_trait]
@@ -546,6 +548,7 @@ impl SourceService for GrpcSourceService {
         if let Some(proto_change) = event_request.event {
             match convert_proto_to_source_change(&proto_change, &self.source_id) {
                 Ok(source_change) => {
+                    let dispatch_guard = self.dispatch_order.lock().await;
                     // WAL append before ACK (if durability enabled)
                     let wal_seq = if let Some(ref wal) = self.wal {
                         match wal.append(&self.source_id, &source_change).await {
@@ -582,18 +585,17 @@ impl SourceService for GrpcSourceService {
                         SourceEvent::Change(source_change),
                         chrono::Utc::now(),
                         profiling,
+                        wal_seq.unwrap_or_else(|| self.base.next_sequence()),
                     );
 
                     // Set WAL-assigned sequence and source_position
                     if let Some(seq) = wal_seq {
-                        wrapper.sequence = Some(seq);
                         wrapper.source_position =
                             Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                     }
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    // Dispatch via owned base (stamps sequence when not WAL-set)
                     if let Err(e) = self.base.dispatch_event(wrapper).await {
                         debug!(
                             "[{}] Failed to dispatch (no subscribers): {}",
@@ -601,6 +603,7 @@ impl SourceService for GrpcSourceService {
                         );
                     }
 
+                    drop(dispatch_guard);
                     debug!("[{}] Successfully processed gRPC event", self.source_id);
                     Ok(Response::new(SubmitEventResponse {
                         success: true,
@@ -641,6 +644,7 @@ impl SourceService for GrpcSourceService {
         let instance_id = self.instance_id.clone();
         let base = self.base.clone_shared();
         let wal = self.wal.clone();
+        let dispatch_order = self.dispatch_order.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
@@ -658,6 +662,7 @@ impl SourceService for GrpcSourceService {
                 while let Ok(Some(proto_change)) = stream.message().await {
                     match convert_proto_to_source_change(&proto_change, &source_id) {
                         Ok(source_change) => {
+                            let dispatch_guard = dispatch_order.lock().await;
                             // WAL append before dispatch (if durability enabled)
                             let wal_seq = if let Some(ref wal) = wal {
                                 match wal.append(&source_id, &source_change).await {
@@ -701,20 +706,20 @@ impl SourceService for GrpcSourceService {
                                 SourceEvent::Change(source_change),
                                 chrono::Utc::now(),
                                 profiling,
+                                wal_seq.unwrap_or_else(|| base.next_sequence()),
                             );
 
                             // Set WAL-assigned sequence and source_position
                             if let Some(seq) = wal_seq {
-                                wrapper.sequence = Some(seq);
                                 wrapper.source_position =
                                     Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                             }
 
-                            // Dispatch via owned base (stamps sequence when not WAL-set)
                             if let Err(e) = base.dispatch_event(wrapper).await {
                                 debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
                             }
 
+                            drop(dispatch_guard);
                             events_processed += 1;
 
                             // Send periodic updates

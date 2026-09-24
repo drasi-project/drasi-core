@@ -364,10 +364,69 @@ impl VariableValue {
             })
     }
 
+    /// Hash the identity compared by `eq_for_groupby`, including nested values.
+    ///
+    /// Exactly integral floats use the equivalent integer's grouping hash; integers are
+    /// never rounded through `f64`. Elements use their stable reference.
     pub fn hash_for_groupby<H: Hasher>(&self, state: &mut H) {
         match self {
             VariableValue::Element(element) => element.get_reference().hash(state),
+            VariableValue::Integer(value) => {
+                std::mem::discriminant(self).hash(state);
+                value.hash_for_groupby(state);
+            }
+            VariableValue::Float(value) => match value.as_integer_exact() {
+                Some(integer) => VariableValue::Integer(integer).hash_for_groupby(state),
+                None => self.hash(state),
+            },
+            VariableValue::List(values) => {
+                std::mem::discriminant(self).hash(state);
+                values.len().hash(state);
+                for value in values {
+                    value.hash_for_groupby(state);
+                }
+            }
+            VariableValue::Object(values) => {
+                std::mem::discriminant(self).hash(state);
+                values.len().hash(state);
+                for (key, value) in values {
+                    key.hash(state);
+                    value.hash_for_groupby(state);
+                }
+            }
             _ => self.hash(state),
+        }
+    }
+
+    /// Compare grouping identities, paired with `hash_for_groupby`.
+    ///
+    /// Elements compare by reference, not mutable properties. Numeric equality
+    /// is exact: an integral float shares an integer's group only when conversion
+    /// loses no information. Lists/objects apply these rules recursively.
+    /// Unlike ordinary query comparison, this never rounds a large integer to
+    /// `f64`. Grouping-equal values must hash equally in every index/output path.
+    pub(crate) fn eq_for_groupby(&self, other: &Self) -> bool {
+        match (self, other) {
+            (VariableValue::Element(left), VariableValue::Element(right)) => {
+                left.get_reference() == right.get_reference()
+            }
+            (VariableValue::Integer(integer), VariableValue::Float(float))
+            | (VariableValue::Float(float), VariableValue::Integer(integer)) => {
+                float.as_integer_exact().as_ref() == Some(integer)
+            }
+            (VariableValue::Float(left), VariableValue::Float(right)) => left.eq_for_groupby(right),
+            (VariableValue::List(left), VariableValue::List(right)) => {
+                left.len() == right.len()
+                    && left.iter().zip(right).all(|(a, b)| a.eq_for_groupby(b))
+            }
+            (VariableValue::Object(left), VariableValue::Object(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|((ak, av), (bk, bv))| ak == bk && av.eq_for_groupby(bv))
+            }
+            _ => self == other,
         }
     }
 }

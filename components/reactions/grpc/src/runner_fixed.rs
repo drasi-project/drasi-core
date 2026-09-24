@@ -359,23 +359,24 @@ async fn flush_pending(
         // Advance the checkpoint to the batch's max fully-acked (terminal)
         // sequence after the side effect committed.
         if let Some(seq) = completed_seq {
-            if let Err(e) = checkpoints.advance(base, &query_id, seq).await {
+            if let Err(e) = checkpoints
+                .advance_with_policy(base, &query_id, seq, policy)
+                .await
+            {
                 error!(
                     "[{reaction_name}] Failed to write checkpoint for query '{query_id}' \
                      (seq {seq}): {e}"
                 );
-                if FailureAction::from_policy(policy) == FailureAction::Stop {
-                    base.status_handle()
-                        .set_status(
-                            ComponentStatus::Error,
-                            Some(format!(
-                                "gRPC checkpoint write failed for query '{query_id}' (seq {seq}); \
-                                 stopped per recovery policy"
-                            )),
-                        )
-                        .await;
-                    return FlushControl::Stop;
-                }
+                base.status_handle()
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!(
+                            "gRPC checkpoint write failed for query '{query_id}' (seq {seq}); \
+                             stopped per recovery policy"
+                        )),
+                    )
+                    .await;
+                return FlushControl::Stop;
             }
         }
         return FlushControl::Continue;

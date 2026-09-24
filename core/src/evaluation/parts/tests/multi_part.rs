@@ -38,6 +38,87 @@ fn create_multipart_test_registry() -> Arc<FunctionRegistry> {
 }
 
 #[tokio::test]
+async fn aggregation_projection_neither_contribution_reaches_noop() {
+    use crate::{
+        evaluation::{
+            context::{ChangeContext, QueryVariables},
+            functions::aggregation::ValueAccumulator,
+            parts::aggregation_snapshot_hash,
+            InstantQueryClock,
+        },
+        interface::{AccumulatorIndex, ResultKey, ResultOwner},
+    };
+    let query = build_query("MATCH (a) WHERE total >= 0 RETURN key, total");
+    let registry = create_multipart_test_registry();
+    let index = Arc::new(InMemoryResultIndex::new());
+    let evaluator = QueryPartEvaluator::new(
+        Arc::new(ExpressionEvaluator::new(registry, index.clone())),
+        index.clone(),
+    );
+    let before: QueryVariables = variablemap!["key" => json!("g"), "total" => json!(-1)];
+    let after: QueryVariables = variablemap!["key" => json!("g"), "total" => json!(0)];
+    let keys = vec!["key".to_string()];
+    let key = ResultKey::groupby_from_variables(&keys, &after);
+    let baseline = aggregation_snapshot_hash(&keys, &after);
+    index
+        .set(
+            key.clone(),
+            ResultOwner::PartDefault(1),
+            Some(ValueAccumulator::Signature(baseline)),
+        )
+        .await
+        .unwrap();
+    assert!(index
+        .get(&key, &ResultOwner::PartCurrent(1))
+        .await
+        .unwrap()
+        .is_none());
+    assert_ne!(
+        before, after,
+        "must not exit via the earlier unchanged-input guard"
+    );
+    let clock = Arc::new(InstantQueryClock::new(0, 0));
+    let context = ChangeContext {
+        solution_signature: 1,
+        before_anchor_element: None,
+        after_anchor_element: None,
+        before_clock: clock.clone(),
+        after_clock: clock,
+        is_future_reprocess: false,
+        before_grouping_hash: 1,
+        after_grouping_hash: 1,
+    };
+    let output = evaluator
+        .evaluate(
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                grouping_keys: keys,
+                default_before: false,
+                default_after: true,
+                row_signature: 1,
+            },
+            1,
+            &query.parts[0],
+            &context,
+        )
+        .await
+        .unwrap();
+    // Before is filtered out, after passes but equals PartDefault: the ordinary
+    // projection reaches the final (false, false) arm, not either earlier guard.
+    assert_eq!(output, vec![QueryPartEvaluationContext::Noop]);
+    assert!(index
+        .get(&key, &ResultOwner::PartCurrent(1))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        matches!(index.get(&key, &ResultOwner::PartDefault(1)).await.unwrap(),
+        Some(ValueAccumulator::Signature(signature)) if signature == baseline)
+    );
+}
+
+#[tokio::test]
 async fn aggregating_part_to_scalar_part_add_solution() {
     let query = build_query(
         "
