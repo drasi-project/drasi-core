@@ -180,7 +180,7 @@ pub struct SourceSubscriptionSettings {
     /// Contains the opaque position bytes that the source interprets to seek its change stream.
     /// Only meaningful when the source returns `supports_replay() == true`.
     pub resume_from: Option<Bytes>,
-    /// If set, the last framework-assigned monotonic `sequence` the subscribing query
+    /// If set, the last source-local monotonic `sequence` the subscribing query
     /// durably checkpointed for this source. On resubscribe the source raises its
     /// per-source sequence counter to at least `resume_sequence + 1` (via `fetch_max`,
     /// never lowering it), so filled-in sequences after a restart stay strictly above

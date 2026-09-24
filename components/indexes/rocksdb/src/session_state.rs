@@ -179,6 +179,11 @@ impl RocksDbSessionState {
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))
     }
 
+    /// Whether a session transaction is currently open.
+    pub(crate) fn has_active_session(&self) -> Result<bool, IndexError> {
+        Ok(self.lock()?.txn.is_some())
+    }
+
     /// Execute `f` against the active session transaction.
     /// Returns an error if no session is active.
     pub(crate) fn with_txn<R>(
