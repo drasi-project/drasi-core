@@ -51,7 +51,13 @@ impl ScalarFunction for RecordingBoolean {
     }
 }
 
-fn evaluate_on_two_mib_worker(expression: &str) -> VariableValue {
+fn evaluate_on_two_mib_worker(
+    expression: &str,
+    function_registry: Arc<FunctionRegistry>,
+) -> VariableValue {
+    // Parsing and AST teardown get headroom on the 8 MiB outer thread; evaluation
+    // is spawned onto an actual Tokio worker, not run by block_on's calling thread.
+    // Keep the worker at 2 MiB, the stack size that reproduced #893.
     let expression = expression.to_string();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -65,7 +71,6 @@ fn evaluate_on_two_mib_worker(expression: &str) -> VariableValue {
 
             let (result, expression) = runtime.block_on(async move {
                 tokio::spawn(async move {
-                    let function_registry = Arc::new(FunctionRegistry::new());
                     let result_index = Arc::new(InMemoryResultIndex::new());
                     let evaluator = ExpressionEvaluator::new(function_registry, result_index);
                     let variables = QueryVariables::new();
@@ -98,7 +103,7 @@ fn evaluates_128_term_conjunction_on_two_mib_worker() {
         .join(" AND ");
 
     assert_eq!(
-        evaluate_on_two_mib_worker(&expression),
+        evaluate_on_two_mib_worker(&expression, Arc::new(FunctionRegistry::new())),
         VariableValue::Bool(true)
     );
 }
@@ -110,8 +115,35 @@ fn evaluates_128_term_disjunction_on_two_mib_worker() {
         .join(" OR ");
 
     assert_eq!(
-        evaluate_on_two_mib_worker(&expression),
+        evaluate_on_two_mib_worker(&expression, Arc::new(FunctionRegistry::new())),
         VariableValue::Bool(false)
+    );
+}
+
+#[test]
+fn flattened_128_term_disjunction_remains_eager_and_left_to_right_on_two_mib_worker() {
+    let expression = (0..128)
+        .map(|position| format!("record({position}, {})", position % 3 == 0))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let function_registry = Arc::new(FunctionRegistry::new());
+    function_registry.register_function(
+        "record",
+        Function::Scalar(Arc::new(RecordingBoolean {
+            calls: calls.clone(),
+        })),
+    );
+
+    assert_eq!(
+        evaluate_on_two_mib_worker(&expression, function_registry),
+        VariableValue::Bool(true)
+    );
+    assert_eq!(
+        *calls
+            .lock()
+            .expect("recording mutex should not be poisoned"),
+        (0..128).collect::<Vec<i64>>()
     );
 }
 

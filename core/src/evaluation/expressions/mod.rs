@@ -483,6 +483,10 @@ impl ExpressionEvaluator {
         Ok(result)
     }
 
+    /// Avoids per-node recursion for same-operator AND/OR chains with an explicit
+    /// operand stack, preserving eager left-to-right evaluation and the first error.
+    /// Alternating AND/OR boundaries and other expression operators still recurse;
+    /// this is not a general fix for deeply nested expression trees.
     async fn evaluate_logical_expression(
         &self,
         context: &ExpressionEvaluationContext<'_>,
@@ -497,14 +501,20 @@ impl ExpressionEvaluator {
             match (operator, operand) {
                 (
                     LogicalOperator::And,
-                    ast::Expression::BinaryExpression(ast::BinaryExpression::And(left, right)),
+                    ast::Expression::BinaryExpression(ast::BinaryExpression::And(
+                        inner_left,
+                        inner_right,
+                    )),
                 )
                 | (
                     LogicalOperator::Or,
-                    ast::Expression::BinaryExpression(ast::BinaryExpression::Or(left, right)),
+                    ast::Expression::BinaryExpression(ast::BinaryExpression::Or(
+                        inner_left,
+                        inner_right,
+                    )),
                 ) => {
-                    operands.push(right);
-                    operands.push(left);
+                    operands.push(inner_right);
+                    operands.push(inner_left);
                 }
                 _ => {
                     let value = self.evaluate_predicate(context, operand).await?;
