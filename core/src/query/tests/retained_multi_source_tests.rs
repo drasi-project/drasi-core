@@ -21,6 +21,7 @@ use crate::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
         functions::{Count, Function, FunctionRegistry},
+        variable_value::VariableValue,
     },
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, QueryJoin, QueryJoinKey,
@@ -90,8 +91,9 @@ impl MaterializedQuery {
         }
     }
 
-    async fn process(&mut self, change: SourceChange) {
-        for change in self.query.process_source_change(change).await.unwrap() {
+    async fn process(&mut self, change: SourceChange) -> Vec<QueryPartEvaluationContext> {
+        let changes = self.query.process_source_change(change).await.unwrap();
+        for change in &changes {
             match change {
                 QueryPartEvaluationContext::Adding {
                     after,
@@ -107,14 +109,15 @@ impl MaterializedQuery {
                     row_signature,
                     ..
                 } => {
-                    self.rows.insert(row_signature, after);
+                    self.rows.insert(*row_signature, after.clone());
                 }
                 QueryPartEvaluationContext::Removing { row_signature, .. } => {
-                    self.rows.remove(&row_signature);
+                    self.rows.remove(row_signature);
                 }
                 QueryPartEvaluationContext::Noop => {}
             }
         }
+        changes
     }
 }
 
@@ -238,7 +241,66 @@ async fn run_queries(changes: Vec<SourceChange>) -> (MaterializedQuery, Material
 
 #[tokio::test]
 async fn retained_multi_source_group_migration_matches_fresh_reconstruction() {
-    let (retained_pending, retained_ready) = run_queries(live_changes()).await;
+    let mut retained_pending = MaterializedQuery::new(PENDING_QUERY).await;
+    let mut retained_ready = MaterializedQuery::new(READY_QUERY).await;
+    let mut changes = live_changes();
+    let transition = changes.pop().unwrap();
+    let mut pending_add = None;
+    for change in changes {
+        for emitted in retained_pending.process(change.clone()).await {
+            assert!(matches!(emitted, QueryPartEvaluationContext::Adding { .. }));
+            assert!(pending_add.replace(emitted).is_none());
+        }
+        assert!(retained_ready.process(change).await.is_empty());
+    }
+    let (pending_signature, before) = match pending_add.expect("Pending row must be emitted") {
+        QueryPartEvaluationContext::Adding {
+            row_signature,
+            after,
+        } => (row_signature, after),
+        other => panic!("expected Pending addition, got {other:?}"),
+    };
+    assert_eq!(
+        before,
+        QueryVariables::from([
+            ("itemId".into(), VariableValue::from(json!("item-20"))),
+            ("statusName".into(), VariableValue::from(json!("Pending"))),
+            ("markerCount".into(), VariableValue::from(json!(0))),
+        ])
+    );
+    assert_eq!(
+        retained_pending.rows,
+        HashMap::from([(pending_signature, before.clone())])
+    );
+    assert_eq!(
+        retained_pending.process(transition.clone()).await,
+        vec![QueryPartEvaluationContext::Removing {
+            before,
+            row_signature: pending_signature
+        }]
+    );
+    let ready_changes = retained_ready.process(transition).await;
+    assert_eq!(ready_changes.len(), 1);
+    let (ready_signature, after) = match &ready_changes[0] {
+        QueryPartEvaluationContext::Adding {
+            row_signature,
+            after,
+        } => (*row_signature, after.clone()),
+        other => panic!("expected Ready addition, got {other:?}"),
+    };
+    assert_eq!(
+        after,
+        QueryVariables::from([
+            ("taskNumber".into(), VariableValue::from(json!(20))),
+            ("statusName".into(), VariableValue::from(json!("Ready"))),
+            ("runCount".into(), VariableValue::from(json!(0))),
+        ])
+    );
+    assert_ne!(pending_signature, ready_signature);
+    assert_eq!(
+        retained_ready.rows,
+        HashMap::from([(ready_signature, after)])
+    );
     let (fresh_pending, fresh_ready) = run_queries(fresh_snapshot()).await;
 
     assert_eq!(retained_pending.rows, fresh_pending.rows);

@@ -20,7 +20,7 @@ use serde_json::json;
 use crate::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
-        functions::{Count, Function, FunctionRegistry, Sum},
+        functions::{Count, Function, FunctionRegistry, Max, Min, Sum},
         variable_value::VariableValue,
     },
     in_memory_index::{
@@ -41,6 +41,8 @@ impl MaterializedQuery {
         let functions = Arc::new(FunctionRegistry::new());
         functions.register_function("count", Function::Aggregating(Arc::new(Count {})));
         functions.register_function("sum", Function::Aggregating(Arc::new(Sum {})));
+        functions.register_function("min", Function::Aggregating(Arc::new(Min {})));
+        functions.register_function("max", Function::Aggregating(Arc::new(Max {})));
         let parser = Arc::new(CypherParser::new(functions.clone()));
         let element_index = Arc::new(InMemoryElementIndex::new());
         let query = QueryBuilder::new(query_text, parser)
@@ -665,4 +667,559 @@ async fn aggregate_snapshot_terminal_aggregation_keeps_existing_empty_group_sema
         subject.rows,
         HashMap::from([(signature, summary(0.0, 0.0, 0))])
     );
+}
+
+fn grouped_position(id: &str, group: serde_json::Value, value: i64, time: u64) -> Element {
+    Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("test", id),
+            labels: Arc::from([Arc::from("Position")]),
+            effective_from: time,
+        },
+        properties: ElementPropertyMap::from(json!({"group": group, "value": value})),
+    }
+}
+
+#[tokio::test]
+async fn grouping_numeric_representation_update_keeps_one_identity() {
+    for (before_group, after_group) in [(json!(1), json!(1.0)), (json!(1.0), json!(1))] {
+        let mut subject = MaterializedQuery::new(
+            "MATCH (p:Position)
+             WITH p.group AS groupKey, sum(p.value) AS totalValue
+             RETURN groupKey, totalValue",
+        )
+        .await;
+        let first = subject
+            .process(SourceChange::Insert {
+                element: grouped_position("p", before_group.clone(), 10, 1),
+            })
+            .await;
+        assert_eq!(first.len(), 1);
+        let signature = first[0].row_signature();
+
+        let update = subject
+            .process(SourceChange::Update {
+                element: grouped_position("p", after_group.clone(), 20, 2),
+            })
+            .await;
+        assert_eq!(
+            subject.rows.len(),
+            1,
+            "equivalent numeric keys are one group"
+        );
+        assert_eq!(update.len(), 1);
+        assert_eq!(update[0].row_signature(), signature);
+        assert_eq!(
+            value(&subject.rows[&signature], "totalValue"),
+            &VariableValue::from(json!(20.0))
+        );
+
+        subject
+            .process(SourceChange::Insert {
+                element: grouped_position("q", before_group, 5, 3),
+            })
+            .await;
+        assert_eq!(subject.rows.len(), 1);
+        assert_eq!(
+            value(&subject.rows[&signature], "totalValue"),
+            &VariableValue::from(json!(25.0))
+        );
+
+        let deletion = subject.process(delete_position("p", 4)).await;
+        assert_eq!(deletion.len(), 1);
+        assert_eq!(deletion[0].row_signature(), signature);
+        assert_eq!(subject.rows.len(), 1);
+        assert_eq!(
+            value(&subject.rows[&signature], "totalValue"),
+            &VariableValue::from(json!(5.0))
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_aggregate_suppresses_unchanged_zero_deletion() {
+    let mut subject =
+        MaterializedQuery::new("MATCH (p:Position) RETURN sum(p.value) AS totalValue").await;
+    let first = subject
+        .process(position_change(false, "p", 1, "a", 0, 0))
+        .await;
+    assert!(
+        matches!(first.as_slice(), [QueryPartEvaluationContext::Aggregation {
+        default_before: true, after, ..
+    }] if value(after, "totalValue") == &VariableValue::from(json!(0.0)))
+    );
+    let initial = subject.rows.clone();
+    let deletion = subject.process(delete_position("p", 2)).await;
+    assert!(
+        deletion.is_empty(),
+        "an existing terminal zero result must not notify 0 -> 0: {deletion:?}"
+    );
+    assert_eq!(subject.rows, initial);
+
+    let added = subject
+        .process(position_change(false, "q", 3, "a", 10, 0))
+        .await;
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_signature(), first[0].row_signature());
+    let deletion = subject.process(delete_position("q", 4)).await;
+    assert!(
+        matches!(deletion.as_slice(), [QueryPartEvaluationContext::Aggregation {
+        before: Some(before), after, default_after: true, ..
+    }] if value(before, "totalValue") == &VariableValue::from(json!(10.0))
+        && value(after, "totalValue") == &VariableValue::from(json!(0.0)))
+    );
+    assert_eq!(
+        subject.rows, initial,
+        "terminal empty-group retention is unchanged"
+    );
+}
+
+#[tokio::test]
+async fn projected_zero_aggregate_retains_internal_default_transition() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position) WITH sum(p.value) AS totalValue RETURN totalValue",
+    )
+    .await;
+    let first = subject
+        .process(position_change(false, "p", 1, "a", 0, 0))
+        .await;
+    assert!(matches!(
+        first.as_slice(),
+        [QueryPartEvaluationContext::Adding { after, .. }]
+            if value(after, "totalValue") == &VariableValue::from(json!(0.0))
+    ));
+    let signature = first[0].row_signature();
+    let deleted = subject.process(delete_position("p", 2)).await;
+    assert!(matches!(
+        deleted.as_slice(),
+        [QueryPartEvaluationContext::Removing { before, row_signature }]
+            if *row_signature == signature
+                && value(before, "totalValue") == &VariableValue::from(json!(0.0))
+    ));
+    assert!(subject.rows.is_empty());
+}
+
+#[tokio::test]
+async fn grouping_numeric_compound_contributors_share_accumulators_and_drain() {
+    for (integer, float) in [
+        (json!(1), json!(1.0)),
+        (json!(0), json!(-0.0)),
+        (
+            json!(9_007_199_254_740_992_i64),
+            json!(9_007_199_254_740_992.0),
+        ),
+        (
+            json!([1, {"nested": [0, -1]}]),
+            json!([1.0, {"nested": [-0.0, -1.0]}]),
+        ),
+    ] {
+        for (first_group, second_group) in [(integer.clone(), float.clone()), (float, integer)] {
+            for projection in ["groupKey, totalValue, low, high", "totalValue, low, high"] {
+                let mut subject = MaterializedQuery::new(&format!(
+                    "MATCH (p:Position)
+                     WITH p.group AS groupKey, sum(p.value) AS totalValue,
+                          min(p.value) AS low, max(p.value) AS high
+                     RETURN {projection}"
+                ))
+                .await;
+                let first = subject
+                    .process(SourceChange::Insert {
+                        element: grouped_position("p", first_group.clone(), 10, 1),
+                    })
+                    .await;
+                let signature = first[0].row_signature();
+                let second = subject
+                    .process(SourceChange::Insert {
+                        element: grouped_position("q", second_group.clone(), 5, 2),
+                    })
+                    .await;
+                assert_eq!(second.len(), 1);
+                assert_eq!(second[0].row_signature(), signature);
+                assert_eq!(subject.rows.len(), 1);
+                assert_eq!(
+                    value(&subject.rows[&signature], "totalValue"),
+                    &VariableValue::from(json!(15.0))
+                );
+                assert_eq!(
+                    value(&subject.rows[&signature], "low"),
+                    &VariableValue::from(json!(5.0))
+                );
+                assert_eq!(
+                    value(&subject.rows[&signature], "high"),
+                    &VariableValue::from(json!(10.0))
+                );
+
+                let unchanged = subject
+                    .process(SourceChange::Update {
+                        element: grouped_position("p", second_group.clone(), 10, 3),
+                    })
+                    .await;
+                assert!(unchanged.is_empty(), "{unchanged:?}");
+                let changed = subject
+                    .process(SourceChange::Update {
+                        element: grouped_position("p", second_group.clone(), 20, 4),
+                    })
+                    .await;
+                assert_eq!(changed.len(), 1);
+                assert_eq!(changed[0].row_signature(), signature);
+                assert_eq!(
+                    value(&subject.rows[&signature], "totalValue"),
+                    &VariableValue::from(json!(25.0))
+                );
+                assert_eq!(
+                    value(&subject.rows[&signature], "high"),
+                    &VariableValue::from(json!(20.0))
+                );
+
+                subject.process(delete_position("q", 5)).await;
+                let drained = subject.process(delete_position("p", 6)).await;
+                assert!(
+                    matches!(drained.as_slice(), [QueryPartEvaluationContext::Removing { row_signature, .. }] if *row_signature == signature),
+                    "{drained:?}"
+                );
+                assert!(
+                    subject.rows.is_empty(),
+                    "normalized group must drain its original baseline"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn grouping_numeric_precision_boundary_migrates_through_scalar_projection() {
+    let exact = json!(9_007_199_254_740_992.0);
+    let distinct = json!(9_007_199_254_740_993_i64);
+    for (first_group, second_group) in [(exact.clone(), distinct.clone()), (distinct, exact)] {
+        let mut subject = MaterializedQuery::new(
+            "MATCH (p:Position)
+             WITH p.group AS key, p.value AS value
+             WITH key AS groupKey, sum(value) AS totalValue
+             RETURN totalValue",
+        )
+        .await;
+        let first = subject
+            .process(SourceChange::Insert {
+                element: grouped_position("p", first_group, 10, 1),
+            })
+            .await;
+        let old_signature = first[0].row_signature();
+        let migrated = subject
+            .process(SourceChange::Update {
+                element: grouped_position("p", second_group, 10, 2),
+            })
+            .await;
+        assert_eq!(
+            migrated.len(),
+            2,
+            "distinct exact numeric identities must migrate: {migrated:?}"
+        );
+        assert!(migrated.iter().any(
+            |change| matches!(change, QueryPartEvaluationContext::Removing {
+            row_signature, ..
+        } if *row_signature == old_signature)
+        ));
+        assert_eq!(subject.rows.len(), 1);
+        assert!(!subject.rows.contains_key(&old_signature));
+        assert_eq!(
+            value(subject.rows.values().next().unwrap(), "totalValue"),
+            &VariableValue::from(json!(10.0))
+        );
+    }
+}
+
+#[tokio::test]
+async fn grouping_numeric_signed_and_large_positive_boundaries_are_distinct() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position)
+             WITH p.group AS groupKey, sum(p.value) AS totalValue
+             RETURN groupKey, totalValue",
+    )
+    .await;
+    let negative = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("negative", json!(i64::MIN), 10, 1),
+        })
+        .await;
+    let positive = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("positive", json!(9_223_372_036_854_775_808.0), 20, 2),
+        })
+        .await;
+    assert_eq!(negative.len(), 1);
+    assert_eq!(positive.len(), 1);
+    assert_ne!(negative[0].row_signature(), positive[0].row_signature());
+    assert_eq!(subject.rows.len(), 2);
+    assert_eq!(
+        value(&subject.rows[&negative[0].row_signature()], "totalValue"),
+        &VariableValue::from(json!(10.0))
+    );
+    assert_eq!(
+        value(&subject.rows[&positive[0].row_signature()], "totalValue"),
+        &VariableValue::from(json!(20.0))
+    );
+    let negative_signature = negative[0].row_signature();
+    let positive_signature = positive[0].row_signature();
+    for (id, group, number, time, signature) in [
+        (
+            "negative",
+            json!(i64::MIN as f64),
+            15,
+            3,
+            negative_signature,
+        ),
+        (
+            "positive",
+            json!(9_223_372_036_854_775_808.0),
+            25,
+            4,
+            positive_signature,
+        ),
+    ] {
+        let changes = subject
+            .process(SourceChange::Update {
+                element: grouped_position(id, group, number, time),
+            })
+            .await;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].row_signature(), signature);
+        assert_eq!(subject.rows.len(), 2);
+        assert_eq!(
+            value(&subject.rows[&signature], "totalValue"),
+            &VariableValue::from(json!(number as f64))
+        );
+    }
+    for (id, time, signature, remaining) in [
+        ("negative", 5, negative_signature, 1),
+        ("positive", 6, positive_signature, 0),
+    ] {
+        let changes = subject.process(delete_position(id, time)).await;
+        assert!(
+            matches!(changes.as_slice(), [QueryPartEvaluationContext::Removing { row_signature, .. }] if *row_signature == signature)
+        );
+        assert!(!subject.rows.contains_key(&signature));
+        assert_eq!(subject.rows.len(), remaining);
+    }
+}
+
+fn account_summary(account: &str, total: f64) -> QueryVariables {
+    QueryVariables::from([
+        ("account".into(), VariableValue::from(json!(account))),
+        ("totalValue".into(), VariableValue::from(json!(total))),
+    ])
+}
+
+#[tokio::test]
+async fn chained_aggregate_groups_replace_each_identity_domain() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position)
+         WITH p.group[0] AS account, p.group[1] AS desk, sum(p.value) AS deskValue
+         WITH account, sum(deskValue) AS totalValue
+         RETURN account, totalValue",
+    )
+    .await;
+    let first = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("p", json!(["a", "x"]), 10, 1),
+        })
+        .await;
+    let a = first[0].row_signature();
+    let second = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("q", json!(["a", "y"]), 20, 2),
+        })
+        .await;
+    assert_summary_delta(
+        &second,
+        a,
+        Some(account_summary("a", 10.0)),
+        Some(account_summary("a", 30.0)),
+    );
+    let third = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("r", json!(["b", "y"]), 7, 3),
+        })
+        .await;
+    let b = third[0].row_signature();
+    assert_ne!(a, b);
+    assert_eq!(
+        subject.rows,
+        HashMap::from([
+            (a, account_summary("a", 30.0)),
+            (b, account_summary("b", 7.0))
+        ])
+    );
+
+    let changed = subject
+        .process(SourceChange::Update {
+            element: grouped_position("p", json!(["a", "x"]), 15, 4),
+        })
+        .await;
+    assert_summary_delta(
+        &changed,
+        a,
+        Some(account_summary("a", 30.0)),
+        Some(account_summary("a", 35.0)),
+    );
+
+    let migrated = subject
+        .process(SourceChange::Update {
+            element: grouped_position("p", json!(["b", "z"]), 15, 5),
+        })
+        .await;
+    assert_eq!(migrated.len(), 2);
+    for (signature, account, before, after) in [(a, "a", 35.0, 20.0), (b, "b", 7.0, 22.0)] {
+        let change = migrated
+            .iter()
+            .find(|c| c.row_signature() == signature)
+            .unwrap();
+        assert_summary_delta(
+            std::slice::from_ref(change),
+            signature,
+            Some(account_summary(account, before)),
+            Some(account_summary(account, after)),
+        );
+    }
+    assert_eq!(
+        subject.rows,
+        HashMap::from([
+            (a, account_summary("a", 20.0)),
+            (b, account_summary("b", 22.0))
+        ])
+    );
+    let deleted = subject.process(delete_position("q", 6)).await;
+    // Existing chained-empty behavior, also verified on the unchanged baseline:
+    // the last contribution updates the outer group to zero rather than removing it.
+    assert_summary_delta(
+        &deleted,
+        a,
+        Some(account_summary("a", 20.0)),
+        Some(account_summary("a", 0.0)),
+    );
+    assert_eq!(
+        subject.rows,
+        HashMap::from([
+            (a, account_summary("a", 0.0)),
+            (b, account_summary("b", 22.0)),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn future_reprocess_unchanged_aggregate_reaches_downstream_filter() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position)
+         WITH p.group AS groupKey, sum(p.value) AS totalValue
+         WHERE drasi.trueFor(totalValue >= 0, 10)
+         RETURN groupKey, totalValue",
+    )
+    .await;
+    let inserted = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("p", json!("a"), 0, 1),
+        })
+        .await;
+    assert!(inserted.is_empty());
+    assert!(subject.rows.is_empty());
+    let queue = subject.query.future_queue();
+    assert_eq!(queue.peek_due_time().await.unwrap(), Some(11));
+    let future_ref = queue
+        .pop()
+        .await
+        .unwrap()
+        .expect("filter must schedule reprocessing");
+    assert_eq!(future_ref.original_time, 1);
+    assert_eq!(future_ref.due_time, 11);
+    let emitted = subject.process(SourceChange::Future { future_ref }).await;
+    assert!(
+        matches!(emitted.as_slice(), [QueryPartEvaluationContext::Adding { after, .. }]
+        if value(after, "totalValue") == &VariableValue::from(json!(0.0)))
+    );
+    assert_eq!(
+        subject.rows.len(),
+        1,
+        "unchanged aggregate input must still cross the clock-dependent filter"
+    );
+    assert_eq!(queue.peek_due_time().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn future_reprocess_preserves_terminal_unchanged_value_policy() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position)
+         WITH p, drasi.trueUntil(true, 11) AS live
+         RETURN sum(CASE WHEN live THEN p.value ELSE 0 END) AS totalValue",
+    )
+    .await;
+    let inserted = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("p", json!("a"), 0, 1),
+        })
+        .await;
+    assert_eq!(inserted.len(), 1, "initial zero aggregate must be emitted");
+    let before = subject.rows.clone();
+    let queue = subject.query.future_queue();
+    let future_ref = queue
+        .pop()
+        .await
+        .unwrap()
+        .expect("expiry must schedule a future");
+    assert_eq!(future_ref.due_time, 11);
+    let expired = subject.process(SourceChange::Future { future_ref }).await;
+    assert!(
+        expired.is_empty(),
+        "clock-driven reevaluation must not notify an unchanged terminal total"
+    );
+    assert_eq!(subject.rows, before);
+    assert_eq!(queue.peek_due_time().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn grouping_lazy_extrema_use_typed_keys_and_stable_element_references() {
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position)
+         WITH p.group AS groupKey, min(p.value) AS low, max(p.value) AS high
+         RETURN groupKey, low, high",
+    )
+    .await;
+    for (id, group, number, time) in [("p", json!(1), 10, 1), ("q", json!("1"), 20, 2)] {
+        subject
+            .process(SourceChange::Insert {
+                element: grouped_position(id, group, number, time),
+            })
+            .await;
+    }
+    assert_eq!(subject.rows.len(), 2);
+    assert!(subject.rows.values().any(|row| value(row, "groupKey")
+        == &VariableValue::from(json!("1"))
+        && value(row, "low") == &VariableValue::from(json!(20))));
+
+    let mut subject = MaterializedQuery::new(
+        "MATCH (p:Position) WITH p, min(p.value) AS low, max(p.value) AS high
+         RETURN low, high",
+    )
+    .await;
+    let first = subject
+        .process(SourceChange::Insert {
+            element: grouped_position("p", json!(1), 10, 1),
+        })
+        .await;
+    let signature = first[0].row_signature();
+    let changed = subject
+        .process(SourceChange::Update {
+            element: grouped_position("p", json!(1), 20, 2),
+        })
+        .await;
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].row_signature(), signature);
+    assert_eq!(
+        value(&subject.rows[&signature], "low"),
+        &VariableValue::from(json!(20))
+    );
+    assert_eq!(
+        value(&subject.rows[&signature], "high"),
+        &VariableValue::from(json!(20))
+    );
+    subject.process(delete_position("p", 3)).await;
+    assert!(subject.rows.is_empty());
 }

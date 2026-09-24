@@ -98,11 +98,28 @@ pub enum ResultOwner {
     PartDefault(usize),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ResultKey {
     GroupBy(Arc<Vec<VariableValue>>),
     InputHash(u64),
     Element(ElementReference),
+}
+
+impl PartialEq for ResultKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::GroupBy(left), Self::GroupBy(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right.iter())
+                        .all(|(a, b)| a.eq_for_groupby(b))
+            }
+            (Self::InputHash(left), Self::InputHash(right)) => left == right,
+            (Self::Element(left), Self::Element(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 impl ResultKey {

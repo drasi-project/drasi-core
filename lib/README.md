@@ -413,9 +413,10 @@ let config: DrasiLibConfig = core.get_current_config().await?;
 ```
 
 Aggregate snapshots use the engine's grouping identity even when an ordinary
-`RETURN` follows an aggregating `WITH`. Queries with output persisted by an older,
-contributor-keyed engine need an explicit reconstruction; upgrading does not
-automatically rekey historical rows. See
+`RETURN` follows an aggregating `WITH`. Changes to numeric grouping identity,
+lazy extrema keys, or older contributor-keyed output require explicit complete
+reconstruction of affected queries; upgrading does not automatically rekey
+persisted state. See
 [aggregate result identity and migration boundaries](../docs/aggregate-result-identity.md)
 for regression coverage, empty-group semantics, and compatibility limits.
 

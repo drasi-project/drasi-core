@@ -459,3 +459,170 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
     core.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
+    let (source, handle) = MockSource::new("numeric")?;
+    let core = DrasiLib::builder()
+        .with_id("numeric-identity")
+        .with_source(source)
+        .with_query(Query::cypher("numeric-summary")
+            .query("MATCH (p:Position) WITH p.group AS groupKey, sum(p.value) AS totalValue RETURN groupKey, totalValue")
+            .from_source("numeric")
+            .enable_bootstrap(false)
+            .build())
+        .build().await?;
+    core.start().await?;
+    let query = core
+        .query_manager()
+        .get_query_instance("numeric-summary")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let mut subscription = query.subscribe("numeric-test".into()).await?;
+    handle
+        .send(SourceChange::Insert {
+            element: node(
+                "numeric",
+                "Position",
+                "p",
+                1,
+                json!({"group": 1, "value": 10}),
+            ),
+        })
+        .await?;
+    let first = timeout(TIMEOUT, subscription.receiver.recv()).await??;
+    let signature = match first.results.as_slice() {
+        [ResultDiff::Add { row_signature, .. }] => *row_signature,
+        other => panic!("expected one added group, got {other:?}"),
+    };
+    handle
+        .send(SourceChange::Update {
+            element: node(
+                "numeric",
+                "Position",
+                "p",
+                2,
+                json!({"group": 1.0, "value": 20}),
+            ),
+        })
+        .await?;
+    let update = timeout(TIMEOUT, subscription.receiver.recv()).await??;
+    assert_eq!(
+        core.get_query_results("numeric-summary").await?,
+        vec![json!({"groupKey": 1.0, "totalValue": 20.0})],
+        "numeric representation changes must not retain old aggregate rows",
+    );
+    assert!(
+        matches!(update.results.as_slice(), [ResultDiff::Update { row_signature, .. }] if *row_signature == signature)
+    );
+    handle
+        .send(SourceChange::Update {
+            element: node(
+                "numeric",
+                "Position",
+                "p",
+                3,
+                json!({"group": 1, "value": 30}),
+            ),
+        })
+        .await?;
+    assert_live_update(
+        &mut subscription,
+        signature,
+        json!({"groupKey": 1.0, "totalValue": 20.0}),
+        json!({"groupKey": 1, "totalValue": 30.0}),
+    )
+    .await?;
+    assert_eq!(
+        core.get_query_results("numeric-summary").await?,
+        vec![json!({"groupKey": 1, "totalValue": 30.0})]
+    );
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result<()> {
+    let (source, handle) = MockSource::new("terminal")?;
+    let core = DrasiLib::builder()
+        .with_id("terminal-identity")
+        .with_source(source)
+        .with_query(
+            Query::cypher("terminal-summary")
+                .query("MATCH (p:Position) RETURN sum(p.value) AS totalValue")
+                .from_source("terminal")
+                .enable_bootstrap(false)
+                .build(),
+        )
+        .build()
+        .await?;
+    core.start().await?;
+    let query = core
+        .query_manager()
+        .get_query_instance("terminal-summary")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let mut subscription = query.subscribe("terminal-test".into()).await?;
+    let zero = node("terminal", "Position", "zero", 1, json!({"value": 0}));
+    handle
+        .send(SourceChange::Insert {
+            element: zero.clone(),
+        })
+        .await?;
+    let first = timeout(TIMEOUT, subscription.receiver.recv()).await??;
+    assert_eq!(first.sequence, 1);
+    assert!(
+        matches!(first.results.as_slice(), [ResultDiff::Aggregation { after, .. }]
+        if after == &json!({"totalValue": 0.0}))
+    );
+    assert_eq!(
+        core.get_query_results("terminal-summary").await?,
+        vec![json!({"totalValue": 0.0})]
+    );
+
+    handle
+        .send(SourceChange::Delete {
+            metadata: zero.get_metadata().clone(),
+        })
+        .await?;
+    // A subsequent real change is a processing barrier: no settling sleep or
+    // timeout-as-success is needed to assert absence of the zero deletion event.
+    handle
+        .send(SourceChange::Insert {
+            element: node("terminal", "Position", "next", 3, json!({"value": 5})),
+        })
+        .await?;
+    let next = timeout(TIMEOUT, subscription.receiver.recv()).await??;
+    assert!(
+        matches!(next.results.as_slice(), [ResultDiff::Aggregation { before: Some(before), after, .. }]
+        if before == &json!({"totalValue": 0.0}) && after == &json!({"totalValue": 5.0})),
+        "the next notification must be a real value change, not 0 -> 0: {:?}",
+        next.results
+    );
+    assert_eq!(next.sequence, 2);
+    assert_eq!(query.fetch_outbox(0).await?.results.len(), 2);
+    assert_eq!(
+        core.get_query_results("terminal-summary").await?,
+        vec![json!({"totalValue": 5.0})]
+    );
+    handle
+        .send(SourceChange::Delete {
+            metadata: node("terminal", "Position", "next", 4, json!({"value": 5}))
+                .get_metadata()
+                .clone(),
+        })
+        .await?;
+    let deleted = timeout(TIMEOUT, subscription.receiver.recv()).await??;
+    assert_eq!(deleted.sequence, 3);
+    assert!(
+        matches!(deleted.results.as_slice(), [ResultDiff::Aggregation {
+        before: Some(before), after, ..
+    }] if before == &json!({"totalValue": 5.0}) && after == &json!({"totalValue": 0.0}))
+    );
+    assert_eq!(
+        core.get_query_results("terminal-summary").await?,
+        vec![json!({"totalValue": 0.0})]
+    );
+    core.shutdown().await?;
+    Ok(())
+}

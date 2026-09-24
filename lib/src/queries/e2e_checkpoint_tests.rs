@@ -1006,6 +1006,18 @@ mod aggregate_snapshot_tests {
 
     impl PersistentAggregate {
         async fn open(tmp: &tempfile::TempDir, query_id: &str) -> Self {
+            Self::open_query(
+                tmp,
+                query_id,
+                "MATCH (n:Node)
+                 WITH sum(n.value) AS totalValue, sum(n.cost) AS totalCost,
+                      count(n) AS positionCount
+                 RETURN totalValue, totalCost, positionCount",
+            )
+            .await
+        }
+
+        async fn open_query(tmp: &tempfile::TempDir, query_id: &str, query_text: &str) -> Self {
             let core = build_e2e_lib("aggregate-persistence", tmp, None)
                 .await
                 .unwrap();
@@ -1017,12 +1029,7 @@ mod aggregate_snapshot_tests {
             wait_for_status(&core, SOURCE, ComponentStatus::Running).await;
 
             let config = Query::cypher(query_id)
-                .query(
-                    "MATCH (n:Node)
-                     WITH sum(n.value) AS totalValue, sum(n.cost) AS totalCost,
-                          count(n) AS positionCount
-                     RETURN totalValue, totalCost, positionCount",
-                )
+                .query(query_text)
                 .from_source(SOURCE)
                 .auto_start(false)
                 .enable_bootstrap(false)
@@ -1102,6 +1109,110 @@ mod aggregate_snapshot_tests {
 
     fn summary(value: f64, cost: f64, count: i64) -> Value {
         json!({"totalValue": value, "totalCost": cost, "positionCount": count})
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn grouping_numeric_persistent_compound_key_reopens_and_drains() {
+        const QUERY: &str = "MATCH (n:Node)
+            WITH n.groupKey AS groupKey, sum(n.value) AS totalValue,
+                 sum(n.cost) AS totalCost, count(n) AS positionCount
+            RETURN totalValue, totalCost, positionCount";
+        fn grouped(id: &str, group: Value, value: i64, cost: i64, time: u64) -> Element {
+            let mut node = position(id, value, cost, time);
+            if let Element::Node { properties, .. } = &mut node {
+                *properties = ElementPropertyMap::from(json!({
+                    "groupKey": group, "value": value, "cost": cost,
+                }));
+            }
+            node
+        }
+        let integer = json!([1, {"bucket": 0}]);
+        let float = json!([1.0, {"bucket": -0.0}]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut subject = PersistentAggregate::open_query(&tmp, "numeric-summary", QUERY).await;
+        let added = subject
+            .send(
+                SourceChange::Insert {
+                    element: grouped("p", integer, 10, 8, 1),
+                },
+                1,
+            )
+            .await;
+        let signature = match added.as_slice() {
+            [ResultDiff::Add {
+                row_signature,
+                data,
+            }] => {
+                assert_eq!(data, &summary(10.0, 8.0, 1));
+                *row_signature
+            }
+            other => panic!("expected a group addition, got {other:?}"),
+        };
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Insert {
+                        element: grouped("q", float.clone(), 5, 4, 2),
+                    },
+                    2
+                )
+                .await,
+            update(signature, summary(10.0, 8.0, 1), summary(15.0, 12.0, 2))
+        );
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(15.0, 12.0, 2))]))
+            .await;
+        subject.shutdown().await;
+
+        let mut subject = PersistentAggregate::open_query(&tmp, "numeric-summary", QUERY).await;
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(15.0, 12.0, 2))]))
+            .await;
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Update {
+                        element: grouped("p", float, 20, 8, 3),
+                    },
+                    3
+                )
+                .await,
+            update(signature, summary(15.0, 12.0, 2), summary(25.0, 12.0, 2))
+        );
+        subject
+            .assert_snapshot(HashMap::from([(signature, summary(25.0, 12.0, 2))]))
+            .await;
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Delete {
+                        metadata: position("q", 5, 4, 4).get_metadata().clone(),
+                    },
+                    4
+                )
+                .await,
+            update(signature, summary(25.0, 12.0, 2), summary(20.0, 8.0, 1))
+        );
+        assert_eq!(
+            subject
+                .send(
+                    SourceChange::Delete {
+                        metadata: position("p", 20, 8, 5).get_metadata().clone(),
+                    },
+                    5
+                )
+                .await,
+            vec![ResultDiff::Delete {
+                data: summary(20.0, 8.0, 1),
+                row_signature: signature
+            }]
+        );
+        subject.assert_snapshot(HashMap::new()).await;
+        subject.shutdown().await;
+        let subject = PersistentAggregate::open_query(&tmp, "numeric-summary", QUERY).await;
+        subject.assert_snapshot(HashMap::new()).await;
+        subject.shutdown().await;
     }
 
     fn update(signature: u64, before: Value, after: Value) -> Vec<ResultDiff> {

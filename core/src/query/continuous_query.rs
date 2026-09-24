@@ -31,7 +31,9 @@ use tokio::{
 
 use crate::{
     evaluation::{
-        context::{ChangeContext, QueryPartEvaluationContext, QueryVariables},
+        context::{
+            query_variables_unchanged, ChangeContext, QueryPartEvaluationContext, QueryVariables,
+        },
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
@@ -250,11 +252,12 @@ impl ContinuousQuery {
                             before,
                             after,
                             default_before,
-                            default_after,
                             ..
                         } => {
                             if let Some(before) = before {
-                                if before == after && !default_before && !default_after {
+                                // Default transitions have already reached downstream
+                                // parts; only value changes or creation notify consumers.
+                                if query_variables_unchanged(before, after) && !default_before {
                                     return;
                                 }
                             }
@@ -262,7 +265,7 @@ impl ContinuousQuery {
                             aggregation_results.insert(ctx);
                         }
                         QueryPartEvaluationContext::Updating { before, after, .. } => {
-                            if before == after {
+                            if query_variables_unchanged(before, after) {
                                 return;
                             }
                             result.push(ctx);
@@ -613,6 +616,8 @@ impl ContinuousQuery {
             contexts = result.clone();
         }
 
+        // Nonaggregates retain the MATCH identity; each aggregating part replaces
+        // the hashes with its own group domain, including through final projections.
         Ok(result
             .into_iter()
             .map(|(ctx, cc)| match ctx {
@@ -790,6 +795,8 @@ impl SolutionChangesResult {
     }
 }
 
+/// Collapse each group to its earliest before value/key/default marker and its
+/// latest after value/key/default marker. The final default flag is not sticky.
 struct CollapsedAggregationResults {
     // [hash of after change grouping keys] -> (context, hash of before change grouping keys)
     data: HashMap<u64, (QueryPartEvaluationContext, u64)>,
@@ -958,5 +965,59 @@ mod collapsed_aggregation_tests {
                 ..
             } if before == &variables("group-a", 0) && after == &variables("group-a", 1)
         ));
+    }
+
+    #[test]
+    fn collapse_three_changes_keeps_earliest_before_key_and_latest_after_default() {
+        let mut collapsed = CollapsedAggregationResults::new();
+        for (before, after, default_before, default_after) in [
+            (variables("old", 4), variables("new", 5), true, false),
+            (variables("new", 5), variables("new", 6), false, true),
+            (variables("new", 6), variables("new", 7), false, false),
+        ] {
+            collapsed.insert(QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                default_before,
+                default_after,
+                grouping_keys: vec!["group".into()],
+                row_signature: 0,
+            });
+        }
+        let clock = Arc::new(InstantQueryClock::new(0, 0));
+        let input = ChangeContext {
+            solution_signature: 42,
+            before_anchor_element: None,
+            after_anchor_element: None,
+            before_clock: clock.clone(),
+            after_clock: clock,
+            is_future_reprocess: false,
+            before_grouping_hash: 42,
+            after_grouping_hash: 42,
+        };
+        let mut results = collapsed.into_vec_with_context(&input);
+        assert_eq!(results.len(), 1);
+        let (result, context) = results.pop().unwrap();
+        let keys = vec!["group".into()];
+        assert_eq!(context.solution_signature, 42);
+        assert_eq!(
+            context.before_grouping_hash,
+            extract_grouping_value_hash(&keys, &variables("old", 4))
+        );
+        assert_eq!(
+            context.after_grouping_hash,
+            extract_grouping_value_hash(&keys, &variables("new", 7))
+        );
+        assert_eq!(
+            result,
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(variables("old", 4)),
+                after: variables("new", 7),
+                grouping_keys: keys,
+                default_before: true,
+                default_after: false,
+                row_signature: context.after_grouping_hash,
+            }
+        );
     }
 }
