@@ -82,7 +82,7 @@ To modify or create agentic workflows, you'll need to:
   2. **Stage 2** (`pr-first-approval-label-run.yml`): Runs in the base-repo context with write permissions, re-queries reviews from the API, and manages the label.
 
 ### [release-plz.yml](release-plz.yml)
-- **Purpose**: Automates version bumps, changelog generation, and crate publishing using release-plz.
+- **Purpose**: Automates version bumps, changelog generation, and crate publishing using release-plz, then calls `publish-plugins.yml` for signed multi-architecture plugin OCI images.
 - **Triggers**:
   - Automatically on push to `main` branch
   - Manual workflow dispatch with optional dry-run mode
@@ -94,7 +94,7 @@ The workflow detects the type of commit and runs the appropriate action:
 | Commit Type | Detection | Action |
 |-------------|-----------|--------|
 | Regular commit | Commit message does NOT start with `chore: release` | Creates/updates a Release PR with version bumps and CHANGELOGs |
-| Release PR merge | Commit message starts with `chore: release`, `chore(release)`, or `release:` | Publishes crates to crates.io and creates git tags |
+| Release PR merge | Commit message starts with `chore: release`, `chore(release)`, or `release:` | Verifies public plugin directory visibility, publishes crates to crates.io and creates git tags, then publishes signed plugin OCI images |
 
 #### Manual Trigger
 
@@ -106,13 +106,16 @@ The workflow detects the type of commit and runs the appropriate action:
 
 #### Recovering from Failed Releases
 
-If a release PR was merged but publishing failed (or the commit message didn't match the expected pattern), you can manually trigger publishing:
+If a release PR was merged but publishing failed (or the commit message didn't match the expected pattern), start a new run:
 
-1. Go to **Actions** → **Release-plz** → **Run workflow**
-2. Check the **"Force publish crates"** checkbox
-3. Click **Run workflow**
+1. Merge any workflow/script repair first. Verify that the crate versions on the corrected `main` are the intended release versions, comparing them with crates.io; do not bump versions or revert the release PR just to retry publishing.
+2. Confirm the [public package setup](#public-package-setup) is complete for existing packages.
+3. Go to **Actions** → **Release-plz** → **Run workflow** and select the corrected `main`.
+4. Set **Force publish crates** (`force_publish`) to `true` and **Dry run only** (`dry_run`) to `false`, then click **Run workflow**.
 
-This will run `release-plz release` which publishes all crates that have local versions newer than what's on crates.io.
+This runs `release-plz release` for unpublished crate versions and, on success, calls `publish-plugins.yml` with signing enabled. **Re-running the old failed run uses the old workflow revision, not the repair on `main`.** These are manual recovery instructions; changing the workflow alone does not publish anything.
+
+New packages may be private after their first push. If final visibility verification fails, a package administrator must make them public in GitHub Package settings, then rerun the failed verification job. If only plugin publishing failed after crates were published, it can also be retried via a new `publish-plugins.yml` dispatch at the intended release ref without republishing crates.
 
 #### Release Flow
 
@@ -124,9 +127,11 @@ This will run `release-plz release` which publishes all crates that have local v
 2. **Review the Release PR** → Check the proposed version bumps and changelog entries
 
 3. **Merge the Release PR** → Workflow detects the release commit and:
+   - Verifies that `drasi-plugin-directory` exists, is readable, and is public
    - Publishes all updated crates to crates.io
    - Creates git tags for each published version
    - Creates GitHub releases
+   - Calls `publish-plugins.yml` to publish signed multi-architecture plugin OCI images and verify public package visibility
 
 #### Conventional Commits and Versioning
 
@@ -181,15 +186,29 @@ This runs automatically during the release process - no manual invocation needed
 
 - `GITHUB_TOKEN`: Automatically provided, used for creating PRs and releases
 - `CARGO_REGISTRY_TOKEN`: Must be configured in repository secrets for publishing to crates.io
-- `PACKAGES_ADMIN_TOKEN`: PAT classic with package administration access, validated before publishing and used to make GHCR plugin packages public
+- `PACKAGES_ADMIN_TOKEN`: PAT classic with `read:packages`, access to the organization's container packages, and organization SSO authorization if required. The existing secret name is retained for compatibility; it is used only for read-only package visibility verification, not administration or publication.
+
+##### Public package setup
+
+GitHub's [Get a package REST endpoint](https://docs.github.com/en/rest/packages/packages#get-a-package) supports reading package metadata; there is no supported `PATCH` visibility endpoint. The workflows use explicit `GET` requests before publishing to verify that `drasi-plugin-directory` exists, is readable, and has `visibility: public`. After all plugin builds and pushes succeed, they verify every published package is public. A successful check proves read access and public visibility, **not package administration rights**.
+
+A package administrator must use each package's **Package settings** → **Change visibility** to select **Public** ([GitHub instructions](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)). This is a manual setup step, including for `drasi-plugin-directory`; newly created plugin packages may need it after their first push. Then rerun verification. The script fails rather than changing visibility or ignoring private/internal packages.
+
+To verify explicitly, run `.github/scripts/package-visibility.sh verify-public drasi-plugin-directory source/http` with `GH_TOKEN` supplied securely from the configured token. `PACKAGE_VISIBILITY_ORG` overrides the default `drasi-project` organization. Missing credentials, unreadable/missing packages, and unexpected visibility responses fail closed. The publication steps still use `GITHUB_TOKEN` with `packages: write`, and signing still requires `id-token: write`.
 
 ##### Rotating `PACKAGES_ADMIN_TOKEN`
 
-Repository maintainers are responsible for manual rotation before expiry. GitHub Actions does not renew the token automatically.
+Repository maintainers are responsible for manual rotation before expiry. GitHub Actions does not renew the token automatically. Rotation is not a fix for an unsupported API endpoint.
 
-1. Check the expiry in [GitHub's classic PAT settings](https://github.com/settings/tokens). Before it expires, create a replacement classic PAT with `write:packages` from an account with admin access to the Drasi container packages. Authorize it for organization SSO if required.
+1. Check the expiry in [GitHub's classic PAT settings](https://github.com/settings/tokens). Before it expires, create a replacement classic PAT with `read:packages` from an account with read access to the Drasi container packages. Authorize it for organization SSO if required.
 2. Replace the repository secret using `gh secret set PACKAGES_ADMIN_TOKEN --repo drasi-project/drasi-core` and enter the token at the hidden prompt. Do not put it in source code, command arguments, or logs.
 3. Using the replacement token, verify read access to `drasi-plugin-directory` with `GET /orgs/drasi-project/packages/container/drasi-plugin-directory`, then revoke the previous token.
+
+### [publish-plugins.yml](publish-plugins.yml)
+- **Purpose**: Builds and publishes the plugin architecture matrix and verifies public GHCR package visibility without changing it.
+- **Triggers**: Called by `release-plz.yml` after crate publication, called by `nightly.yml`, or dispatched manually.
+- **Inputs**: `sign` controls cosign signing; `dry_run` skips publication and visibility checks; `skip_visibility` skips the visibility preflight, package listing, and final verification.
+- **Nightly behavior**: `nightly.yml` runs `release-plz update` (no crate publication), then publishes unsigned plugins with `sign: false`, `dry_run: false`, `skip_visibility: true`, and a fixed `drasi-nightly-test` tag by default. A passing nightly does not validate the signed, versioned release's visibility checks.
 
 ### [scorecard.yaml](scorecard.yaml)
 - **Purpose**: Runs OpenSSF Scorecard analysis to evaluate repository security and best practices.
@@ -198,9 +217,8 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
   - Scheduled weekly (every Monday at 15:15 UTC).
 
 ### [test.yml](test.yml)
-- **Purpose**: Executes `cargo test` to run unit tests and performance tests.
-- **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
-  - Note: Performance tests are skipped for draft pull requests.
+- **Purpose**: Runs the mocked package-visibility and release-retry shell regressions before the Rust dependency-cycle check and unit/integration tests. The visibility mock rejects non-GET requests; no real credentials or API writes are used.
+- **Trigger**: Automatically triggered on pull requests to `main`, `feature/*`, `feature-lib`, or `release/*`, and by manual dispatch.
 
 
 ## Viewing Workflow Status

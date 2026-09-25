@@ -87,8 +87,8 @@ jobs:
       # on each tag overwrite.
       sign: false
       dry_run: false
-      # Nightly test packages are already pullable; skip the org-admin visibility
-      # step (it needs a token that can administer org package visibility).
+      # Nightly test packages are already pullable; skip public visibility checks
+      # (they use PACKAGES_ADMIN_TOKEN for read-only package metadata access).
       skip_visibility: true
 
   # If any job in the nightly failed, open (or update) a tracking issue so the
