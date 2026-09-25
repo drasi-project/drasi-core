@@ -291,8 +291,8 @@ pub struct FfiRuntimeContext {
     pub component_id: FfiStr,
     /// Nullable — not all plugins need state store.
     ///
-    /// **Lifetime: persistent.** The plugin retains this pointer for the component's
-    /// lifetime; neither side frees the vtable struct.
+    /// **Lifetime: persistent.** The plugin retains this pointer and (via
+    /// `FfiStateStoreProxy`) frees the vtable struct and its inner state on `Drop`.
     pub state_store: *const StateStoreVtable,
     /// Per-instance log callback (nullable — falls back to global if null).
     pub log_callback: Option<super::callbacks::LogCallbackFn>,
