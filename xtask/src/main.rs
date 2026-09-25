@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct CargoMetadata {
@@ -1049,9 +1050,6 @@ fn publish_plugins(args: &[String]) {
 
             match publish_single_plugin(&client, &auth, &reference_str, p).await {
                 Ok(url) => {
-                    println!("  ✓ {reference_str} → {url}");
-                    success_count += 1;
-
                     // Sign the published artifact with cosign if --sign is enabled
                     if sign {
                         // Extract digest from manifest URL and sign by digest
@@ -1062,8 +1060,15 @@ fn publish_plugins(args: &[String]) {
                         } else {
                             reference_str.clone()
                         };
-                        cosign_sign(&digest_ref);
+                        if let Err(e) = cosign_sign_and_verify(&digest_ref) {
+                            eprintln!("  ✗ {reference_str} ({}) — {e}", p.metadata.target_triple);
+                            fail_count += 1;
+                            continue;
+                        }
                     }
+
+                    println!("  ✓ {reference_str} → {url}");
+                    success_count += 1;
                 }
                 Err(e) => {
                     eprintln!("  ✗ {reference_str} — {e}");
@@ -1075,7 +1080,7 @@ fn publish_plugins(args: &[String]) {
         println!("\n=== Published: {success_count} succeeded, {fail_count} failed ===");
 
         // Update plugin directory with entries for each successfully published plugin
-        if success_count > 0 {
+        if success_count > 0 && fail_count == 0 {
             println!("\n=== Updating plugin directory ===");
             let mut dir_entries: Vec<(String, String)> = plugins
                 .iter()
@@ -1092,6 +1097,8 @@ fn publish_plugins(args: &[String]) {
                     Err(e) => eprintln!("  ✗ directory entry: {dir_tag} — {e}"),
                 }
             }
+        } else if fail_count > 0 {
+            eprintln!("\n=== Skipping plugin directory update because publishing had failures ===");
         }
 
         if fail_count > 0 {
@@ -1120,49 +1127,160 @@ fn make_tag(
     }
 }
 
-/// Sign an OCI artifact with cosign after publishing.
+/// Sign and verify an OCI artifact with cosign after publishing.
 ///
-/// Uses cosign keyless signing which stores signatures as OCI referrers.
+/// Uses cosign keyless signing by default. A successful publish requires both
+/// the signing command and the verification postcondition to pass.
 ///
 /// Supports:
 /// - Keyless mode (default): uses ambient OIDC credentials (GitHub Actions, etc.)
 /// - Key-based mode: set `COSIGN_KEY` env var to a private key path
 ///
-/// Warns on failure but does not abort the publish batch.
-fn cosign_sign(reference: &str) {
-    print!("  🔏 signing {reference}...");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+/// Returns an error on failure so the publish batch exits non-zero.
+fn cosign_sign_and_verify(reference: &str) -> Result<(), String> {
+    let max_attempts = env_usize("COSIGN_MAX_ATTEMPTS", 3).max(1);
+    let retry_delay = Duration::from_secs(env_u64("COSIGN_RETRY_DELAY_SECONDS", 10));
 
-    let mut cmd = Command::new("cosign");
-    cmd.arg("sign").arg("--yes").arg(reference);
+    cosign_sign_with_program(reference, "cosign", max_attempts, retry_delay)?;
+    cosign_verify_with_program(reference, "cosign", max_attempts, retry_delay)
+}
 
-    // If COSIGN_KEY is set, use key-based signing
-    if let Ok(key) = std::env::var("COSIGN_KEY") {
-        cmd.arg("--key").arg(&key);
-    }
+fn cosign_sign_with_program(
+    reference: &str,
+    program: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> Result<(), String> {
+    run_cosign_with_retries("signing", reference, max_attempts, retry_delay, || {
+        let mut cmd = Command::new(program);
+        cmd.arg("sign").arg("--yes").arg(reference);
+        append_cosign_key_arg(&mut cmd);
+        cmd
+    })
+}
 
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.success() {
-                println!(" ✓ signed");
+fn cosign_verify_with_program(
+    reference: &str,
+    program: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> Result<(), String> {
+    run_cosign_with_retries(
+        "verifying signature",
+        reference,
+        max_attempts,
+        retry_delay,
+        || {
+            let mut cmd = Command::new(program);
+            cmd.arg("verify");
+            if let Ok(key) = std::env::var("COSIGN_KEY") {
+                cmd.arg("--key").arg(key);
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!(" ✗ signing failed: {}", stderr.trim());
-                if stderr.contains("expired_token") || stderr.contains("retrieving ID token") {
+                let identity_regexp = std::env::var("COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP")
+                    .unwrap_or_else(|_| "https://github.com/drasi-project/.*".to_string());
+                let issuer = std::env::var("COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER")
+                    .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
+                cmd.arg("--certificate-identity-regexp")
+                    .arg(identity_regexp)
+                    .arg("--certificate-oidc-issuer")
+                    .arg(issuer);
+            }
+            cmd.arg(reference);
+            cmd
+        },
+    )
+}
+
+fn run_cosign_with_retries<F>(
+    action: &str,
+    reference: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+    mut build_command: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Command,
+{
+    let max_attempts = max_attempts.max(1);
+    let mut last_error = String::new();
+
+    for attempt in 1..=max_attempts {
+        print!("  🔏 {action} {reference} (attempt {attempt}/{max_attempts})...");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        match build_command().output() {
+            Ok(output) if output.status.success() => {
+                println!(" ✓");
+                return Ok(());
+            }
+            Ok(output) => {
+                last_error = command_error_message(&output);
+                eprintln!(" ✗ {last_error}");
+                if action == "signing"
+                    && (last_error.contains("expired_token")
+                        || last_error.contains("retrieving ID token"))
+                {
                     eprintln!("    hint: keyless signing requires GitHub Actions OIDC or `cosign login`. For local signing, set COSIGN_KEY=path/to/key.pem");
                 }
             }
-        }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound
-                || e.kind() == std::io::ErrorKind::PermissionDenied
-            {
-                eprintln!(" ✗ cosign not found in PATH (install: https://docs.sigstore.dev/cosign/system_config/installation/)");
-            } else {
-                eprintln!(" ✗ failed to run cosign: {e}");
+            Err(e) => {
+                last_error = if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    "cosign not found in PATH (install: https://docs.sigstore.dev/cosign/system_config/installation/)".to_string()
+                } else {
+                    format!("failed to run cosign: {e}")
+                };
+                eprintln!(" ✗ {last_error}");
             }
         }
+
+        if attempt < max_attempts {
+            eprintln!(
+                "    retrying {action} for {reference} in {}s",
+                retry_delay.as_secs()
+            );
+            thread::sleep(retry_delay);
+        }
     }
+
+    Err(format!(
+        "{action} failed for {reference} after {max_attempts} attempt(s): {last_error}"
+    ))
+}
+
+fn command_error_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    format!("cosign exited with {}", output.status)
+}
+
+fn append_cosign_key_arg(cmd: &mut Command) {
+    if let Ok(key) = std::env::var("COSIGN_KEY") {
+        cmd.arg("--key").arg(key);
+    }
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 async fn publish_single_plugin(
@@ -1493,6 +1611,19 @@ mod tests {
         assert_eq!(zig.get_program(), "cargo");
         let args: Vec<_> = zig.get_args().collect();
         assert_eq!(args, ["zigbuild"]);
+    }
+
+    #[test]
+    fn cosign_sign_command_failure_is_error() {
+        let reference =
+            "ghcr.io/drasi-project/reaction/sse@sha256:60c70c051c53c423caa9e60d55f09d01fbdea853ff202450412bdc06cf262ad5";
+
+        let error =
+            cosign_sign_with_program(reference, "rustc", 1, std::time::Duration::from_secs(0))
+                .expect_err("failed signing command should fail publication");
+
+        assert!(error.contains("signing failed"));
+        assert!(error.contains(reference));
     }
 
     #[test]
