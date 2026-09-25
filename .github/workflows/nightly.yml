@@ -88,7 +88,7 @@ jobs:
       sign: false
       dry_run: false
       # Nightly test packages are already pullable; skip public visibility checks
-      # (they use PACKAGES_ADMIN_TOKEN for read-only package metadata access).
+# (no package metadata token is needed on this path).
       skip_visibility: true
 
   # If any job in the nightly failed, open (or update) a tracking issue so the
