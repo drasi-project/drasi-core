@@ -7,3 +7,5 @@ The documentation for Drasi is at https://drasi-docs.azurewebsites.net/, with th
 This folder contains the documentation for contributing to Drasi-Core. 
 
 To browse the table of contents, refer to the [contributing docs](./../CONTRIBUTING.md).
+
+Release operators: [repairing signatures on existing plugin releases](./contributing/plugin-signature-repair.md).
