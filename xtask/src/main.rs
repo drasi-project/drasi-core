@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize)]
 struct CargoMetadata {
@@ -1032,8 +1033,7 @@ fn publish_plugins(args: &[String]) {
             oci_client::secrets::RegistryAuth::Basic(username.clone(), password.clone())
         };
 
-        let mut success_count = 0;
-        let mut fail_count = 0;
+        let mut publish_result = PublishBatchResult::default();
 
         for p in &plugins {
             let tag = make_tag(
@@ -1049,33 +1049,28 @@ fn publish_plugins(args: &[String]) {
 
             match publish_single_plugin(&client, &auth, &reference_str, p).await {
                 Ok(url) => {
-                    println!("  ✓ {reference_str} → {url}");
-                    success_count += 1;
-
-                    // Sign the published artifact with cosign if --sign is enabled
-                    if sign {
-                        // Extract digest from manifest URL and sign by digest
-                        let digest_ref = if let Some(digest) = url.rsplit("/manifests/").next() {
-                            // Build registry/repo@sha256:... reference
-                            let repo = reference_str.split(':').next().unwrap_or(&reference_str);
-                            format!("{repo}@{digest}")
-                        } else {
-                            reference_str.clone()
-                        };
-                        cosign_sign(&digest_ref);
-                    }
+                    publish_result.record_pushed_artifact(
+                        sign,
+                        &reference_str,
+                        &p.metadata.target_triple,
+                        &url,
+                        cosign_sign_and_verify,
+                    );
                 }
                 Err(e) => {
                     eprintln!("  ✗ {reference_str} — {e}");
-                    fail_count += 1;
+                    publish_result.record_failure();
                 }
             }
         }
 
-        println!("\n=== Published: {success_count} succeeded, {fail_count} failed ===");
+        println!(
+            "\n=== Published: {} succeeded, {} failed ===",
+            publish_result.success_count, publish_result.fail_count
+        );
 
         // Update plugin directory with entries for each successfully published plugin
-        if success_count > 0 {
+        if publish_result.should_update_directory() {
             println!("\n=== Updating plugin directory ===");
             let mut dir_entries: Vec<(String, String)> = plugins
                 .iter()
@@ -1092,12 +1087,68 @@ fn publish_plugins(args: &[String]) {
                     Err(e) => eprintln!("  ✗ directory entry: {dir_tag} — {e}"),
                 }
             }
+        } else if publish_result.has_failures() {
+            eprintln!("\n=== Skipping plugin directory update because publishing had failures ===");
         }
 
-        if fail_count > 0 {
+        if publish_result.has_failures() {
             std::process::exit(1);
         }
     });
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PublishBatchResult {
+    success_count: usize,
+    fail_count: usize,
+}
+
+impl PublishBatchResult {
+    fn record_pushed_artifact<F>(
+        &mut self,
+        sign: bool,
+        reference: &str,
+        target_triple: &str,
+        manifest_url: &str,
+        sign_and_verify: F,
+    ) -> bool
+    where
+        F: FnOnce(&str) -> Result<(), String>,
+    {
+        if sign {
+            let digest_ref = digest_reference(reference, manifest_url);
+            if let Err(e) = sign_and_verify(&digest_ref) {
+                eprintln!("  ✗ {reference} ({target_triple}) — {e}");
+                self.record_failure();
+                return false;
+            }
+        }
+
+        println!("  ✓ {reference} → {manifest_url}");
+        self.success_count += 1;
+        true
+    }
+
+    fn record_failure(&mut self) {
+        self.fail_count += 1;
+    }
+
+    fn has_failures(&self) -> bool {
+        self.fail_count > 0
+    }
+
+    fn should_update_directory(&self) -> bool {
+        self.success_count > 0 && !self.has_failures()
+    }
+}
+
+fn digest_reference(reference: &str, manifest_url: &str) -> String {
+    if let Some((_, digest)) = manifest_url.rsplit_once("/manifests/") {
+        let repo = reference.split(':').next().unwrap_or(reference);
+        format!("{repo}@{digest}")
+    } else {
+        reference.to_string()
+    }
 }
 
 /// Build the OCI tag from the plugin version, optional override, pre-release label, and arch suffix.
@@ -1120,49 +1171,283 @@ fn make_tag(
     }
 }
 
-/// Sign an OCI artifact with cosign after publishing.
+/// Sign and verify an OCI artifact with cosign after publishing.
 ///
-/// Uses cosign keyless signing which stores signatures as OCI referrers.
+/// Uses cosign keyless signing by default. A successful publish requires both
+/// the signing command and the verification postcondition to pass.
 ///
 /// Supports:
 /// - Keyless mode (default): uses ambient OIDC credentials (GitHub Actions, etc.)
-/// - Key-based mode: set `COSIGN_KEY` env var to a private key path
+/// - Key-based mode: set `COSIGN_KEY` env var to a private key path or KMS reference
+/// - Public-key verification override: set `COSIGN_VERIFY_KEY` to a public key path or KMS reference
 ///
-/// Warns on failure but does not abort the publish batch.
-fn cosign_sign(reference: &str) {
-    print!("  🔏 signing {reference}...");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+/// Returns an error on failure so the publish batch exits non-zero.
+fn cosign_sign_and_verify(reference: &str) -> Result<(), String> {
+    let max_attempts = env_usize("COSIGN_MAX_ATTEMPTS", 3).max(1);
+    let retry_delay = Duration::from_secs(env_u64("COSIGN_RETRY_DELAY_SECONDS", 10));
 
-    let mut cmd = Command::new("cosign");
-    cmd.arg("sign").arg("--yes").arg(reference);
+    cosign_sign_and_verify_with_program(reference, "cosign", max_attempts, retry_delay)
+}
 
-    // If COSIGN_KEY is set, use key-based signing
-    if let Ok(key) = std::env::var("COSIGN_KEY") {
-        cmd.arg("--key").arg(&key);
+fn cosign_sign_and_verify_with_program(
+    reference: &str,
+    program: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> Result<(), String> {
+    cosign_sign_with_program(reference, program, max_attempts, retry_delay)?;
+    cosign_verify_with_program(reference, program, max_attempts, retry_delay)
+}
+
+fn cosign_sign_with_program(
+    reference: &str,
+    program: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> Result<(), String> {
+    run_cosign_with_retries("signing", reference, max_attempts, retry_delay, || {
+        let mut cmd = Command::new(program);
+        cmd.arg("sign").arg("--yes").arg(reference);
+        append_cosign_key_arg(&mut cmd);
+        cmd
+    })
+}
+
+const DEFAULT_COSIGN_CERTIFICATE_IDENTITY: &str =
+    "https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main";
+const DEFAULT_COSIGN_CERTIFICATE_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+struct CosignVerifyArgs {
+    args: Vec<String>,
+    cleanup_path: Option<PathBuf>,
+}
+
+impl Drop for CosignVerifyArgs {
+    fn drop(&mut self) {
+        if let Some(path) = &self.cleanup_path {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn cosign_verify_with_program(
+    reference: &str,
+    program: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> Result<(), String> {
+    let verify_args = cosign_verify_args(program)?;
+    run_cosign_with_retries(
+        "verifying signature",
+        reference,
+        max_attempts,
+        retry_delay,
+        || {
+            let mut cmd = Command::new(program);
+            cmd.arg("verify");
+            cmd.args(&verify_args.args);
+            cmd.arg(reference);
+            cmd
+        },
+    )
+}
+
+fn cosign_verify_args(program: &str) -> Result<CosignVerifyArgs, String> {
+    if let Ok(key) = std::env::var("COSIGN_VERIFY_KEY") {
+        return Ok(CosignVerifyArgs {
+            args: vec!["--key".to_string(), key],
+            cleanup_path: None,
+        });
     }
 
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.success() {
-                println!(" ✓ signed");
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!(" ✗ signing failed: {}", stderr.trim());
-                if stderr.contains("expired_token") || stderr.contains("retrieving ID token") {
+    if let Ok(key) = std::env::var("COSIGN_KEY") {
+        if cosign_key_supports_direct_verify(&key) {
+            return Ok(CosignVerifyArgs {
+                args: vec!["--key".to_string(), key],
+                cleanup_path: None,
+            });
+        }
+
+        let public_key = derive_cosign_public_key(program, &key)?;
+        let public_key_path = write_temp_cosign_public_key(&public_key)?;
+        return Ok(CosignVerifyArgs {
+            args: vec![
+                "--key".to_string(),
+                public_key_path.to_string_lossy().into_owned(),
+            ],
+            cleanup_path: Some(public_key_path),
+        });
+    }
+
+    let issuer = std::env::var("COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER")
+        .unwrap_or_else(|_| DEFAULT_COSIGN_CERTIFICATE_OIDC_ISSUER.to_string());
+    if let Ok(identity_regexp) = std::env::var("COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP") {
+        Ok(CosignVerifyArgs {
+            args: vec![
+                "--certificate-identity-regexp".to_string(),
+                identity_regexp,
+                "--certificate-oidc-issuer".to_string(),
+                issuer,
+            ],
+            cleanup_path: None,
+        })
+    } else {
+        let identity = std::env::var("COSIGN_VERIFY_CERTIFICATE_IDENTITY")
+            .unwrap_or_else(|_| DEFAULT_COSIGN_CERTIFICATE_IDENTITY.to_string());
+        Ok(CosignVerifyArgs {
+            args: vec![
+                "--certificate-identity".to_string(),
+                identity,
+                "--certificate-oidc-issuer".to_string(),
+                issuer,
+            ],
+            cleanup_path: None,
+        })
+    }
+}
+
+fn derive_cosign_public_key(program: &str, key: &str) -> Result<String, String> {
+    let output = Command::new(program)
+        .arg("public-key")
+        .arg("--key")
+        .arg(key)
+        .output()
+        .map_err(|e| format!("failed to derive cosign public key: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "failed to derive cosign public key: {}",
+            command_error_message(&output)
+        ));
+    }
+
+    let public_key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if public_key.is_empty() {
+        return Err("failed to derive cosign public key: empty public key output".to_string());
+    }
+
+    Ok(public_key)
+}
+
+fn write_temp_cosign_public_key(public_key: &str) -> Result<PathBuf, String> {
+    let mut path = std::env::temp_dir();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("failed to create temporary cosign public key path: {e}"))?
+        .as_nanos();
+    path.push(format!(
+        "drasi-cosign-public-key-{}-{now}.pem",
+        std::process::id()
+    ));
+    fs::write(&path, public_key)
+        .map_err(|e| format!("failed to write temporary cosign public key: {e}"))?;
+    Ok(path)
+}
+
+fn cosign_key_supports_direct_verify(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "awskms://",
+        "azurekms://",
+        "gcpkms://",
+        "hashivault://",
+        "k8s://",
+        "pkcs11://",
+    ]
+    .iter()
+    .any(|prefix| key.starts_with(prefix))
+}
+
+fn run_cosign_with_retries<F>(
+    action: &str,
+    reference: &str,
+    max_attempts: usize,
+    retry_delay: Duration,
+    mut build_command: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Command,
+{
+    let max_attempts = max_attempts.max(1);
+    let mut last_error = String::new();
+
+    for attempt in 1..=max_attempts {
+        print!("  🔏 {action} {reference} (attempt {attempt}/{max_attempts})...");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        match build_command().output() {
+            Ok(output) if output.status.success() => {
+                println!(" ✓");
+                return Ok(());
+            }
+            Ok(output) => {
+                last_error = command_error_message(&output);
+                eprintln!(" ✗ {last_error}");
+                if action == "signing"
+                    && (last_error.contains("expired_token")
+                        || last_error.contains("retrieving ID token"))
+                {
                     eprintln!("    hint: keyless signing requires GitHub Actions OIDC or `cosign login`. For local signing, set COSIGN_KEY=path/to/key.pem");
                 }
             }
-        }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound
-                || e.kind() == std::io::ErrorKind::PermissionDenied
-            {
-                eprintln!(" ✗ cosign not found in PATH (install: https://docs.sigstore.dev/cosign/system_config/installation/)");
-            } else {
-                eprintln!(" ✗ failed to run cosign: {e}");
+            Err(e) => {
+                last_error = if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::PermissionDenied
+                {
+                    "cosign not found in PATH (install: https://docs.sigstore.dev/cosign/system_config/installation/)".to_string()
+                } else {
+                    format!("failed to run cosign: {e}")
+                };
+                eprintln!(" ✗ {last_error}");
             }
         }
+
+        if attempt < max_attempts {
+            eprintln!(
+                "    retrying {action} for {reference} in {}s",
+                retry_delay.as_secs()
+            );
+            thread::sleep(retry_delay);
+        }
     }
+
+    Err(format!(
+        "{action} failed for {reference} after {max_attempts} attempt(s): {last_error}"
+    ))
+}
+
+fn command_error_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    format!("cosign exited with {}", output.status)
+}
+
+fn append_cosign_key_arg(cmd: &mut Command) {
+    if let Ok(key) = std::env::var("COSIGN_KEY") {
+        cmd.arg("--key").arg(key);
+    }
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 async fn publish_single_plugin(
@@ -1327,6 +1612,16 @@ fn triple_to_arch_suffix(triple: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn package(name: &str, publishable: bool, dependencies: Vec<Dependency>) -> Package {
         Package {
@@ -1348,6 +1643,72 @@ mod tests {
             kind: kind.map(str::to_string),
             path: Some(PathBuf::from(name)),
         }
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &str)], unset: &[&'static str]) -> Self {
+            let mut saved = Vec::new();
+            for name in vars
+                .iter()
+                .map(|(name, _)| *name)
+                .chain(unset.iter().copied())
+            {
+                if saved.iter().any(|(saved_name, _)| saved_name == &name) {
+                    continue;
+                }
+                saved.push((name, std::env::var(name).ok()));
+            }
+            for name in unset {
+                std::env::remove_var(name);
+            }
+            for (name, value) in vars {
+                std::env::set_var(name, value);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn test_temp_dir(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        dir.push(format!("drasi-xtask-{name}-{}-{now}", std::process::id()));
+        fs::create_dir_all(&dir).expect("test temp dir should be created");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn mock_cosign_script(dir: &Path, body: &str) -> PathBuf {
+        let script = dir.join("cosign-mock.sh");
+        fs::write(&script, body).expect("mock cosign script should be written");
+        let mut perms = fs::metadata(&script)
+            .expect("mock cosign script metadata should be readable")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("mock cosign script should be executable");
+        script
+    }
+
+    #[cfg(unix)]
+    fn read_calls(path: &Path) -> String {
+        fs::read_to_string(path).unwrap_or_default()
     }
 
     #[test]
@@ -1493,6 +1854,488 @@ mod tests {
         assert_eq!(zig.get_program(), "cargo");
         let args: Vec<_> = zig.get_args().collect();
         assert_eq!(args, ["zigbuild"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_sign_command_failure_is_error() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("sign-failure");
+        let calls = dir.join("calls");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+if [[ "$1" == "sign" ]]; then
+    echo "signing failed" >&2
+    exit 42
+fi
+echo "unexpected command: $*" >&2
+exit 2
+"#,
+        );
+        let reference =
+            "ghcr.io/drasi-project/reaction/sse@sha256:60c70c051c53c423caa9e60d55f09d01fbdea853ff202450412bdc06cf262ad5";
+
+        let _env = EnvGuard::set(
+            &[("MOCK_COSIGN_CALLS", calls.to_str().unwrap())],
+            &["COSIGN_KEY", "COSIGN_VERIFY_KEY"],
+        );
+        let error = cosign_sign_with_program(
+            reference,
+            script.to_str().unwrap(),
+            1,
+            std::time::Duration::from_secs(0),
+        )
+        .expect_err("failed signing command should fail publication");
+
+        assert!(error.contains("signing failed"));
+        assert!(error.contains(reference));
+        assert_eq!(read_calls(&calls), format!("sign --yes {reference}\n"));
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_verify_command_failure_is_error() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("verify-failure");
+        let calls = dir.join("calls");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+case "$1" in
+    sign)
+        exit 0
+        ;;
+    verify)
+        echo "verification failed" >&2
+        exit 43
+        ;;
+esac
+echo "unexpected command: $*" >&2
+exit 2
+"#,
+        );
+        let reference = "ghcr.io/drasi-project/reaction/sse@sha256:abc";
+
+        let _env = EnvGuard::set(
+            &[("MOCK_COSIGN_CALLS", calls.to_str().unwrap())],
+            &[
+                "COSIGN_KEY",
+                "COSIGN_VERIFY_KEY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP",
+                "COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER",
+            ],
+        );
+        let error = cosign_sign_and_verify_with_program(
+            reference,
+            script.to_str().unwrap(),
+            1,
+            std::time::Duration::from_secs(0),
+        )
+        .expect_err("failed verification should fail publication");
+
+        assert!(error.contains("verification failed"));
+        assert!(read_calls(&calls)
+            .contains("sign --yes ghcr.io/drasi-project/reaction/sse@sha256:abc\n"));
+        assert!(read_calls(&calls).contains("verify --certificate-identity https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/drasi-project/reaction/sse@sha256:abc\n"));
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_retry_exhaustion_retries_signing() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("retry-exhaustion");
+        let calls = dir.join("calls");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+echo "still failing" >&2
+exit 44
+"#,
+        );
+
+        let _env = EnvGuard::set(
+            &[("MOCK_COSIGN_CALLS", calls.to_str().unwrap())],
+            &["COSIGN_KEY", "COSIGN_VERIFY_KEY"],
+        );
+        let error = cosign_sign_with_program(
+            "ghcr.io/drasi-project/reaction/sse@sha256:abc",
+            script.to_str().unwrap(),
+            2,
+            std::time::Duration::from_secs(0),
+        )
+        .expect_err("retry exhaustion should fail");
+
+        assert!(error.contains("after 2 attempt(s)"));
+        assert_eq!(read_calls(&calls).lines().count(), 2);
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_transient_signing_failure_recovers() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("transient-recovery");
+        let calls = dir.join("calls");
+        let sign_count = dir.join("sign-count");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+case "$1" in
+    sign)
+        count=0
+        if [[ -f "$MOCK_SIGN_COUNT" ]]; then
+            count="$(cat "$MOCK_SIGN_COUNT")"
+        fi
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$MOCK_SIGN_COUNT"
+        if [[ "$count" -eq 1 ]]; then
+            echo "transient signing error" >&2
+            exit 45
+        fi
+        exit 0
+        ;;
+    verify)
+        exit 0
+        ;;
+esac
+echo "unexpected command: $*" >&2
+exit 2
+"#,
+        );
+
+        let _env = EnvGuard::set(
+            &[
+                ("MOCK_COSIGN_CALLS", calls.to_str().unwrap()),
+                ("MOCK_SIGN_COUNT", sign_count.to_str().unwrap()),
+            ],
+            &[
+                "COSIGN_KEY",
+                "COSIGN_VERIFY_KEY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP",
+                "COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER",
+            ],
+        );
+        cosign_sign_and_verify_with_program(
+            "ghcr.io/drasi-project/reaction/sse@sha256:abc",
+            script.to_str().unwrap(),
+            3,
+            std::time::Duration::from_secs(0),
+        )
+        .expect("transient signing failure should recover");
+
+        let calls = read_calls(&calls);
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("sign "))
+                .count(),
+            2
+        );
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("verify "))
+                .count(),
+            1
+        );
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_successful_keyless_verify_uses_exact_default_identity() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("keyless-default");
+        let calls = dir.join("calls");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+case "$1" in
+    sign)
+        exit 0
+        ;;
+    verify)
+        expected="verify --certificate-identity https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/drasi-project/reaction/sse@sha256:abc"
+        if [[ "$*" != "$expected" ]]; then
+            echo "unexpected keyless policy: $*" >&2
+            exit 46
+        fi
+        exit 0
+        ;;
+esac
+echo "unexpected command: $*" >&2
+exit 2
+"#,
+        );
+
+        let _env = EnvGuard::set(
+            &[("MOCK_COSIGN_CALLS", calls.to_str().unwrap())],
+            &[
+                "COSIGN_KEY",
+                "COSIGN_VERIFY_KEY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP",
+                "COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER",
+            ],
+        );
+        cosign_sign_and_verify_with_program(
+            "ghcr.io/drasi-project/reaction/sse@sha256:abc",
+            script.to_str().unwrap(),
+            1,
+            std::time::Duration::from_secs(0),
+        )
+        .expect("exact default keyless policy should verify");
+
+        assert!(read_calls(&calls).contains("--certificate-identity https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main"));
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_unexpected_keyless_policy_is_rejected() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("keyless-reject");
+        let calls = dir.join("calls");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+case "$1" in
+    sign)
+        exit 0
+        ;;
+    verify)
+        if [[ "$*" == *"@refs/heads/main"* ]]; then
+            exit 0
+        fi
+        echo "unexpected workflow identity" >&2
+        exit 47
+        ;;
+esac
+echo "unexpected command: $*" >&2
+exit 2
+"#,
+        );
+
+        let _env = EnvGuard::set(
+            &[
+                ("MOCK_COSIGN_CALLS", calls.to_str().unwrap()),
+                (
+                    "COSIGN_VERIFY_CERTIFICATE_IDENTITY",
+                    "https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/feature",
+                ),
+            ],
+            &[
+                "COSIGN_KEY",
+                "COSIGN_VERIFY_KEY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP",
+                "COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER",
+            ],
+        );
+        let error = cosign_sign_and_verify_with_program(
+            "ghcr.io/drasi-project/reaction/sse@sha256:abc",
+            script.to_str().unwrap(),
+            1,
+            std::time::Duration::from_secs(0),
+        )
+        .expect_err("unexpected workflow/ref should be rejected by verification");
+
+        assert!(error.contains("unexpected workflow identity"));
+        assert!(read_calls(&calls).contains("@refs/heads/feature"));
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_local_private_key_derives_public_key_for_verify() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("local-key");
+        let calls = dir.join("calls");
+        let private_key = dir.join("cosign.key");
+        fs::write(&private_key, "PRIVATE").expect("private key should be written");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+case "$1" in
+    sign)
+        if [[ "$2" != "--yes" || "$4" != "--key" || "$5" != "$MOCK_PRIVATE_KEY" ]]; then
+            echo "unexpected signing key args: $*" >&2
+            exit 48
+        fi
+        exit 0
+        ;;
+    public-key)
+        if [[ "$2" != "--key" || "$3" != "$MOCK_PRIVATE_KEY" ]]; then
+            echo "unexpected public-key args: $*" >&2
+            exit 49
+        fi
+        echo "PUBLIC"
+        exit 0
+        ;;
+    verify)
+        if [[ "$2" != "--key" || "$3" == "$MOCK_PRIVATE_KEY" ]]; then
+            echo "verify did not use a derived public key file: $*" >&2
+            exit 50
+        fi
+        grep -q "PUBLIC" "$3"
+        exit 0
+        ;;
+esac
+echo "unexpected command: $*" >&2
+exit 2
+"#,
+        );
+
+        let _env = EnvGuard::set(
+            &[
+                ("MOCK_COSIGN_CALLS", calls.to_str().unwrap()),
+                ("MOCK_PRIVATE_KEY", private_key.to_str().unwrap()),
+                ("COSIGN_KEY", private_key.to_str().unwrap()),
+            ],
+            &[
+                "COSIGN_VERIFY_KEY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP",
+                "COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER",
+            ],
+        );
+        cosign_sign_and_verify_with_program(
+            "ghcr.io/drasi-project/reaction/sse@sha256:abc",
+            script.to_str().unwrap(),
+            1,
+            std::time::Duration::from_secs(0),
+        )
+        .expect("local private key should derive a public key for verification");
+
+        let calls = read_calls(&calls);
+        assert!(calls.contains("public-key --key"));
+        assert!(calls.contains("verify --key"));
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cosign_kms_key_is_used_directly_for_verify() {
+        let _lock = env_lock();
+        let dir = test_temp_dir("kms-key");
+        let calls = dir.join("calls");
+        let script = mock_cosign_script(
+            &dir,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_COSIGN_CALLS"
+case "$1" in
+    sign)
+        exit 0
+        ;;
+    public-key)
+        echo "KMS key should not derive a local public key" >&2
+        exit 51
+        ;;
+    verify)
+        if [[ "$2" != "--key" || "$3" != "awskms://example/key" ]]; then
+            echo "verify did not use KMS key directly: $*" >&2
+            exit 52
+        fi
+        exit 0
+        ;;
+esac
+echo "unexpected command: $*" >&2
+exit 2
+"#,
+        );
+
+        let _env = EnvGuard::set(
+            &[
+                ("MOCK_COSIGN_CALLS", calls.to_str().unwrap()),
+                ("COSIGN_KEY", "awskms://example/key"),
+            ],
+            &[
+                "COSIGN_VERIFY_KEY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY",
+                "COSIGN_VERIFY_CERTIFICATE_IDENTITY_REGEXP",
+                "COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER",
+            ],
+        );
+        cosign_sign_and_verify_with_program(
+            "ghcr.io/drasi-project/reaction/sse@sha256:abc",
+            script.to_str().unwrap(),
+            1,
+            std::time::Duration::from_secs(0),
+        )
+        .expect("KMS key should be verified directly");
+
+        let calls = read_calls(&calls);
+        assert!(!calls.contains("public-key"));
+        assert!(calls.contains("verify --key awskms://example/key"));
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[test]
+    fn signing_failure_is_not_counted_successful_and_skips_directory_update() {
+        let mut result = PublishBatchResult::default();
+        let ok = result.record_pushed_artifact(
+            true,
+            "ghcr.io/drasi-project/reaction/sse:0.3.8-darwin-arm64",
+            "aarch64-apple-darwin",
+            "https://ghcr.io/v2/drasi-project/reaction/sse/manifests/sha256:abc",
+            |reference| {
+                assert_eq!(reference, "ghcr.io/drasi-project/reaction/sse@sha256:abc");
+                Err("signing failed".to_string())
+            },
+        );
+
+        assert!(!ok);
+        assert_eq!(
+            result,
+            PublishBatchResult {
+                success_count: 0,
+                fail_count: 1
+            }
+        );
+        assert!(result.has_failures());
+        assert!(!result.should_update_directory());
+    }
+
+    #[test]
+    fn signed_artifact_success_allows_directory_update() {
+        let mut result = PublishBatchResult::default();
+        let ok = result.record_pushed_artifact(
+            true,
+            "ghcr.io/drasi-project/reaction/sse:0.3.8-darwin-arm64",
+            "aarch64-apple-darwin",
+            "https://ghcr.io/v2/drasi-project/reaction/sse/manifests/sha256:abc",
+            |_| Ok(()),
+        );
+
+        assert!(ok);
+        assert_eq!(
+            result,
+            PublishBatchResult {
+                success_count: 1,
+                fail_count: 0
+            }
+        );
+        assert!(!result.has_failures());
+        assert!(result.should_update_directory());
     }
 
     #[test]
