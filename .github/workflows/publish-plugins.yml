@@ -348,6 +348,8 @@ jobs:
           INPUT_SIGN: ${{ inputs.sign }}
           TARGET: ${{ matrix.target }}
           ARCH_SUFFIX: ${{ matrix.arch_suffix }}
+          COSIGN_VERIFY_CERTIFICATE_IDENTITY: https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main
+          COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
           # Defence in depth: reject anything outside the expected charset before
           # the value reaches the command line.
