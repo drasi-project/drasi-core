@@ -48,7 +48,19 @@
 //! database for subsequent operations.
 //!
 //! Keys and values are stored as byte arrays (`&[u8]` / `Vec<u8>`).
+//!
+//! With the optional `configuration` feature, `RedbConfigurationStore` provides
+//! a separate transactional, encrypted desired-state store for DrasiLib management.
+//! One cloned provider supports multiple instance IDs. The application supplies
+//! an external encryption key; definitions, receipts and snapshots are protected,
+//! and commits use immediate durability. This does not change ordinary processing
+//! state-store behavior or make it an automatically encrypted store.
 
 mod provider;
 
 pub use provider::RedbStateStoreProvider;
+
+#[cfg(feature = "configuration")]
+mod configuration;
+#[cfg(feature = "configuration")]
+pub use configuration::RedbConfigurationStore;

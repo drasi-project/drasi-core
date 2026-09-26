@@ -250,7 +250,7 @@ impl ResourceHandle {
         self.cleanup.is_some()
     }
 
-    pub(super) fn same_instance(&self, other: &Self) -> bool {
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.value, &other.value)
     }
 
@@ -273,7 +273,7 @@ impl ResourceHandle {
             })
     }
 
-    pub(super) async fn shutdown(&self) -> anyhow::Result<()> {
+    pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         if let Some(cleanup) = &self.cleanup {
             cleanup.shutdown().await?;
         }

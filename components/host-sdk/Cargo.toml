@@ -55,6 +55,7 @@ workspace = true
 
 [dev-dependencies]
 drasi-index-rocksdb = { workspace = true }
+drasi-state-store-redb = { workspace = true, features = ["configuration"] }
 tempfile = "3"
 libloading = "0.8"
 rmp-serde = "1"

@@ -246,6 +246,7 @@ impl ComponentHandle {
 
     /// Set readiness-gated activation before starting this component.
     pub async fn require_downstream_ready(&self, required: bool) -> GraphResult<()> {
+        self.control.require_configuration_write()?;
         let (reply, result) = oneshot::channel();
         self.control
             .commands
@@ -262,6 +263,7 @@ impl ComponentHandle {
 
     /// Configure a native output stream before its first activation.
     pub async fn bind_stream(&self, port: PortId, stream: StreamId) -> GraphResult<()> {
+        self.control.require_configuration_write()?;
         let (reply, result) = oneshot::channel();
         self.control
             .commands
@@ -296,6 +298,7 @@ impl ComponentHandle {
     }
 
     pub async fn set_control_handler(&self, handler: Arc<dyn ControlHandler>) -> GraphResult<()> {
+        self.control.require_configuration_write()?;
         let (reply, result) = oneshot::channel();
         self.control
             .commands
@@ -494,6 +497,17 @@ impl GraphControl {
     /// Only rejection of the graph addition is a method error. Later failures
     /// belong to the returned generation-specific handle.
     pub async fn add_component(&self, addition: ComponentAddition) -> GraphResult<ComponentHandle> {
+        if let Err(cause) = self.require_configuration_write() {
+            let addition = RejectedAddition::new(addition);
+            self.rejected_additions
+                .lock()
+                .map_err(|_| topology("rejected addition ownership poisoned"))?
+                .push(addition.clone());
+            return Err(GraphError::AdditionRejected {
+                cause: Box::new(cause),
+                addition,
+            });
+        }
         let (reply, result) = oneshot::channel();
         if let Err(error) = self
             .commands
@@ -546,6 +560,7 @@ impl GraphControl {
         &self,
         connections: Vec<(ComponentId, ComponentId)>,
     ) -> GraphResult<()> {
+        self.require_configuration_write()?;
         let (reply, result) = oneshot::channel();
         self.commands
             .send(controller::Command::ControlConnections {
@@ -563,6 +578,7 @@ impl GraphControl {
         &self,
         connections: Vec<(ComponentId, ComponentId)>,
     ) -> GraphResult<()> {
+        self.require_configuration_write()?;
         let (reply, result) = oneshot::channel();
         self.commands
             .send(controller::Command::ControlConnections {

@@ -1,5 +1,27 @@
 # Drasi Host SDK
 
+## Integrated desired-state management
+
+Load and verify libraries with the existing loader/lifecycle APIs, register
+them in `PluginRegistry`, and supply `computation_factory_registry()` to
+`DrasiLib::builder().with_component_factories(...)`. The registry includes
+standard graph factories and the loaded native implementations. DrasiLib does
+not load library paths from stored definitions.
+
+`management::HostManagementResources` provides standard resource recipes for
+memory indexes, middleware, transactional factories and configuration references.
+Its `configuration` recipe can include local `secrets`, or use an externally
+supplied `SecretStoreProvider`. These values are privileged configuration; use
+an encrypted `ConfigurationStore` when persisting them. `HostConfigurationResolver`
+is shared with Server rather than duplicating its secret/environment resolution.
+
+Persistence is a separate opt-in provider, such as
+`drasi-state-store-redb` with its `configuration` feature. Share one provider
+across multiple instance IDs, and register the required factories on each
+restart. Missing factories remain visible as failed declarations, not silently
+removed components. See [managed configuration](../../lib/docs/managed-configuration.md)
+for acceptance, reconstruction, snapshots and mutation-boundary contracts.
+
 The Drasi Host SDK provides the host-side counterpart to the [Drasi Plugin SDK](../plugin-sdk/README.md). While the Plugin SDK helps authors **build** cdylib plugins, the Host SDK helps the server **load, validate, and interact** with them at runtime.
 
 ## Overview

@@ -11,6 +11,11 @@ and the decisions about when to create, start, stop or replace them.
 This describes the implementation in this branch.
 **ComputationGraph is the only execution engine.**
 
+Optional [managed configuration](managed-configuration.md) adds durable
+desired-state acceptance, full graph-set reconciliation and named snapshots
+directly to DrasiLib. Factories, storage and provider resolution are supplied
+externally; ordinary object injection remains the default without persistence.
+
 ## One runtime, existing plugin contracts
 
 You can keep using the existing source, query and reaction APIs and plugins.

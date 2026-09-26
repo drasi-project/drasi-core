@@ -22,7 +22,7 @@ drasi-reaction-application.workspace = true
 drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
 drasi-index-garnet.workspace = true
 drasi-plugin-sdk.workspace = true
-drasi-state-store-redb.workspace = true
+drasi-state-store-redb = { workspace = true, features = ["configuration"] }
 drasi-wal-redb.workspace = true
 
 tokio = { version = "1.6", features = ["full"] }

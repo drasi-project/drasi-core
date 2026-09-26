@@ -375,6 +375,7 @@ impl GraphControl {
         component: ComponentId,
         policy: LifecyclePolicy,
     ) -> GraphResult<GraphRevision> {
+        self.require_configuration_write()?;
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Policy {
@@ -1418,10 +1419,20 @@ impl Operations {
                             })?;
                         lease.component = constructed.0;
                         lease.refresh_configuration();
-                    } else if matches!(lease.component, Component::Unresolved(_)) {
+                    } else if let Component::Unresolved(definition) = &lease.component {
+                        if matches!(
+                            definition.construction,
+                            super::ComponentConstruction::Factory(_)
+                        ) {
+                            return Err(GraphError::Creation {
+                                component: node.descriptor.id().clone(),
+                                disposition: FailureDisposition::Retryable,
+                                source: anyhow::anyhow!("component factory is not registered"),
+                            });
+                        }
                         return Err(super::addition::validation_failure(
                             node.descriptor.id(),
-                            topology("component factory or instance binding is missing"),
+                            topology("component instance binding is missing"),
                         ));
                     }
                     if lease.component.role() != node.role {

@@ -169,6 +169,7 @@ pub struct DrasiLib {
     pub(crate) component_event_broadcast_tx: ComponentEventBroadcastSender,
     pub(crate) computation_registry: Arc<crate::computation::instance::ComputationRegistry>,
     pub(crate) computation_runtime: Arc<crate::computation::runtime::Runtime>,
+    pub(crate) management: Arc<std::sync::OnceLock<crate::management::Management>>,
 }
 
 impl Clone for DrasiLib {
@@ -187,6 +188,7 @@ impl Clone for DrasiLib {
             component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
             computation_registry: self.computation_registry.clone(),
             computation_runtime: self.computation_runtime.clone(),
+            management: self.management.clone(),
         }
     }
 }
@@ -311,6 +313,7 @@ impl DrasiLib {
             component_event_broadcast_tx,
             computation_registry,
             computation_runtime,
+            management: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -400,6 +403,15 @@ impl DrasiLib {
 
         // Brief write lock to set the flag
         *self.running.write().await = true;
+        drop(_lifecycle);
+        if let Some(management) = self.management.get() {
+            let report = management.reconcile().await?;
+            if !report.converged() {
+                return Err(DrasiError::invalid_state(
+                    "managed components did not all become ready; inspect management status",
+                ));
+            }
+        }
         info!("drasi-lib started successfully");
 
         Ok(())
@@ -522,6 +534,10 @@ impl DrasiLib {
         *self.running.write().await = false;
         runtime_shutdown?;
         computation_shutdown?;
+        drop(_lifecycle);
+        if let Some(management) = self.management.get() {
+            management.close().await?;
+        }
 
         info!("drasi-lib shut down permanently");
         Ok(())

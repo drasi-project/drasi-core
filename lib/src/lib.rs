@@ -54,6 +54,7 @@ pub mod error;
 
 /// Computation contracts and the authoritative DAG runtime.
 pub mod computation;
+pub mod management;
 
 /// Identity providers for authentication credentials
 pub mod identity;

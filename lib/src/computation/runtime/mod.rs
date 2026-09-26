@@ -651,6 +651,7 @@ impl Runtime {
         bootstrap_recipe: Option<crate::config::BootstrapSnapshot>,
         start: bool,
     ) -> anyhow::Result<ComponentHandle> {
+        self.control()?.require_configuration_write()?;
         let mutation = self.mutations.lock().await;
         let id = source.id().to_owned();
         let mut meta = metadata;
@@ -694,6 +695,7 @@ impl Runtime {
         config: QueryConfig,
         start: bool,
     ) -> anyhow::Result<ComponentHandle> {
+        self.control()?.require_configuration_write()?;
         let mutation = self.mutations.lock().await;
         let id = config.id.clone();
         ComponentId::try_new(id)?;
@@ -735,6 +737,7 @@ impl Runtime {
         metadata: HashMap<String, String>,
         start: bool,
     ) -> anyhow::Result<ComponentHandle> {
+        self.control()?.require_configuration_write()?;
         let mutation = self.mutations.lock().await;
         let id = reaction.id().to_owned();
         let ids = reaction.query_ids();
@@ -976,6 +979,7 @@ impl Runtime {
         kind: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
+        self.control()?.require_configuration_write()?;
         let record = self.record(id, kind).await?;
         let dependents: Vec<_> = self
             .control()?
@@ -1201,6 +1205,7 @@ impl Runtime {
         id: &str,
         source: Box<dyn Source>,
     ) -> anyhow::Result<()> {
+        self.control()?.require_configuration_write()?;
         let old = self.record(id, "source").await?;
         if source.id() != id {
             anyhow::bail!(
@@ -1254,6 +1259,7 @@ impl Runtime {
         id: &str,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
+        self.control()?.require_configuration_write()?;
         let old = self.record(id, "query").await?;
         if config.id != id {
             anyhow::bail!(
@@ -1272,6 +1278,7 @@ impl Runtime {
         id: &str,
         reaction: Box<dyn Reaction>,
     ) -> anyhow::Result<()> {
+        self.control()?.require_configuration_write()?;
         let old = self.record(id, "reaction").await?;
         if reaction.id() != id {
             anyhow::bail!(

@@ -120,6 +120,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 /// # }
 /// ```
 pub struct DrasiLibBuilder {
+    management: Option<crate::management::ManagementOptions>,
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
@@ -160,6 +161,39 @@ impl Default for DrasiLibBuilder {
 }
 
 impl DrasiLibBuilder {
+    pub fn with_management(mut self, options: crate::management::ManagementOptions) -> Self {
+        self.management = Some(options);
+        self
+    }
+
+    pub fn with_component_factories(
+        mut self,
+        factories: crate::computation::v1::FactoryRegistry,
+    ) -> Self {
+        self.management
+            .get_or_insert_with(Default::default)
+            .factories = factories;
+        self
+    }
+
+    pub fn with_configuration_store(
+        mut self,
+        store: Arc<dyn crate::management::ConfigurationStore>,
+    ) -> Self {
+        self.management.get_or_insert_with(Default::default).store = Some(store);
+        self
+    }
+
+    pub fn with_management_resources(
+        mut self,
+        resources: Arc<dyn crate::management::ManagementResourceResolver>,
+    ) -> Self {
+        self.management
+            .get_or_insert_with(Default::default)
+            .resources = resources;
+        self
+    }
+
     /// Register an additional computation graph with instance-owned execution.
     pub fn with_computation_graph(
         mut self,
@@ -173,6 +207,7 @@ impl DrasiLibBuilder {
     /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
+            management: None,
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -501,8 +536,50 @@ impl DrasiLibBuilder {
     /// After building, you can call `start()` to begin processing.
     pub async fn build(self) -> Result<DrasiLib> {
         let mut builder = self;
+        let management = builder.management.take();
+        if management
+            .as_ref()
+            .is_some_and(|options| options.store.is_some())
+            && (!builder.source_instances.is_empty()
+                || !builder.reaction_instances.is_empty()
+                || !builder.query_configs.is_empty()
+                || !builder.computation_graphs.is_empty())
+        {
+            return Err(DrasiError::invalid_config(
+                "persistent instances restore authoritative definitions; add reconstructible components through apply_desired_state instead of preconstructed builder objects",
+            ));
+        }
         let graphs = std::mem::take(&mut builder.computation_graphs);
-        crate::computation::instance::build_instance(builder.build_inner(), graphs).await
+        let core =
+            crate::computation::instance::build_instance(builder.build_inner(), graphs).await?;
+        if let Some(options) = management {
+            let persistent = options.store.is_some();
+            let opened = crate::management::Management::open(
+                core.config.id.clone(),
+                core.computation_registry.clone(),
+                core.running.clone(),
+                core.is_shutdown.clone(),
+                options,
+            )
+            .await;
+            let opened = match opened {
+                Ok(opened) => opened,
+                Err(error) => {
+                    return Err(crate::computation::instance::cleanup_failed_instance(
+                        core,
+                        error.into(),
+                    )
+                    .await)
+                }
+            };
+            core.management
+                .set(opened)
+                .map_err(|_| DrasiError::invalid_state("management already initialized"))?;
+            if persistent {
+                core.computation_control()?.protect_configuration();
+            }
+        }
+        Ok(core)
     }
 
     async fn build_inner(self) -> Result<DrasiLib> {

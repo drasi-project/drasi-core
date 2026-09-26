@@ -394,7 +394,30 @@ impl DrasiLib {
         graph: ComputationGraph,
         options: ComputationOptions,
     ) -> Result<ComputationHandle> {
+        if let Err(error) = self.computation_control()?.require_configuration_write() {
+            return Err(super::instance::reject_graph(
+                graph,
+                options,
+                anyhow::Error::from(error).into(),
+            )
+            .await);
+        }
         let _lifecycle = self.computation_registry.lifecycle.lock().await;
+        if self.management.get().is_some_and(|management| {
+            management
+                .configuration()
+                .desired
+                .graphs
+                .iter()
+                .any(|desired| desired.topology.graph_id == graph.snapshot().id.as_ref())
+        }) {
+            return Err(super::instance::reject_graph(
+                graph,
+                options,
+                DrasiError::invalid_state("graph ID is owned by managed configuration"),
+            )
+            .await);
+        }
         if let Err(error) = self.state_guard.require_initialized() {
             return Err(super::instance::reject_graph(graph, options, error).await);
         }
@@ -443,6 +466,11 @@ impl DrasiLib {
     }
 
     pub async fn remove_computation_graph(&self, id: &str) -> Result<()> {
+        self.get_computation_graph(id)
+            .await?
+            .control()
+            .require_configuration_write()
+            .map_err(anyhow::Error::from)?;
         self.state_guard.require_initialized()?;
         self.computation_registry.remove(id).await
     }

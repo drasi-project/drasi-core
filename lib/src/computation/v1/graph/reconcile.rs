@@ -30,6 +30,9 @@ use std::{future::Future, num::NonZeroUsize};
 /// Supply new external instances/providers separately when executing the preview.
 #[derive(Debug, Clone)]
 pub enum DesiredMutation {
+    /// Apply a complete graph definition, preserving unchanged live instances.
+    /// The graph ID must match. External bindings must be supplied explicitly.
+    SetTopology(DesiredTopology),
     PutComponent(DesiredComponent),
     /// Replace even when the desired description is unchanged.
     ReplaceComponent(DesiredComponent),
@@ -153,6 +156,7 @@ impl GraphControl {
         preview: ReconciliationPreview,
         bindings: TopologyBindings,
     ) -> GraphResult<ReconciliationReport> {
+        self.require_configuration_write()?;
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Reconcile {
@@ -299,6 +303,31 @@ pub(super) fn preview(
     let mut explicit_binds = BTreeSet::new();
     for change in &changes {
         match change {
+            DesiredMutation::SetTopology(target) => {
+                if target.version != 1 || target.graph_id != desired.graph_id {
+                    return Err(topology("desired topology identity or version mismatch"));
+                }
+                if old.components.iter().any(|node| {
+                    graph
+                        .reserved_components
+                        .contains(node.descriptor.id().as_str())
+                        && !target.components.iter().any(|new| new == node)
+                }) {
+                    return Err(topology(
+                        "full desired topology cannot change host-reserved components",
+                    ));
+                }
+                for resource in &target.resources {
+                    if old.resources.iter().find(|prior| prior.id == resource.id) != Some(resource)
+                        || old.resource_configurations.get(&resource.id)
+                            != target.resource_configurations.get(&resource.id)
+                        || !graph.resource_handles.contains_key(&resource.id)
+                    {
+                        resources.insert(resource.id.clone());
+                    }
+                }
+                desired = target.clone();
+            }
             DesiredMutation::SetSubscriptions {
                 consumer,
                 producers,
@@ -903,6 +932,63 @@ fn describe(
     Ok((nodes, edges, order))
 }
 
+pub(crate) fn validate_definition(desired: &DesiredTopology) -> GraphResult<()> {
+    if desired.version != 1 {
+        return Err(topology("unsupported desired topology version"));
+    }
+    super::super::validate_identifier("graph", &desired.graph_id)?;
+    describe(desired)?;
+    let ids: BTreeSet<_> = desired
+        .components
+        .iter()
+        .map(|node| node.descriptor.id())
+        .collect();
+    let resources: BTreeSet<_> = desired
+        .resources
+        .iter()
+        .map(|resource| &resource.id)
+        .collect();
+    if desired
+        .control_connections
+        .iter()
+        .chain(&desired.subscriptions)
+        .any(|(from, to)| from == to || !ids.contains(from) || !ids.contains(to))
+        || desired
+            .readiness_required
+            .iter()
+            .any(|id| !ids.contains(id))
+        || desired.component_resources.iter().any(|(id, values)| {
+            !ids.contains(id) || values.iter().any(|value| !resources.contains(value))
+        })
+        || desired.component_plugins.keys().any(|id| !ids.contains(id))
+        || desired
+            .resource_configurations
+            .keys()
+            .any(|id| !resources.contains(id))
+    {
+        return Err(topology(
+            "desired topology references undeclared nodes or resources",
+        ));
+    }
+    for node in &desired.components {
+        if let ComponentConstruction::Factory(spec) = &node.construction {
+            if spec.descriptor != node.descriptor
+                || spec.role != node.role
+                || spec.completion != node.completion
+            {
+                return Err(topology(
+                    "factory specification and desired interface disagree",
+                ));
+            }
+        }
+    }
+    for plugin in desired.component_plugins.values() {
+        super::super::validate_identifier("plugin", &plugin.id)?;
+        super::super::validate_identifier("plugin version", &plugin.version)?;
+    }
+    Ok(())
+}
+
 struct Prepared {
     nodes: Vec<NodeSnapshot>,
     edges: Vec<EdgeSnapshot>,
@@ -1012,16 +1098,23 @@ fn prepare(
                         "factory specification and desired interface disagree",
                     ));
                 }
-                let factory = factories
-                    .get(&spec.implementation)
-                    .ok_or_else(|| topology("implementation is not registered"))?;
-                super::super::specification::validate_specification(
-                    &plan.desired.graph_id,
-                    spec,
-                    factory.as_ref(),
-                    &declarations,
-                    &resources,
-                )?;
+                let Some(factory) = factories.get(&spec.implementation) else {
+                    if bindings.deferred_management_validation && construct {
+                        components
+                            .insert(id.clone(), Component::Unresolved(Arc::new(node.clone())));
+                        continue;
+                    }
+                    return Err(topology("implementation is not registered"));
+                };
+                if !bindings.deferred_management_validation {
+                    super::super::specification::validate_specification(
+                        &plan.desired.graph_id,
+                        spec,
+                        factory.as_ref(),
+                        &declarations,
+                        &resources,
+                    )?;
+                }
                 if plan.update.contains(id) && !factory.supports_reconfiguration() {
                     return Err(topology(
                         "factory does not support in-place reconfiguration",
@@ -1695,6 +1788,8 @@ fn commit_desired(
     graph.resource_handles = std::mem::take(&mut prepared.resources);
     graph.factories = std::mem::take(&mut prepared.factories);
     graph.snapshot.revision = plan.desired.revision;
+    graph.snapshot.requirements = plan.desired.requirements.clone();
+    graph.snapshot.allow_incomplete = plan.desired.allow_incomplete;
     graph.snapshot.nodes = prepared.nodes.clone().into();
     graph.snapshot.edges = prepared.edges.clone().into();
     graph.snapshot.unbound_relationships = plan.desired.boundary_relationships.clone().into();
@@ -1746,7 +1841,12 @@ fn commit_desired(
         .resource_configurations
         .iter()
         .filter(|(id, _)| {
-            graph.snapshot.resources.contains_key(*id) && !plan.resources.contains(*id)
+            graph.snapshot.resources.contains_key(*id)
+                && (!plan.resources.contains(*id)
+                    || plan
+                        .changes
+                        .iter()
+                        .any(|change| matches!(change, DesiredMutation::SetTopology(_))))
         })
         .map(|(id, configuration)| (id.clone(), configuration.clone()))
         .collect();
@@ -1924,7 +2024,15 @@ async fn realize(
         } else {
             None
         };
-        let mut created = Ok(());
+        let mut created = if matches!(lease.component, Component::Unresolved(_)) {
+            Err(GraphError::Creation {
+                component: id.clone(),
+                disposition: FailureDisposition::Retryable,
+                source: anyhow::anyhow!("component factory is not registered"),
+            })
+        } else {
+            Ok(())
+        };
         if let Some((spec, factory)) = definition {
             let missing: Vec<_> = spec
                 .dependencies
@@ -1973,6 +2081,14 @@ async fn realize(
             let resources = graph.resource_handles.clone();
             let graph_id = graph.snapshot.id.clone();
             created = drive(graph, operations, controls, cancel, async {
+                super::super::specification::validate_specification(
+                    &graph_id,
+                    &spec,
+                    factory.as_ref(),
+                    &graph.snapshot.resources,
+                    &resources,
+                )
+                .map_err(|error| super::super::addition::validation_failure(id, error))?;
                 let context = ConstructionContext::resolve(
                     graph.execution_scope.clone(),
                     graph_id,

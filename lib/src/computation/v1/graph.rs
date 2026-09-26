@@ -1023,6 +1023,7 @@ impl ComputationGraphBuilder {
             rejected_additions: Arc::new(std::sync::Mutex::new(Vec::new())),
             deferred_activation: BTreeSet::new(),
             reported_resources: BTreeMap::new(),
+            management_protected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }
@@ -1099,9 +1100,35 @@ pub struct GraphControl {
     peers: Arc<super::ControlPlane>,
     registry: watch::Receiver<Arc<GraphRegistrySnapshot>>,
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
+    management_protected: Arc<std::sync::atomic::AtomicBool>,
+    management_access: bool,
 }
 
 impl GraphControl {
+    pub(crate) fn protect_configuration(&self) {
+        self.management_protected
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn management_control(&self) -> Self {
+        let mut control = self.clone();
+        control.management_access = true;
+        control
+    }
+
+    pub(crate) fn require_configuration_write(&self) -> GraphResult<()> {
+        if !self.management_access
+            && self
+                .management_protected
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(topology(
+                "managed configuration must be changed through DrasiLib::apply_desired_state",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn inspector(&self) -> super::ComputationInspector {
         self.inspector.clone()
     }
@@ -1165,6 +1192,7 @@ pub struct ComputationGraph {
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
     deferred_activation: BTreeSet<ComponentId>,
     reported_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
+    management_protected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ComputationGraph {
@@ -1271,6 +1299,8 @@ impl ComputationGraph {
             peers: self.peers.clone(),
             registry: self.registry.subscribe(),
             rejected_additions: self.rejected_additions.clone(),
+            management_protected: self.management_protected.clone(),
+            management_access: false,
         };
         let state = self.state.clone();
         let observed = self.observed.clone();

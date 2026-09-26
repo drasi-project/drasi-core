@@ -70,7 +70,7 @@ pub struct DesiredRelationship {
 
 /// Versioned desired configuration only. Operational state, generations, secrets,
 /// queued data and constructed handles have no fields in this representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredTopology {
     pub version: u32,
@@ -126,6 +126,10 @@ pub struct TopologyBindings {
     pub subscriptions: Vec<(ComponentId, ComponentId)>,
     /// Semantic admission diagnostics belong to the added node, not its caller.
     pub validation_error: Option<Arc<GraphError>>,
+    /// Management has durably accepted these declarations. Resolve missing
+    /// factories and invalid component configuration as node creation outcomes.
+    #[doc(hidden)]
+    pub deferred_management_validation: bool,
 }
 
 impl DesiredPipe {
@@ -199,6 +203,13 @@ impl DesiredPipe {
 }
 
 impl DesiredTopology {
+    /// Validate graph structure without constructing components or requiring
+    /// factories/resources to be available. Component-specific creation failures
+    /// remain runtime outcomes.
+    pub fn validate_structure(&self) -> GraphResult<()> {
+        super::controller::reconcile::validate_definition(self)
+    }
+
     pub fn to_json(&self) -> GraphResult<String> {
         serde_json::to_string_pretty(self)
             .map_err(|error| topology(format!("cannot export desired topology: {error}")))

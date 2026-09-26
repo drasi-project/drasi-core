@@ -111,6 +111,144 @@ fn codec() -> Result<EnvelopeCodec> {
     codec.register_schema(GraphChangeCodec::schema())?;
     Ok(codec)
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_definitions(
+) -> Result<()> {
+    use drasi_lib::{management::*, DrasiLib};
+    use drasi_state_store_redb::RedbConfigurationStore;
+    let plugin = plugin()?;
+    let directory = directory()?;
+    let output_path = directory.path().join("managed.jsonl");
+    let source = factory(&plugin, COUNTER)?;
+    let sink = factory(&plugin, CAPTURE)?;
+    let graph = ComputationGraph::builder("managed-native")
+        .component(
+            source.specification(
+                id("counter"),
+                json!({
+                    "stream":"counter/out","count":3,"start":10,"step":2,"interval_ms":2
+                }),
+            )?,
+            source,
+        )
+        .component(
+            sink.specification(id("capture"), json!({"path":output_path}))?,
+            sink,
+        )
+        .bind_stream(endpoint("counter", "out"), stream("counter/out"))
+        .connect(
+            edge("counter", "capture"),
+            Box::new(BoundedPipeConfig { capacity: 2 }),
+        )
+        .build()?;
+    let mut definition = DesiredInstance::from(graph.snapshot().select(GraphSelection::All)?);
+    let secret_id = ResourceId::try_new("configuration")?;
+    definition.graphs[0]
+        .topology
+        .resources
+        .push(ResourceSpecification {
+            id: secret_id.clone(),
+            role: ResourceRole::SecretStore,
+            ownership: ResourceOwnership::Borrowed,
+            binding: Arc::from("host.configuration"),
+        });
+    definition.graphs[0]
+        .topology
+        .resource_configurations
+        .insert(
+            secret_id.clone(),
+            json!({"kind":"configuration","secrets":{"capture-path":output_path}}),
+        );
+    let capture = definition.graphs[0]
+        .topology
+        .components
+        .iter_mut()
+        .find(|node| node.descriptor.id() == &id("capture"))
+        .unwrap();
+    let ComponentConstruction::Factory(spec) = &mut capture.construction else {
+        unreachable!()
+    };
+    spec.configuration.insert(
+        Arc::from("path"),
+        ConfigurationValue::Reference {
+            resource: secret_id,
+            key: Arc::from("secret:capture-path"),
+            secret: true,
+        },
+    );
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("management.redb"),
+        [19; 32],
+    )?);
+    let mut plugins = PluginRegistry::new();
+    plugins.register_computation_plugin(plugin.clone())?;
+    let resources = Arc::new(drasi_host_sdk::management::HostManagementResources::new(
+        &plugins,
+        Arc::new(drasi_core::middleware::MiddlewareTypeRegistry::new()),
+        None,
+    )?);
+    let core = DrasiLib::builder()
+        .with_id("managed-host")
+        .with_component_factories(plugins.computation_factory_registry()?)
+        .with_configuration_store(store.clone())
+        .with_management_resources(resources.clone())
+        .build()
+        .await?;
+    let receipt = core
+        .apply_desired_state(0, "create", definition.clone())
+        .await?;
+    assert!(receipt.durable);
+    assert!(core.reconcile_desired_state().await?.converged());
+    let handle = core.get_computation_graph("managed-native").await?;
+    let generation = handle.observed().components[&id("counter")].generation;
+    core.apply_desired_state(receipt.revision, "same-config", definition)
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(
+        handle.observed().components[&id("counter")].generation,
+        generation
+    );
+    core.start().await?;
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if output_path.exists() && captured(&output_path)?.len() == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    assert_eq!(values(&captured(&output_path)?)?, [10, 12, 14]);
+    core.snapshot_desired_configuration("running-definition")
+        .await?;
+    core.shutdown().await?;
+    let restored = DrasiLib::builder()
+        .with_id("managed-host")
+        .with_component_factories(plugins.computation_factory_registry()?)
+        .with_configuration_store(store)
+        .with_management_resources(resources)
+        .build()
+        .await?;
+    assert_eq!(restored.desired_configuration()?.revision, receipt.revision);
+    assert!(restored.management_status().await?.converged());
+    assert_eq!(
+        restored
+            .get_computation_graph("managed-native")
+            .await?
+            .observed()
+            .components
+            .len(),
+        2
+    );
+    assert!(restored
+        .load_configuration_snapshot("running-definition")
+        .await?
+        .is_some());
+    restored.shutdown().await?;
+    Ok(())
+}
 fn captured(path: &Path) -> Result<Vec<ChangeEnvelope>> {
     let codec = codec()?;
     std::fs::read(path)?
@@ -118,6 +256,205 @@ fn captured(path: &Path) -> Result<Vec<ChangeEnvelope>> {
         .filter(|line| !line.is_empty())
         .map(|line| Ok(codec.decode(line)?))
         .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recipes() -> Result<()> {
+    use drasi_lib::{management::*, DrasiLib};
+    use drasi_state_store_redb::RedbConfigurationStore;
+    struct Sink {
+        descriptor: ComponentDescriptor,
+        values: Arc<Mutex<Vec<Value>>>,
+    }
+    #[async_trait]
+    impl ComputationComponent for Sink {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+        fn configuration(&self) -> Result<Value> {
+            Ok(json!({}))
+        }
+        async fn start(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl EnvelopeSink for Sink {
+        fn completion(&self) -> SinkCompletion {
+            SinkCompletion::Handled
+        }
+        async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
+            for operation in input.envelope.changes().operations() {
+                let after = match operation {
+                    ChangeOperation::Added { after, .. }
+                    | ChangeOperation::Updated { after, .. } => after,
+                    _ => anyhow::bail!("unexpected query result"),
+                };
+                let row = QueryChangeCodec::decode_row(after)?;
+                self.values
+                    .lock()
+                    .unwrap()
+                    .push(QueryChangeCodec::row_values_to_json(&row.values));
+            }
+            Ok(())
+        }
+    }
+    struct SinkFactory {
+        descriptor: FactoryDescriptor,
+        values: Arc<Mutex<Vec<Value>>>,
+    }
+    #[async_trait]
+    impl ComponentFactory for SinkFactory {
+        fn descriptor(&self) -> &FactoryDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _: &ComponentSpecification) -> Result<()> {
+            Ok(())
+        }
+        async fn create(
+            &self,
+            context: ConstructionContext,
+        ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+            Ok(ConstructedComponent::sink(Box::new(Sink {
+                descriptor: context.specification.descriptor.clone(),
+                values: self.values.clone(),
+            })))
+        }
+    }
+    let plugin = plugin()?;
+    let source = factory(&plugin, COUNTER)?;
+    let query = Arc::new(ContinuousQueryFactory::default());
+    let values = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(SinkFactory {
+        descriptor: FactoryDescriptor {
+            implementation: ImplementationIdentity::try_new("test/query-sink", "1")?,
+            role: ComponentRole::Sink,
+            configuration_version: 1,
+            configuration: ConfigurationSchema::default(),
+            dependencies: Default::default(),
+        },
+        values: values.clone(),
+    });
+    let indexes = ResourceId::try_new("indexes")?;
+    let query_definition = ContinuousQueryDefinition {
+        graph_id: "managed-query".into(),
+        id: id("query"),
+        query: "MATCH (n:Counter) RETURN n.value AS value".into(),
+        language: ComputationQueryLanguage::Cypher,
+        output_stream: stream("query/out"),
+        outbox_capacity: NonZeroUsize::new(16).unwrap(),
+    };
+    let query_spec = ComponentSpecification {
+        descriptor: query_definition.descriptor(),
+        role: ComponentRole::Query,
+        completion: None,
+        implementation: query.descriptor().implementation.clone(),
+        configuration_version: 1,
+        configuration: [
+            (
+                Arc::from("query"),
+                ConfigurationValue::Literal(json!(query_definition.query)),
+            ),
+            (
+                Arc::from("language"),
+                ConfigurationValue::Literal(json!("cypher")),
+            ),
+            (
+                Arc::from("stream"),
+                ConfigurationValue::Literal(json!("query/out")),
+            ),
+        ]
+        .into(),
+        dependencies: [(Arc::from("indexes"), vec![indexes.clone()])].into(),
+    };
+    let sink_spec = ComponentSpecification {
+        descriptor: ComponentDescriptor::try_new(
+            id("sink"),
+            vec![PortDescriptor::new(
+                PortId::try_new("in")?,
+                PortDirection::Input,
+                QueryChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )?,
+        role: ComponentRole::Sink,
+        completion: Some(SinkCompletion::Handled),
+        implementation: sink.descriptor.implementation.clone(),
+        configuration_version: 1,
+        configuration: Default::default(),
+        dependencies: Default::default(),
+    };
+    let graph = ComputationGraph::builder("managed-query")
+        .declare_resource(ResourceSpecification {
+            id: indexes.clone(),
+            role: ResourceRole::IndexBackend,
+            ownership: ResourceOwnership::Borrowed,
+            binding: Arc::from("memory"),
+        })?
+        .resource_configuration(indexes, json!({"kind":"memoryIndexes"}))?
+        .component(
+            source.specification(
+                id("counter"),
+                json!({"stream":"counter/out","count":3,"start":2,"step":2,"interval_ms":2}),
+            )?,
+            source,
+        )
+        .component(query_spec, query)
+        .component(sink_spec, sink.clone())
+        .bind_stream(endpoint("counter", "out"), stream("counter/out"))
+        .bind_stream(endpoint("query", "out"), stream("query/out"))
+        .connect(
+            edge("counter", "query"),
+            Box::new(BoundedPipeConfig { capacity: 4 }),
+        )
+        .connect(
+            edge("query", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 4 }),
+        )
+        .build()?;
+    let mut plugins = PluginRegistry::new();
+    plugins.register_computation_plugin(plugin)?;
+    let mut factories = plugins.computation_factory_registry()?;
+    factories.register(sink)?;
+    let resources = Arc::new(drasi_host_sdk::management::HostManagementResources::new(
+        &plugins,
+        Arc::new(drasi_core::middleware::MiddlewareTypeRegistry::new()),
+        None,
+    )?);
+    let directory = directory()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("query.redb"),
+        [17; 32],
+    )?);
+    let core = DrasiLib::builder()
+        .with_component_factories(factories)
+        .with_management_resources(resources)
+        .with_configuration_store(store)
+        .build()
+        .await?;
+    core.apply_desired_state(
+        0,
+        "query",
+        DesiredInstance::from(graph.snapshot().select(GraphSelection::All)?),
+    )
+    .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    core.start().await?;
+    tokio::time::timeout(TIMEOUT, async {
+        while values.lock().unwrap().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
+    assert_eq!(
+        *values.lock().unwrap(),
+        [json!({"value":2}), json!({"value":4}), json!({"value":6})]
+    );
+    core.shutdown().await?;
+    Ok(())
 }
 fn integer(element: &Element, name: &str) -> Result<i64> {
     let properties = match element {
