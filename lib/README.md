@@ -386,6 +386,11 @@ core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
 ```
 
+`stop_query()` also cleans up queries in `Error`, including failures during
+startup or bootstrap. It releases active subscriptions and processing tasks before
+reporting `Stopped`, while preserving the query configuration and persisted state.
+Calling `stop_query()` on an already stopped query returns an error.
+
 ### Inspecting Components
 
 ```rust
