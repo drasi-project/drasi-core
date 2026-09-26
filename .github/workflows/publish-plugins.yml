@@ -38,6 +38,22 @@ on:
         required: false
         type: string
         default: ''
+      repair_batch:
+        description: 'Sign-only recovery inventory; none preserves normal publication'
+        required: false
+        type: choice
+        default: 'none'
+        options:
+          - none
+          - release-2026-09-25-darwin-arm64
+      repair_action:
+        description: 'Repair only: plan is read-only; execute explicitly authorizes signing'
+        required: false
+        type: choice
+        default: 'plan'
+        options:
+          - plan
+          - execute
   workflow_call:
     inputs:
       pre_release:
@@ -89,8 +105,120 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  select-mode:
+    name: Validate Publication or Repair Selection
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+    steps:
+      - name: Checkout workflow code, never the publication ref input
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate selection
+        id: select
+        env:
+          WORKFLOW_INPUTS: ${{ toJSON(inputs) }}
+        run: python3 .github/scripts/repair-plugin-signatures.py select
+
+  repair-plan:
+    name: Plan Plugin Signature Repair (read-only)
+    needs: select-mode
+    if: >-
+      ${{ needs.select-mode.outputs.mode == 'plan' &&
+          github.repository == 'drasi-project/drasi-core' &&
+          github.ref == 'refs/heads/main' &&
+          github.event_name == 'workflow_dispatch' &&
+          github.workflow_ref == 'drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted main workflow commit
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: drasi-project/drasi-core
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+        with:
+          cosign-release: 'v2.5.2'
+
+      - name: Validate complete inventory and signatures (no login or signing)
+        id: repair
+        env:
+          WORKFLOW_INPUTS: ${{ toJSON(inputs) }}
+        run: python3 .github/scripts/repair-plugin-signatures.py plan
+
+      - name: Retain repair plan or failure report
+        if: ${{ always() && steps.repair.outputs.report != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-signature-repair-plan
+          path: ${{ steps.repair.outputs.report }}
+          if-no-files-found: error
+          retention-days: 30
+
+  repair-execute:
+    name: Execute Plugin Signature Repair
+    needs: select-mode
+    if: >-
+      ${{ needs.select-mode.outputs.mode == 'execute' &&
+          inputs.repair_action == 'execute' &&
+          inputs.repair_batch == 'release-2026-09-25-darwin-arm64' &&
+          github.repository == 'drasi-project/drasi-core' &&
+          github.ref == 'refs/heads/main' &&
+          github.event_name == 'workflow_dispatch' &&
+          github.workflow_ref == 'drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main' }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    concurrency:
+      group: plugin-signature-repair-${{ inputs.repair_batch }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted main workflow commit
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: drasi-project/drasi-core
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+        with:
+          cosign-release: 'v2.5.2'
+
+      - name: Revalidate inventory, sign missing signatures, and verify anonymously
+        id: repair
+        env:
+          WORKFLOW_INPUTS: ${{ toJSON(inputs) }}
+          REPAIR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/repair-plugin-signatures.py execute
+
+      - name: Retain repair result or failure report
+        if: ${{ always() && steps.repair.outputs.report != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-signature-repair-execute
+          path: ${{ steps.repair.outputs.report }}
+          if-no-files-found: error
+          retention-days: 30
+
   visibility-preflight:
     name: Verify Plugin Directory Is Public
+    needs: select-mode
+    if: ${{ needs.select-mode.outputs.mode == 'publish' }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -106,8 +234,8 @@ jobs:
 
   list-plugin-packages:
     name: List Plugin Packages
-    needs: visibility-preflight
-    if: ${{ !inputs.dry_run && !inputs.skip_visibility }}
+    needs: [select-mode, visibility-preflight]
+    if: ${{ needs.select-mode.outputs.mode == 'publish' && !inputs.dry_run && !inputs.skip_visibility }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -139,7 +267,8 @@ jobs:
 
   build-and-publish:
     name: Build & Publish (${{ matrix.arch_suffix }})
-    needs: visibility-preflight
+    needs: [select-mode, visibility-preflight]
+    if: ${{ needs.select-mode.outputs.mode == 'publish' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -404,11 +533,12 @@ jobs:
   verify-public-visibility:
     name: Verify Public Package Visibility
     needs:
+      - select-mode
       - build-and-publish
       - list-plugin-packages
     # Skipped on dry runs and when skip_visibility is set (e.g. nightly test runs,
     # where the packages are already pullable and visibility verification is omitted).
-    if: ${{ !inputs.dry_run && !inputs.skip_visibility }}
+    if: ${{ needs.select-mode.outputs.mode == 'publish' && !inputs.dry_run && !inputs.skip_visibility }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
