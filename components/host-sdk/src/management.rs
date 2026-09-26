@@ -4,7 +4,7 @@
 //! Resource recipes for integrated DrasiLib management. Library loading and
 //! factory registration use PluginRegistry; no second component registry exists.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -17,9 +17,16 @@ use serde::Deserialize;
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum Recipe {
     MemoryIndexes,
+    Indexes {
+        provider: String,
+    },
     Middleware,
     QueryMiddleware,
     TransactionalTransformers,
+    Qos {
+        definition: QosChannelDefinition,
+        provider: Option<String>,
+    },
     Configuration {
         #[serde(default)]
         secrets: BTreeMap<String, String>,
@@ -33,6 +40,8 @@ pub struct HostManagementResources {
     middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
     transactional: Arc<TransactionalTransformerRegistry>,
     secrets: Option<Arc<dyn SecretStoreProvider>>,
+    factories: FactoryRegistry,
+    indexes: BTreeMap<String, Arc<dyn drasi_core::computation::ComputationIndexProvider>>,
 }
 
 impl HostManagementResources {
@@ -45,7 +54,25 @@ impl HostManagementResources {
             transactional: registry.transactional_transformer_registry(middleware.clone())?,
             middleware,
             secrets,
+            factories: registry.computation_factory_registry()?,
+            indexes: BTreeMap::new(),
         })
+    }
+
+    /// Register an external index implementation for durable QoS journal recipes.
+    pub fn with_index_provider(
+        mut self,
+        name: impl Into<String>,
+        provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
+    ) -> Result<Self> {
+        let name = name.into();
+        ResourceId::try_new(name.clone())?;
+        anyhow::ensure!(
+            !self.indexes.contains_key(&name),
+            "duplicate managed index provider"
+        );
+        self.indexes.insert(name, provider);
+        Ok(self)
     }
 }
 
@@ -109,8 +136,8 @@ impl ConfigurationResolver for HostConfigurationResolver {
 impl ManagementResourceResolver for HostManagementResources {
     async fn resolve(
         &self,
-        _: &str,
-        _: &str,
+        instance: &str,
+        graph: &str,
         specification: &ResourceSpecification,
         configuration: &serde_json::Value,
     ) -> Result<ResourceHandle> {
@@ -122,6 +149,15 @@ impl ManagementResourceResolver for HostManagementResources {
                 Arc::new(QueryIndexProviderResource(Arc::new(
                     drasi_core::computation::InMemoryComputationProvider,
                 ))),
+            ),
+            Recipe::Indexes { provider } => ResourceHandle::new(
+                ResourceRole::IndexBackend,
+                Arc::new(QueryIndexProviderResource(
+                    self.indexes
+                        .get(&provider)
+                        .context("managed index provider is not registered")?
+                        .clone(),
+                )),
             ),
             Recipe::Middleware => ResourceHandle::new(
                 ResourceRole::Middleware,
@@ -137,6 +173,45 @@ impl ManagementResourceResolver for HostManagementResources {
                     self.transactional.clone(),
                 )),
             ),
+            Recipe::Qos {
+                definition,
+                provider,
+            } => {
+                anyhow::ensure!(
+                    specification.ownership == ResourceOwnership::Graph,
+                    "host-created QoS resources require graph ownership"
+                );
+                let channel = if definition.durable {
+                    let provider = provider
+                        .as_ref()
+                        .and_then(|name| self.indexes.get(name))
+                        .context("durable QoS requires a registered index provider")?;
+                    anyhow::ensure!(
+                        !provider.is_volatile(),
+                        "durable QoS cannot use volatile indexes"
+                    );
+                    let scope = format!("qos/{}/{instance}/{graph}", instance.len());
+                    let indexes = provider
+                        .create_indexes(&scope, specification.id.as_str())
+                        .await?;
+                    QosChannel::persistent(
+                        definition,
+                        indexes,
+                        self.factories.envelope_codec(
+                            NonZeroUsize::new(64 * 1024 * 1024).expect("constant size"),
+                        )?,
+                        specification.id.as_str(),
+                    )
+                    .await?
+                } else {
+                    anyhow::ensure!(
+                        provider.is_none(),
+                        "volatile QoS must not declare durable storage"
+                    );
+                    QosChannel::volatile(definition)?
+                };
+                channel.resource()
+            }
             Recipe::Configuration { secrets } => ResourceHandle::new(
                 ResourceRole::SecretStore,
                 Arc::new(ConfigurationResolverResource(Arc::new(

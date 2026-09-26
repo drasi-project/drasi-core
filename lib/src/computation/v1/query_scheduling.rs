@@ -60,12 +60,42 @@ impl ResourceCleanup for QuerySchedulingResource {
     }
 }
 
-struct QueryScheduledSource {
+/// Independent, non-destructive source of due-work notifications. The consumer
+/// completes actual scheduled work in its processing transaction.
+pub struct QueryScheduledSource {
     descriptor: ComponentDescriptor,
     stream: StreamId,
     scheduling: Arc<QuerySchedulingResource>,
     sequence: u64,
     not_before: Option<tokio::time::Instant>,
+}
+
+fn source_descriptor(id: ComponentId) -> super::Result<ComponentDescriptor> {
+    ComponentDescriptor::try_new(
+        id,
+        vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )],
+    )
+}
+
+impl QueryScheduledSource {
+    pub fn new(
+        id: ComponentId,
+        stream: StreamId,
+        scheduling: Arc<QuerySchedulingResource>,
+    ) -> super::Result<Self> {
+        Ok(Self {
+            descriptor: source_descriptor(id)?,
+            stream,
+            scheduling,
+            sequence: 0,
+            not_before: None,
+        })
+    }
 }
 #[async_trait]
 impl ComputationComponent for QueryScheduledSource {
@@ -182,15 +212,7 @@ impl ComponentFactory for QueryScheduledSourceFactory {
         &self.descriptor
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
-        let expected = ComponentDescriptor::try_new(
-            spec.descriptor.id().clone(),
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?;
+        let expected = source_descriptor(spec.descriptor.id().clone())?;
         anyhow::ensure!(
             spec.descriptor == expected,
             "scheduled source requires typed graph input"
@@ -217,13 +239,8 @@ impl ComponentFactory for QueryScheduledSourceFactory {
             })?;
         let stream = StreamId::try_new(stream).map_err(ComponentCreationError::terminal)?;
         Ok(ConstructedComponent::source(Box::new(
-            QueryScheduledSource {
-                descriptor: context.specification.descriptor.clone(),
-                stream,
-                scheduling,
-                sequence: 0,
-                not_before: None,
-            },
+            QueryScheduledSource::new(context.component_id.clone(), stream, scheduling)
+                .map_err(ComponentCreationError::terminal)?,
         )))
     }
 }

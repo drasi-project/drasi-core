@@ -25,6 +25,12 @@ use tokio::sync::{broadcast, mpsc};
 pub trait Timestamped {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
 
+    /// Logical producer identity and sequence. Timestamp merging may compare
+    /// stream heads, but must not move a later sequence ahead of its own head.
+    fn ordering_stream(&self) -> Option<(&str, u64)> {
+        None
+    }
+
     /// Optional query-local source rank and authoritative source sequence.
     /// Event types without a ranked source retain FIFO timestamp ties.
     fn ordering_tie_breaker(&self) -> Option<(usize, u64)> {
@@ -378,6 +384,16 @@ impl Timestamped for SourceEventWrapper {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
         self.timestamp
     }
+    fn ordering_stream(&self) -> Option<(&str, u64)> {
+        Some((
+            if matches!(self.event, SourceEvent::Control(SourceControl::FuturesDue)) {
+                "\0scheduled"
+            } else {
+                &self.source_id
+            },
+            self.sequence,
+        ))
+    }
 }
 
 /// Arc-wrapped SourceEventWrapper for zero-copy distribution
@@ -536,6 +552,9 @@ impl QueryResult {
 impl Timestamped for QueryResult {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
         self.timestamp
+    }
+    fn ordering_stream(&self) -> Option<(&str, u64)> {
+        Some((&self.query_id, self.sequence))
     }
 }
 

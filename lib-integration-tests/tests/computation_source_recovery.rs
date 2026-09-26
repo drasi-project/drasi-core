@@ -30,7 +30,7 @@ use drasi_lib::{
     },
     queries::SnapshotResponse,
     sources::SourceError,
-    wal::{WalError, WalProvider},
+    wal::WalProvider,
     CapacityPolicy, ComponentStatus, DispatchMode, DrasiLib, DurabilityConfig, Query,
     RecoveryPolicy, Source, SourceRuntimeContext, SourceSubscriptionSettings, StorageBackendRef,
 };
@@ -136,23 +136,12 @@ impl Source for ObservedApplication {
         settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         let result = self.inner.subscribe(settings.clone()).await;
-        let unavailable =
-            result
-                .as_ref()
-                .err()
-                .and_then(|error| match error.downcast_ref::<WalError>() {
-                    Some(WalError::PositionUnavailable {
-                        source_id,
-                        requested,
-                        oldest_available,
-                    }) => Some(SourceError::PositionUnavailable {
-                        source_id: source_id.clone(),
-                        requested: Bytes::copy_from_slice(&requested.to_be_bytes()),
-                        earliest_available: oldest_available
-                            .map(|sequence| Bytes::copy_from_slice(&sequence.to_be_bytes())),
-                    }),
-                    _ => None,
-                });
+        let unavailable = result.as_ref().err().is_some_and(|error| {
+            matches!(
+                error.downcast_ref::<SourceError>(),
+                Some(SourceError::PositionUnavailable { .. })
+            )
+        });
         self.observations
             .subscriptions
             .lock()
@@ -163,13 +152,8 @@ impl Source for ObservedApplication {
                     .as_ref()
                     .ok()
                     .and_then(|response| response.position_handle.as_ref().map(Arc::downgrade)),
-                unavailable: unavailable.is_some(),
+                unavailable,
             });
-        // Real retention gaps exercise the Source contract's typed error, not
-        // a synthetic failure counter or a claim that replay is unsupported.
-        if let Some(error) = unavailable {
-            return Err(error.into());
-        }
         result
     }
 

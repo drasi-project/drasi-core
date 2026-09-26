@@ -261,6 +261,7 @@ impl InMemoryElementIndex {
                                                     let in_out = Element::Relation {
                                                         metadata: ElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 new_element.get_reference(),
                                                                 other,
                                                             ),
@@ -280,6 +281,7 @@ impl InMemoryElementIndex {
                                                     let out_in = Element::Relation {
                                                         metadata: ElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 other,
                                                                 new_element.get_reference(),
                                                             ),
@@ -428,8 +430,8 @@ impl InMemoryElementIndex {
 
                 if let Some(others) = partial_joins.get(qjk2) {
                     for other in others {
-                        let in_out = get_join_virtual_ref(old_element, other);
-                        let out_in = get_join_virtual_ref(other, old_element);
+                        let in_out = get_join_virtual_ref(query_join, old_element, other);
+                        let out_in = get_join_virtual_ref(query_join, other, old_element);
 
                         elements_to_delete.push(in_out);
                         elements_to_delete.push(out_in);
@@ -740,8 +742,17 @@ fn extract_join_spec_by_label(
     result
 }
 
-fn get_join_virtual_ref(ref1: &ElementReference, ref2: &ElementReference) -> ElementReference {
-    let new_id = format!("{}:{}", ref1.element_id, ref2.element_id);
+fn get_join_virtual_ref(
+    join: &QueryJoin,
+    ref1: &ElementReference,
+    ref2: &ElementReference,
+) -> ElementReference {
+    let new_id = join.relationship_id(
+        &ref1.source_id,
+        &ref1.element_id,
+        &ref2.source_id,
+        &ref2.element_id,
+    );
     ElementReference::new("&join", new_id.as_str())
 }
 

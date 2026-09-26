@@ -16,10 +16,10 @@
 //! ComponentGraph is involved in construction, processing or output publication.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     num::NonZeroUsize,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
 };
@@ -76,6 +76,8 @@ pub(crate) fn query_reset_key(query: &str) -> String {
     format!("computation-reset-v1:{query}")
 }
 
+#[path = "query_delivery.rs"]
+mod delivery;
 #[path = "query_recovery.rs"]
 mod recovery;
 
@@ -103,20 +105,12 @@ impl ContinuousQueryDefinition {
     }
 
     fn configuration_bytes(&self, execution: &QueryExecutionSettings) -> anyhow::Result<Bytes> {
-        if !execution.is_empty() {
-            return Ok(Bytes::from(serde_json::to_vec(&(
-                2u32,
-                &self.query,
-                self.language,
-                self.output_stream.as_str(),
-                execution,
-            ))?));
-        }
         Ok(Bytes::from(serde_json::to_vec(&(
-            1u32,
+            3u32,
             &self.query,
             self.language,
             self.output_stream.as_str(),
+            execution,
         ))?))
     }
 
@@ -330,6 +324,12 @@ pub struct ContinuousQueryTransformer {
     recovery_scope: Arc<str>,
     scheduling: Option<Arc<super::QuerySchedulingResource>>,
     draining_futures: bool,
+    delivery_tracking: bool,
+    pending_output: VecDeque<super::ChangeEnvelope>,
+    replay_pending: Arc<AtomicBool>,
+    delivery_changed: Arc<tokio::sync::Notify>,
+    delivery_sequence: AtomicU64,
+    delivered_output: AtomicU64,
 }
 
 impl ContinuousQueryTransformer {
@@ -414,6 +414,12 @@ impl ContinuousQueryTransformer {
             publication_identity: Arc::new(RwLock::new(Some(uuid::Uuid::new_v4()))),
             scheduling: None,
             draining_futures: false,
+            delivery_tracking: false,
+            pending_output: VecDeque::new(),
+            replay_pending: Arc::new(AtomicBool::new(false)),
+            delivery_changed: Arc::new(tokio::sync::Notify::new()),
+            delivery_sequence: AtomicU64::new(0),
+            delivered_output: AtomicU64::new(0),
         };
         if !defer_build {
             instance.build().await?;
@@ -505,6 +511,23 @@ impl ContinuousQueryTransformer {
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
         self.bootstrap = Some(provider);
         self
+    }
+
+    pub fn with_scheduling(
+        mut self,
+        scheduling: Arc<super::QuerySchedulingResource>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !self
+                .results
+                .state
+                .read()
+                .map_err(|_| anyhow::anyhow!("query state poisoned"))?
+                .ready,
+            "bind the scheduling resource before starting a query"
+        );
+        self.scheduling = Some(scheduling);
+        Ok(self)
     }
 
     pub fn with_source_progress(
@@ -945,6 +968,14 @@ impl ContinuousQueryTransformer {
         let retain_from = sequence
             .saturating_sub(self.definition.outbox_capacity.get() as u64)
             .saturating_add(1);
+        if self.delivery_tracking
+            && retain_from.saturating_sub(1) > self.delivered_output.load(Ordering::Acquire)
+        {
+            return Err(IndexError::Other(
+                anyhow::anyhow!("query output retention cannot evict unconfirmed handoff")
+                    .into_boxed_dyn_error(),
+            ));
+        }
         resources
             .outbox_writer()
             .ok_or(IndexError::NotSupported)?
@@ -955,7 +986,8 @@ impl ContinuousQueryTransformer {
             .checkpoint_store()
             .ok_or(IndexError::NotSupported)?
             .stage_result_sequence(id, sequence)
-            .await
+            .await?;
+        self.stage_delivery().await
     }
 
     async fn stage_projection(&self, output: &super::ChangeEnvelope) -> Result<(), IndexError> {
@@ -1014,7 +1046,7 @@ impl ContinuousQueryTransformer {
                 self.sync_metrics()?;
                 Ok(vec![OutputEnvelope {
                     port: PortId::try_new("out")?,
-                    envelope: output,
+                    envelope: self.live_delivery(output)?,
                 }])
             }
             None => Ok(Vec::new()),
@@ -1271,6 +1303,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
             self.build().await?;
         }
         self.initialize_recovery().await?;
+        self.prepare_delivery().await?;
         self.publish_source_progress(true).await?;
         guard.complete = true;
         self.failure.store(false, Ordering::Release);
@@ -1286,13 +1319,14 @@ impl ComputationComponent for ContinuousQueryTransformer {
         self.results.notify.notify_waiters();
         self.sync_metrics()?;
         if let Some(scheduling) = &self.scheduling {
-            scheduling.ready(self.query()?.future_queue());
+            scheduling.ready(self.query()?.scheduling_queue());
         }
         Ok(())
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.draining_futures = false;
+        self.replay_pending.store(false, Ordering::Release);
         if let Some(scheduling) = &self.scheduling {
             scheduling.stopped();
         }
@@ -1323,7 +1357,15 @@ impl ComputationComponent for ContinuousQueryTransformer {
 
 #[async_trait]
 impl Transformer for ContinuousQueryTransformer {
+    async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
+        self.confirm_delivery(outputs).await
+    }
+
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+        anyhow::ensure!(
+            self.pending_output.is_empty(),
+            "drain recovered query output before accepting input"
+        );
         let futures_due = GraphChangeCodec::is_futures_due(&input.envelope);
         let progress = if futures_due {
             super::GraphProducerProgress::from_envelope(&input.envelope)?
@@ -1360,6 +1402,18 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
+        if self.delivery_tracking {
+            return self.query.as_ref().map(|query| {
+                Arc::new(delivery::QueryDeliveryWakeup {
+                    scheduled: self.scheduling.is_none().then(|| FutureWakeup {
+                        queue: query.future_queue(),
+                        keep_alive: self.runtime_compatibility,
+                    }),
+                    pending: self.replay_pending.clone(),
+                    changed: self.delivery_changed.clone(),
+                }) as Arc<dyn WakeupSource>
+            });
+        }
         if self.scheduling.is_some() {
             return None;
         }
@@ -1372,7 +1426,7 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     fn has_pending_emissions(&self) -> bool {
-        self.draining_futures
+        self.draining_futures || !self.pending_output.is_empty()
     }
 
     async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -1380,6 +1434,9 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        if !self.pending_output.is_empty() {
+            return self.replay_output().await;
+        }
         let _timer = TransactionTimer {
             metrics: self.metrics.clone(),
             started: std::time::Instant::now(),
@@ -1892,7 +1949,9 @@ impl ComponentFactory for ContinuousQueryFactory {
                     .map_err(ComponentCreationError::terminal)?;
             }
         }
-        Ok(ConstructedComponent::query(Box::new(query)))
+        Ok(ConstructedComponent::query(Box::new(
+            super::TransactionTransformer::from_query(query),
+        )))
     }
 }
 

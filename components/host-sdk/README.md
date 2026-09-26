@@ -2,6 +2,13 @@
 
 ## Integrated desired-state management
 
+Managed graphs support shared QoS channels as well as component factories.
+`HostManagementResources::with_index_provider` registers external processing
+storage for `qos` recipes. Native factories expose their executable record
+schemas so persistent channels use the same validators when replaying data.
+See [pipe QoS](../../lib/docs/computation-graph-qos.md) for profiles, subscription
+retirement and the difference between durable acceptance and completed effects.
+
 Load and verify libraries with the existing loader/lifecycle APIs, register
 them in `PluginRegistry`, and supply `computation_factory_registry()` to
 `DrasiLib::builder().with_component_factories(...)`. The registry includes

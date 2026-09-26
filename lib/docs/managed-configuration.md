@@ -41,6 +41,17 @@ externally provisioned encryption key, and optionally applies a JSON desired
 definition. It demonstrates the real APIs without requiring a Server or another
 public wrapper class.
 
+### QoS resource recipes
+
+Managed definitions can use `DesiredPipe::Qos` and a graph-owned `qos` resource
+recipe. `HostManagementResources::with_index_provider(name, provider)` registers
+external processing storage for durable channels; a volatile channel needs none.
+The same provider can back query resources with
+`{"kind":"indexes","provider":"processing-storage"}`.
+These are independent of the configuration store. Factory `record_schemas()`
+supplies executable validators for custom persisted records. See the
+[QoS guide](computation-graph-qos.md) for the complete recipe and retention rules.
+
 ## Desired-state API
 
 `management::DesiredInstance` contains `version: 1` and a list of `DesiredGraph`

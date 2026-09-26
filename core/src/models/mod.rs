@@ -67,6 +67,62 @@ pub struct QueryJoin {
     pub keys: Vec<QueryJoinKey>,
 }
 
+impl QueryJoin {
+    /// Stable identity for a directed synthetic relationship. Endpoint source
+    /// IDs and the join name are necessary even when element IDs happen to match.
+    pub fn relationship_id(
+        &self,
+        from_source: &str,
+        from_element: &str,
+        to_source: &str,
+        to_element: &str,
+    ) -> String {
+        let mut id = String::from("v2:");
+        for value in [
+            self.id.as_str(),
+            from_source,
+            from_element,
+            to_source,
+            to_element,
+        ] {
+            id.push_str(&value.len().to_string());
+            id.push(':');
+            id.push_str(value);
+        }
+        id
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn synthetic_join_identity_distinguishes_direction_sources_labels_and_separators() {
+    let join = QueryJoin {
+        id: "PRICE".into(),
+        keys: Vec::new(),
+    };
+    let forward = join.relationship_id("stocks", "AAPL", "prices", "AAPL");
+    assert_ne!(
+        forward,
+        join.relationship_id("prices", "AAPL", "stocks", "AAPL")
+    );
+    assert_ne!(
+        forward,
+        join.relationship_id("other", "AAPL", "prices", "AAPL")
+    );
+    assert_ne!(
+        forward,
+        QueryJoin {
+            id: "OWNS".into(),
+            keys: Vec::new()
+        }
+        .relationship_id("stocks", "AAPL", "prices", "AAPL")
+    );
+    assert_ne!(
+        join.relationship_id("a:b", "c", "d", "e"),
+        join.relationship_id("a", "b:c", "d", "e")
+    );
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryConfig {
     pub mode: String,

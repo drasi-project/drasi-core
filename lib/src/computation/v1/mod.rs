@@ -126,8 +126,9 @@
 //! Queue capacity counts queued envelopes, not bytes, component-local state,
 //! in-flight processing, or a transform's caller-allocated result vector.
 //! Ordinary continuous-query pipelines explicitly use [`RankedInputQueue`]:
-//! one shared bounded heap ordered by wrapper event time, declaration rank and
-//! raw source sequence. Scheduled signals share that heap using their due time.
+//! one shared bounded queue ordered by producer progress, merging available
+//! stream heads by wrapper event time and declaration rank. Scheduled signals
+//! have their own stream and due time.
 //! [`PipeCapability::RankedEventOrder`] is distinct from producer FIFO. This
 //! orders admitted events, without waiting for quiet sources or promising a
 //! watermark over unseen events.
@@ -217,6 +218,7 @@ mod inspection;
 pub use inspection::*;
 mod inventory;
 pub use inventory::*;
+mod qos_pipe;
 mod query_bootstrap;
 mod query_codec;
 mod retained_pipe;
@@ -245,6 +247,7 @@ pub use lifecycle::*;
 pub use pipe::*;
 pub use pipe_metrics::PipeMetricsSnapshot;
 pub use ports::*;
+pub use qos_pipe::*;
 pub use query::*;
 pub use query_bootstrap::*;
 pub use query_codec::*;

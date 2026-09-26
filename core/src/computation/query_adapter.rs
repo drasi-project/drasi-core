@@ -12,26 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use async_trait::async_trait;
 use std::{
     future::Future,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{Arc, Weak},
 };
 
 use crate::{
     computation::{
         AtomicResultTransaction, ComputationFutureResult, ComputationIndexes,
-        ComputationQueryError, Result,
+        ComputationQueryError, ComputationTransaction, Result,
     },
-    evaluation::{context::QueryPartEvaluationContext, EvaluationError},
-    interface::{FutureQueue, IndexError},
+    evaluation::context::QueryPartEvaluationContext,
+    interface::{FutureElementRef, FutureQueue, IndexError, PushType},
     models::SourceChange,
-    query::QueryBuilder,
+    query::{QueryBuilder, QueryEvaluator},
 };
-
-use super::ContinuousQuery;
 
 /// Query-local execution for the parallel graph, using the unchanged evaluator.
 ///
@@ -39,10 +35,47 @@ use super::ContinuousQuery;
 /// through the existing builder. An arbitrary prebuilt legacy query cannot be
 /// paired with unrelated indexes or a descriptive transaction token.
 pub struct ComputationQuery {
-    inner: ContinuousQuery,
-    resources: ComputationIndexes,
-    recovery_required: AtomicBool,
-    atomic_output: bool,
+    inner: QueryEvaluator,
+    transaction: Arc<ComputationTransaction>,
+    scheduling: Arc<dyn FutureQueue>,
+}
+
+struct ScheduledQueue {
+    transaction: Weak<ComputationTransaction>,
+    queue: Arc<dyn FutureQueue>,
+}
+
+#[async_trait]
+impl FutureQueue for ScheduledQueue {
+    async fn peek_due_time(
+        &self,
+    ) -> std::result::Result<Option<crate::models::ElementTimestamp>, IndexError> {
+        let transaction = self.transaction.upgrade().ok_or(IndexError::NotSupported)?;
+        transaction
+            .inspect(async { Ok(self.queue.peek_due_time().await?) })
+            .await
+            .map_err(IndexError::other)
+    }
+    async fn push(
+        &self,
+        _: PushType,
+        _: usize,
+        _: u64,
+        _: &crate::models::ElementReference,
+        _: crate::models::ElementTimestamp,
+        _: crate::models::ElementTimestamp,
+    ) -> std::result::Result<bool, IndexError> {
+        Err(IndexError::NotSupported)
+    }
+    async fn pop(&self) -> std::result::Result<Option<FutureElementRef>, IndexError> {
+        Err(IndexError::NotSupported)
+    }
+    async fn remove(&self, _: usize, _: u64) -> std::result::Result<(), IndexError> {
+        Err(IndexError::NotSupported)
+    }
+    async fn clear(&self) -> std::result::Result<(), IndexError> {
+        Err(IndexError::NotSupported)
+    }
 }
 
 impl ComputationQuery {
@@ -53,24 +86,25 @@ impl ComputationQuery {
             .with_archive_index(set.archive_index.clone())
             .with_result_index(set.result_index.clone())
             .with_future_queue(set.future_queue.clone())
-            .with_session_control(set.session_control.clone())
-            .try_build()
+            .try_build_evaluator()
             .await?;
-        if !Arc::ptr_eq(&inner.session_control, &set.session_control)
-            || !Arc::ptr_eq(&inner.element_index, &set.element_index)
-        {
+        if !Arc::ptr_eq(inner.element_index(), &set.element_index) {
             return Err(ComputationQueryError::TransactionMismatch);
         }
+        let transaction = Arc::new(ComputationTransaction::for_query(resources));
+        let scheduling = Arc::new(ScheduledQueue {
+            transaction: Arc::downgrade(&transaction),
+            queue: inner.future_queue(),
+        });
         Ok(Self {
             inner,
-            atomic_output: resources.atomic_result_transaction().is_ok(),
-            resources,
-            recovery_required: AtomicBool::new(false),
+            transaction,
+            scheduling,
         })
     }
 
     pub fn resources(&self) -> &ComputationIndexes {
-        &self.resources
+        self.transaction.resources()
     }
 
     /// Run graph-owned metadata/reset staging under the same serialized resource
@@ -89,60 +123,33 @@ impl ComputationQuery {
 
     /// Includes the builder's existing shadow queue; no spawned timer/consumer.
     pub fn future_queue(&self) -> Arc<dyn FutureQueue> {
-        self.inner.future_queue.clone()
+        self.inner.future_queue()
+    }
+
+    /// Read-only committed scheduling view; it cannot pop or mutate due work.
+    pub fn scheduling_queue(&self) -> Arc<dyn FutureQueue> {
+        self.scheduling.clone()
     }
 
     /// Dropped evaluation, failed commit/rollback, or failed non-atomic processing
     /// can leave uncertain state. The owner must recover a replacement rather
     /// than reuse this constructed query.
     pub fn recovery_required(&self) -> bool {
-        self.recovery_required.load(Ordering::Acquire)
+        self.transaction.recovery_required()
     }
 
     /// Await provider-registered work before retiring this query's resources.
     /// This seals the constructed query; it is not a restart or a rollback claim.
     pub async fn shutdown(&self) -> Result<()> {
-        let _lock = self
-            .inner
-            .change_lock
-            .try_lock()
-            .map_err(|_| ComputationQueryError::OperationInProgress)?;
-        self.recovery_required.store(true, Ordering::Release);
-        if let Some(cleanup) = self.resources.cleanup() {
-            cleanup.cancel();
-            cleanup.shutdown().await?;
-        }
-        self.inner.session_control.rollback()?;
-        Ok(())
+        self.transaction.shutdown().await
     }
 
     pub async fn quiesce(&self) -> Result<()> {
-        let _lock = self
-            .inner
-            .change_lock
-            .try_lock()
-            .map_err(|_| ComputationQueryError::OperationInProgress)?;
-        if self.recovery_required() {
-            return Err(ComputationQueryError::RecoveryRequired);
-        }
-        if let Some(cleanup) = self.resources.cleanup() {
-            if let Err(error) = cleanup.quiesce().await {
-                self.recovery_required.store(true, Ordering::Release);
-                return Err(error.into());
-            }
-        }
-        Ok(())
+        self.transaction.quiesce().await
     }
 
     async fn in_operation<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
-        let _lock = self.inner.change_lock.lock().await;
-        crate::computation::operation::in_operation(
-            &self.resources,
-            &self.recovery_required,
-            self.atomic_output,
-            operation,
-        )
-        .await
+        self.transaction.run(operation).await
     }
 
     async fn evaluate_source_change(
@@ -156,16 +163,7 @@ impl ComputationQuery {
         &self,
         input: Vec<SourceChange>,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
-        let mut changes = Vec::new();
-        for change in input {
-            changes.extend(
-                self.inner
-                    .execute_source_middleware(change)
-                    .await
-                    .map_err(EvaluationError::from)?,
-            );
-        }
-        Ok(self.inner.process_changes_inner(changes).await?)
+        Ok(self.inner.evaluate_changes(input).await?)
     }
 
     pub async fn process_source_change(
@@ -255,7 +253,7 @@ impl ComputationQuery {
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
         self.in_operation(async {
-            let Some(future_ref) = self.inner.future_queue.pop().await? else {
+            let Some(future_ref) = self.inner.future_queue().pop().await? else {
                 return Ok(None);
             };
             let source_id = future_ref.element_ref.source_id.clone();
@@ -289,8 +287,8 @@ impl ComputationQuery {
     }
 
     fn validate_transaction(&self, transaction: &AtomicResultTransaction) -> Result<()> {
-        let expected = self.resources.atomic_result_transaction()?;
-        if transaction.matches(&expected, &self.inner.session_control) {
+        let expected = self.resources().atomic_result_transaction()?;
+        if transaction.matches(&expected, &self.resources().indexes().session_control) {
             Ok(())
         } else {
             Err(ComputationQueryError::TransactionMismatch)

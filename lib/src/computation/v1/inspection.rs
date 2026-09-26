@@ -363,6 +363,7 @@ impl ComputationTopologySource {
                         DesiredPipe::Bounded { .. } => "Bounded",
                         DesiredPipe::Broadcast { .. } => "Broadcast",
                         DesiredPipe::Retained(_) => "Retained",
+                        DesiredPipe::Qos(_) => "Qos",
                         DesiredPipe::Ranked(_) => "Ranked",
                         DesiredPipe::External { .. } => "External",
                     };

@@ -784,7 +784,21 @@ impl ComputationGraphBuilder {
         let mut stream_destinations = BTreeSet::new();
         let mut edges = Vec::new();
         let mut used_resources = BTreeMap::new();
+        let mut multicast_outputs = BTreeMap::new();
+        let mut multicast_subscribers = BTreeSet::new();
         for (edge_index, (edge, provider)) in self.edges.iter().enumerate() {
+            if let Some((resource, subscriber)) = provider.multicast_subscription() {
+                if multicast_outputs
+                    .get(&resource)
+                    .is_some_and(|from| from != &edge.from)
+                    || !multicast_subscribers.insert((resource.clone(), subscriber))
+                {
+                    return Err(topology(
+                        "multicast requires one producer output and distinct subscriber identities",
+                    ));
+                }
+                multicast_outputs.insert(resource, edge.from.clone());
+            }
             let resources = provider.resource_dependencies();
             let exclusive = provider.exclusive_resources();
             for (id, role) in &resources {
@@ -817,7 +831,16 @@ impl ComputationGraphBuilder {
             if !unique_edges.insert(edge.clone()) {
                 return Err(topology("duplicate edge"));
             }
-            let (_, output) = resolve(&ids, &nodes, &edge.from)?;
+            let (from, output) = resolve(&ids, &nodes, &edge.from)?;
+            if let Some(DesiredPipe::Qos(config)) = provider.specification() {
+                if nodes[from].output_streams.get(&edge.from.port)
+                    != Some(&config.definition.stream)
+                {
+                    return Err(topology(
+                        "QoS channel stream differs from its producer output",
+                    ));
+                }
+            }
             let (to, input) = resolve(&ids, &nodes, &edge.to)?;
             if !stream_destinations.insert((edge.from.clone(), edge.to.component.clone())) {
                 return Err(topology(
@@ -1479,6 +1502,7 @@ struct Outgoing {
     port: PortId,
     sender: Arc<dyn EnvelopeSender>,
     progress: Arc<FlowProgress>,
+    multicast: Option<ResourceId>,
 }
 
 #[derive(Default)]
@@ -1677,6 +1701,15 @@ async fn run_node(
                 }
             }
             _ => 'input_work: {
+                if let Component::Transformer(transformer) | Component::Query(transformer) =
+                    component
+                {
+                    if transformer.has_pending_emissions() {
+                        break 'input_work transformer.continue_transform().await.map_err(
+                            |source| component_error(node, "recovered processing", source),
+                        )?;
+                    }
+                }
                 if ready.is_empty() {
                     let (scheduled, incoming) = tokio::select! {
                         biased;
@@ -1815,11 +1848,16 @@ async fn run_node(
                         "output port has no bound relationship",
                     ));
                 }
-                for (accepted_branches, output) in outputs
-                    .iter()
-                    .filter(|output| output.port == emission.port)
-                    .enumerate()
-                {
+                let mut multicast = BTreeSet::new();
+                let mut accepted_branches = 0;
+                for output in outputs.iter().filter(|output| output.port == emission.port) {
+                    if output
+                        .multicast
+                        .as_ref()
+                        .is_some_and(|group| !multicast.insert(group.clone()))
+                    {
+                        continue;
+                    }
                     output
                         .sender
                         .send(emission.envelope.clone())
@@ -1829,6 +1867,16 @@ async fn run_node(
                             accepted_branches,
                             source: Box::new(source),
                         })?;
+                    accepted_branches += match &output.multicast {
+                        Some(group) => outputs
+                            .iter()
+                            .filter(|branch| {
+                                branch.port == emission.port
+                                    && branch.multicast.as_ref() == Some(group)
+                            })
+                            .count(),
+                        None => 1,
+                    };
                 }
             }
             match component {

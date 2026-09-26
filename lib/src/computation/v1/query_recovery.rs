@@ -98,6 +98,15 @@ impl ContinuousQueryTransformer {
         let query = self.query()?;
         let resources = query.resources();
         let mut highwater = self.results.snapshot()?.as_of_sequence;
+        let mut delivery_sequence = self.delivery_sequence.load(Ordering::Acquire);
+        if let Some(checkpoint) = resources.checkpoint_store() {
+            if let Some(saved) = checkpoint
+                .read_checkpoint(delivery::DELIVERY_SEQUENCE)
+                .await?
+            {
+                delivery_sequence = delivery_sequence.max(saved.sequence);
+            }
+        }
         let old_marker = self.read_reset_marker().await?;
         let persisted_generation = if let Some(checkpoint) = resources.checkpoint_store() {
             checkpoint
@@ -222,6 +231,14 @@ impl ContinuousQueryTransformer {
                     checkpoint
                         .stage_result_sequence(self.definition.id.as_str(), highwater)
                         .await?;
+                    if self.delivery_tracking {
+                        checkpoint
+                            .stage_checkpoint(delivery::DELIVERED, highwater, None)
+                            .await?;
+                        checkpoint
+                            .stage_checkpoint(delivery::DELIVERY_SEQUENCE, delivery_sequence, None)
+                            .await?;
+                    }
                 }
                 Ok(())
             })

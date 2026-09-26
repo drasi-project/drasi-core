@@ -1644,3 +1644,83 @@ async fn persistent_resource_recipe_and_native_transaction_configuration_roundtr
     restored.dispose().await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_qos_recipes_replay_real_native_records_and_isolate_instances() -> Result<()> {
+    use drasi_host_sdk::management::HostManagementResources;
+    use drasi_lib::management::ManagementResourceResolver;
+    let plugin = plugin()?;
+    let root = directory()?;
+    let mut plugins = PluginRegistry::new();
+    plugins.register_computation_plugin(plugin.clone())?;
+    let resources = HostManagementResources::new(
+        &plugins,
+        Arc::new(drasi_core::middleware::MiddlewareTypeRegistry::new()),
+        None,
+    )?
+    .with_index_provider("persistent", storage(root.path()))?;
+    let definition = QosChannelDefinition {
+        stream: stream("counter/out"),
+        capacity: NonZeroUsize::new(8).unwrap(),
+        durable: true,
+        retention: RetentionPolicy::Backpressure,
+        subscribers: [("sink".into(), SubscriptionStart::Earliest)].into(),
+    };
+    let specification = ResourceSpecification {
+        id: ResourceId::try_new("journal")?,
+        role: ResourceRole::StateStore,
+        ownership: ResourceOwnership::Graph,
+        binding: "host.qos".into(),
+    };
+    let recipe = json!({"kind":"qos", "definition":definition, "provider":"persistent"});
+    let mut source = factory(&plugin, COUNTER)?.create_component(
+        id("counter"),
+        json!({"stream":"counter/out","count":1,"start":7,"step":1,"interval_ms":1}),
+    )?;
+    source.start().await?;
+    let envelope = source
+        .next()
+        .await?
+        .context("native source event")?
+        .envelope;
+    source.stop().await?;
+    {
+        let handle = resources
+            .resolve("first", "graph", &specification, &recipe)
+            .await?;
+        let channel = handle.get::<QosChannel>()?;
+        assert_eq!(channel.publish(&envelope).await?.position(), Some(1));
+        channel.shutdown().await?;
+    }
+    {
+        let handle = resources
+            .resolve("second", "graph", &specification, &recipe)
+            .await?;
+        let channel = handle.get::<QosChannel>()?;
+        assert_eq!(channel.progress().await?.accepted, 0);
+        channel.shutdown().await?;
+    }
+    let handle = resources
+        .resolve("first", "graph", &specification, &recipe)
+        .await?;
+    let channel = handle.get::<QosChannel>()?;
+    assert_eq!(channel.progress().await?.accepted, 1);
+    let mut pipe = definition
+        .pipe(specification.id.clone(), "sink")
+        .create_with_resources(&[(specification.id.clone(), handle.clone())].into())?;
+    let mut receiver = pipe.pipe.take_receiver()?;
+    let delivery = receiver
+        .receive()
+        .await?
+        .context("retained native record")?;
+    assert_eq!(values(&[delivery.envelope().clone()])?, [7]);
+    delivery
+        .into_parts()
+        .1
+        .context("acknowledgement")?
+        .complete(HandlingOutcome::Handled)
+        .await?;
+    assert_eq!(channel.progress().await?.processed["sink"], 1);
+    channel.shutdown().await?;
+    Ok(())
+}

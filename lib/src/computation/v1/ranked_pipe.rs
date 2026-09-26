@@ -16,8 +16,7 @@ use super::*;
 use async_trait::async_trait;
 use std::result::Result;
 use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BinaryHeap},
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::{Arc, Mutex, Weak},
 };
@@ -46,33 +45,25 @@ struct Binding {
     metrics: pipe_metrics::PipeMetrics,
 }
 
+#[derive(Clone)]
 struct Entry {
     key: (chrono::DateTime<chrono::Utc>, usize, u64),
-    admission: u64,
     generation: u64,
     envelope: ChangeEnvelope,
 }
 
-impl PartialEq for Entry {
-    fn eq(&self, other: &Self) -> bool {
-        (self.key, self.admission) == (other.key, other.admission)
+impl crate::channels::Timestamped for Entry {
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+        self.key.0
     }
-}
-impl Eq for Entry {}
-impl PartialOrd for Entry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for Entry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (other.key, other.admission).cmp(&(self.key, self.admission))
+    fn ordering_tie_breaker(&self) -> Option<(usize, u64)> {
+        Some((self.key.1, self.key.2))
     }
 }
 
 #[derive(Default)]
 struct State {
-    heap: BinaryHeap<Entry>,
+    heap: crate::channels::priority_queue::OrderedHeap<Entry>,
     bindings: BTreeMap<usize, (Arc<Binding>, Closure)>,
     next_generation: u64,
     next_admission: u64,
@@ -81,9 +72,9 @@ struct State {
 
 /// One finite priority inbox shared by all inputs to one query.
 ///
-/// Each edge receiver can remove only its own globally earliest entry. The
-/// graph's Arrival consumer therefore dequeues one shared minimum, not one
-/// independently prefetched head per source. No idle source is awaited.
+/// Each producer's earliest admitted sequence is its head. Compare those heads
+/// by timestamp/rank; a backwards clock cannot jump a recovery watermark past
+/// unprocessed work. No idle source is awaited.
 pub struct RankedInputQueue {
     capacity: usize,
     state: Mutex<State>,
@@ -187,7 +178,7 @@ impl ResourceCleanup for RankedInputQueue {
             .lock()
             .map_err(|_| anyhow::anyhow!("ranked input ownership poisoned"))?;
         state.closed = true;
-        for entry in std::mem::take(&mut state.heap) {
+        for entry in std::mem::take(&mut state.heap).drain() {
             if let Some((binding, _)) = state.bindings.get(&entry.key.1) {
                 binding.metrics.discarded(1);
             }
@@ -276,9 +267,10 @@ impl PipeControl for Control {
         if RankedInputQueue::closure(&state, &self.binding) == Closure::Cancelled {
             return Err(PipeError::Closed);
         }
-        Ok(!state.heap.iter().any(|entry| {
+        let idle = !state.heap.iter().any(|entry| {
             entry.key.1 == self.binding.rank && entry.generation == self.binding.generation
-        }))
+        });
+        Ok(idle)
     }
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         Some(self.binding.metrics.snapshot())
@@ -365,12 +357,14 @@ impl EnvelopeSender for Sender {
                     state.next_admission = next;
                     let receipt = EnqueueReceipt::new(envelope.id().clone());
                     self.binding.metrics.accepted();
-                    state.heap.push(Entry {
-                        key,
+                    state.heap.push(
+                        Arc::new(Entry {
+                            key,
+                            generation: self.binding.generation,
+                            envelope,
+                        }),
                         admission,
-                        generation: self.binding.generation,
-                        envelope,
-                    });
+                    );
                     drop(state);
                     self.queue.changed.notify_waiters();
                     return Ok(receipt);
@@ -420,7 +414,7 @@ impl EnvelopeReceiver for Receiver {
                     self.binding.metrics.delivered();
                     drop(state);
                     self.queue.changed.notify_waiters();
-                    return Ok(Some(Delivery::new(entry.envelope, None)));
+                    return Ok(Some(Delivery::new(entry.envelope.clone(), None)));
                 }
                 if closure == Closure::Draining
                     && !state.heap.iter().any(|entry| {

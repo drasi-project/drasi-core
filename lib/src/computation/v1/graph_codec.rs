@@ -74,7 +74,7 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Box<bincode
 }
 
 impl GraphChangeCodec {
-    pub(crate) fn encode_futures_due(
+    pub fn encode_futures_due(
         component: &ComponentId,
         stream: StreamId,
         sequence: u64,

@@ -23,12 +23,23 @@ use super::{ChangeEnvelope, ContractError, EnvelopeId, PipeCapabilities, PipeMet
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnqueueReceipt {
     id: EnvelopeId,
+    position: Option<u64>,
 }
 
 impl EnqueueReceipt {
     /// Providers construct a receipt only after actually accepting the event.
     pub fn new(id: EnvelopeId) -> Self {
-        Self { id }
+        Self { id, position: None }
+    }
+
+    pub fn with_position(mut self, position: u64) -> Self {
+        self.position = Some(position);
+        self
+    }
+
+    /// Journal position, distinct from the producer's source or transport sequence.
+    pub fn position(&self) -> Option<u64> {
+        self.position
     }
 
     pub fn envelope_id(&self) -> &EnvelopeId {

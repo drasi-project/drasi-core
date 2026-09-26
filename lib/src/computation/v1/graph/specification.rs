@@ -369,6 +369,11 @@ impl ConstructedComponent {
 #[async_trait]
 pub trait ComponentFactory: Send + Sync {
     fn descriptor(&self) -> &FactoryDescriptor;
+    /// Executable schemas needed to persist/replay this factory's records.
+    /// This is metadata discovery, not component construction or I/O.
+    fn record_schemas(&self) -> Vec<Arc<crate::computation::v1::Schema>> {
+        Vec::new()
+    }
     fn supports_reconfiguration(&self) -> bool {
         false
     }

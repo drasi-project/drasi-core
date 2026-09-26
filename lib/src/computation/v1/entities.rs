@@ -550,6 +550,7 @@ impl ComputationTopology {
             }
             let resources = match &relationship.pipe {
                 DesiredPipe::Retained(config) => config.resource_dependencies(),
+                DesiredPipe::Qos(config) => config.resource_dependencies(),
                 DesiredPipe::Ranked(config) => config.resource_dependencies(),
                 DesiredPipe::External { resources, .. } => resources.clone(),
                 DesiredPipe::Bounded { .. } | DesiredPipe::Broadcast { .. } => BTreeMap::new(),

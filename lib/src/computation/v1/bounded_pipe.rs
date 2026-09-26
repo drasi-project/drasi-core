@@ -59,6 +59,12 @@ pub struct ProvidedPipe {
 /// clones are not supported by the graph (they can prevent finite completion).
 /// The graph requires cancellation-safe receive and synchronous control closure.
 pub trait PipeProvider: Send + Sync {
+    /// Endpoints sharing this resource receive one producer append. Subscriber
+    /// IDs are independent progress owners; all endpoints must share one output.
+    fn multicast_subscription(&self) -> Option<(super::ResourceId, String)> {
+        None
+    }
+
     fn specification(&self) -> Option<super::DesiredPipe> {
         None
     }

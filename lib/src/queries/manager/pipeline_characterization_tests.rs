@@ -1688,8 +1688,43 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         ),
         "checkpoint-seeded dedup must suppress replayed source sequence 1",
     );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while backend
+            .trace
+            .snapshot()
+            .iter()
+            .filter(|event| matches!(event, TraceEvent::SessionCommit))
+            .count()
+            < 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("query confirms the accepted output");
+    let mut trace = backend.trace.snapshot();
+    let commit = trace
+        .iter()
+        .position(|event| matches!(event, TraceEvent::SessionCommit))
+        .unwrap();
+    let dispatch = trace
+        .iter()
+        .position(|event| matches!(event, TraceEvent::ReactionDispatch { sequence: 2 }))
+        .unwrap();
+    assert!(
+        dispatch > commit,
+        "external dispatch follows the input/state/output commit"
+    );
     assert_eq!(
-        backend.trace.snapshot(),
+        trace
+            .iter()
+            .filter(|event| matches!(event, TraceEvent::ReactionDispatch { .. }))
+            .count(),
+        1
+    );
+    trace.retain(|event| !matches!(event, TraceEvent::ReactionDispatch { .. }));
+    assert_eq!(
+        trace,
         vec![
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
@@ -1709,8 +1744,19 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 query_id: QUERY_ID.to_string(),
                 sequence: 2,
             },
+            TraceEvent::CheckpointStaged {
+                source_id: "\0computation:query-delivery-sequence:v1".into(),
+                sequence: 2,
+                source_position: None,
+            },
             TraceEvent::SessionCommit,
-            TraceEvent::ReactionDispatch { sequence: 2 },
+            TraceEvent::SessionBegin,
+            TraceEvent::CheckpointStaged {
+                source_id: "\0computation:query-delivered:v1".into(),
+                sequence: 2,
+                source_position: None,
+            },
+            TraceEvent::SessionCommit,
         ],
         "committed input is deduplicated before a session, and new output commits before dispatch"
     );

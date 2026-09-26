@@ -4,8 +4,9 @@
 [Usage](computation-graph-usage.md) |
 [Middleware](computation-graph-middleware.md)
 
-`TransactionTransformer` runs an ordered sequence of transformers inside one
-storage transaction. It is one component in the graph, not a nested graph:
+`TransactionTransformer` owns either a linear sequence of transactional steps
+or a complete query-processing body. Both use the same core transaction owner.
+It is one component in the graph, not a nested graph:
 
 ```text
 upstream --> TransactionTransformer [first --> second --> third] --> downstream
@@ -13,6 +14,52 @@ upstream --> TransactionTransformer [first --> second --> third] --> downstream
 
 There are **no pipes, queues or independently scheduled tasks between the steps**.
 The output event from one step is passed directly to the next.
+
+## Query body
+
+`ContinuousQueryFactory` constructs a `TransactionTransformer` query body,
+including for ordinary DrasiLib queries. The reusable `QueryEvaluator` contains
+the existing matching, change detection, projection, aggregation and middleware
+algorithms. The standalone `ContinuousQuery` API also uses that same evaluator;
+the graph does not construct a nested standalone runtime or copy query semantics.
+
+For direct graph construction:
+
+```rust,ignore
+let query = TransactionTransformer::query(
+    definition,       // ContinuousQueryDefinition
+    provider,         // Arc<dyn ComputationIndexProvider>
+    QueryOptions::default(),
+    QueryExecutionSettings::default(),
+    None,             // optional middleware registry
+).await?;
+let results = query.query_results().expect("query body");
+```
+
+A query body owns the full index bundle, materialized rows, source checkpoints,
+result journal and scheduling state. It is not squeezed through the linear
+steps' limited key/value interface. Existing per-query middleware remains in
+that same query transaction. Memory-only query execution remains supported;
+persistent recovery requires complete atomic storage.
+
+The query's state, input position, result sequence, live rows and output commit
+together. Forwarding confirmation is separate. A crash after commit but before
+confirmation replays saved output without running the query again. Replay uses
+a fresh transport sequence while preserving logical query-result identity.
+The container drains recovered output before accepting new input, and does not
+evict unconfirmed output to make room.
+
+An optional `QuerySchedulingResource` binds an independent `QueryScheduledSource`.
+Use `with_scheduling` before starting a directly constructed query container, or
+the factory's `scheduling` resource dependency. The source observes committed
+due work through a read-only view and emits typed notifications. Schedule changes
+commit with the query state; removing due work, reevaluating it and storing the
+result commit together. Notifications never destructively remove scheduled work.
+
+`ContinuousQueryTransformer` remains the lower-level query state/evaluation body.
+Use the container or registered query factory for automatic pending-output
+handoff and replay. A query body is not an ordinary linear step and cannot be
+nested into another transaction container.
 
 ## Transaction behaviour
 
@@ -71,8 +118,9 @@ containers cannot be nested.
 
 `MiddlewareTransformer` implements the new trait and is in the standard
 transactional registry. Its ordinary and independently durable modes remain
-available. Other transformers, including the existing Continuous Query
-transformer, are **not automatically transactional participants**.
+available. Other transformers are **not automatically transactional participants**. Query
+execution uses the dedicated body described above, not the linear participation
+trait.
 
 ## Separate state for each step
 
@@ -171,7 +219,7 @@ a boolean configuration flag cannot turn an ordinary transformer into one.
 
 ## Storage, connections and recovery
 
-The initial implementation requires **persistent storage with a complete atomic
+The linear-step implementation requires **persistent storage with a complete atomic
 transaction**, such as the existing RocksDB computation provider or an atomic
 index plugin through `LegacyIndexProviderAdapter`. All steps use one index bundle
 and session. Separate providers or sessions are not combined into a distributed

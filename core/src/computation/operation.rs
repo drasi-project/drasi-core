@@ -105,16 +105,22 @@ pub struct ComputationTransaction {
     resources: ComputationIndexes,
     lock: tokio::sync::Mutex<()>,
     recovery_required: AtomicBool,
+    atomic: bool,
 }
 
 impl ComputationTransaction {
     pub fn try_new(resources: ComputationIndexes) -> Result<Self> {
         resources.atomic_result_transaction()?;
-        Ok(Self {
+        Ok(Self::for_query(resources))
+    }
+
+    pub(crate) fn for_query(resources: ComputationIndexes) -> Self {
+        Self {
+            atomic: resources.atomic_result_transaction().is_ok(),
             resources,
             lock: tokio::sync::Mutex::new(()),
             recovery_required: AtomicBool::new(false),
-        })
+        }
     }
 
     pub fn resources(&self) -> &ComputationIndexes {
@@ -127,7 +133,21 @@ impl ComputationTransaction {
 
     pub async fn run<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
         let _lock = self.lock.lock().await;
-        in_operation(&self.resources, &self.recovery_required, true, operation).await
+        in_operation(
+            &self.resources,
+            &self.recovery_required,
+            self.atomic,
+            operation,
+        )
+        .await
+    }
+
+    pub(crate) async fn inspect<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
+        let _lock = self.lock.lock().await;
+        if self.recovery_required() {
+            return Err(ComputationQueryError::RecoveryRequired);
+        }
+        operation.await
     }
 
     pub async fn quiesce(&self) -> Result<()> {

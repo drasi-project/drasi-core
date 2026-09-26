@@ -27,6 +27,7 @@
 mod indexes;
 mod io_scope;
 pub(crate) mod operation;
+mod query_adapter;
 mod scoped_index;
 pub use io_scope::{
     BlockingFailures as ComputationIoFailures, BlockingScope as ComputationIoScope,
@@ -35,11 +36,11 @@ pub use operation::ComputationTransaction;
 pub use scoped_index::ScopedIndex;
 mod transaction;
 
-pub use crate::query::computation_exports::ComputationQuery;
 pub use indexes::{
     ComputationIndexProvider, ComputationIndexes, ComputationResource, ComputationResourceCleanup,
     InMemoryComputationProvider,
 };
+pub use query_adapter::ComputationQuery;
 pub use transaction::{AtomicResultTransaction, TransactionDomain};
 
 use crate::{

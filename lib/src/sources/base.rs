@@ -1050,6 +1050,50 @@ impl SourceBase {
             .map(|(bootstrap_receiver, _)| bootstrap_receiver))
     }
 
+    /// Select WAL replay without losing sequence-only recovery before the first
+    /// native cursor is checkpointed. An explicitly configured bootstrap provider
+    /// still handles fresh snapshots.
+    pub async fn subscribe_with_wal(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        wal: &dyn crate::wal::WalProvider,
+        source_type: &str,
+    ) -> Result<SubscriptionResponse> {
+        let resume = match &settings.resume_from {
+            Some(position) => {
+                let bytes: [u8; 8] = position
+                    .get(..8)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Invalid resume_from position: expected at least 8 bytes, got {}",
+                            position.len()
+                        )
+                    })?
+                    .try_into()?;
+                Some(u64::from_be_bytes(bytes))
+            }
+            None => settings.resume_sequence,
+        }
+        .or_else(|| (settings.enable_bootstrap && !self.has_bootstrap_provider()).then_some(0));
+        let Some(resume) = resume else {
+            return self.subscribe_with_bootstrap(settings, source_type).await;
+        };
+        self.subscribe_with_replay(settings, wal, resume, source_type)
+            .await
+            .map_err(|error| match error.downcast_ref::<crate::wal::WalError>() {
+                Some(crate::wal::WalError::PositionUnavailable {
+                    oldest_available, ..
+                }) => crate::sources::SourceError::PositionUnavailable {
+                    source_id: self.id.clone(),
+                    requested: bytes::Bytes::copy_from_slice(&resume.to_be_bytes()),
+                    earliest_available: oldest_available
+                        .map(|position| bytes::Bytes::copy_from_slice(&position.to_be_bytes())),
+                }
+                .into(),
+                _ => error,
+            })
+    }
+
     /// Subscribe with WAL replay support.
     ///
     /// Creates a streaming channel, captures the WAL head under the dispatchers

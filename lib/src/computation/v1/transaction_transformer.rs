@@ -368,7 +368,7 @@ impl Drop for RunGuard {
 /// State, input progress and final output commit before the output is returned.
 /// Failed/cancelled processing requires reconstruction; retained committed output
 /// is replayed without invoking any of the steps again.
-pub struct TransactionTransformer {
+struct LinearTransaction {
     definition: TransactionTransformerDefinition,
     prepared: Prepared,
     store: TransformStore,
@@ -381,7 +381,7 @@ pub struct TransactionTransformer {
     running: bool,
 }
 
-impl TransactionTransformer {
+impl LinearTransaction {
     pub async fn new(
         definition: TransactionTransformerDefinition,
         registry: Arc<TransactionalTransformerRegistry>,
@@ -601,7 +601,7 @@ impl TransactionTransformer {
 }
 
 #[async_trait]
-impl ComputationComponent for TransactionTransformer {
+impl ComputationComponent for LinearTransaction {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.prepared.descriptor
     }
@@ -655,7 +655,7 @@ impl ComputationComponent for TransactionTransformer {
 }
 
 #[async_trait]
-impl Transformer for TransactionTransformer {
+impl Transformer for LinearTransaction {
     fn has_pending_emissions(&self) -> bool {
         !self.pending.is_empty() || self.deferred.is_some()
     }
@@ -694,6 +694,164 @@ impl Transformer for TransactionTransformer {
         self.store.confirm(outputs).await?;
         guard.complete = true;
         Ok(())
+    }
+}
+
+/// A graph-owned processing transaction: either an explicit linear sequence or
+/// the shared query evaluator with its indexes, projections and scheduled work.
+/// Both use the same core transaction owner; neither runs a nested query runtime.
+pub struct TransactionTransformer {
+    body: TransactionBody,
+}
+
+enum TransactionBody {
+    Linear(Box<LinearTransaction>),
+    Query(Box<ContinuousQueryTransformer>),
+}
+
+impl TransactionTransformer {
+    pub async fn new(
+        definition: TransactionTransformerDefinition,
+        registry: Arc<TransactionalTransformerRegistry>,
+        provider: Arc<dyn ComputationIndexProvider>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            body: TransactionBody::Linear(Box::new(
+                LinearTransaction::new(definition, registry, provider).await?,
+            )),
+        })
+    }
+
+    async fn new_scoped(
+        definition: TransactionTransformerDefinition,
+        registry: Arc<TransactionalTransformerRegistry>,
+        provider: Arc<dyn ComputationIndexProvider>,
+        scope: String,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            body: TransactionBody::Linear(Box::new(
+                LinearTransaction::new_scoped(definition, registry, provider, scope).await?,
+            )),
+        })
+    }
+
+    pub async fn query(
+        definition: ContinuousQueryDefinition,
+        provider: Arc<dyn ComputationIndexProvider>,
+        options: QueryOptions,
+        execution: QueryExecutionSettings,
+        middleware: Option<Arc<MiddlewareTypeRegistry>>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self::from_query(
+            ContinuousQueryTransformer::new_configured(
+                definition, provider, options, execution, middleware,
+            )
+            .await?,
+        ))
+    }
+
+    pub fn from_query(query: ContinuousQueryTransformer) -> Self {
+        Self {
+            body: TransactionBody::Query(Box::new(query.track_delivery())),
+        }
+    }
+
+    pub fn query_results(&self) -> Option<QueryResults> {
+        match &self.body {
+            TransactionBody::Query(query) => Some(query.results()),
+            TransactionBody::Linear(_) => None,
+        }
+    }
+
+    pub fn with_scheduling(self, scheduling: Arc<QuerySchedulingResource>) -> anyhow::Result<Self> {
+        match self.body {
+            TransactionBody::Query(query) => Ok(Self {
+                body: TransactionBody::Query(Box::new(query.with_scheduling(scheduling)?)),
+            }),
+            TransactionBody::Linear(_) => {
+                anyhow::bail!("linear transaction steps do not own scheduled query work")
+            }
+        }
+    }
+
+    pub fn step_descriptors(&self) -> Box<dyn Iterator<Item = &ComponentDescriptor> + '_> {
+        match &self.body {
+            TransactionBody::Linear(sequence) => Box::new(sequence.step_descriptors()),
+            TransactionBody::Query(query) => Box::new(std::iter::once(query.descriptor())),
+        }
+    }
+
+    pub fn with_source_progress(self, progress: Arc<QuerySourceProgress>) -> anyhow::Result<Self> {
+        Ok(Self {
+            body: match self.body {
+                TransactionBody::Linear(sequence) => {
+                    TransactionBody::Linear(Box::new(sequence.with_source_progress(progress)?))
+                }
+                TransactionBody::Query(query) => {
+                    TransactionBody::Query(Box::new(query.with_source_progress(progress)?))
+                }
+            },
+        })
+    }
+
+    fn processor(&self) -> &dyn Transformer {
+        match &self.body {
+            TransactionBody::Linear(sequence) => sequence.as_ref(),
+            TransactionBody::Query(query) => query.as_ref(),
+        }
+    }
+    fn processor_mut(&mut self) -> &mut dyn Transformer {
+        match &mut self.body {
+            TransactionBody::Linear(sequence) => sequence.as_mut(),
+            TransactionBody::Query(query) => query.as_mut(),
+        }
+    }
+}
+
+#[async_trait]
+impl ComputationComponent for TransactionTransformer {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        self.processor().descriptor()
+    }
+    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+        self.processor().configuration()
+    }
+    fn bind_control(&mut self, control: ComponentControl) {
+        self.processor_mut().bind_control(control);
+    }
+    fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
+        self.processor().control_handler()
+    }
+    fn requires_readiness_confirmation(&self) -> bool {
+        self.processor().requires_readiness_confirmation()
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().start().await
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().stop().await
+    }
+}
+
+#[async_trait]
+impl Transformer for TransactionTransformer {
+    fn has_pending_emissions(&self) -> bool {
+        self.processor().has_pending_emissions()
+    }
+    fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
+        self.processor().wakeup_source()
+    }
+    async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.processor_mut().transform(input).await
+    }
+    async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.processor_mut().on_wakeup().await
+    }
+    async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.processor_mut().continue_transform().await
+    }
+    async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
+        self.processor_mut().delivery_completed(outputs).await
     }
 }
 

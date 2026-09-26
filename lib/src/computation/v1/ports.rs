@@ -34,8 +34,8 @@ pub enum PortDirection {
 pub enum PipeCapability {
     /// FIFO for each logical producer stream using authoritative sequence.
     FifoPerStream,
-    /// One shared inbox orders admitted events by event time, query-local source
-    /// rank, then authoritative source sequence; this is not producer FIFO.
+    /// Merge available source heads by event time and query-local rank, without
+    /// moving a later logical source sequence ahead of an earlier admitted one.
     RankedEventOrder,
     /// Capacity pressure waits/rejects explicitly rather than silently dropping.
     Backpressure,

@@ -108,11 +108,16 @@ wait does not abandon that task.
 ## How events are ordered and buffered
 
 Each continuous query has one bounded input queue shared by its sources.
-Queued events are compared in this order:
+Within a source, admitted events are ordered by that source's logical sequence.
+The available source heads are compared in this order:
 
 1. The event timestamp reported by the source.
 2. The source's position in that query's source list.
 3. The sequence number maintained by that source.
+
+A backwards timestamp cannot move a later source event ahead of an earlier
+unprocessed one. The same rule protects reaction checkpoints. This avoids
+mistaking an unprocessed event for a duplicate after advancing a high-water mark.
 
 The same source can have a different position in another query. Its sequence
 number is assigned before the event is sent to subscribers; a query does not
@@ -129,6 +134,8 @@ events when the queue is full; selecting it is an explicit loss/backpressure
 choice. Other source, output and reaction queues have their own limits.
 
 Custom graphs can use FIFO, broadcast or retained/replayable connections.
+The [QoS channel](computation-graph-qos.md) adds shared blocking or lossy
+multicast and durable multicast with separate subscriber progress.
 The selected connection and consumer must support the guarantees requested.
 Putting a result in a queue is not the same as finishing its handling.
 
@@ -149,9 +156,19 @@ Queries keep current result rows, source progress, output sequence numbers and
 recent output history. The recent history lets consumers recover missed results
 without always rebuilding from a full snapshot.
 
-With a storage provider that supports atomic query output, index changes,
+Query factories use a `TransactionTransformer` query body. It invokes the same
+`QueryEvaluator` as the standalone query API; solving, change detection and
+aggregation are not reimplemented. With a storage provider that supports atomic query output, index changes,
 source checkpoints, output sequence, retained outputs and current rows commit
-together. Only committed results become visible.
+together. Only committed results become visible. Unconfirmed output is replayed
+after restart without reevaluating the input. Query-result positions remain
+stable while replay uses new transport delivery numbers.
+
+An independent `QueryScheduledSource` observes a read-only committed future
+queue. It emits ordinary routed, typed due-work notifications without removing
+work. The query transaction removes actual due work, reevaluates it using the
+existing logic and stages output atomically. Lost/duplicate hints cannot lose
+the stored work.
 
 The middleware transformer also has a durable mode. It saves previous elements,
 input progress and pending transformed output together, then uses durable output

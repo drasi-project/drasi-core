@@ -366,6 +366,7 @@ impl GarnetElementIndex {
                                                     StoredElement::Relation(StoredRelation {
                                                         metadata: StoredElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 &element_reference,
                                                                 &other,
                                                             ),
@@ -383,6 +384,7 @@ impl GarnetElementIndex {
                                                     StoredElement::Relation(StoredRelation {
                                                         metadata: StoredElementMetadata {
                                                             reference: get_join_virtual_ref(
+                                                                qj,
                                                                 &other,
                                                                 &element_reference,
                                                             ),
@@ -489,8 +491,8 @@ impl GarnetElementIndex {
                 let others = self.buffered_smembers_refs(&other_pj_key).await?;
 
                 for other in others {
-                    let in_out = get_join_virtual_ref(old_element, &other);
-                    let out_in = get_join_virtual_ref(&other, old_element);
+                    let in_out = get_join_virtual_ref(query_join, old_element, &other);
+                    let out_in = get_join_virtual_ref(query_join, &other, old_element);
 
                     self.delete_element_internal(&in_out).await?;
                     self.delete_element_internal(&out_in).await?;
@@ -1074,10 +1076,16 @@ fn extract_join_spec_by_label(
 }
 
 fn get_join_virtual_ref(
+    join: &QueryJoin,
     ref1: &StoredElementReference,
     ref2: &StoredElementReference,
 ) -> StoredElementReference {
-    let new_id = format!("{}:{}", ref1.element_id, ref2.element_id);
+    let new_id = join.relationship_id(
+        &ref1.source_id,
+        &ref1.element_id,
+        &ref2.source_id,
+        &ref2.element_id,
+    );
     StoredElementReference {
         source_id: "$join".to_string(),
         element_id: new_id,

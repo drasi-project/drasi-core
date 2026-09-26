@@ -30,6 +30,7 @@ pub enum DesiredPipe {
         lag_policy: crate::computation::v1::BroadcastLagPolicy,
     },
     Retained(crate::computation::v1::RetainedPipeConfig),
+    Qos(crate::computation::v1::QosPipeConfig),
     Ranked(crate::computation::v1::RankedInputPipeConfig),
     External {
         binding: String,
@@ -104,6 +105,41 @@ pub struct FactoryRegistry {
 }
 
 impl FactoryRegistry {
+    pub fn envelope_codec(
+        &self,
+        max_bytes: NonZeroUsize,
+    ) -> GraphResult<crate::computation::v1::EnvelopeCodec> {
+        use crate::computation::v1::{
+            EnvelopeCodec, GraphChangeCodec, QueryChangeCodec, Schema, SchemaId,
+        };
+        let mut schemas: BTreeMap<(SchemaId, u32), Arc<Schema>> = BTreeMap::new();
+        for schema in [GraphChangeCodec::schema(), QueryChangeCodec::schema()]
+            .into_iter()
+            .chain(
+                self.factories
+                    .values()
+                    .flat_map(|factory| factory.record_schemas()),
+            )
+        {
+            let descriptor = schema.descriptor();
+            let key = (descriptor.id().clone(), descriptor.version().value());
+            if let Some(existing) = schemas.get(&key) {
+                if existing.descriptor() != descriptor {
+                    return Err(topology("registered factories disagree on a record schema"));
+                }
+            } else {
+                schemas.insert(key, schema);
+            }
+        }
+        let mut codec = EnvelopeCodec::new(max_bytes);
+        for schema in schemas.into_values() {
+            codec
+                .register_schema(schema)
+                .map_err(|error| topology(error.to_string()))?;
+        }
+        Ok(codec)
+    }
+
     pub fn register(&mut self, factory: Arc<dyn ComponentFactory>) -> GraphResult<()> {
         let id = factory.descriptor().implementation.clone();
         if self.factories.contains_key(&id) {
@@ -136,6 +172,7 @@ impl DesiredPipe {
     pub(super) fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
         match self {
             Self::Retained(config) => config.resource_dependencies(),
+            Self::Qos(config) => config.resource_dependencies(),
             Self::Ranked(config) => config.resource_dependencies(),
             Self::External { resources, .. } => resources.clone(),
             Self::Bounded { .. } | Self::Broadcast { .. } => BTreeMap::new(),
@@ -158,6 +195,7 @@ impl DesiredPipe {
                 lag_policy: *lag_policy,
             }),
             Self::Retained(config) => Box::new(config.clone()),
+            Self::Qos(config) => Box::new(config.clone()),
             Self::Ranked(config) => Box::new(config.clone()),
             Self::External {
                 binding,

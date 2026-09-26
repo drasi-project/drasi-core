@@ -94,12 +94,19 @@ persistent state and saved output with `new_durable`. See the
 [middleware guide](computation-graph-middleware.md) for configuration, batching
 and recovery limits.
 
-`TransactionTransformer` runs a configured linear sequence whose implementations
-also implement `TransactionalTransformer`. It owns the shared transaction and
-saved output; each step receives a borrowed `TransactionContext` with isolated
-state. It does not create a nested graph or schedule child nodes. See the
+`TransactionTransformer` owns either a configured linear sequence whose
+implementations also implement `TransactionalTransformer`, or a query body using
+the shared core evaluator. It owns the processing transaction and saved output;
+linear steps receive a borrowed `TransactionContext` with isolated state. It
+does not create a nested graph or schedule child nodes. See the
 [transaction guide](computation-graph-transactions.md) for participation,
 configuration and recovery requirements.
+
+`QosChannel` implements one producer journal with independently checkpointed
+subscribers. `QosPipeConfig` selects a subscriber endpoint; graph fan-out performs
+one append for endpoints sharing that channel. Memory backpressure, explicit
+lossy retention and persistent replay are available. See
+[pipe QoS](computation-graph-qos.md) for ownership, retirement and provider recipes.
 
 A data connection names `(component, port)` at both ends, its provider and its
 `RelationshipPolicy`. A resource declaration names its role, ownership and

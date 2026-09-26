@@ -834,7 +834,24 @@ fn describe(
     let mut unique = BTreeSet::new();
     let mut destinations = BTreeSet::new();
     let mut edges = Vec::new();
+    let mut multicast = BTreeMap::new();
+    let mut multicast_subscribers = BTreeSet::new();
     for (index, edge) in desired.relationships.iter().enumerate() {
+        if let DesiredPipe::Qos(config) = &edge.pipe {
+            if multicast
+                .get(&config.resource)
+                .is_some_and(|(from, definition)| {
+                    *from != &edge.definition.from || *definition != &config.definition
+                })
+                || !multicast_subscribers.insert((&config.resource, &config.subscriber))
+            {
+                return Err(topology("QoS multicast requires one producer, consistent declarations and distinct subscribers"));
+            }
+            multicast.insert(
+                &config.resource,
+                (&edge.definition.from, &config.definition),
+            );
+        }
         if !unique.insert(edge.definition.clone()) {
             return Err(topology("duplicate relationship"));
         }
@@ -847,6 +864,17 @@ fn describe(
             ));
         }
         let (_, output) = resolve(&ids, &nodes, &edge.definition.from)?;
+        if let DesiredPipe::Qos(config) = &edge.pipe {
+            if nodes[ids[&edge.definition.from.component]]
+                .output_streams
+                .get(&edge.definition.from.port)
+                != Some(&config.definition.stream)
+            {
+                return Err(topology(
+                    "QoS channel stream differs from its producer output",
+                ));
+            }
+        }
         let (to, input) = resolve(&ids, &nodes, &edge.definition.to)?;
         for component in [&edge.definition.from.component, &edge.definition.to.component] {
             let node = &nodes[ids[component]];
@@ -2216,6 +2244,9 @@ async fn realize(
                 port: edge.definition.from.port.clone(),
                 sender: pipe.pipe.sender(),
                 progress: progress.clone(),
+                multicast: graph.providers[&index]
+                    .multicast_subscription()
+                    .map(|(group, _)| group),
             });
             graph.components[to].take()?.inputs.push(Incoming {
                 edge: index,

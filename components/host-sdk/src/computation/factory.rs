@@ -132,6 +132,9 @@ impl ComponentFactory for NativeFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
+    fn record_schemas(&self) -> Vec<Arc<Schema>> {
+        self.schemas.clone()
+    }
     fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {
         anyhow::ensure!(
             specification.implementation == self.metadata.implementation

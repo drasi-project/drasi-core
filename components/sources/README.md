@@ -1382,6 +1382,13 @@ layer before creating `SourceChange`; do not add a templating system after
 
 ## 8. Resilience & Persistence Patterns
 
+WAL-backed sources can delegate subscription selection to
+`SourceBase::subscribe_with_wal`. It handles both native cursor bytes and
+`resume_sequence` (including zero before the first event checkpoint), preserves
+configured fresh bootstrap behavior, and exposes unavailable WAL history as
+`SourceError::PositionUnavailable` for the query's explicit recovery policy.
+HTTP, gRPC and Application sources share this implementation.
+
 Sources fall into three broad resilience categories.
 
 ### Pattern A — Native upstream replay

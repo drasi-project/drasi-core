@@ -15,7 +15,7 @@
 use super::events::Timestamped;
 use log::{debug, trace};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -49,9 +49,7 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.event.timestamp() == other.event.timestamp()
-            && self.event.ordering_tie_breaker() == other.event.ordering_tie_breaker()
-            && self.enqueue_order == other.enqueue_order
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -71,11 +69,16 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior (oldest first)
-        other
-            .event
-            .timestamp()
-            .cmp(&self.event.timestamp())
+        let sequence = |entry: &Self| {
+            entry
+                .event
+                .ordering_tie_breaker()
+                .map(|(_, sequence)| sequence)
+                .or_else(|| entry.event.ordering_stream().map(|(_, sequence)| sequence))
+        };
+        sequence(other)
+            .cmp(&sequence(self))
+            .then_with(|| other.event.timestamp().cmp(&self.event.timestamp()))
             .then_with(|| {
                 other
                     .event
@@ -83,6 +86,115 @@ where
                     .cmp(&self.event.ordering_tie_breaker())
             })
             .then_with(|| other.enqueue_order.cmp(&self.enqueue_order))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum StreamKey {
+    Unordered,
+    Ranked(usize),
+    Named(String),
+}
+
+type Head = (
+    chrono::DateTime<chrono::Utc>,
+    Option<(usize, u64)>,
+    u64,
+    StreamKey,
+);
+
+/// Orders each stream by its own progress, then merges the available heads by
+/// timestamp/rank. Heap size and memory remain bounded by the admitted events.
+pub(crate) struct OrderedHeap<T: Timestamped + Clone + Send + Sync + 'static> {
+    streams: BTreeMap<StreamKey, BinaryHeap<PriorityQueueEvent<T>>>,
+    heads: BTreeSet<Head>,
+    len: usize,
+}
+
+impl<T: Timestamped + Clone + Send + Sync + 'static> Default for OrderedHeap<T> {
+    fn default() -> Self {
+        Self {
+            streams: BTreeMap::new(),
+            heads: BTreeSet::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T: Timestamped + Clone + Send + Sync + 'static> OrderedHeap<T> {
+    fn head(key: &StreamKey, entry: &PriorityQueueEvent<T>) -> Head {
+        (
+            entry.event.timestamp(),
+            entry.event.ordering_tie_breaker(),
+            entry.enqueue_order,
+            key.clone(),
+        )
+    }
+    pub(crate) fn push(&mut self, event: Arc<T>, order: u64) {
+        let key = match event.ordering_tie_breaker() {
+            Some((rank, _)) => StreamKey::Ranked(rank),
+            None => match event.ordering_stream() {
+                Some((source, _)) => StreamKey::Named(source.to_owned()),
+                None => StreamKey::Unordered,
+            },
+        };
+        let stream = self.streams.entry(key.clone()).or_default();
+        if let Some(head) = stream.peek() {
+            self.heads.remove(&Self::head(&key, head));
+        }
+        stream.push(PriorityQueueEvent::new(event, order));
+        self.heads
+            .insert(Self::head(&key, stream.peek().expect("nonempty stream")));
+        self.len += 1;
+    }
+    pub(crate) fn pop(&mut self) -> Option<Arc<T>> {
+        let head = self.heads.pop_first()?;
+        let key = head.3;
+        let stream = self.streams.get_mut(&key).expect("head owns a stream");
+        let entry = stream.pop().expect("head owns an event");
+        if let Some(head) = stream.peek() {
+            self.heads.insert(Self::head(&key, head));
+        } else {
+            self.streams.remove(&key);
+        }
+        self.len -= 1;
+        Some(entry.event)
+    }
+    pub(crate) fn peek(&self) -> Option<&Arc<T>> {
+        let (_, _, _, key) = self.heads.first()?;
+        self.streams.get(key)?.peek().map(|entry| &entry.event)
+    }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.streams
+            .values()
+            .flat_map(|stream| stream.iter().map(|entry| entry.event.as_ref()))
+    }
+    pub(crate) fn retain(&mut self, mut predicate: impl FnMut(&T) -> bool) {
+        self.heads.clear();
+        self.len = 0;
+        self.streams.retain(|key, stream| {
+            stream.retain(|entry| predicate(&entry.event));
+            self.len += stream.len();
+            if let Some(head) = stream.peek() {
+                self.heads.insert(Self::head(key, head));
+                true
+            } else {
+                false
+            }
+        });
+    }
+    pub(crate) fn drain(&mut self) -> impl Iterator<Item = Arc<T>> {
+        let mut entries = Vec::with_capacity(self.len);
+        while let Some(entry) = self.pop() {
+            entries.push(entry);
+        }
+        entries.into_iter()
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -176,7 +288,7 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     /// Internal heap storing events (min-heap by timestamp)
-    heap: Arc<Mutex<BinaryHeap<PriorityQueueEvent<T>>>>,
+    heap: Arc<Mutex<OrderedHeap<T>>>,
     next_enqueue_order: Arc<AtomicU64>,
     /// Notification mechanism for waiting on new events
     notify: Arc<Notify>,
@@ -193,7 +305,7 @@ where
     /// Create a new priority queue with the specified maximum capacity
     pub fn new(max_capacity: usize) -> Self {
         Self {
-            heap: Arc::new(Mutex::new(BinaryHeap::new())),
+            heap: Arc::new(Mutex::new(OrderedHeap::default())),
             next_enqueue_order: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(Notify::new()),
             max_capacity,
@@ -239,10 +351,7 @@ where
         }
 
         // Enqueue event
-        heap.push(PriorityQueueEvent::new(
-            event,
-            self.allocate_enqueue_order(),
-        ));
+        heap.push(event, self.allocate_enqueue_order());
 
         // Update metrics using atomic operations (lock-free)
         self.metrics
@@ -293,10 +402,7 @@ where
             // Check if there's capacity
             if heap.len() < self.max_capacity {
                 // Space available - enqueue the event
-                heap.push(PriorityQueueEvent::new(
-                    event,
-                    self.allocate_enqueue_order(),
-                ));
+                heap.push(event, self.allocate_enqueue_order());
 
                 // Update metrics using atomic operations (lock-free)
                 self.metrics
@@ -357,7 +463,7 @@ where
     /// Returns None if queue is empty
     pub async fn try_dequeue(&self) -> Option<Arc<T>> {
         let mut heap = self.heap.lock().await;
-        let event = heap.pop().map(|pq_event| pq_event.event);
+        let event = heap.pop();
 
         if event.is_some() {
             self.metrics
@@ -385,8 +491,7 @@ where
             tokio::pin!(notified);
 
             let mut heap = self.heap.lock().await;
-            if let Some(pq_event) = heap.pop() {
-                let event = pq_event.event;
+            if let Some(event) = heap.pop() {
                 self.metrics
                     .total_dequeued
                     .fetch_add(1, AtomicOrdering::Relaxed);
@@ -450,7 +555,7 @@ where
     /// Drain all events from the queue (for shutdown)
     pub async fn drain(&self) -> Vec<Arc<T>> {
         let mut heap = self.heap.lock().await;
-        let events: Vec<Arc<T>> = heap.drain().map(|pq_event| pq_event.event).collect();
+        let events: Vec<Arc<T>> = heap.drain().collect();
 
         self.metrics.current_depth.store(0, AtomicOrdering::Relaxed);
 

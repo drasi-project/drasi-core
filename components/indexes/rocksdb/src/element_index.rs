@@ -790,6 +790,7 @@ fn update_source_joins(
                                             let in_out = StoredElement::Relation(StoredRelation {
                                                 metadata: StoredElementMetadata {
                                                     reference: get_join_virtual_ref(
+                                                        qj,
                                                         &element_reference,
                                                         &other,
                                                     ),
@@ -804,6 +805,7 @@ fn update_source_joins(
                                             let out_in = StoredElement::Relation(StoredRelation {
                                                 metadata: StoredElementMetadata {
                                                     reference: get_join_virtual_ref(
+                                                        qj,
                                                         &other,
                                                         &element_reference,
                                                     ),
@@ -906,8 +908,8 @@ fn delete_source_join(
     let pj_key = encode_partial_join_key(&pj_prefix, old_element);
 
     let did_remove = match txn.get_cf(&partial_cf, &pj_key) {
-        Ok(Some(_)) => false,
-        Ok(None) => {
+        Ok(None) => false,
+        Ok(Some(_)) => {
             if let Err(err) = txn.delete_cf(&partial_cf, &pj_key) {
                 return Err(IndexError::other(err));
             }
@@ -937,8 +939,8 @@ fn delete_source_join(
                     Err(e) => return Err(IndexError::other(e)),
                 };
 
-                let in_out = get_join_virtual_ref(old_element, &other);
-                let out_in = get_join_virtual_ref(&other, old_element);
+                let in_out = get_join_virtual_ref(query_join, old_element, &other);
+                let out_in = get_join_virtual_ref(query_join, &other, old_element);
 
                 delete_element_internal(context.clone(), txn, &hash_stored_element_ref(&in_out))?;
                 delete_element_internal(context.clone(), txn, &hash_stored_element_ref(&out_in))?;
@@ -1093,10 +1095,16 @@ fn decode_partial_join_key(key: &[u8]) -> Result<StoredElementReference, IndexEr
 }
 
 fn get_join_virtual_ref(
+    join: &QueryJoin,
     ref1: &StoredElementReference,
     ref2: &StoredElementReference,
 ) -> StoredElementReference {
-    let new_id = format!("{}:{}", ref1.element_id, ref2.element_id);
+    let new_id = join.relationship_id(
+        &ref1.source_id,
+        &ref1.element_id,
+        &ref2.source_id,
+        &ref2.element_id,
+    );
     StoredElementReference {
         source_id: "$join".to_string(),
         element_id: new_id,

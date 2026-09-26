@@ -824,6 +824,7 @@ async fn deploy(
                 port: edge.definition.from.port.clone(),
                 sender: provided.pipe.sender(),
                 progress: progress.clone(),
+                multicast: provider.multicast_subscription().map(|(group, _)| group),
             });
             graph.components[to].take()?.inputs.push(Incoming {
                 edge: edge_index,

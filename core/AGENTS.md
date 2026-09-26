@@ -3,6 +3,7 @@
 The continuous query engine: evaluates parsed Cypher/GQL ASTs against a labeled property graph and emits result diffs as elements change. Foundation crate of the workspace.
 
 ## Invariants (change with extreme care)
+- Query solving, change detection, projection, aggregation and middleware evaluation have one implementation in `query/evaluator.rs`. `ContinuousQuery` keeps the standalone API; graph transactions own the same `QueryEvaluator` without a nested legacy runtime. Do not fork those algorithms.
 - Solution signatures and result keys are SpookyHash values persisted as DB keys by external index backends - changing the hash algorithm, the hashed fields, or their order breaks persisted state on upgrade
 - Element/ElementValue serde shapes cross the plugin FFI boundary (MessagePack payloads in plugin-sdk) - an FFI compatibility surface; index/WAL backends persist their own separate storage models that must be updated in tandem; typespec/core-types.tsp must be kept in sync by hand when core/src/models changes (nothing validates it)
 - Timestamps are epoch milliseconds throughout; effective_from validation rejects nanosecond-scale values
