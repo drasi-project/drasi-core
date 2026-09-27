@@ -40,6 +40,7 @@ pub(crate) struct Management {
     task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     registry: Arc<ComputationRegistry>,
     running: Arc<RwLock<bool>>,
+    confirmed: Arc<AtomicBool>,
 }
 
 struct Driver {
@@ -54,9 +55,31 @@ struct Driver {
     receipts: BTreeMap<String, (DesiredInstance, AcceptanceReceipt)>,
     snapshots: BTreeMap<String, CommittedConfiguration>,
     owned: BTreeSet<String>,
-    pending_cleanup: Vec<(ResourceId, ResourceHandle)>,
     desired: watch::Sender<CommittedConfiguration>,
     status: watch::Sender<ManagementStatus>,
+    confirmed: Arc<AtomicBool>,
+}
+
+struct ManagedResource {
+    resolver: Arc<dyn ManagementResourceResolver>,
+    instance_id: String,
+    graph_id: String,
+    specification: ResourceSpecification,
+    configuration: serde_json::Value,
+}
+
+#[async_trait::async_trait]
+impl ResourceConstructor for ManagedResource {
+    async fn construct(&self) -> Result<ResourceHandle> {
+        self.resolver
+            .resolve(
+                &self.instance_id,
+                &self.graph_id,
+                &self.specification,
+                &self.configuration,
+            )
+            .await
+    }
 }
 
 impl Management {
@@ -98,6 +121,7 @@ impl Management {
             error: None,
             graphs: Vec::new(),
         });
+        let confirmed = Arc::new(AtomicBool::new(true));
         let mut driver = Driver {
             instance_id,
             registry: registry.clone(),
@@ -115,9 +139,9 @@ impl Management {
             current,
             receipts: BTreeMap::new(),
             snapshots: BTreeMap::new(),
-            pending_cleanup: Vec::new(),
             desired,
             status,
+            confirmed: confirmed.clone(),
         };
         let (commands, receive) = mpsc::channel(32);
         let task = tokio::spawn(async move { driver.run(receive).await });
@@ -128,6 +152,7 @@ impl Management {
             task: tokio::sync::Mutex::new(Some(task)),
             registry,
             running,
+            confirmed,
         };
         // Declarations and failures are visible on return, without requiring
         // successful component realization to open a persisted instance.
@@ -169,8 +194,12 @@ impl Management {
         .await
     }
 
-    pub(crate) fn configuration(&self) -> CommittedConfiguration {
-        self.desired.borrow().clone()
+    pub(crate) fn configuration(&self) -> Result<CommittedConfiguration> {
+        anyhow::ensure!(
+            self.confirmed.load(Ordering::Acquire),
+            ManagementError::ConfigurationUnconfirmed
+        );
+        Ok(self.desired.borrow().clone())
     }
     pub(crate) async fn status(&self) -> Result<ManagementStatus> {
         let mut status = self.status.borrow().clone();
@@ -189,6 +218,9 @@ impl Management {
                 .iter()
                 .find(|graph| graph.topology.graph_id == report.graph_id);
             let handle = handles.iter().find(|graph| graph.id() == report.graph_id);
+            if let Some(handle) = handle {
+                report.resource_errors = resource_errors(&handle.observed());
+            }
             report.converged = match (target, handle) {
                 (Some(target), Some(handle)) => {
                     report.applied
@@ -203,6 +235,14 @@ impl Management {
         if latest != desired.revision {
             status.revision = latest;
             status.reconciling = true;
+            for graph in &mut status.graphs {
+                graph.converged = false;
+            }
+        }
+        if !self.confirmed.load(Ordering::Acquire) {
+            status
+                .error
+                .get_or_insert_with(|| ManagementError::ConfigurationUnconfirmed.to_string());
             for graph in &mut status.graphs {
                 graph.converged = false;
             }
@@ -246,6 +286,62 @@ impl Management {
 }
 
 impl Driver {
+    fn unconfirmed(&self, error: &anyhow::Error) {
+        self.confirmed.store(false, Ordering::Release);
+        self.status.send_modify(|status| {
+            status.reconciling = false;
+            status.error = Some(format!(
+                "configuration state could not be confirmed: {error:#}"
+            ));
+            for graph in &mut status.graphs {
+                graph.converged = false;
+            }
+        });
+    }
+
+    fn adopt_committed(&mut self, committed: CommittedConfiguration) -> Result<()> {
+        let validation: Result<()> = (|| {
+            anyhow::ensure!(
+                committed.revision >= self.current.revision,
+                "configuration store regressed its committed revision"
+            );
+            anyhow::ensure!(
+                committed.revision != self.current.revision
+                    || committed.desired == self.current.desired,
+                "configuration store changed desired state without advancing its revision"
+            );
+            normalize(committed.desired.clone())
+                .context("invalid persisted desired configuration")?;
+            Ok(())
+        })();
+        if let Err(error) = validation {
+            self.unconfirmed(&error);
+            return Err(error);
+        }
+        let changed = self.current != committed;
+        self.current = committed;
+        self.desired.send_replace(self.current.clone());
+        let was_confirmed = self.confirmed.swap(true, Ordering::AcqRel);
+        if changed || !was_confirmed {
+            self.pending();
+        }
+        Ok(())
+    }
+
+    async fn refresh_committed(&mut self) -> Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let committed = match store.load().await {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.unconfirmed(&error);
+                return Err(error.context("configuration state could not be confirmed"));
+            }
+        };
+        self.adopt_committed(committed)
+    }
+
     fn pending(&self) {
         self.status.send_replace(ManagementStatus {
             revision: self.current.revision,
@@ -291,33 +387,31 @@ impl Driver {
             );
         }
         if let Some(store) = &self.store {
-            let previous = self.current.clone();
             let result = store.commit(expected, &request, &desired).await;
             // Also resolves a backend error after a commit: never roll memory
             // backward or assume an uncertain commit was a rejection.
-            let committed = store
-                .load()
-                .await
-                .context("configuration state could not be confirmed")?;
-            anyhow::ensure!(
-                committed.revision >= previous.revision,
-                "configuration store regressed its committed revision"
-            );
-            if let Ok(receipt) = &result {
-                anyhow::ensure!(
-                    receipt.durable && receipt.revision <= committed.revision,
-                    "configuration store did not confirm durable acceptance"
-                );
-                if receipt.revision == committed.revision {
-                    anyhow::ensure!(
-                        committed.desired == desired,
-                        "configuration store receipt does not match its committed definition"
-                    );
+            let committed = match store.load().await {
+                Ok(committed) => committed,
+                Err(error) => {
+                    self.unconfirmed(&error);
+                    return Err(error.context("configuration state could not be confirmed"));
                 }
-                self.current = committed;
+            };
+            if let Ok(receipt) = &result {
+                if receipt.request_id != request
+                    || !receipt.durable
+                    || receipt.revision > committed.revision
+                    || receipt.revision == committed.revision && committed.desired != desired
+                {
+                    let error = anyhow::anyhow!(
+                        "configuration store receipt does not confirm the committed definition"
+                    );
+                    self.unconfirmed(&error);
+                    return Err(error);
+                }
             }
-            self.desired.send_replace(self.current.clone());
-            if result.is_ok() || previous != self.current {
+            self.adopt_committed(committed)?;
+            if result.is_ok() {
                 self.pending();
             }
             return result;
@@ -354,26 +448,6 @@ impl Driver {
         Ok(receipt)
     }
 
-    async fn cleanup_pending(&mut self) -> Result<()> {
-        let mut failures = Vec::new();
-        let pending = std::mem::take(&mut self.pending_cleanup);
-        for (id, handle) in pending {
-            match handle.shutdown().await {
-                Ok(()) => {}
-                Err(error) => {
-                    failures.push(error.to_string());
-                    self.pending_cleanup.push((id, handle));
-                }
-            }
-        }
-        anyhow::ensure!(
-            failures.is_empty(),
-            "pending provider cleanup failed: {}",
-            failures.join("; ")
-        );
-        Ok(())
-    }
-
     async fn realize_graph(&mut self, desired: &DesiredGraph) -> GraphManagementStatus {
         let id = &desired.topology.graph_id;
         let mut status = GraphManagementStatus {
@@ -384,7 +458,6 @@ impl Driver {
             resource_errors: BTreeMap::new(),
         };
         let result: Result<()> = async {
-            self.cleanup_pending().await?;
             let current = self
                 .registry
                 .list()
@@ -453,40 +526,16 @@ impl Driver {
                     .resource_configurations
                     .get(&resource.id)
                     .context("missing provider construction recipe")?;
-                let resolved = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    self.resolver
-                        .resolve(&self.instance_id, id, resource, configuration),
-                )
-                .await
-                .map_err(|_| anyhow::anyhow!("resource construction timed out"))
-                .and_then(|result| result);
-                match resolved {
-                    Ok(handle) if handle.role() == resource.role => {
-                        if resource.ownership == ResourceOwnership::Graph {
-                            self.pending_cleanup
-                                .push((resource.id.clone(), handle.clone()));
-                        }
-                        bindings.resources.insert(resource.id.clone(), handle);
-                    }
-                    Ok(handle) => {
-                        if resource.ownership == ResourceOwnership::Graph {
-                            if let Err(error) = handle.shutdown().await {
-                                self.pending_cleanup.push((resource.id.clone(), handle));
-                                return Err(error.context("cleanup incorrectly typed resource"));
-                            }
-                        }
-                        status.resource_errors.insert(
-                            resource.id.clone(),
-                            "provider role differs from declaration".into(),
-                        );
-                    }
-                    Err(error) => {
-                        status
-                            .resource_errors
-                            .insert(resource.id.clone(), format!("{error:#}"));
-                    }
-                }
+                bindings.resource_constructors.insert(
+                    resource.id.clone(),
+                    Arc::new(ManagedResource {
+                        resolver: self.resolver.clone(),
+                        instance_id: self.instance_id.clone(),
+                        graph_id: id.clone(),
+                        specification: resource.clone(),
+                        configuration: configuration.clone(),
+                    }),
+                );
             }
             if resources_changed && changes.is_empty() {
                 changes.push(DesiredMutation::SetTopology(target.clone()));
@@ -509,19 +558,11 @@ impl Driver {
             }
             if !changes.is_empty() {
                 let preview = control.preview(actual.revision, changes).await?;
-                let result = control.reconcile(preview, bindings).await;
-                let publication = control.registry_snapshot();
-                self.pending_cleanup.retain(|(id, handle)| {
-                    publication
-                        .resource(id)
-                        .map_or(true, |bound| !bound.same_instance(handle))
-                });
-                let report = result?;
+                let report = control.reconcile(preview, bindings).await?;
+                status.resource_errors = resource_errors(&control.observed());
                 if report.committed {
-                    self.cleanup_pending().await?;
                     status.applied = true;
                 } else {
-                    self.cleanup_pending().await?;
                     anyhow::bail!("graph transition did not commit: {:?}", report.failures);
                 }
             } else {
@@ -580,6 +621,7 @@ impl Driver {
                 }
             }
             let observed = control.observed();
+            status.resource_errors = resource_errors(&observed);
             status.converged = status.resource_errors.is_empty()
                 && graph_converged(desired, &observed, *self.running.read().await);
             Ok(())
@@ -599,6 +641,7 @@ impl Driver {
         );
         let registry = self.registry.clone();
         let _lifecycle = registry.lifecycle.lock().await;
+        self.refresh_committed().await?;
         let desired = self.current.desired.clone();
         let ids: BTreeSet<_> = desired
             .graphs
@@ -671,8 +714,9 @@ impl Driver {
                     desired,
                     reply,
                 } => {
+                    let previous = self.current.revision;
                     let result = self.commit(expected, request, desired).await;
-                    let accepted = result.is_ok();
+                    let accepted = result.is_ok() || self.current.revision != previous;
                     let _ = reply.send(result);
                     if accepted {
                         if let Err(error) = self.reconcile().await {
@@ -737,10 +781,9 @@ impl Driver {
                     let _ = reply.send(result);
                 }
                 Command::Close(reply) => {
-                    let result = self.cleanup_pending().await;
-                    let result = match (result, &self.store) {
-                        (Ok(()), Some(store)) => store.close().await,
-                        (result, _) => result,
+                    let result = match &self.store {
+                        Some(store) => store.close().await,
+                        None => Ok(()),
                     };
                     let closed = result.is_ok();
                     let _ = reply.send(result);
@@ -752,8 +795,7 @@ impl Driver {
         }
         loop {
             let graphs = self.registry.shutdown().await;
-            let resources = self.cleanup_pending().await;
-            if graphs.is_ok() && resources.is_ok() {
+            if graphs.is_ok() {
                 if let Some(store) = &self.store {
                     if let Err(error) = store.close().await {
                         log::error!("Closing dropped configuration session failed: {error}");
@@ -764,7 +806,7 @@ impl Driver {
                     break;
                 }
             } else {
-                log::error!("Dropped managed instance retains store ownership until cleanup succeeds: graphs={graphs:?}, resources={resources:?}");
+                log::error!("Dropped managed instance retains store ownership until cleanup succeeds: graphs={graphs:?}");
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -772,7 +814,11 @@ impl Driver {
 }
 
 fn graph_converged(desired: &DesiredGraph, observed: &ObservedGraph, running: bool) -> bool {
-    desired.topology.components.iter().all(|node| {
+    desired.topology.resources.iter().all(|resource| {
+        observed.resources.get(&resource.id).is_some_and(|state| {
+            state.realization == ResourceRealization::Created && state.failure.is_none()
+        })
+    }) && desired.topology.components.iter().all(|node| {
         node.descriptor.ports().iter().all(|port| {
             let endpoint = Endpoint::new(node.descriptor.id().clone(), port.id().clone());
             desired
@@ -796,6 +842,19 @@ fn graph_converged(desired: &DesiredGraph, observed: &ObservedGraph, running: bo
         .relationships
         .values()
         .all(|edge| edge.binding == BindingState::Bound)
+}
+
+fn resource_errors(observed: &ObservedGraph) -> BTreeMap<ResourceId, String> {
+    observed
+        .resources
+        .iter()
+        .filter_map(|(id, resource)| {
+            resource
+                .failure
+                .as_ref()
+                .map(|failure| (id.clone(), failure.cause.to_string()))
+        })
+        .collect()
 }
 
 fn valid_name(name: &str) -> Result<()> {

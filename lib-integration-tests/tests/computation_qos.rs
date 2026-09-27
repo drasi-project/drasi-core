@@ -15,8 +15,8 @@ use drasi_lib::computation::v1::*;
 
 fn definition(durable: bool, retention: RetentionPolicy, capacity: usize) -> QosChannelDefinition {
     QosChannelDefinition {
-        stream: StreamId::try_new("source/out").unwrap(),
-        capacity: NonZeroUsize::new(capacity).unwrap(),
+        stream: StreamId::try_new("source/out").expect("stream"),
+        capacity: NonZeroUsize::new(capacity).expect("capacity"),
         durable,
         retention,
         subscribers: BTreeMap::from([
@@ -81,7 +81,7 @@ async fn persistent(root: &Path, definition: QosChannelDefinition) -> Result<Arc
     let provider =
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)));
     let indexes = provider.create_indexes("qos", "channel").await?;
-    let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).unwrap());
+    let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).expect("codec limit"));
     codec.register_schema(GraphChangeCodec::schema())?;
     Ok(QosChannel::persistent(definition, indexes, codec, "journal").await?)
 }
@@ -362,7 +362,7 @@ impl EnvelopeSink for RecordingSink {
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
         self.seen
             .lock()
-            .unwrap()
+            .expect("recorded events")
             .push(input.envelope.system().sequence());
         Ok(())
     }
@@ -370,15 +370,15 @@ impl EnvelopeSink for RecordingSink {
 
 fn descriptor(id: &str, port: &str, direction: PortDirection) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
-        ComponentId::try_new(id).unwrap(),
+        ComponentId::try_new(id).expect("component"),
         vec![PortDescriptor::new(
-            PortId::try_new(port).unwrap(),
+            PortId::try_new(port).expect("port"),
             direction,
             GraphChangeCodec::schema().descriptor().clone(),
             PipeRequirements::default(),
         )],
     )
-    .unwrap()
+    .expect("descriptor")
 }
 
 #[tokio::test]
@@ -437,9 +437,280 @@ async fn graph_fanout_appends_once_and_both_consumers_complete_every_event() -> 
     Ok(())
 }
 
+struct ModelConsumer {
+    id: String,
+    connection: ProvidedPipe,
+    receiver: Box<dyn EnvelopeReceiver>,
+    pending: Option<(u64, Box<dyn Acknowledgement>)>,
+    cursor: u64,
+    retired: bool,
+    skip: bool,
+}
+
+#[tokio::test]
+async fn seeded_qos_schedules_match_an_independent_acceptance_and_completion_ledger() -> Result<()>
+{
+    let mut exercised = [0; 8];
+    for seed in 1..=32_u64 {
+        let retention = if seed % 2 == 0 {
+            RetentionPolicy::Backpressure
+        } else {
+            RetentionPolicy::PruneOldest
+        };
+        let mut definition = definition(false, retention, (seed % 4 + 1) as usize);
+        definition.subscribers = (0..4)
+            .map(|index| (format!("consumer-{index}"), SubscriptionStart::Earliest))
+            .collect();
+        let channel = QosChannel::volatile(definition.clone())?;
+        let mut consumers = Vec::new();
+        for (index, id) in definition.subscribers.keys().enumerate() {
+            let skip = retention == RetentionPolicy::PruneOldest && index % 2 == 0;
+            let mut connection = endpoint(&channel, &definition, id, skip)?;
+            let receiver = connection.pipe.take_receiver()?;
+            consumers.push(ModelConsumer {
+                id: id.clone(),
+                connection,
+                receiver,
+                pending: None,
+                cursor: 0,
+                retired: false,
+                skip,
+            });
+        }
+        let mut accepted: Vec<ChangeEnvelope> = Vec::new();
+        let mut schedule = seed;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for step in 0..128 {
+                schedule = schedule
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let index = ((schedule >> 32) % consumers.len() as u64) as usize;
+                let action = ((schedule >> 40) % 8) as usize;
+                let head = accepted.len() as u64;
+                let oldest = head
+                    .saturating_sub(definition.capacity.get() as u64)
+                    .saturating_add(1);
+                if action == 0 || action == 1 || action == 6 && step < 96 {
+                    let next = event(head * 3)?;
+                    let blocked = retention == RetentionPolicy::Backpressure
+                        && head >= definition.capacity.get() as u64
+                        && consumers
+                            .iter()
+                            .any(|consumer| !consumer.retired && consumer.cursor < oldest);
+                    if blocked {
+                        assert!(
+                            futures::poll!(Box::pin(channel.publish(&next))).is_pending(),
+                            "seed={seed}, step={step}"
+                        );
+                        exercised[0] += 1;
+                    } else {
+                        assert_eq!(channel.publish(&next).await?.position(), Some(head + 1));
+                        accepted.push(next);
+                        exercised[1] += 1;
+                    }
+                } else if action == 7 && head != 0 {
+                    let offset = ((schedule >> 48) % head) as usize;
+                    let result = channel.publish(&accepted[offset]).await;
+                    if offset as u64 + 1 < oldest {
+                        assert!(result.is_err(), "expired producer retry must not append");
+                    } else {
+                        assert_eq!(result?.position(), Some(offset as u64 + 1));
+                    }
+                    exercised[7] += 1;
+                } else {
+                    let consumer = &mut consumers[index];
+                    if consumer.retired {
+                        continue;
+                    }
+                    match action {
+                        2 => {
+                            if consumer.pending.is_some() || consumer.cursor == head {
+                                assert!(futures::poll!(consumer.receiver.receive()).is_pending());
+                            } else if consumer.cursor + 1 < oldest && !consumer.skip {
+                                assert!(matches!(consumer.receiver.receive().await,
+                                    Err(PipeError::PositionUnavailable { requested, oldest: found })
+                                        if requested == consumer.cursor && found == oldest));
+                            } else {
+                                if consumer.cursor + 1 < oldest {
+                                    consumer.cursor = oldest - 1;
+                                }
+                                let position = consumer.cursor + 1;
+                                let delivery = consumer
+                                    .receiver
+                                    .receive()
+                                    .await?
+                                    .expect("ledger has pending work");
+                                let (envelope, acknowledgement) = delivery.into_parts();
+                                assert_eq!(envelope.id(), accepted[position as usize - 1].id());
+                                assert_eq!(
+                                    envelope.system().source_position(),
+                                    accepted[position as usize - 1].system().source_position()
+                                );
+                                consumer.pending =
+                                    Some((position, acknowledgement.expect("handled completion")));
+                                exercised[2] += 1;
+                            }
+                        }
+                        3 => {
+                            if let Some((position, acknowledgement)) = consumer.pending.take() {
+                                acknowledgement.complete(HandlingOutcome::Handled).await?;
+                                consumer.cursor = position;
+                                exercised[3] += 1;
+                            }
+                        }
+                        4 => {
+                            exercised[4] += usize::from(consumer.pending.take().is_some());
+                        }
+                        5 => {
+                            consumer.connection.control.cancel();
+                            if let Some((_, acknowledgement)) = consumer.pending.take() {
+                                assert!(matches!(
+                                    acknowledgement.complete(HandlingOutcome::Handled).await,
+                                    Err(PipeError::Closed)
+                                ));
+                            }
+                            let mut connection =
+                                endpoint(&channel, &definition, &consumer.id, consumer.skip)?;
+                            consumer.receiver = connection.pipe.take_receiver()?;
+                            consumer.connection = connection;
+                            exercised[5] += 1;
+                        }
+                        6 => {
+                            consumer.connection.control.cancel();
+                            consumer.pending.take();
+                            channel.retire(&consumer.id).await?;
+                            consumer.retired = true;
+                            exercised[6] += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                let progress = channel.progress().await?;
+                assert_eq!(
+                    progress.accepted,
+                    accepted.len() as u64,
+                    "seed={seed}, step={step}"
+                );
+                assert_eq!(
+                    progress.earliest_available,
+                    if accepted.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            (accepted.len() as u64)
+                                .saturating_sub(definition.capacity.get() as u64)
+                                + 1,
+                        )
+                    }
+                );
+                for consumer in &consumers {
+                    assert_eq!(
+                        progress.processed[&consumer.id], consumer.cursor,
+                        "seed={seed}, step={step}, consumer={}",
+                        consumer.id
+                    );
+                    assert_eq!(progress.retired.contains(&consumer.id), consumer.retired);
+                }
+                assert_eq!(
+                    progress.producer_sequence,
+                    accepted.last().map(|event| event.system().sequence())
+                );
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        channel.shutdown().await?;
+    }
+    assert!(
+        exercised.iter().all(|count| *count > 0),
+        "schedule did not exercise every operation: {exercised:?}"
+    );
+    Ok(())
+}
+
+struct CommitGate {
+    before_commit: bool,
+    entered: tokio::sync::Notify,
+}
+
+#[tokio::test]
+async fn cancelled_append_and_completion_resolve_exactly_before_and_after_real_commit() -> Result<()>
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for acknowledgement in [false, true] {
+        for before_commit in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let definition = definition(true, RetentionPolicy::Backpressure, 2);
+            let fail = Arc::new(AtomicBool::new(false));
+            let gate = Arc::new(CommitGate {
+                before_commit,
+                entered: tokio::sync::Notify::new(),
+            });
+            let channel = uncertain_channel(
+                directory.path(),
+                definition.clone(),
+                fail.clone(),
+                Some(gate.clone()),
+            )
+            .await?;
+            let first = event(0)?;
+            let completion = if acknowledgement {
+                channel.publish(&first).await?;
+                let mut connection = endpoint(&channel, &definition, "fast", false)?;
+                let mut receiver = connection.pipe.take_receiver()?;
+                let acknowledgement = received(receiver.as_mut(), 0).await?;
+                // Keep the subscription owner alive until its completion future is dropped.
+                Some((connection, receiver, acknowledgement))
+            } else {
+                None
+            };
+            fail.store(true, Ordering::Release);
+            let mut operation = Box::pin(async {
+                if let Some((connection, receiver, acknowledgement)) = completion {
+                    let result = acknowledgement.complete(HandlingOutcome::Handled).await;
+                    drop((connection, receiver));
+                    result
+                } else {
+                    channel.publish(&first).await.map(|_| ())
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    _ = gate.entered.notified() => {},
+                    result = &mut operation => panic!("commit reply deliberately withheld: {result:?}"),
+                }
+            }).await?;
+            drop(operation);
+            assert!(
+                channel.progress().await.is_err(),
+                "cancelled storage work fences the cached owner"
+            );
+            channel.shutdown().await?;
+            let reopened = persistent(directory.path(), definition).await?;
+            let expected_accepted = u64::from(acknowledgement || !before_commit);
+            let progress = reopened.progress().await?;
+            assert_eq!(progress.accepted, expected_accepted);
+            assert_eq!(
+                progress.producer_sequence,
+                (expected_accepted == 1).then_some(0)
+            );
+            assert_eq!(
+                progress.processed["fast"],
+                u64::from(acknowledgement && !before_commit)
+            );
+            assert_eq!(progress.processed["slow"], 0);
+            assert_eq!(reopened.publish(&first).await?.position(), Some(1));
+            assert_eq!(reopened.progress().await?.accepted, 1);
+            reopened.shutdown().await?;
+        }
+    }
+    Ok(())
+}
+
 struct LoseCommitResponse {
     inner: Arc<dyn drasi_core::interface::SessionControl>,
     fail: Arc<std::sync::atomic::AtomicBool>,
+    gate: Option<Arc<CommitGate>>,
 }
 #[async_trait]
 impl drasi_core::interface::SessionControl for LoseCommitResponse {
@@ -447,8 +718,17 @@ impl drasi_core::interface::SessionControl for LoseCommitResponse {
         self.inner.begin().await
     }
     async fn commit(&self) -> std::result::Result<(), drasi_core::interface::IndexError> {
+        let fail = self.fail.swap(false, std::sync::atomic::Ordering::AcqRel);
+        if let Some(gate) = self.gate.as_ref().filter(|gate| fail && gate.before_commit) {
+            gate.entered.notify_one();
+            std::future::pending::<()>().await;
+        }
         self.inner.commit().await?;
-        if self.fail.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        if fail {
+            if let Some(gate) = &self.gate {
+                gate.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             return Err(drasi_core::interface::IndexError::IOError);
         }
         Ok(())
@@ -462,6 +742,7 @@ async fn uncertain_channel(
     root: &Path,
     definition: QosChannelDefinition,
     fail: Arc<std::sync::atomic::AtomicBool>,
+    gate: Option<Arc<CommitGate>>,
 ) -> Result<Arc<QosChannel>> {
     use drasi_core::{
         computation::{ComputationIndexes, ComputationResource, TransactionDomain},
@@ -473,6 +754,7 @@ async fn uncertain_channel(
     let control: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(LoseCommitResponse {
         inner: original.indexes().session_control.clone(),
         fail,
+        gate,
     });
     let domain = TransactionDomain::new(control.clone());
     let set = original.indexes();
@@ -486,23 +768,30 @@ async fn uncertain_channel(
         },
         Some(domain.clone()),
         Some(ComputationResource::participating(
-            original.checkpoint_store().unwrap().clone(),
+            original
+                .checkpoint_store()
+                .expect("checkpoint store")
+                .clone(),
             &domain,
         )),
         Some(ComputationResource::participating(
-            original.outbox_writer().unwrap().clone(),
+            original.outbox_writer().expect("outbox").clone(),
             &domain,
         )),
         Some(ComputationResource::participating(
-            original.live_results_writer().unwrap().clone(),
+            original
+                .live_results_writer()
+                .expect("live results")
+                .clone(),
             &domain,
         )),
     )?
-    .with_cleanup(original.cleanup().unwrap().clone());
+    .with_cleanup(original.cleanup().expect("storage owner").clone());
     Ok(QosChannel::persistent(
         definition,
         indexes,
-        FactoryRegistry::standard().envelope_codec(NonZeroUsize::new(1024 * 1024).unwrap())?,
+        FactoryRegistry::standard()
+            .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
         "journal",
     )
     .await?)
@@ -518,7 +807,7 @@ async fn ambiguous_acceptance_and_acknowledgement_recover_the_committed_state() 
         {
             let fail = Arc::new(AtomicBool::new(false));
             let channel =
-                uncertain_channel(directory.path(), definition.clone(), fail.clone()).await?;
+                uncertain_channel(directory.path(), definition.clone(), fail.clone(), None).await?;
             if acknowledge {
                 channel.publish(&first).await?;
                 let mut endpoint = endpoint(&channel, &definition, "fast", false)?;

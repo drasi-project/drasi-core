@@ -53,6 +53,7 @@ Start with the guide for your task:
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
+| [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
 
 From the drasi-core repository root, run a complete in-process example:
 
@@ -1159,6 +1160,48 @@ match core.get_source_status("unknown").await {
 | `all-identity` | Enable all identity providers |
 
 ---
+
+## Testing and qualification
+
+The [requirement ledger](tests/runtime_parity/requirements.tsv) tracks all 48
+replacement-confidence scenarios. A passing test is evidence for its asserted
+contract, not proof that the entire replacement is qualified. `partial`,
+`blocked` and `unqualified` rows remain unsatisfied even when their existing tests
+pass.
+
+From the repository root, with Docker available and the pinned Rust toolchain:
+
+```bash
+make build-native-network-plugin build-test-plugins
+python3 lib/tests/runtime_parity/test_requirements.py
+bash lib/tests/runtime_parity/check-runner.sh
+bash lib/tests/run-runtime-parity.sh target/runtime-conformance
+```
+
+The runner checks historical case mappings, named requirements, discovery and
+actual results across default, no-default, additional recovery/middleware,
+integration, plugin-factory, Host SDK and Redis-compatible backend profiles.
+Backend cases are explicitly selected, not silently left ignored. Ignored
+subprocess workers require a passing parent driver. The sole existing DLL stress
+quarantine has an owner and expiry and cannot qualify resource-lifetime safety.
+Redis compatibility is not a claim of retained-volume Garnet product recovery.
+
+Per-profile discovery, execution logs and `qualification.json` are retained in
+the output directory. To enforce the stronger replacement gate:
+
+```bash
+python3 lib/tests/runtime_parity/check_requirements.py \
+  --evidence-dir target/runtime-conformance --require-qualified
+```
+
+This command intentionally fails while any requirement lacks complete passing
+evidence. Native durable ingress/consumer services, the Server managed API,
+real-product restart matrices and sustained-operation qualification are still
+explicit gaps; volatile/lossy configurations remain supported as such.
+
+Coverage CI enables the extra persistent test features and backend targets and
+includes Host SDK unit tests. Source coverage does not by itself measure
+assertion strength or independently loaded, uninstrumented DLL code.
 
 ## Related Projects
 

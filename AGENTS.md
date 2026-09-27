@@ -14,7 +14,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 ## Done means (the main CI gates)
 - `cargo fmt -- --check` passes
 - `make clippy` passes - do NOT use `cargo clippy --all-features` (the bundled-jq feature has a flaky source build); warnings are errors
-- `make build-native-network-plugin`, then `cargo test --workspace --exclude drasi-host-sdk` and `make test-host-sdk` pass; native network integration tests load the separately built library. A running Docker daemon is required (testcontainers).
+- CI builds `make build-native-network-plugin build-test-plugins`, tests the remaining workspace packages, and runs `lib/tests/run-runtime-parity.sh` for the library, no-default, recovery/middleware, integration, Host SDK and selected backend profiles. `make test-host-sdk` remains the focused SDK command. A running Docker daemon is required (testcontainers).
 - Commits are signed off: `git commit -s` (DCO)
 - CI additionally gates PRs on: a typos check, cargo-audit, cargo-deny, FFI layout tests, and coverage
 

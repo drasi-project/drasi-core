@@ -149,6 +149,14 @@ pub trait ResourceCleanup: Send + Sync {
     async fn shutdown(&self) -> anyhow::Result<()>;
 }
 
+/// Constructs a resource after reconciliation has retired its previous owner.
+/// Construction has a 30-second deadline. Implementations must clean
+/// up partially acquired resources if construction fails or is cancelled.
+#[async_trait]
+pub trait ResourceConstructor: Send + Sync {
+    async fn construct(&self) -> anyhow::Result<ResourceHandle>;
+}
+
 /// An actual constructed resource, held separately from desired specifications.
 /// Catalogue requirements can validate its concrete Rust type during preflight.
 #[derive(Clone)]

@@ -194,7 +194,7 @@ pub struct QosChannel {
     definition: QosChannelDefinition,
     state: Mutex<State>,
     bindings: StdMutex<Bindings>,
-    persistent: Option<Persistent>,
+    persistent: StdMutex<Option<Arc<Persistent>>>,
     closed: AtomicBool,
     changed: Notify,
 }
@@ -250,7 +250,7 @@ impl QosChannel {
                 entries: BTreeMap::new(),
             }),
             bindings: StdMutex::new(Bindings::default()),
-            persistent: None,
+            persistent: StdMutex::new(None),
             closed: AtomicBool::new(false),
             changed: Notify::new(),
         }))
@@ -445,11 +445,11 @@ impl QosChannel {
             definition,
             state: Mutex::new(State { metadata, entries }),
             bindings: StdMutex::new(Bindings::default()),
-            persistent: Some(Persistent {
+            persistent: StdMutex::new(Some(Arc::new(Persistent {
                 transaction,
                 key,
                 codec,
-            }),
+            }))),
             closed: AtomicBool::new(false),
             changed: Notify::new(),
         }))
@@ -459,12 +459,20 @@ impl QosChannel {
         ResourceHandle::new(ResourceRole::StateStore, self.clone()).with_cleanup(self.clone())
     }
 
+    fn storage(&self) -> Result<Option<Arc<Persistent>>, PipeError> {
+        Ok(self
+            .persistent
+            .lock()
+            .map_err(|_| backend("QoS storage poisoned"))?
+            .clone())
+    }
+
     fn check(&self) -> Result<(), PipeError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(PipeError::Closed);
         }
         if self
-            .persistent
+            .storage()?
             .as_ref()
             .is_some_and(|store| store.transaction.recovery_required())
         {
@@ -507,7 +515,7 @@ impl QosChannel {
         metadata: &Metadata,
         append: Option<(u64, &ChangeEnvelope, u64)>,
     ) -> Result<(), PipeError> {
-        let Some(store) = &self.persistent else {
+        let Some(store) = self.storage()? else {
             return Ok(());
         };
         let bytes =
@@ -596,7 +604,7 @@ impl QosChannel {
                     .find(|(_, saved)| saved.system().sequence() == sequence);
                 if let Some((position, saved)) = retained {
                     // Full comparison includes source position and branch context.
-                    let same = if let Some(store) = &self.persistent {
+                    let same = if let Some(store) = self.storage()? {
                         store
                             .codec
                             .encode(saved)
@@ -754,9 +762,13 @@ impl ResourceCleanup for QosChannel {
         self.closed.store(true, Ordering::Release);
         self.changed.notify_waiters();
         let _state = self.state.lock().await;
-        if let Some(store) = &self.persistent {
+        if let Some(store) = self.storage()? {
             store.transaction.shutdown().await?;
         }
+        self.persistent
+            .lock()
+            .map_err(|_| backend("QoS storage poisoned"))?
+            .take();
         Ok(())
     }
 }

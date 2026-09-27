@@ -2644,7 +2644,11 @@ pub(super) async fn dispose_resources(graph: &mut ComputationGraph) -> GraphResu
         if specification.ownership == ResourceOwnership::Borrowed {
             continue;
         }
-        let Some(resource) = graph.resource_handles.get(id) else {
+        let Some(resource) = graph
+            .resource_handles
+            .get(id)
+            .or_else(|| graph.pending_resource_cleanup.get(id))
+        else {
             continue;
         };
         update(graph, |state| {
@@ -2655,6 +2659,7 @@ pub(super) async fn dispose_resources(graph: &mut ComputationGraph) -> GraphResu
         match result {
             Ok(Ok(())) => {
                 graph.resource_handles.remove(id);
+                graph.pending_resource_cleanup.remove(id);
                 update(graph, |state| {
                     let observed = state.resources.get_mut(id).expect("resource");
                     observed.realization = ResourceRealization::Released;

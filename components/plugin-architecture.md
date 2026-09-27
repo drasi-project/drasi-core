@@ -216,6 +216,15 @@ Some services flow from host to plugin:
 
 The host builds a vtable from its own trait implementation and passes it to the plugin, which wraps it in a local proxy (`FfiStateStoreProxy`, `FfiBootstrapProviderProxy`).
 
+State-store reads preserve the difference between a missing key and a failed
+read, including a provider panic. The existing ABI's boolean slots conflate
+absence and errors, so the proxy uses the error-capable get/count operations for
+existence checks and the counted batch operation for deletion results. These
+corrections do not change ABI 0.15 layouts. Complete list-error reporting,
+durability forwarding and persistent service-vtable lifetime ownership remain
+versioned-interface work, tracked by the
+[replacement requirement ledger](../lib/tests/runtime_parity/requirements.tsv).
+
 ## Runtime Model
 
 ### Multiple Tokio Runtimes
@@ -243,6 +252,13 @@ Host calls vtable.start_fn(state)
 This avoids nesting tokio runtimes (which would panic) by running `block_on` on a fresh OS thread.
 
 ## Logging and Tracing
+
+Plugin source/reaction wrappers own a bounded status-channel forwarder rather
+than retaining an unread 16-entry receiver. Normal lifecycle operations keep
+their existing callbacks; background error updates also reach the instance
+callback. Dropping a wrapper revokes that callback before stopping its
+forwarder. The host callback still logs and rejects an update when its observer
+queue is full; this is not a lossless lifecycle-event delivery guarantee.
 
 ### Plugin → Host Log Bridge
 
@@ -432,8 +448,8 @@ cargo test --test error_resilience_test                             # 11 tests
 # Dynamic tests (requires: make build-dynamic-plugins)
 cargo test --no-default-features --features dynamic-plugins --lib   # 185 tests
 
-# Host-SDK integration tests (requires pre-built cdylib plugins)
-cd ../drasi-core && cargo test -p drasi-host-sdk --test integration_test  # 22 tests
+# Host-SDK unit and actual-library integration tests, including FFI recovery
+cd ../drasi-core && make test-host-sdk
 
 # Smoke tests (builds and runs server with all plugins)
 make test-smoke

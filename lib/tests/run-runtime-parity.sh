@@ -28,14 +28,23 @@ fi
 unset DRASI_TEST_EXECUTION
 mkdir -p "$logs" "$TMPDIR" || exit 1
 failed=0
+printf '1\n' > "$logs/matrix.exit-code"
+if [[ "$(type -t cargo)" == function ]]; then
+    printf 'synthetic\n' > "$logs/execution-mode"
+else
+    printf 'actual\n' > "$logs/execution-mode"
+fi
 
-for profile in default no-default-features extra-capabilities integration plugin-factories; do
+python3 lib/tests/runtime_parity/check_requirements.py || exit 1
+
+for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk garnet-backends; do
     package=drasi-lib
     inventory=lib/tests/runtime_parity/original-cases.tsv
     mappings=lib/tests/runtime_parity/case-mappings.tsv
-    sources=lib/tests
+    sources=(lib/tests/*.rs)
     targets=(--lib --tests)
     features=(--locked)
+    test_arguments=(--format pretty)
     case "$profile" in
         no-default-features) features+=(--no-default-features) ;;
         extra-capabilities)
@@ -46,17 +55,35 @@ for profile in default no-default-features extra-capabilities integration plugin
             package=lib-integration-tests
             inventory=lib/tests/runtime_parity/integration-cases.tsv
             mappings=/dev/null
-            sources=lib-integration-tests/tests
+            sources=(lib-integration-tests/tests/*.rs)
             targets=(--tests)
             features+=(--no-default-features --features computation-middleware-tests,garnet-tests)
+            test_arguments+=(--test-threads=1)
             ;;
         plugin-factories)
             package=drasi-plugin-sdk
             inventory=/dev/null
             mappings=/dev/null
-            sources=components/plugin-sdk/tests
+            sources=(components/plugin-sdk/tests/computation_factories.rs)
             targets=(--test computation_factories)
             features+=(--no-default-features --features computation)
+            ;;
+        host-sdk)
+            package=drasi-host-sdk
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs)
+            targets=(--lib --test integration_test --test native_computation_pipeline)
+            test_arguments+=(--test-threads=1)
+            ;;
+        garnet-backends)
+            package=drasi-index-garnet
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(components/indexes/garnet/tests/computation_resources.rs components/indexes/garnet/tests/outbox_live_results_tests.rs)
+            targets=(--test computation_resources --test outbox_live_results_tests)
+            features+=(--features computation)
+            test_arguments+=(--include-ignored --test-threads=1)
             ;;
     esac
     discovered="$logs/$profile.discovered.tsv"
@@ -150,7 +177,11 @@ for profile in default no-default-features extra-capabilities integration plugin
         ' lib/tests/runtime_parity/computation-contracts.tsv "$discovered"; then
             failed=1
         fi
-        for source in "$sources"/*.rs; do
+        if ! python3 lib/tests/runtime_parity/check_requirements.py \
+            --profile "$profile" --package "$package" --discovered "$discovered"; then
+            failed=1
+        fi
+        for source in "${sources[@]}"; do
             binary="${source##*/}"
             binary="${binary%.rs}"
             case "$binary" in
@@ -189,7 +220,7 @@ for profile in default no-default-features extra-capabilities integration plugin
     fi
     printf 'Running %s (full log: %s/%s.log)\n' "$profile" "$logs" "$profile"
     cargo test --color never -p "$package" \
-        "${features[@]}" "${targets[@]}" --no-fail-fast -- --format pretty > "$logs/$profile.log" 2>&1
+        "${features[@]}" "${targets[@]}" --no-fail-fast -- "${test_arguments[@]}" > "$logs/$profile.log" 2>&1
     status=$?
     printf '%s\n' "$status" > "$logs/$profile.exit-code"
     grep -E '^test result:|^error:|^failures:' "$logs/$profile.log" || true
@@ -267,6 +298,11 @@ for profile in default no-default-features extra-capabilities integration plugin
         failed=1
     fi
 done
+
+printf '%s\n' "$failed" > "$logs/matrix.exit-code"
+if ! python3 lib/tests/runtime_parity/check_requirements.py --evidence-dir "$logs"; then
+    failed=1
+fi
 
 # These are capability configurations of one runtime, not engine comparisons.
 # Discovery and execution failures remain failures; every profile is attempted.

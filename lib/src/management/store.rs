@@ -26,6 +26,8 @@ pub struct AcceptanceReceipt {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManagementError {
+    #[error("configuration state could not be confirmed; reconcile before reading authoritative desired state")]
+    ConfigurationUnconfirmed,
     #[error("configuration revision conflict: expected {expected}, current {actual}")]
     RevisionConflict { expected: u64, actual: u64 },
     #[error("request ID was already used for a different desired configuration")]

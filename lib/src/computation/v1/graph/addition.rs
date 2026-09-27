@@ -648,6 +648,9 @@ pub(super) fn insert(
     if !addition.bindings.pipes.is_empty() {
         return Err(topology("add pipes using a connection mutation"));
     }
+    if !addition.bindings.resource_constructors.is_empty() {
+        return Err(topology("deferred resources require graph reconciliation"));
+    }
     if addition
         .bindings
         .subscriptions

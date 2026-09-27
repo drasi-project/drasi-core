@@ -62,7 +62,10 @@ impl From<DesiredTopology> for DesiredInstance {
 
 /// Resolve a persisted provider recipe. Implementations retain loading, secret
 /// and backend-specific policy outside drasi-lib. Successful resources transfer
-/// the declared cleanup ownership to the graph.
+/// the declared cleanup ownership to the graph. Replacements are constructed
+/// only after the graph releases the prior owner. Resolution is cancellation-safe
+/// and bounded by a 30-second deadline; partial acquisitions must be
+/// released if the resolver fails or its future is dropped.
 #[async_trait]
 pub trait ManagementResourceResolver: Send + Sync {
     async fn resolve(
@@ -159,8 +162,10 @@ impl crate::DrasiLib {
     }
 
     /// Privileged: definitions may contain literal credentials or secret refs.
+    /// Returns an error while an ambiguous commit cannot be confirmed by the
+    /// store; reconciliation reloads authoritative state before applying it.
     pub fn desired_configuration(&self) -> crate::Result<CommittedConfiguration> {
-        Ok(self.management()?.configuration())
+        self.management()?.configuration().map_err(Into::into)
     }
 
     pub async fn management_status(&self) -> crate::Result<ManagementStatus> {

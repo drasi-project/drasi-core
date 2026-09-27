@@ -24,6 +24,11 @@ jobs:
         .github/scripts/package-visibility.test.sh
         .github/scripts/release-with-retry.test.sh
         cargo run -p xtask -- check-publish-dependency-cycles
+        python3 lib/tests/runtime_parity/test_requirements.py
+        bash lib/tests/runtime_parity/check-runner.sh
         make build-native-network-plugin
-        cargo test --workspace --exclude drasi-host-sdk
-        make test-host-sdk
+        make build-test-plugins
+        cargo test --workspace --exclude drasi-host-sdk --exclude drasi-lib --exclude lib-integration-tests -- --test-threads=1
+        bash lib/tests/run-runtime-parity.sh
+        cargo test -p drasi-lib --doc
+        cargo test -p drasi-core --features parallel_solver

@@ -403,20 +403,26 @@ impl DrasiLib {
             .await);
         }
         let _lifecycle = self.computation_registry.lifecycle.lock().await;
-        if self.management.get().is_some_and(|management| {
-            management
-                .configuration()
+        if let Some(management) = self.management.get() {
+            let configuration = match management.configuration() {
+                Ok(configuration) => configuration,
+                Err(error) => {
+                    return Err(super::instance::reject_graph(graph, options, error.into()).await);
+                }
+            };
+            if configuration
                 .desired
                 .graphs
                 .iter()
                 .any(|desired| desired.topology.graph_id == graph.snapshot().id.as_ref())
-        }) {
-            return Err(super::instance::reject_graph(
-                graph,
-                options,
-                DrasiError::invalid_state("graph ID is owned by managed configuration"),
-            )
-            .await);
+            {
+                return Err(super::instance::reject_graph(
+                    graph,
+                    options,
+                    DrasiError::invalid_state("graph ID is owned by managed configuration"),
+                )
+                .await);
+            }
         }
         if let Err(error) = self.state_guard.require_initialized() {
             return Err(super::instance::reject_graph(graph, options, error).await);

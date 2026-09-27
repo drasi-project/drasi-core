@@ -91,6 +91,12 @@ reopen the same store and resolve/retry against committed state; an uncertain
 write is never reported as definite nonacceptance. The configured backend
 determines the crash/power-loss boundary.
 
+Awaited channel shutdown releases its storage even when a caller retains a
+closed channel or endpoint handle. Those old handles remain fenced and cannot
+read, publish or acknowledge work in a replacement journal. Managed same-path
+replacement preserves the committed journal and subscriber cursors; it does not
+copy the data into a new empty channel.
+
 ## Completion and membership
 
 Receiving or dropping a delivery is not completion. The consumer/graph explicitly

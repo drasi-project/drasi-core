@@ -3198,10 +3198,52 @@ async fn create_started_mock_source(
     (plugin, source, event_rx)
 }
 
+#[tokio::test]
+#[serial]
+async fn test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels() {
+    let (_plugin, source, mut source_updates) = create_started_mock_source("status-cycles").await;
+    let plugin = load_plugin_from_path(
+        &require_plugin("drasi-reaction-log"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("load matching log reaction");
+    let reaction = plugin.reaction_plugins[0]
+        .create_reaction("status-reaction", vec![], &serde_json::json!({}), false)
+        .await
+        .expect("create reaction");
+    let (update_tx, mut reaction_updates) = tokio::sync::mpsc::channel(16);
+    reaction
+        .initialize(drasi_lib::ReactionRuntimeContext {
+            instance_id: "status-instance".into(),
+            reaction_id: "status-reaction".into(),
+            update_tx,
+            state_store: None,
+            identity_provider: None,
+            snapshot_fetcher: None,
+            resource_observer: None,
+        })
+        .await;
+    for _ in 0..24 {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            source.stop().await.expect("source stop");
+            source.start().await.expect("source restart");
+            reaction.start().await.expect("reaction start");
+            reaction.stop().await.expect("reaction stop");
+        })
+        .await
+        .expect("repeated lifecycle must not deadlock on a 16-entry plugin status queue");
+        while source_updates.try_recv().is_ok() {}
+        while reaction_updates.try_recv().is_ok() {}
+    }
+    source.stop().await.expect("source cleanup");
+}
+
 /// Verify `supports_replay()` is wired through FFI and returns the trait default (true).
 #[tokio::test]
 #[serial]
-#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
 async fn test_ffi_supports_replay_returns_true() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
@@ -3220,7 +3262,6 @@ async fn test_ffi_supports_replay_returns_true() {
 /// when `request_position_handle = true`, and `None` when `false`.
 #[tokio::test]
 #[serial]
-#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
 async fn test_ffi_subscribe_position_handle() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
@@ -3290,7 +3331,6 @@ async fn test_ffi_subscribe_position_handle() {
 /// skipped (bootstrap_receiver is None even when enable_bootstrap is true).
 #[tokio::test]
 #[serial]
-#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
 async fn test_ffi_resume_from_skips_bootstrap() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
@@ -3363,7 +3403,6 @@ impl drasi_lib::bootstrap::BootstrapProvider for TestBootstrapProvider {
 /// `source_position` through the FFI boundary (plugin → host callback).
 #[tokio::test]
 #[serial]
-#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
 async fn test_ffi_bootstrap_result_receiver_delivers_result() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");
@@ -3432,7 +3471,6 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
 /// stop Drasi, make changes, restart — missed changes must be replayed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
 async fn test_ffi_checkpoint_persist_and_resume_from() {
     if !plugin_exists("drasi-source-mock") {
         panic!("SKIP: drasi-source-mock not built as cdylib");

@@ -1,0 +1,51 @@
+# id	priority	state	scope	profile	package	binary	case	remaining
+# covered means the named contract is tested, not that its entire subsystem is production-qualified.
+# partial/blocked/unqualified requirements cannot satisfy the replacement qualification gate.
+M01	P1	covered	managed	integration	lib-integration-tests	computation_management	commit_failure_prevents_construction_and_lost_response_is_resolved_by_request_id	-
+M02	P1	covered	managed	integration	lib-integration-tests	computation_management	regressed_changed_and_invalid_store_reads_cannot_replace_confirmed_state	-
+M03	P1	partial	managed	integration	lib-integration-tests	computation_managed_resources	live_same_path_journal_replacement_preserves_unhandled_data_and_closes_the_old_owner	Live/crash handover preserves pending data; sustained in-flight processing and resolver timeout still need qualification.
+M04	P1	partial	managed	integration	lib-integration-tests	computation_managed_resources	listener_handover_retries_cleanup_and_survives_cancelled_wait_without_reopening_unrelated_resources	External port contention and crash-interrupted listener replacement remain.
+M05	P1	partial	managed	integration	lib-integration-tests	computation_management	unavailable_factory_is_visible_and_can_be_registered_after_restart	Complete missing-secret/provider/version/corrupt-record matrix through public managed entrypoints.
+M06	P1	partial	managed	integration	lib-integration-tests	computation_management	redb_recovers_every_declaration_and_isolates_instances_snapshots_and_receipts	Concurrent snapshots/applies and interrupted restoration need deterministic barriers.
+M07	P2	partial	managed	integration	lib-integration-tests	computation_management	concurrent_revision_writers_cannot_overwrite_each_other	Stale close/drop and partial shutdown across reacquired instance leases need extended cases.
+G01	P1	partial	graph	default	drasi-lib	computation_addition_control	addition_reports_only_graph_rejection_and_waits_report_node_failures	Extend the complete invalid-definition matrix through native and ordinary public entrypoints.
+G02	P1	covered	graph	default	drasi-lib	computation_reconciliation	sink_replacement::current_thread	-
+G03	P1	partial	graph	default	drasi-lib	computation_reconciliation	drain_waits_for_handling_and_failed_cleanup_retains_desired_ownership_for_retry	Combine multi-hop required fan-out with unavailable consumers and cancellation.
+G04	P1	covered	graph	default	drasi-lib	computation_reconciliation	replacing_a_producer_with_a_new_stream_starts_an_independent_sequence	-
+G05	P1	covered	graph	default	drasi-lib	computation_configuration_snapshot	in_place_configuration_changes_publish_with_the_new_revision_not_old_snapshots	-
+G06	P2	unqualified	graph	-	-	-	-	Measure sustained replacement task/socket/file-descriptor/memory ownership, not only successful drops.
+Q01	P1	partial	qos	integration	lib-integration-tests	computation_qos	seeded_qos_schedules_match_an_independent_acceptance_and_completion_ledger	Add persisted corruption, full-width sequence exhaustion and producer-lifetime schedules.
+Q02	P1	covered	qos	integration	lib-integration-tests	computation_qos	blocking_multicast_retires_only_after_every_subscriber_handles	-
+Q03	P1	partial	qos	integration	lib-integration-tests	computation_qos	lossy_multicast_reports_gaps_and_requires_explicit_skip	Assert exact externally observable skip notifications in addition to gap/cursor behavior.
+Q04	P1	covered	qos	integration	lib-integration-tests	computation_qos	cancelled_append_and_completion_resolve_exactly_before_and_after_real_commit	-
+Q05	P1	covered	qos	integration	lib-integration-tests	computation_qos	cancelled_subscription_keeps_history_and_stale_ack_cannot_advance_a_replacement	-
+Q06	P1	partial	qos	integration	lib-integration-tests	computation_qos	membership_change_preserves_existing_progress_and_captures_new_subscription_cut	Live membership changes under traffic and process death, including rejected capacity reductions.
+Q07	P1	blocked	recoverable-profile	-	-	-	-	No complete requested-reliability profile validates source replay, query handoff, and progress-store durability together; deliberate volatile/lossy pipelines remain valid.
+Q08	P2	unqualified	qos	-	-	-	-	Larger fan-out, long disconnections, byte quotas and backlog/resource budgets require sustained measurements.
+T01	P1	partial	query-body	extra-capabilities	drasi-lib	computation_query_faults	transaction_query_body_atomic_fault_matrix_preserves_all_participants	Extend every remaining bootstrap/retention/writer fault through both the wrapper and factory-created graph.
+T02	P1	partial	transaction	extra-capabilities	drasi-lib	computation_transaction_transformer	failed_or_cancelled_later_step_rolls_back_every_step_and_input_progress	Expand first/middle/last fault schedules across additional stage counts and live replacement.
+T03	P1	covered	query-body	integration	lib-integration-tests	computation_transaction_query	process_crashes_preserve_atomic_query_state_and_every_durable_handoff	-
+T04	P1	partial	query-body	default	drasi-lib	computation_query_configuration	native_query_executes_synthetic_joins_and_the_configured_source_middleware_pipeline	Compose exact join/aggregate/value oracles with mixed source ordering and recovery profiles.
+T05	P1	partial	scheduled-query	integration	lib-integration-tests	computation_transaction_query	scheduled_work_and_its_committed_output_survive_process_crashes	Add deterministic replace/cancel/rollback and stale notification schedules.
+T06	P1	partial	scheduled-query	extra-capabilities	drasi-lib	computation_query_faults	transaction_query_body_replays_cancelled_commits_before_accepting_more_input	Clock jumps, full output pipes and concurrent real-source/due-input pressure remain.
+T07	P2	unqualified	query-body	-	-	-	-	Measure cancellation latency and fairness under sustained ready input and timer bursts.
+S01	P1	unqualified	postgres-cdc	-	-	-	-	Real PostgreSQL CDC/bootstrap to durable query/recording receiver with upstream feedback crash barriers is not yet qualified.
+S02	P1	partial	wal-source	integration	lib-integration-tests	computation_source_recovery	ordinary_runtime_replays_uncheckpointed_wal_without_reset_in_both_dispatch_modes	Unify HTTP/gRPC WAL network retry/cursor/retention cases with full-pipeline assertions.
+S03	P1	blocked	native-durable-ingress	-	-	-	-	Native ingress acknowledgement is volatile and the ABI lacks source recovery-progress services.
+S04	P1	partial	wal-source	integration	lib-integration-tests	computation_source_recovery	ordinary_multisource_recovery_keeps_committed_rows_when_only_one_checkpoint_is_missing	Add independently delayed/failing real snapshots with concurrent live traffic.
+S05	P2	unqualified	connector-restart	-	-	-	-	Restart each claimed external product using retained data and verify unavailable-offset behavior.
+R01	P1	partial	reaction	integration	lib-integration-tests	reaction_recovery_conformance	rocksdb_redb_crash_after_effect_before_checkpoint	Qualify actual durable HTTP/gRPC endpoints and response-loss boundaries.
+R02	P1	partial	reaction	default	drasi-lib	computation_consumer_recovery	partial_handling_failure_restarts_from_the_last_successfully_handled_delta	Add remote partial batches and multiple changes within one query result.
+R03	P1	partial	reaction	integration	lib-integration-tests	reaction_recovery_conformance	rocksdb_redb_fresh_trigger_no_history_replay	Combine fresh-trigger and snapshot-maintaining consumers in one failure/reconstruction matrix.
+R04	P1	blocked	native-durable-consumer	-	-	-	-	ConsumerProgressStore does not declare durability; native recovery-resource services are incomplete.
+R05	P1	covered	reaction	default	drasi-lib	computation_consumer_recovery	live_retention_gaps_fail_reset_or_emit_an_explicit_skip_before_retained_deltas	-
+A01	P1	partial	dynamic-plugins	host-sdk	drasi-host-sdk	native_computation_pipeline	actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifecycle	Broaden malformed metadata/buffer and cross-version capability rejection schedules.
+A02	P1	partial	dynamic-plugins	host-sdk	drasi-host-sdk	integration_test	test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels	Plugin queue saturation is covered; the host callback still rejects/logs updates when its observer queue is full.
+A03	P1	partial	legacy-provider-abi	host-sdk	drasi-host-sdk	lib	state_store_bridge::tests::read_errors_and_panics_are_not_missing_checkpoints	Read/existence/delete outcomes are covered; list errors, durability forwarding and persistent-vtable ownership require a versioned ABI extension.
+A04	P1	partial	native-transaction-abi	host-sdk	drasi-host-sdk	native_computation_pipeline	cancelling_borrowed_transaction_rpc_revokes_plugin_work_and_rolls_back_real_storage	Extend revocation/failure schedules across every RPC operation and repeated handle reuse.
+A05	P2	unqualified	dynamic-plugins	-	-	-	-	Sustained per-instance DLL ownership/late-callback accounting remains; process-pinned libraries are intentional.
+H01	P1	unqualified	server	-	-	-	-	Expand Server startup/acceptance/readiness contracts through REST, including delayed and failed activation.
+H02	P1	blocked	server-managed	-	-	-	-	Server does not expose the complete integrated desired-state/receipt/snapshot workflow.
+H03	P1	blocked	server-graph-query	-	-	-	-	Ordinary query APIs do not expose the complete graph-scoped native query/result/diagnostic contract.
+H04	P1	unqualified	test-infra-qos	-	-	-	-	Session-local golden-hash evidence exists; versioned test-infra QoS/query-host selection and provenance assertions are still required.
+H05	P2	unqualified	server-observers	-	-	-	-	Prolonged SSE/reconnect gaps need explicit resynchronization and stale-observer assertions.

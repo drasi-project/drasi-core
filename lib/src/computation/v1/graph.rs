@@ -112,6 +112,12 @@ pub enum GraphError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("resource {resource} construction failed: {source}")]
+    ResourceCreation {
+        resource: ResourceId,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("{cause}")]
     Reported {
         #[source]
@@ -1041,6 +1047,7 @@ impl ComputationGraphBuilder {
             state: watch::channel(GraphState::Ready).0,
             cleanup_timeout: self.cleanup_timeout,
             resource_handles: self.resource_handles,
+            pending_resource_cleanup: BTreeMap::new(),
             registry,
             peers: super::ControlPlane::new(64)?,
             rejected_additions: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1208,6 +1215,7 @@ pub struct ComputationGraph {
     state: watch::Sender<GraphState>,
     cleanup_timeout: Duration,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    pending_resource_cleanup: BTreeMap<ResourceId, ResourceHandle>,
     registry: watch::Sender<Arc<GraphRegistrySnapshot>>,
     inspector: super::ComputationInspector,
     execution_scope: Arc<str>,

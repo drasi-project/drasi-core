@@ -2048,20 +2048,26 @@ mod profiling_tests {
                 },
                 Some(domain.clone()),
                 Some(ComputationResource::participating(
-                    original.checkpoint_store().unwrap().clone(),
+                    original
+                        .checkpoint_store()
+                        .expect("checkpoint store")
+                        .clone(),
                     &domain,
                 )),
                 Some(ComputationResource::participating(
-                    original.outbox_writer().unwrap().clone(),
+                    original.outbox_writer().expect("outbox").clone(),
                     &domain,
                 )),
                 Some(ComputationResource::participating(
-                    original.live_results_writer().unwrap().clone(),
+                    original
+                        .live_results_writer()
+                        .expect("live results")
+                        .clone(),
                     &domain,
                 )),
             )
             .map_err(IndexError::other)?;
-            Ok(wrapped.with_cleanup(original.cleanup().unwrap().clone()))
+            Ok(wrapped.with_cleanup(original.cleanup().expect("storage owner").clone()))
         }
 
         fn is_volatile(&self) -> bool {

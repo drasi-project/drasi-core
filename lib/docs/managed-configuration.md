@@ -122,7 +122,20 @@ revision or restart healthy components.
 When a store reports an uncertain commit outcome, the API does not guess success
 or rejection. Use `configuration_receipt(request_id)` and the current committed
 definition, or repeat the same request. A failed acceptance before commit cannot
-start constructing its components.
+start constructing its components. The driver reloads authoritative state even
+when the commit response fails: a confirmed new definition becomes the live
+target without restarting the instance. If confirmation is unavailable or
+inconsistent, `desired_configuration()` returns an error and status cannot claim
+convergence. `reconcile_desired_state()` reloads the store before retrying.
+
+Resource replacement follows the same scoped processing boundary as component
+replacement. The graph pauses affected work, stops dependent owners and closes
+the old graph-owned resource before invoking its replacement resolver. The new
+target is visible while construction is pending. Failed construction leaves a
+retryable, nonconverged resource, not a requirement to open two exclusive owners
+of the same database or listener. Unrelated graph branches remain running.
+Resources returned with an incorrect role are never injected; the graph retains
+cleanup responsibility for graph-owned instances, including failed cleanup.
 
 Factories must obey the existing cancellation-safe construction contract.
 Resource resolution has a 30-second timeout and must also be cancellation safe.

@@ -34,7 +34,7 @@ async fn query(root: &Path) -> Result<TransactionTransformer> {
             query: "MATCH (n:Item) RETURN count(n) AS total".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out")?,
-            outbox_capacity: NonZeroUsize::new(8).unwrap(),
+            outbox_capacity: NonZeroUsize::new(8).expect("outbox capacity"),
         },
         provider(root),
         QueryOptions::default(),
@@ -48,8 +48,8 @@ async fn query(root: &Path) -> Result<TransactionTransformer> {
 
 fn definition(key: &str, subscribers: &[&str]) -> QosChannelDefinition {
     QosChannelDefinition {
-        stream: StreamId::try_new(format!("{key}/out")).unwrap(),
-        capacity: NonZeroUsize::new(8).unwrap(),
+        stream: StreamId::try_new(format!("{key}/out")).expect("stream"),
+        capacity: NonZeroUsize::new(8).expect("channel capacity"),
         durable: true,
         retention: RetentionPolicy::Backpressure,
         subscribers: subscribers
@@ -65,7 +65,8 @@ async fn channel(root: &Path, key: &str, subscribers: &[&str]) -> Result<Arc<Qos
         provider(root)
             .create_indexes("transaction-query", &format!("pipe-{key}"))
             .await?,
-        FactoryRegistry::standard().envelope_codec(NonZeroUsize::new(1024 * 1024).unwrap())?,
+        FactoryRegistry::standard()
+            .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
         key,
     )
     .await?)
@@ -103,7 +104,8 @@ fn input(sequence: u64) -> Result<ChangeEnvelope> {
 fn total(query: &TransactionTransformer) -> Result<i64> {
     let snapshot = query.query_results().context("query results")?.snapshot()?;
     anyhow::ensure!(snapshot.rows.len() == 1, "expected one aggregate");
-    let row = QueryChangeCodec::decode_row(snapshot.rows.values().next().unwrap())?;
+    let row =
+        QueryChangeCodec::decode_row(snapshot.rows.values().next().context("aggregate row")?)?;
     match &row.values["total"] {
         VariableValue::Integer(value) => value.as_i64().context("aggregate integer"),
         value => anyhow::bail!("unexpected aggregate {value:?}"),

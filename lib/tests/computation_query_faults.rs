@@ -43,6 +43,8 @@ use std::{
 
 const BOOTSTRAP: &str = "\0computation:query-bootstrap:v1";
 const PENDING: &str = "\0computation:pending-output:v1";
+const DELIVERED: &str = "\0computation:query-delivered:v1";
+const DELIVERY_SEQUENCE: &str = "\0computation:query-delivery-sequence:v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fault {
@@ -56,6 +58,8 @@ enum Fault {
     ReadLiveRows,
     Commit,
     CommittedThenWait,
+    DeliverySequence,
+    DeliveryConfirmed,
 }
 
 struct Injection {
@@ -116,7 +120,11 @@ impl CheckpointStore for Checkpoints {
         sequence: u64,
         position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
-        let fault = if key.starts_with("computation:input:") {
+        let fault = if key == DELIVERY_SEQUENCE {
+            Some(Fault::DeliverySequence)
+        } else if key == DELIVERED {
+            Some(Fault::DeliveryConfirmed)
+        } else if key.starts_with("computation:input:") {
             Some(Fault::InputCheckpoint)
         } else if key == PENDING && position.is_some() {
             Some(Fault::PendingStart)
@@ -258,6 +266,44 @@ enum Backend {
     OrdinaryPlugin,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryPoint {
+    Direct,
+    TransactionBody,
+}
+
+struct QueryUnderTest {
+    processor: Box<dyn Transformer>,
+    results: QueryResults,
+}
+
+impl QueryUnderTest {
+    fn new(query: ContinuousQueryTransformer, entry: EntryPoint) -> Self {
+        let results = query.results();
+        let processor: Box<dyn Transformer> = match entry {
+            EntryPoint::Direct => Box::new(query),
+            EntryPoint::TransactionBody => Box::new(TransactionTransformer::from_query(query)),
+        };
+        Self { processor, results }
+    }
+    fn results(&self) -> QueryResults {
+        self.results.clone()
+    }
+}
+
+impl std::ops::Deref for QueryUnderTest {
+    type Target = dyn Transformer;
+    fn deref(&self) -> &Self::Target {
+        self.processor.as_ref()
+    }
+}
+
+impl std::ops::DerefMut for QueryUnderTest {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.processor.as_mut()
+    }
+}
+
 fn provider_for(path: &std::path::Path, backend: Backend) -> Arc<dyn ComputationIndexProvider> {
     match backend {
         Backend::Computation => Arc::new(RocksDbComputationProvider::new(
@@ -318,12 +364,28 @@ fn input(sequence: u64) -> InputEnvelope {
 #[tokio::test]
 async fn atomic_fault_matrix_rolls_back_all_output_and_source_progress_before_fencing() {
     for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
-        atomic_fault_matrix(backend).await;
+        atomic_fault_matrix(backend, EntryPoint::Direct).await;
     }
 }
 
-async fn atomic_fault_matrix(backend: Backend) {
-    for point in [Fault::InputCheckpoint, Fault::LiveRows, Fault::ResultSequence, Fault::Commit] {
+#[tokio::test]
+async fn transaction_query_body_atomic_fault_matrix_preserves_all_participants() {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        atomic_fault_matrix(backend, EntryPoint::TransactionBody).await;
+    }
+}
+
+async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
+    for point in [
+        Fault::InputCheckpoint,
+        Fault::LiveRows,
+        Fault::ResultSequence,
+        Fault::DeliverySequence,
+        Fault::Commit,
+    ] {
+        if point == Fault::DeliverySequence && entry == EntryPoint::Direct {
+            continue;
+        }
         let temp = tempfile::tempdir().expect("temp");
         let base = provider_for(temp.path(), backend);
         let fault = Injection::new(point);
@@ -332,7 +394,7 @@ async fn atomic_fault_matrix(backend: Backend) {
                 .expect("scope"),
         );
         {
-            let mut query = ContinuousQueryTransformer::new(
+            let query = ContinuousQueryTransformer::new(
                 definition(false),
                 Arc::new(Provider {
                     inner: base.clone(),
@@ -343,6 +405,7 @@ async fn atomic_fault_matrix(backend: Backend) {
             .expect("construct")
             .with_source_progress(progress.clone())
             .expect("source progress");
+            let mut query = QueryUnderTest::new(query, entry);
             query.start().await.expect("start");
             fault.armed.store(true, Ordering::Release);
             assert!(query.transform(input(1)).await.is_err(), "{point:?}");
@@ -364,11 +427,56 @@ async fn atomic_fault_matrix(backend: Backend) {
             );
             query.stop().await.expect("cleanup");
         }
-        let mut reopened = ContinuousQueryTransformer::new(definition(false), base)
+        {
+            let stored = base
+                .create_indexes("faults", "query")
+                .await
+                .expect("independent reopen");
+            let checkpoints = stored.checkpoint_store().unwrap();
+            assert!(
+                checkpoints
+                    .read_all_checkpoints()
+                    .await
+                    .unwrap()
+                    .keys()
+                    .all(|key| !key.starts_with("computation:input:")),
+                "{backend:?}/{entry:?}/{point:?}"
+            );
+            assert_eq!(
+                checkpoints
+                    .read_result_sequence("query")
+                    .await
+                    .unwrap()
+                    .unwrap_or(0),
+                0
+            );
+            assert!(stored
+                .outbox_writer()
+                .unwrap()
+                .read_from("query", 0)
+                .await
+                .unwrap()
+                .is_empty());
+            assert!(stored
+                .live_results_writer()
+                .unwrap()
+                .read_snapshot("query")
+                .await
+                .unwrap()
+                .is_empty());
+            stored
+                .cleanup()
+                .unwrap()
+                .shutdown()
+                .await
+                .expect("release independent reader");
+        }
+        let reopened = ContinuousQueryTransformer::new(definition(false), base)
             .await
             .expect("reopen")
             .with_source_progress(progress.clone())
             .expect("source progress");
+        let mut reopened = QueryUnderTest::new(reopened, entry);
         reopened.start().await.expect("consistent rollback");
         assert!(reopened
             .results()
@@ -666,17 +774,24 @@ async fn bootstrap_projection_and_completion_checkpoint_failures_keep_handoff_cl
 #[tokio::test]
 async fn cancelled_committed_source_and_future_outputs_recover_without_reusing_sequences() {
     for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
-        cancelled_committed_outputs(backend).await;
+        cancelled_committed_outputs(backend, EntryPoint::Direct).await;
     }
 }
 
-async fn cancelled_committed_outputs(backend: Backend) {
+#[tokio::test]
+async fn transaction_query_body_replays_cancelled_commits_before_accepting_more_input() {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        cancelled_committed_outputs(backend, EntryPoint::TransactionBody).await;
+    }
+}
+
+async fn cancelled_committed_outputs(backend: Backend, entry: EntryPoint) {
     for temporal in [false, true] {
         let temp = tempfile::tempdir().expect("temp");
         let base = provider_for(temp.path(), backend);
         let fault = Injection::new(Fault::CommittedThenWait);
         {
-            let mut query = ContinuousQueryTransformer::new(
+            let query = ContinuousQueryTransformer::new(
                 definition(temporal),
                 Arc::new(Provider {
                     inner: base.clone(),
@@ -685,6 +800,7 @@ async fn cancelled_committed_outputs(backend: Backend) {
             )
             .await
             .expect("construct");
+            let mut query = QueryUnderTest::new(query, entry);
             query.start().await.expect("start");
             if temporal {
                 assert!(query
@@ -720,9 +836,10 @@ async fn cancelled_committed_outputs(backend: Backend) {
             );
             query.stop().await.expect("join owned I/O and retire query");
         }
-        let mut recovered = ContinuousQueryTransformer::new(definition(temporal), base)
+        let recovered = ContinuousQueryTransformer::new(definition(temporal), base)
             .await
             .expect("reopen");
+        let mut recovered = QueryUnderTest::new(recovered, entry);
         recovered.start().await.expect("committed output recovery");
         let retained = recovered
             .results()
@@ -730,6 +847,33 @@ async fn cancelled_committed_outputs(backend: Backend) {
             .expect("unpublished retained output");
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].system().sequence(), 1);
+        if entry == EntryPoint::TransactionBody {
+            assert!(recovered.has_pending_emissions());
+            let replay = recovered
+                .continue_transform()
+                .await
+                .expect("pending committed output");
+            assert_eq!(replay.len(), 1);
+            assert_ne!(replay[0].envelope.id(), retained[0].id());
+            assert_eq!(
+                QueryRecoveryIdentity::from_envelope(&replay[0].envelope).unwrap(),
+                QueryRecoveryIdentity::from_envelope(&retained[0]).unwrap()
+            );
+            assert_eq!(
+                QueryChangeCodec::query_generation(&replay[0].envelope).unwrap(),
+                QueryChangeCodec::query_generation(&retained[0]).unwrap()
+            );
+            assert_eq!(
+                QueryChangeCodec::query_sequence(&replay[0].envelope).unwrap(),
+                1
+            );
+            assert_eq!(replay[0].envelope.system().sequence(), 2);
+            recovered
+                .delivery_completed(&replay)
+                .await
+                .expect("durable handoff");
+            assert!(!recovered.has_pending_emissions());
+        }
         assert!(recovered
             .transform(input(1))
             .await
@@ -747,13 +891,93 @@ async fn cancelled_committed_outputs(backend: Backend) {
                     .envelope
                     .system()
                     .sequence(),
-                2
+                if entry == EntryPoint::TransactionBody {
+                    3
+                } else {
+                    2
+                }
             );
         }
+
         recovered.stop().await.expect("stop");
     }
 }
 
+#[tokio::test]
+async fn transaction_query_body_failed_confirmation_replays_identical_results_without_recalculation(
+) {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        let temp = tempfile::tempdir().expect("temp");
+        let base = provider_for(temp.path(), backend);
+        let fault = Injection::new(Fault::DeliveryConfirmed);
+        let output;
+        {
+            let query = ContinuousQueryTransformer::new(
+                definition(false),
+                Arc::new(Provider {
+                    inner: base.clone(),
+                    fault: fault.clone(),
+                }),
+            )
+            .await
+            .expect("construct");
+            let mut query = TransactionTransformer::from_query(query);
+            query.start().await.expect("start");
+            output = query.transform(input(1)).await.expect("commit result");
+            fault.armed.store(true, Ordering::Release);
+            assert!(query.delivery_completed(&output).await.is_err());
+            query.stop().await.expect("cleanup");
+        }
+        {
+            let query = ContinuousQueryTransformer::new(definition(false), base.clone())
+                .await
+                .expect("reopen");
+            let mut query = TransactionTransformer::from_query(query);
+            query.start().await.expect("start");
+            assert!(query.has_pending_emissions());
+            let replay = query.continue_transform().await.expect("replay");
+            assert_eq!(replay.len(), 1);
+            assert_ne!(replay[0].envelope.id(), output[0].envelope.id());
+            assert_eq!(
+                QueryRecoveryIdentity::from_envelope(&replay[0].envelope).unwrap(),
+                QueryRecoveryIdentity::from_envelope(&output[0].envelope).unwrap()
+            );
+            assert_eq!(
+                QueryChangeCodec::query_sequence(&replay[0].envelope).unwrap(),
+                1
+            );
+            assert_eq!(
+                QueryChangeCodec::query_generation(&replay[0].envelope).unwrap(),
+                QueryChangeCodec::query_generation(&output[0].envelope).unwrap()
+            );
+            assert_eq!(replay[0].envelope.system().sequence(), 2);
+            let result = QueryChangeCodec::to_legacy_result(&replay[0].envelope).expect("result");
+            assert!(matches!(result.results.as_slice(),
+                        [drasi_lib::channels::ResultDiff::Add { data, .. }] if data == &serde_json::json!({"name":"name-1"})));
+            let snapshot = query.query_results().unwrap().snapshot().unwrap();
+            assert_eq!(snapshot.as_of_sequence, 1);
+            assert_eq!(snapshot.rows.len(), 1);
+            query
+                .delivery_completed(&replay)
+                .await
+                .expect("confirm replay");
+            assert!(query
+                .transform(input(1))
+                .await
+                .expect("deduplicated input")
+                .is_empty());
+            query.stop().await.expect("stop");
+        }
+        let query = ContinuousQueryTransformer::new(definition(false), base)
+            .await
+            .expect("reopen confirmed");
+        let mut query = TransactionTransformer::from_query(query);
+        query.start().await.expect("start");
+        assert!(!query.has_pending_emissions());
+        assert_eq!(query.query_results().unwrap().replay(0).unwrap().len(), 1);
+        query.stop().await.expect("cleanup");
+    }
+}
 #[tokio::test]
 async fn strict_recovery_rejects_missing_or_gapped_committed_output() {
     for backend in [Backend::Computation, Backend::OrdinaryPlugin] {

@@ -67,7 +67,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@37461a1de4134bec919a737ee9ba018e72011b7c # v2.52.7
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Cache Cargo registry
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -107,6 +107,7 @@ jobs:
           REDIS_URL: redis://localhost:6379
           DRASI_NATIVE_NETWORK_PLUGIN: ${{ github.workspace }}/target/debug/libdrasi_computation_network.so
         run: |
+          cargo llvm-cov clean --profraw-only
           cargo llvm-cov --workspace \
             --exclude drasi-host-sdk \
             --exclude drasi-source-postgres --exclude drasi-source-http --exclude drasi-source-grpc \
@@ -128,7 +129,14 @@ jobs:
             --exclude drasi-ffi-primitives --exclude drasi-plugin-sdk \
             --exclude drasi-mssql-common \
             --exclude xtask --exclude query-perf --exclude query-example \
-            --lcov --output-path core-lcov.info
+            --features drasi-lib/computation-rocksdb-tests,lib-integration-tests/computation-middleware-tests,lib-integration-tests/garnet-tests \
+            --no-report -- --test-threads=1
+          cargo llvm-cov --no-report -p drasi-index-rocksdb \
+            --features computation --test computation_result_transactions --test outbox_live_results_tests
+          cargo llvm-cov --no-report -p drasi-index-garnet \
+            --features computation --test computation_resources --test outbox_live_results_tests \
+            -- --include-ignored --test-threads=1
+          cargo llvm-cov report --lcov --output-path core-lcov.info
 
       - name: Upload core coverage to Coveralls
         uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
@@ -167,7 +175,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@37461a1de4134bec919a737ee9ba018e72011b7c # v2.52.7
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Cache Cargo registry
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -203,6 +211,7 @@ jobs:
         env:
           REDIS_URL: redis://localhost:6379
         run: |
+          cargo llvm-cov clean --profraw-only
           cargo llvm-cov \
             -p drasi-source-postgres \
             -p drasi-source-http \
@@ -216,7 +225,9 @@ jobs:
             -p drasi-bootstrap-postgres \
             -p drasi-bootstrap-application \
             -p drasi-plugin-sdk \
-            --lcov --output-path plugins-lcov.info
+            --no-report
+          cargo llvm-cov --no-report -p drasi-host-sdk --lib
+          cargo llvm-cov report --lcov --output-path plugins-lcov.info
 
       - name: Upload plugin coverage to Coveralls
         uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6

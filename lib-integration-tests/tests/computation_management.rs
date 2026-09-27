@@ -54,7 +54,7 @@ impl Factory {
             created,
             descriptor: FactoryDescriptor {
                 implementation: ImplementationIdentity::try_new("test/managed-service", "1")
-                    .unwrap(),
+                    .expect("implementation"),
                 role: ComponentRole::Service,
                 configuration_version: 1,
                 configuration: ConfigurationSchema {
@@ -90,29 +90,33 @@ impl ComponentFactory for Factory {
         }
         Ok(ConstructedComponent::service(Box::new(Service {
             descriptor: context.specification.descriptor.clone(),
-            config: serde_json::to_value(context.configuration()).unwrap(),
+            config: serde_json::to_value(context.configuration()).expect("factory configuration"),
         })))
     }
 }
 
 fn registry(created: Arc<AtomicUsize>) -> FactoryRegistry {
     let mut factories = FactoryRegistry::standard();
-    factories.register(Arc::new(Factory::new(created))).unwrap();
+    factories
+        .register(Arc::new(Factory::new(created)))
+        .expect("unique factory");
     factories
 }
 
 fn desired(values: &[(&str, bool)]) -> DesiredInstance {
     let mut definition = ComputationGraph::empty("application")
-        .unwrap()
+        .expect("empty graph")
         .snapshot()
         .select(GraphSelection::All)
-        .unwrap();
+        .expect("complete topology");
     definition.components = values
         .iter()
         .map(|(id, fail)| {
-            let descriptor =
-                ComponentDescriptor::try_new(ComponentId::try_new(*id).unwrap(), Vec::new())
-                    .unwrap();
+            let descriptor = ComponentDescriptor::try_new(
+                ComponentId::try_new(*id).expect("component ID"),
+                Vec::new(),
+            )
+            .expect("service descriptor");
             DesiredComponent {
                 descriptor: descriptor.clone(),
                 role: ComponentRole::Service,
@@ -125,7 +129,7 @@ fn desired(values: &[(&str, bool)]) -> DesiredInstance {
                     role: ComponentRole::Service,
                     completion: None,
                     implementation: ImplementationIdentity::try_new("test/managed-service", "1")
-                        .unwrap(),
+                        .expect("implementation"),
                     configuration_version: 1,
                     configuration: [(Arc::from("fail"), ConfigurationValue::Literal(json!(fail)))]
                         .into(),
@@ -449,7 +453,32 @@ impl ConfigurationStore for FaultStore {
 #[async_trait]
 impl ConfigurationSession for FaultSession {
     async fn load(&self) -> Result<CommittedConfiguration> {
-        self.inner.load().await
+        if self
+            .fault
+            .compare_exchange(6, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            anyhow::bail!("injected failure confirming committed configuration");
+        }
+        let mut committed = self.inner.load().await?;
+        for fault in 7..=9 {
+            if self
+                .fault
+                .compare_exchange(fault, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                match fault {
+                    7 => committed.revision = committed.revision.saturating_sub(1),
+                    8 => committed.desired = DesiredInstance::default(),
+                    9 => {
+                        committed.revision += 1;
+                        committed.desired.version = 0;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        Ok(committed)
     }
     async fn commit(
         &self,
@@ -464,12 +493,22 @@ impl ConfigurationSession for FaultSession {
         if fault == 4 {
             std::process::exit(70);
         }
-        let receipt = self.inner.commit(expected, id, definition).await?;
+        let mut receipt = self.inner.commit(expected, id, definition).await?;
         if fault == 2 {
             anyhow::bail!("injected lost response after commit");
         }
         if fault == 3 {
             std::process::exit(71);
+        }
+        if fault == 5 {
+            self.fault.store(6, Ordering::SeqCst);
+            anyhow::bail!("injected response loss with unavailable confirmation");
+        }
+        match fault {
+            10 => receipt.request_id = "different-request".into(),
+            11 => receipt.revision += 1,
+            12 => receipt.durable = false,
+            _ => {}
         }
         Ok(receipt)
     }
@@ -485,6 +524,90 @@ impl ConfigurationSession for FaultSession {
     async fn close(&self) -> Result<()> {
         self.inner.close().await
     }
+}
+
+#[tokio::test]
+async fn inconsistent_store_receipts_do_not_report_acceptance_or_start_construction() -> Result<()>
+{
+    for fault_value in [10, 11, 12] {
+        let directory = tempfile::tempdir()?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let fault = Arc::new(AtomicUsize::new(0));
+        let core = DrasiLib::builder()
+            .with_component_factories(registry(count.clone()))
+            .with_configuration_store(Arc::new(FaultStore {
+                inner: Arc::new(RedbConfigurationStore::new(
+                    directory.path().join("receipts.redb"),
+                    [27; 32],
+                )?),
+                fault: fault.clone(),
+            }))
+            .build()
+            .await?;
+        fault.store(fault_value, Ordering::SeqCst);
+        let outcome = core
+            .apply_desired_state(0, "requested", desired(&[("saved", false)]))
+            .await;
+        assert!(
+            outcome.is_err(),
+            "invalid receipt {fault_value} was accepted: {outcome:?}"
+        );
+        assert!(core.desired_configuration().is_err());
+        assert!(!core.management_status().await?.converged());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        let receipt = core.configuration_receipt("requested").await?.unwrap();
+        assert_eq!(receipt.request_id, "requested");
+        assert_eq!(receipt.revision, 1);
+        assert!(receipt.durable);
+        assert!(core.reconcile_desired_state().await?.converged());
+        assert_eq!(core.desired_configuration()?.revision, 1);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        core.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn regressed_changed_and_invalid_store_reads_cannot_replace_confirmed_state() -> Result<()> {
+    for (fault_value, reason) in [
+        (7, "regressed"),
+        (8, "without advancing"),
+        (9, "invalid persisted desired configuration"),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let fault = Arc::new(AtomicUsize::new(0));
+        let core = DrasiLib::builder()
+            .with_component_factories(registry(count.clone()))
+            .with_configuration_store(Arc::new(FaultStore {
+                inner: Arc::new(RedbConfigurationStore::new(
+                    directory.path().join("reads.redb"),
+                    [29; 32],
+                )?),
+                fault: fault.clone(),
+            }))
+            .build()
+            .await?;
+        core.apply_desired_state(0, "initial", desired(&[("saved", false)]))
+            .await?;
+        assert!(core.reconcile_desired_state().await?.converged());
+        let confirmed = core.desired_configuration()?;
+        fault.store(fault_value, Ordering::SeqCst);
+        let error = core.reconcile_desired_state().await.unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+        assert!(core.desired_configuration().is_err());
+        assert!(!core.management_status().await?.converged());
+        assert_eq!(
+            core.snapshot_desired_configuration("authoritative").await?,
+            confirmed
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(core.reconcile_desired_state().await?.converged());
+        assert_eq!(core.desired_configuration()?, confirmed);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        core.shutdown().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -522,17 +645,74 @@ async fn commit_failure_prevents_construction_and_lost_response_is_resolved_by_r
         core.configuration_receipt("after").await?.unwrap().revision,
         1
     );
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    let live = core.management_status().await?;
+    assert_eq!(live.revision, 1);
+    assert!(live.converged(), "{live:?}");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     core.shutdown().await?;
     let restored = open(store, "fault", count.clone()).await?;
-    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
     let receipt = restored
         .apply_desired_state(0, "after", desired(&[("saved", false)]))
         .await?;
     assert_eq!(receipt.revision, 1);
     assert!(receipt.durable);
     assert!(restored.reconcile_desired_state().await?.converged());
-    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
     restored.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_commit_confirmation_is_explicit_and_reconcile_reloads_authoritative_state(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("uncertain.redb"),
+        [12; 32],
+    )?);
+    let count = Arc::new(AtomicUsize::new(0));
+    let fault = Arc::new(AtomicUsize::new(0));
+    let core = DrasiLib::builder()
+        .with_id("uncertain")
+        .with_component_factories(registry(count.clone()))
+        .with_configuration_store(Arc::new(FaultStore {
+            inner: store,
+            fault: fault.clone(),
+        }))
+        .build()
+        .await?;
+    fault.store(5, Ordering::SeqCst);
+    let error = core
+        .apply_desired_state(0, "uncertain", desired(&[("saved", false)]))
+        .await
+        .expect_err("the response and its confirmation are unavailable");
+    assert!(
+        error.to_string().contains("could not be confirmed"),
+        "{error}"
+    );
+    assert!(
+        core.desired_configuration().is_err(),
+        "unconfirmed cached state must not appear authoritative"
+    );
+    let status = core.management_status().await?;
+    assert!(!status.converged());
+    assert!(status.error.is_some());
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        core.configuration_receipt("uncertain")
+            .await?
+            .unwrap()
+            .revision,
+        1
+    );
+    let recovered = core.reconcile_desired_state().await?;
+    assert_eq!(recovered.revision, 1);
+    assert!(recovered.converged(), "{recovered:?}");
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    core.shutdown().await?;
     Ok(())
 }
 
@@ -795,9 +975,11 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
     core.apply_desired_state(1, "two", first).await?;
     assert!(core.reconcile_desired_state().await?.converged());
     assert_eq!(core.desired_configuration()?.revision, 2);
-    assert!(cleaned.load(Ordering::SeqCst) >= 2);
+    assert_eq!(created.load(Ordering::SeqCst), 2);
+    assert_eq!(cleaned.load(Ordering::SeqCst), 1);
     assert_eq!(count.load(Ordering::SeqCst), 2);
     core.shutdown().await?;
+    assert_eq!(cleaned.load(Ordering::SeqCst), 2);
     Ok(())
 }
 

@@ -53,6 +53,109 @@ use crate::descriptor::{
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
 
+struct StatusTarget {
+    callback: Option<super::callbacks::LifecycleCallbackFn>,
+    context: SendPtr<c_void>,
+    fallback: LifecycleEmitterFn,
+    component_type: &'static str,
+}
+
+pub(crate) struct StatusForwarder {
+    target: Arc<std::sync::Mutex<Option<StatusTarget>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl StatusForwarder {
+    fn new(
+        mut receiver: ComponentUpdateReceiver,
+        context: &FfiRuntimeContext,
+        component_type: &'static str,
+        fallback: LifecycleEmitterFn,
+        runtime: &tokio::runtime::Handle,
+    ) -> Self {
+        let target = Arc::new(std::sync::Mutex::new(Some(StatusTarget {
+            callback: context.lifecycle_callback,
+            context: SendPtr(context.lifecycle_ctx),
+            fallback,
+            component_type,
+        })));
+        let shared = target.clone();
+        let task = runtime.spawn(async move {
+            while let Some(drasi_lib::channels::ComponentUpdate::Status {
+                component_id,
+                status,
+                message,
+            }) = receiver.recv().await
+            {
+                // Start/stop callbacks already report lifecycle operations. The
+                // status channel also carries errors raised by background work.
+                if status != ComponentStatus::Error {
+                    continue;
+                }
+                let target = match shared.lock() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        log::error!("Plugin status callback lock poisoned: {error}");
+                        break;
+                    }
+                };
+                let Some(target) = target.as_ref() else {
+                    break;
+                };
+                let message = message.as_deref().unwrap_or("");
+                if let Some(callback) = target.callback {
+                    let event = FfiLifecycleEvent {
+                        component_id: FfiStr::from_str(&component_id),
+                        component_type: FfiStr::from_str(target.component_type),
+                        event_type: FfiLifecycleEventType::Error,
+                        message: FfiStr::from_str(message),
+                        timestamp_us: super::now_us(),
+                    };
+                    callback(target.context.0.cast_mut(), &event);
+                } else {
+                    (target.fallback)(&component_id, FfiLifecycleEventType::Error, message);
+                }
+            }
+        });
+        Self { target, task }
+    }
+}
+
+impl Drop for StatusForwarder {
+    fn drop(&mut self) {
+        // Revoke and join any synchronous callback before its host context can
+        // be released. The cancelled task retains no usable foreign pointer.
+        self.target
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!("Revoking poisoned plugin status callback: {error}");
+                error.into_inner()
+            })
+            .take();
+        self.task.abort();
+    }
+}
+
+fn forward_status(
+    slot: &std::sync::Mutex<Option<StatusForwarder>>,
+    receiver: ComponentUpdateReceiver,
+    context: &FfiRuntimeContext,
+    component_type: &'static str,
+    fallback: LifecycleEmitterFn,
+    runtime: &tokio::runtime::Handle,
+) {
+    *slot.lock().unwrap_or_else(|error| {
+        log::error!("Replacing poisoned plugin status forwarder: {error}");
+        error.into_inner()
+    }) = Some(StatusForwarder::new(
+        receiver,
+        context,
+        component_type,
+        fallback,
+        runtime,
+    ));
+}
+
 /// Wraps a closure in `catch_unwind`, returning `default` on panic.
 ///
 /// Use this for `extern "C"` functions that don't return `FfiResult` (so
@@ -582,8 +685,7 @@ pub(crate) struct SourceWrapper<T: Source + 'static> {
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     /// Cached instance_id from FfiRuntimeContext (set during initialize).
     pub instance_id: std::sync::RwLock<String>,
-    /// Keeps the dummy status_rx alive so inner source's status_tx.send() doesn't error.
-    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+    pub status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
 }
 
 /// Build a SourceVtable from a concrete type implementing the DrasiLib Source trait.
@@ -863,11 +965,15 @@ pub fn build_source_vtable<T: Source + 'static>(
         }
 
         let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        // Keep the receiver alive so inner source's status_tx.send() doesn't error
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
-        }
         let handle = (w.runtime_handle)().handle().clone();
+        forward_status(
+            &w.status_forwarder,
+            status_rx,
+            ffi_ctx,
+            "source",
+            w.lifecycle_emitter,
+            &handle,
+        );
         let ptr = SendPtr(state as *const SourceWrapper<T>);
         dispatch_to_runtime(&handle, async move {
             let inner = unsafe { ptr.as_ref() };
@@ -940,7 +1046,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
     });
 
     SourceVtable {
@@ -988,7 +1094,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+        status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -1255,10 +1361,15 @@ pub fn build_source_vtable_from_boxed(
         }
 
         let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
-        }
         let handle = (w.runtime_handle)().handle().clone();
+        forward_status(
+            &w.status_forwarder,
+            status_rx,
+            ffi_ctx,
+            "source",
+            w.lifecycle_emitter,
+            &handle,
+        );
         let inner_ptr = SendPtr(state as *const DynSourceWrapper);
         dispatch_to_runtime(&handle, async move {
             let inner = unsafe { inner_ptr.as_ref() };
@@ -1328,7 +1439,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
     });
 
     SourceVtable {
@@ -1369,7 +1480,7 @@ pub(crate) struct ReactionWrapper<T: Reaction + 'static> {
     pub instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     pub instance_id: std::sync::RwLock<String>,
-    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+    pub status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
 }
 
 /// Build a ReactionVtable from a concrete type implementing the DrasiLib Reaction trait.
@@ -1563,10 +1674,15 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         }
 
         let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
-        }
         let handle = (w.runtime_handle)().handle().clone();
+        forward_status(
+            &w.status_forwarder,
+            status_rx,
+            ffi_ctx,
+            "reaction",
+            w.lifecycle_emitter,
+            &handle,
+        );
         let ptr = SendPtr(state as *const ReactionWrapper<T>);
         dispatch_to_runtime(&handle, async move {
             let inner = unsafe { ptr.as_ref() };
@@ -1706,7 +1822,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
     });
 
     ReactionVtable {
@@ -1749,7 +1865,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+        status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
     }
 
     // The state pointer points to a heap-allocated `Arc<DynReactionWrapper>`.
@@ -1944,10 +2060,15 @@ pub fn build_reaction_vtable_from_boxed(
         }
 
         let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
-        }
         let handle = (w.runtime_handle)().handle().clone();
+        forward_status(
+            &w.status_forwarder,
+            status_rx,
+            ffi_ctx,
+            "reaction",
+            w.lifecycle_emitter,
+            &handle,
+        );
         let arc = wrapper_arc(state);
         dispatch_to_runtime(
             &handle,
@@ -2100,7 +2221,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        status_forwarder: std::sync::Mutex::new(None),
     });
     // Heap-allocate the Arc handle and pass its raw pointer as the FFI
     // state. drop_fn reclaims the Box (and decrements the Arc); any
@@ -2926,10 +3047,8 @@ fn build_source_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
-    // Create a dummy mpsc channel pair.
-    // The update_tx is provided to satisfy the SourceRuntimeContext signature.
-    // In the plugin-side context, status updates flow through the FFI lifecycle callback,
-    // not through this channel. The receiver is returned so it stays alive.
+    // The wrapper drains status updates and forwards background errors through
+    // the lifecycle callback independently of source data processing.
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let wal_provider: Option<Arc<dyn drasi_lib::wal::WalProvider>> =
@@ -3868,6 +3987,111 @@ pub fn build_secret_store_plugin_vtable<T: SecretStorePluginDescriptor + 'static
 #[cfg(test)]
 #[path = "subscription_push_tests.rs"]
 mod subscription_push_tests;
+
+#[cfg(test)]
+mod status_forwarder_tests {
+    use super::*;
+    use drasi_lib::channels::ComponentStatusHandle;
+    use std::{sync::Mutex, time::Duration};
+
+    #[derive(Default)]
+    struct Capture {
+        errors: Mutex<Vec<(String, String, String)>>,
+        changed: tokio::sync::Notify,
+    }
+
+    extern "C" fn capture(context: *mut c_void, event: *const FfiLifecycleEvent) {
+        let capture = unsafe { &*context.cast::<Capture>() };
+        let event = unsafe { &*event };
+        capture.errors.lock().unwrap().push(unsafe {
+            (
+                event.component_id.to_string(),
+                event.component_type.to_string(),
+                event.message.to_string(),
+            )
+        });
+        capture.changed.notify_one();
+    }
+
+    fn unexpected_fallback(_: &str, _: FfiLifecycleEventType, _: &str) {
+        panic!("the instance callback must be selected");
+    }
+
+    async fn saturated_status_channels() {
+        for kind in ["source", "reaction"] {
+            let capture_state = Box::<Capture>::default();
+            let context = FfiRuntimeContext {
+                instance_id: FfiStr::from_str("status-instance"),
+                component_id: FfiStr::from_str("status-component"),
+                state_store: std::ptr::null(),
+                log_callback: None,
+                log_ctx: std::ptr::null_mut(),
+                lifecycle_callback: Some(capture),
+                lifecycle_ctx: std::ptr::from_ref(capture_state.as_ref()).cast_mut().cast(),
+                identity_provider: std::ptr::null(),
+                snapshot_fetcher: std::ptr::null(),
+                wal_provider: std::ptr::null(),
+            };
+            let (sender, receiver) = if kind == "source" {
+                let (context, receiver) = build_source_runtime_context(&context);
+                (context.update_tx, receiver)
+            } else {
+                let (context, receiver) = build_reaction_runtime_context(&context);
+                (context.update_tx, receiver)
+            };
+            let forwarder = StatusForwarder::new(
+                receiver,
+                &context,
+                kind,
+                unexpected_fallback,
+                &tokio::runtime::Handle::current(),
+            );
+            let handle = ComponentStatusHandle::new_wired("status-component", sender.clone());
+            tokio::time::timeout(Duration::from_secs(2), async {
+                for _ in 0..128 {
+                    handle.set_status(ComponentStatus::Running, None).await;
+                }
+                handle
+                    .set_status(ComponentStatus::Error, Some("background failure".into()))
+                    .await;
+                capture_state.changed.notified().await;
+            })
+            .await
+            .expect("status reporting must not block at the 17th update");
+            assert_eq!(
+                *capture_state.errors.lock().unwrap(),
+                vec![(
+                    "status-component".into(),
+                    kind.into(),
+                    "background failure".into()
+                )]
+            );
+            drop(forwarder);
+            drop(capture_state);
+            tokio::time::timeout(Duration::from_secs(2), sender.closed())
+                .await
+                .expect("forwarder releases receiver");
+            assert!(sender
+                .send(drasi_lib::channels::ComponentUpdate::Status {
+                    component_id: "late".into(),
+                    status: ComponentStatus::Error,
+                    message: None,
+                })
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn status_saturation_and_callback_revocation_current_thread() {
+        saturated_status_channels().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_saturation_and_callback_revocation_multi_thread() {
+        saturated_status_channels().await;
+    }
+}
 
 #[cfg(test)]
 mod snapshot_stream_tests {

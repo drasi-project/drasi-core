@@ -45,6 +45,18 @@ cargo() {
         package=drasi-plugin-sdk
         profile=plugin-factories
         sources=(components/plugin-sdk/tests/computation_factories.rs)
+    elif [[ " $* " == *" -p drasi-host-sdk "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-host-sdk
+        profile=host-sdk
+        sources=(lib components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs)
+    elif [[ " $* " == *" -p drasi-index-garnet "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-index-garnet
+        profile=garnet-backends
+        sources=(components/indexes/garnet/tests/computation_resources.rs components/indexes/garnet/tests/outbox_live_results_tests.rs)
     fi
     local source binary
     for source in "${sources[@]}"; do
@@ -88,12 +100,17 @@ cargo() {
                     ignored[$3] = 1;
                     drivers[$4] = 1;
                 }
+                next;
+            }
+            FILENAME == ARGV[5] {
+                if ($6 == package && $7 == binary && ($5 == "all" || $5 == profile || ($5 == "default" && package == "drasi-lib"))) found[$8] = 1;
             }
             END {
                 for (name in replacements) found[name] = 1;
                 for (name in found) {
                     if (omit == "capability" && name == "imported_external_components_must_be_supplied_and_execute_in_a_fresh_graph") continue;
                     if (omit == "mapping" && name == "full_pipeline_preserves_main_ownership_subscription_and_removal_results") continue;
+                    if (omit == "requirement" && name == "live_same_path_journal_replacement_preserves_unhandled_data_and_closes_the_old_owner") continue;
                     if (listing == "true") {
                         print name ": test";
                     } else if (omit != "execution" || binary != "lib" || omitted++) {
@@ -105,7 +122,7 @@ cargo() {
                 }
             }
         ' "$mappings" "$inventory" lib/tests/runtime_parity/computation-contracts.tsv \
-            lib/tests/runtime_parity/allowed-ignored.tsv
+            lib/tests/runtime_parity/allowed-ignored.tsv lib/tests/runtime_parity/requirements.tsv
         if [[ "$listing" == true ]]; then
             printf 'synthetic_runner_check: test\n'
         elif [[ "${RUNNER_CHECK_STYLE:-}" == interleaved ]]; then
@@ -127,13 +144,13 @@ export -f cargo
 bash lib/tests/run-runtime-parity.sh "$logs/valid" > "$logs/check.log" 2>&1
 RUNNER_CHECK_STYLE=interleaved bash lib/tests/run-runtime-parity.sh "$logs/interleaved" \
     >> "$logs/check.log" 2>&1
-for omitted in baseline suite discovery execution ignored failure capability mapping worker-driver lost-result; do
+for omitted in baseline suite discovery execution ignored failure capability mapping worker-driver lost-result requirement; do
     if RUNNER_CHECK_OMIT="$omitted" bash lib/tests/run-runtime-parity.sh "$logs/missing-$omitted" \
         >> "$logs/check.log" 2>&1; then
         printf 'Runner accepted missing %s coverage.\n' "$omitted" >&2
         exit 1
     fi
-    for profile in default no-default-features extra-capabilities integration plugin-factories; do
+    for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk garnet-backends; do
         test -f "$logs/missing-$omitted/$profile.exit-code"
     done
 done

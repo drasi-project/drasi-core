@@ -156,6 +156,9 @@ pub struct TopologyBindings {
     pub components: BTreeMap<String, ConstructedComponent>,
     pub pipes: BTreeMap<String, Box<dyn PipeProvider>>,
     pub resources: BTreeMap<ResourceId, ResourceHandle>,
+    /// Reconciliation-only bindings, constructed after old owners are released.
+    /// An ID cannot also have an already constructed resource binding.
+    pub resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     pub readiness_required: BTreeSet<ComponentId>,
     pub defer_activation: bool,
     /// Host-managed input connections committed with the consumer declaration.
@@ -262,6 +265,9 @@ impl DesiredTopology {
         Ok(topology)
     }
     pub fn build(&self, mut bindings: TopologyBindings) -> GraphResult<ComputationGraph> {
+        if !bindings.resource_constructors.is_empty() {
+            return Err(topology("deferred resources require graph reconciliation"));
+        }
         if self.version != 1 {
             return Err(topology("unsupported desired topology version"));
         }

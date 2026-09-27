@@ -1,4 +1,9 @@
-# package	binary	case	required-driver	reason
-drasi-lib	outbox_serialization_throughput_probe	measure_plugin_result_encoding_cost	-	Manual serialization timing diagnostic, not a runtime contract.
-lib-integration-tests	computation_middleware_durability	middleware_recovery_crash_worker	abrupt_process_exit_recovers_state_delivery_and_partial_fanout	Worker explicitly executed and checked by the crash driver.
-lib-integration-tests	computation_transaction_durability	transaction_crash_worker	process_crashes_preserve_transaction_atomicity_and_partial_fanout_recovery	Worker explicitly executed and checked by the crash driver.
+# package	binary	case	required-driver	reason	owner	expires
+drasi-lib	outbox_serialization_throughput_probe	measure_plugin_result_encoding_cost	-	Manual serialization timing diagnostic, not a runtime contract.	diagnostic	-
+lib-integration-tests	computation_middleware_durability	middleware_recovery_crash_worker	abrupt_process_exit_recovers_state_delivery_and_partial_fanout	Worker explicitly executed and checked by the crash driver.	runtime	-
+lib-integration-tests	computation_transaction_durability	transaction_crash_worker	process_crashes_preserve_transaction_atomicity_and_partial_fanout_recovery	Worker explicitly executed and checked by the crash driver.	runtime	-
+lib-integration-tests	computation_management	management_crash_worker	process_crashes_before_commit_after_commit_and_during_creation_recover_exact_intent	Worker explicitly executed and checked by the crash driver.	runtime	-
+lib-integration-tests	computation_managed_resources	managed_resource_crash_worker	process_crashes_during_resource_handover_restore_target_and_pending_data	Worker explicitly executed and checked by the crash driver.	runtime	-
+lib-integration-tests	computation_transaction_query	query_handoff_worker	process_crashes_preserve_atomic_query_state_and_every_durable_handoff	Worker explicitly executed and checked by the crash driver.	runtime	-
+lib-integration-tests	computation_transaction_query	scheduled_query_worker	scheduled_work_and_its_committed_output_survive_process_crashes	Worker explicitly executed and checked by the crash driver.	runtime	-
+drasi-host-sdk	integration_test	test_stress_rapid_subscribe_drop_under_load	-	Existing cross-platform flake tracked by requirements.tsv A05; cannot qualify DLL ownership.	plugin-maintainers	2026-10-26

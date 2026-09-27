@@ -22,7 +22,7 @@ use super::*;
 use crate::computation::v1::{
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentFactory,
     ComponentRole, ConfigurationValue, PipeCapabilities, PipeCapability, PipeProvider,
-    PipeRequirements, PortDirection, RemovalPolicy, ResourceId,
+    PipeRequirements, PortDirection, RemovalPolicy, ResourceConstructor, ResourceId,
 };
 use std::{future::Future, num::NonZeroUsize};
 
@@ -322,6 +322,14 @@ pub(super) fn preview(
                         || old.resource_configurations.get(&resource.id)
                             != target.resource_configurations.get(&resource.id)
                         || !graph.resource_handles.contains_key(&resource.id)
+                        || graph
+                            .observed()
+                            .resources
+                            .get(&resource.id)
+                            .is_some_and(|state| {
+                                state.realization != ResourceRealization::Created
+                                    || state.failure.is_some()
+                            })
                     {
                         resources.insert(resource.id.clone());
                     }
@@ -1024,6 +1032,7 @@ struct Prepared {
     components: BTreeMap<ComponentId, Component>,
     pipes: BTreeMap<EdgeDefinition, Box<dyn PipeProvider>>,
     resources: BTreeMap<ResourceId, ResourceHandle>,
+    resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
 }
 
@@ -1076,6 +1085,19 @@ fn prepare(
         .collect();
     let mut resources = graph.resource_handles.clone();
     for id in &plan.remove_resources {
+        resources.remove(id);
+    }
+    for id in bindings.resource_constructors.keys() {
+        if !plan.resources.contains(id) || !declarations.contains_key(id) {
+            return Err(topology(
+                "resource constructor was not included in the preview",
+            ));
+        }
+        if bindings.resources.contains_key(id) {
+            return Err(topology(
+                "resource has both a constructor and a constructed binding",
+            ));
+        }
         resources.remove(id);
     }
     for (id, handle) in std::mem::take(&mut bindings.resources) {
@@ -1230,6 +1252,7 @@ fn prepare(
         components,
         pipes,
         resources,
+        resource_constructors: bindings.resource_constructors,
         factories,
     })
 }
@@ -1241,7 +1264,26 @@ async fn drive<T>(
     cancel: &mut watch::Receiver<bool>,
     operation: impl Future<Output = GraphResult<T>>,
 ) -> GraphResult<T> {
-    let operation = tokio::time::timeout(graph.cleanup_timeout, operation);
+    drive_with_deadline(
+        graph,
+        operations,
+        controls,
+        cancel,
+        graph.cleanup_timeout,
+        operation,
+    )
+    .await
+}
+
+async fn drive_with_deadline<T>(
+    graph: &ComputationGraph,
+    operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    deadline: std::time::Duration,
+    operation: impl Future<Output = GraphResult<T>>,
+) -> GraphResult<T> {
+    let operation = tokio::time::timeout(deadline, operation);
     tokio::pin!(operation);
     loop {
         operations.advance_start(graph)?;
@@ -1595,7 +1637,12 @@ pub(super) async fn execute(
             let Some(spec) = graph.snapshot.resources.get(id) else {
                 continue;
             };
-            let Some(handle) = graph.resource_handles.get(id).cloned() else {
+            let Some(handle) = graph
+                .resource_handles
+                .get(id)
+                .or_else(|| graph.pending_resource_cleanup.get(id))
+                .cloned()
+            else {
                 continue;
             };
             if spec.ownership == ResourceOwnership::Graph {
@@ -1626,6 +1673,7 @@ pub(super) async fn execute(
                     report.failures.push(failure);
                 } else {
                     graph.resource_handles.remove(id);
+                    graph.pending_resource_cleanup.remove(id);
                     update(graph, |state| {
                         state.resources.get_mut(id).expect("resource").realization =
                             ResourceRealization::Released
@@ -1674,6 +1722,15 @@ pub(super) async fn execute(
     report.revision = graph.snapshot.revision;
     report.committed = true;
     report.removed = plan.remove.clone();
+    realize_resources(
+        graph,
+        operations,
+        controls,
+        cancel,
+        &mut prepared,
+        &mut report,
+    )
+    .await?;
     realize(graph, operations, controls, cancel, &plan, &mut report).await?;
     resume(graph, operations, &plan.pause)?;
     let start: BTreeSet<_> = plan
@@ -1707,6 +1764,74 @@ pub(super) async fn execute(
         report.summary = OperationSummary::CompletedWithFailures;
     }
     Ok(report)
+}
+
+async fn realize_resources(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    prepared: &mut Prepared,
+    report: &mut ReconciliationReport,
+) -> GraphResult<()> {
+    for (id, constructor) in std::mem::take(&mut prepared.resource_constructors) {
+        let specification = graph.snapshot.resources[&id].clone();
+        let result = drive_with_deadline(
+            graph,
+            operations,
+            controls,
+            cancel,
+            std::time::Duration::from_secs(30),
+            async {
+                constructor
+                    .construct()
+                    .await
+                    .map_err(|source| GraphError::ResourceCreation {
+                        resource: id.clone(),
+                        source,
+                    })
+            },
+        )
+        .await;
+        let result = match result {
+            Ok(handle) if handle.role() == specification.role => {
+                graph.resource_handles.insert(id.clone(), handle);
+                Ok(())
+            }
+            Ok(handle) => {
+                if specification.ownership == ResourceOwnership::Graph {
+                    graph.pending_resource_cleanup.insert(id.clone(), handle);
+                }
+                Err(GraphError::ResourceCreation {
+                    resource: id.clone(),
+                    source: anyhow::anyhow!("provider role differs from declaration"),
+                })
+            }
+            result => result.map(|_| ()),
+        };
+        let failed = match result {
+            Ok(()) => None,
+            Err(GraphError::Cancelled) => return Err(GraphError::Cancelled),
+            Err(error) => {
+                let failure = failure(error, FailurePhase::Creation);
+                report.failures.push(failure.clone());
+                Some(failure)
+            }
+        };
+        update(graph, |state| {
+            let resource = state.resources.get_mut(&id).expect("declared resource");
+            resource.realization = if graph.pending_resource_cleanup.contains_key(&id) {
+                ResourceRealization::CleanupRequired
+            } else if failed.is_some() {
+                ResourceRealization::Pending
+            } else {
+                ResourceRealization::Created
+            };
+            resource.failure = failed;
+            resource.transition_time = Utc::now();
+        });
+    }
+    Ok(())
 }
 
 fn commit_desired(
