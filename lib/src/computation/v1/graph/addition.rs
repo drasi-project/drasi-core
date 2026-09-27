@@ -254,6 +254,7 @@ impl ComponentHandle {
                 component: self.id.clone(),
                 generation: self.generation,
                 required,
+                management_access: self.control.management_access,
                 reply,
             })
             .await
@@ -272,6 +273,7 @@ impl ComponentHandle {
                 generation: self.generation,
                 port,
                 stream,
+                management_access: self.control.management_access,
                 reply,
             })
             .await
@@ -306,6 +308,7 @@ impl ComponentHandle {
                 component: self.id.clone(),
                 generation: self.generation,
                 handler,
+                management_access: self.control.management_access,
                 reply,
             })
             .await
@@ -511,7 +514,11 @@ impl GraphControl {
         let (reply, result) = oneshot::channel();
         if let Err(error) = self
             .commands
-            .send(controller::Command::Add { addition, reply })
+            .send(controller::Command::Add {
+                addition,
+                management_access: self.management_access,
+                reply,
+            })
             .await
         {
             let controller::Command::Add { addition, .. } = error.0 else {
@@ -566,6 +573,7 @@ impl GraphControl {
             .send(controller::Command::ControlConnections {
                 connections,
                 subscriptions: false,
+                management_access: self.management_access,
                 reply,
             })
             .await
@@ -584,6 +592,7 @@ impl GraphControl {
             .send(controller::Command::ControlConnections {
                 connections,
                 subscriptions: true,
+                management_access: self.management_access,
                 reply,
             })
             .await

@@ -20,6 +20,11 @@ use drasi_core::models::{
 };
 use drasi_lib::{computation::v1::*, DrasiLib};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
+#[allow(dead_code)]
+#[path = "computation_support/instance.rs"]
+mod instance_support;
+use instance_support::{instance_graph_id, InstalledComponents};
+
 use std::{
     collections::{BTreeMap, HashSet},
     num::NonZeroUsize,
@@ -259,9 +264,7 @@ async fn scenario() {
         .build()
         .await
         .expect("instance");
-    let services = drasi
-        .computation_plugin_services("plugins")
-        .expect("services");
+    let services = drasi.computation_plugin_services().expect("services");
     let factory = Arc::new(ApplicationFactory::default());
     let host = SourcePluginHost::recreatable(factory.clone(), services.clone())
         .await
@@ -280,7 +283,8 @@ async fn scenario() {
     }))
     .await
     .expect("bootstrap plugin");
-    let progress = Arc::new(QuerySourceProgress::new("plugins", id("query")).expect("progress"));
+    let progress =
+        Arc::new(QuerySourceProgress::new(instance_graph_id(), id("query")).expect("progress"));
     let stream = StreamId::try_new("app/out").expect("stream");
     let subscription = LegacySourceSubscription::new(
         host.clone(),
@@ -297,7 +301,7 @@ async fn scenario() {
     let bootstrap = LegacySourceBootstrap::new(vec![subscription.clone()]);
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
-            graph_id: "plugins".into(),
+            graph_id: instance_graph_id(),
             id: id("query"),
             query: "MATCH (n:Item) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
@@ -325,7 +329,7 @@ async fn scenario() {
     )
     .expect("descriptor");
     let mut builder = services
-        .declare(ComputationGraph::builder("plugins"))
+        .declare(ComputationGraph::builder(instance_graph_id()))
         .expect("services")
         .component(
             ComponentSpecification {
@@ -437,14 +441,13 @@ async fn scenario() {
             .provide_resource(resource(name), handle)
             .expect("provide");
     }
-    let graph = builder.build().expect("graph");
+    let graph = builder.build_components().expect("components");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
         "creation does not execute bootstrap"
     );
-    let managed = drasi
-        .add_computation_graph(graph, ComputationOptions { auto_start: false })
+    let managed = InstalledComponents::add(&drasi, graph.auto_start(false))
         .await
         .expect("register");
     assert_eq!(
@@ -520,18 +523,67 @@ async fn real_source_bootstrap_live_and_restart_multi_thread() {
         .expect("adapter deadlock");
 }
 
+struct QueryDelivery {
+    transport_sequence: u64,
+    query_sequence: u64,
+    results: Vec<drasi_lib::channels::ResultDiff>,
+}
+
 async fn receive_queries(
     output: &mut tokio::sync::broadcast::Receiver<ChangeEnvelope>,
     sequence: u64,
+    deliveries: &mut BTreeMap<String, QueryDelivery>,
+    permitted_replay: Option<u64>,
 ) {
     let mut queries = std::collections::BTreeSet::new();
-    for _ in 0..2 {
+    let mut replayed = std::collections::BTreeSet::new();
+    while queries.len() < 2 {
         let envelope = output.recv().await.expect("both queries publish");
-        assert_eq!(envelope.system().sequence(), sequence);
-        queries.insert(
-            QueryChangeCodec::metadata(&envelope)
-                .expect("metadata")
-                .query_id,
+        let query = QueryChangeCodec::metadata(&envelope)
+            .expect("metadata")
+            .query_id;
+        assert!(["first", "second"].contains(&query.as_str()));
+        let logical = QueryChangeCodec::query_sequence(&envelope).expect("query position");
+        let results = QueryChangeCodec::to_legacy_result(&envelope)
+            .expect("logical result")
+            .results;
+        let transport = envelope.system().sequence();
+        assert!(
+            transport >= logical,
+            "transport cannot precede the logical output position"
+        );
+        if let Some(previous) = deliveries.get_mut(&query) {
+            assert!(
+                transport > previous.transport_sequence,
+                "query {query} reused delivery position {transport}"
+            );
+            previous.transport_sequence = transport;
+            if logical != sequence {
+                assert_eq!(permitted_replay, Some(logical), "unexpected query replay");
+                assert_eq!(previous.query_sequence, logical);
+                assert_eq!(
+                    previous.results, results,
+                    "replayed output changed its rows or row identities"
+                );
+                assert!(
+                    replayed.insert(query),
+                    "the same pending output replayed more than once"
+                );
+                continue;
+            }
+        }
+        assert_eq!(logical, sequence);
+        deliveries.insert(
+            query.clone(),
+            QueryDelivery {
+                transport_sequence: transport,
+                query_sequence: logical,
+                results,
+            },
+        );
+        assert!(
+            queries.insert(query),
+            "duplicate newly committed query output"
         );
     }
     assert_eq!(
@@ -551,19 +603,20 @@ async fn persistent_shared_source() {
         false,
         false,
     ));
-    let drasi = DrasiLib::builder()
-        .with_id("durable-plugin-instance")
-        .with_wal_provider(wal.clone())
-        .with_default_index_provider("persistent", backend)
-        .build()
-        .await
-        .expect("instance");
     let factory = Arc::new(ApplicationFactory {
         durable: true,
         ..Default::default()
     });
+    let mut deliveries = BTreeMap::new();
     for generation in 0..2 {
-        let pipeline = drasi.computation_pipeline("durable").expect("pipeline");
+        let drasi = DrasiLib::builder()
+            .with_id("durable-plugin-instance")
+            .with_wal_provider(wal.clone())
+            .with_default_index_provider("persistent", backend.clone())
+            .build()
+            .await
+            .expect("instance");
+        let pipeline = drasi.computation_pipeline().expect("pipeline");
         let services = pipeline.services();
         let catalog = pipeline.catalog();
         let mut output = catalog.subscribe();
@@ -582,13 +635,12 @@ async fn persistent_shared_source() {
                     .build(),
             );
         }
-        let managed = drasi
-            .add_computation_graph(
-                pipeline.build().expect("graph"),
-                ComputationOptions { auto_start: false },
-            )
-            .await
-            .expect("register");
+        let managed = InstalledComponents::add(
+            &drasi,
+            pipeline.build().expect("components").auto_start(false),
+        )
+        .await
+        .expect("register");
         let start = managed.start().await.expect("start");
         assert_eq!(start.summary, OperationSummary::Completed, "{start:?}");
         if generation == 0 {
@@ -608,7 +660,7 @@ async fn persistent_shared_source() {
                 )
                 .await
                 .expect("first input");
-            receive_queries(&mut output, 1).await;
+            receive_queries(&mut output, 1, &mut deliveries, None).await;
             managed.stop().await.expect("stop both subscriptions");
             assert_eq!(factory.removed.lock().expect("removed").len(), 2);
             assert_eq!(
@@ -623,7 +675,7 @@ async fn persistent_shared_source() {
             );
             let report = managed.start().await.expect("resume");
             assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
-            receive_queries(&mut output, 2).await;
+            receive_queries(&mut output, 2, &mut deliveries, None).await;
             let settings = factory.subscriptions.lock().expect("settings").clone();
             assert_eq!(settings.len(), 4);
             for setting in &settings[2..] {
@@ -650,7 +702,7 @@ async fn persistent_shared_source() {
                 )
                 .await
                 .expect("after resume");
-            receive_queries(&mut output, 3).await;
+            receive_queries(&mut output, 3, &mut deliveries, None).await;
         } else {
             assert_eq!(
                 catalog
@@ -685,18 +737,23 @@ async fn persistent_shared_source() {
                 )
                 .await
                 .expect("last input");
-            receive_queries(&mut output, 4).await;
+            // Observation can precede durable producer confirmation of the last output.
+            receive_queries(&mut output, 4, &mut deliveries, Some(3)).await;
+            for query in ["first", "second"] {
+                let snapshot = catalog
+                    .snapshot(query, Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                assert_eq!(snapshot.as_of_sequence, 4);
+                assert_eq!(snapshot.rows.len(), 4);
+            }
         }
-        assert!(matches!(
-            wal.head_sequence("app").await,
-            Err(drasi_lib::wal::WalError::SourceNotRegistered(_))
-        ));
-        drasi
-            .remove_computation_graph("durable")
-            .await
-            .expect("dispose native graph");
+        assert_eq!(
+            wal.head_sequence("app").await.unwrap(),
+            if generation == 0 { 3 } else { 4 }
+        );
+        drasi.shutdown().await.expect("dispose instance resources");
     }
-    drasi.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -708,7 +765,7 @@ async fn actual_wal_plugin_replays_shared_source_and_recovers_reconstructed_nati
 
 async fn volatile_restart(subscription_control: bool) {
     let drasi = DrasiLib::builder().build().await.expect("instance");
-    let pipeline = drasi.computation_pipeline("volatile").expect("pipeline");
+    let pipeline = drasi.computation_pipeline().expect("pipeline");
     let factory = Arc::new(ApplicationFactory {
         subscription_control,
         ..Default::default()
@@ -730,8 +787,7 @@ async fn volatile_restart(subscription_control: bool) {
         )
         .build()
         .expect("graph");
-    let handle = drasi
-        .add_computation_graph(graph, ComputationOptions { auto_start: false })
+    let handle = InstalledComponents::add(&drasi, graph.auto_start(false))
         .await
         .expect("register");
     for epoch in 0..2 {

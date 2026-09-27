@@ -167,7 +167,7 @@ pub struct DrasiLib {
     pub(crate) log_registry: Arc<ComponentLogRegistry>,
     // Events are emitted at the authoritative computation publication boundary.
     pub(crate) component_event_broadcast_tx: ComponentEventBroadcastSender,
-    pub(crate) computation_registry: Arc<crate::computation::instance::ComputationRegistry>,
+    pub(crate) instance_graph: Arc<crate::computation::instance::InstanceGraph>,
     pub(crate) computation_runtime: Arc<crate::computation::runtime::Runtime>,
     pub(crate) management: Arc<std::sync::OnceLock<crate::management::Management>>,
 }
@@ -186,7 +186,7 @@ impl Clone for DrasiLib {
             middleware_registry: Arc::clone(&self.middleware_registry),
             log_registry: Arc::clone(&self.log_registry),
             component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
-            computation_registry: self.computation_registry.clone(),
+            instance_graph: self.instance_graph.clone(),
             computation_runtime: self.computation_runtime.clone(),
             management: self.management.clone(),
         }
@@ -273,10 +273,9 @@ impl DrasiLib {
     ) -> Self {
         let log_registry = crate::managers::get_or_init_global_registry();
         let instance_id = config.id.clone();
-        let computation_registry = Arc::new(
-            crate::computation::instance::ComputationRegistry::new(instance_id),
-        );
-        *computation_registry.wal.lock().expect("new WAL binding") = wal.clone();
+        let instance_graph = Arc::new(crate::computation::instance::InstanceGraph::new(
+            instance_id,
+        ));
         let computation_runtime = crate::computation::runtime::Runtime::new(
             config.clone(),
             middleware_registry.clone(),
@@ -311,7 +310,7 @@ impl DrasiLib {
             middleware_registry,
             log_registry,
             component_event_broadcast_tx,
-            computation_registry,
+            instance_graph,
             computation_runtime,
             management: Arc::new(std::sync::OnceLock::new()),
         }
@@ -329,7 +328,7 @@ impl DrasiLib {
         info!("Initializing drasi-lib");
 
         self.computation_runtime
-            .initialize(&self.computation_registry)
+            .initialize(&self.instance_graph)
             .await?;
 
         self.state_guard.mark_initialized();
@@ -373,7 +372,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start(&self) -> crate::error::Result<()> {
-        let _lifecycle = self.computation_registry.lifecycle.lock().await;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         // Reject start after permanent shutdown
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             return Err(DrasiError::invalid_state(
@@ -448,7 +447,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop(&self) -> crate::error::Result<()> {
-        let _lifecycle = self.computation_registry.lifecycle.lock().await;
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         self.stop_unlocked().await
     }
 
@@ -467,17 +466,7 @@ impl DrasiLib {
         // Stop all components (no lock held during this await).
         // Capture the result but always mark as stopped — partial shutdown is
         // preferable to leaving the running flag set after a partial failure.
-        let computation_result = self
-            .computation_registry
-            .stop_all_except(Some("__drasi_lib_runtime__"))
-            .await;
         let result = self.computation_runtime.stop_all().await;
-        let result = match (result, computation_result) {
-            (Ok(()), result) | (result, Ok(())) => result,
-            (Err(runtime), Err(computation)) => Err(runtime.context(format!(
-                "additional computation stop also failed: {computation:#}"
-            ))),
-        };
 
         // Brief write lock to clear the flag
         *self.running.write().await = false;
@@ -526,10 +515,10 @@ impl DrasiLib {
     pub async fn shutdown(&self) -> crate::error::Result<()> {
         self.is_shutdown
             .store(true, std::sync::atomic::Ordering::Release);
-        self.computation_registry.request_shutdown();
-        let _lifecycle = self.computation_registry.lifecycle.lock().await;
+        self.instance_graph.request_shutdown();
+        let _lifecycle = self.instance_graph.lifecycle.lock().await;
 
-        let computation_shutdown = self.computation_registry.shutdown().await;
+        let computation_shutdown = self.instance_graph.shutdown().await;
         let runtime_shutdown = self.computation_runtime.shutdown().await;
         *self.running.write().await = false;
         runtime_shutdown?;
@@ -1005,7 +994,16 @@ mod tests {
         let graph = core.component_graph();
         let snapshot = graph.snapshot().await.unwrap();
         assert_eq!(snapshot.instance_id, "graph-test");
-        assert_eq!(core.list_computation_graphs().await.unwrap().len(), 1);
+        assert_eq!(
+            core.inspect_computation_inventory()
+                .await
+                .unwrap()
+                .scopes
+                .values()
+                .filter(|scope| scope.owner.is_none())
+                .count(),
+            1
+        );
         assert!(graph
             .inspector()
             .unwrap()

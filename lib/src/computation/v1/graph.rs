@@ -553,6 +553,11 @@ pub struct ComputationGraphBuilder {
 }
 
 impl ComputationGraphBuilder {
+    /// Build component declarations and bindings without starting their execution.
+    pub fn build_components(self) -> GraphResult<super::ComponentBatch> {
+        self.build()?.into_component_batch()
+    }
+
     pub(crate) fn for_additions(mut self) -> Self {
         self.allow_empty = true;
         self
@@ -1051,6 +1056,8 @@ impl ComputationGraphBuilder {
             registry,
             peers: super::ControlPlane::new(64)?,
             rejected_additions: Arc::new(std::sync::Mutex::new(Vec::new())),
+            protected_components: BTreeSet::new(),
+            protected_resources: BTreeSet::new(),
             deferred_activation: BTreeSet::new(),
             reported_resources: BTreeMap::new(),
             management_protected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1222,8 +1229,46 @@ pub struct ComputationGraph {
     peers: Arc<super::ControlPlane>,
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
     deferred_activation: BTreeSet<ComponentId>,
+    protected_components: BTreeSet<ComponentId>,
+    protected_resources: BTreeSet<ResourceId>,
     reported_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ComputationGraph {
+    pub(crate) fn into_component_batch(self) -> GraphResult<super::ComponentBatch> {
+        assert_eq!(
+            self.state(),
+            GraphState::Ready,
+            "component assembly must not be running"
+        );
+        let definition = self.snapshot.select(super::GraphSelection::All)?;
+        let mut bindings = TopologyBindings {
+            resources: self.resource_handles,
+            factories: FactoryRegistry {
+                factories: self.factories,
+            },
+            ..Default::default()
+        };
+        for slot in self.components {
+            let component = slot.take_unstarted();
+            if !matches!(component, Component::Deferred { .. }) {
+                bindings.components.insert(
+                    component.descriptor().id().as_str().to_owned(),
+                    ConstructedComponent(component),
+                );
+            }
+        }
+        for (index, provider) in self.providers {
+            if let DesiredPipe::External { binding, .. } = &self.edges[&index].pipe {
+                bindings.pipes.insert(binding.clone(), provider);
+            }
+        }
+        Ok(super::ComponentBatch {
+            definition,
+            bindings,
+        })
+    }
 }
 
 impl ComputationGraph {

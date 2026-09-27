@@ -982,7 +982,7 @@ These are **reviewed source starting points, not a tested three-way release comb
 
 The reviewed core exposes `Transformer`, `WakeupSource`, `InputEnvelope`, and `OutputEnvelope` in `lib/src/computation/v1/component.rs`, graph/query codecs in the same directory, and managed lifecycle support. Timed processing is therefore a concrete implementation path, not a reason to invent an unmanaged timer service.
 
-The reviewed server exposes managed graph routes under `/api/v1/instances/{instance}/computation/graphs`, including start and stop. Verify that demo query results are also visible through the ordinary v1 query/reaction reads expected by the React package.
+Server exposes the instance ComputationGraph at `/api/v1/instances/{instance}/computation`, with component-batch admission and selected-component lifecycle operations. Verify that demo query results are also visible through the ordinary v1 query/reaction reads expected by the React package.
 
 Before feature work, prove a tiny database -> query -> timed transformer -> query -> SSE browser path and a complete-plan write back to PostgreSQL. Verify snapshot/deletion behavior, transaction-coherent policy contexts, invalidation/fencing delivery, and HTTP error feedback. Also pin Regorus and exercise its Rego v1 evaluation, result validation, and execution limits. Record exact successful source revisions, Rust/Node versions, image digests, plugin versions/hashes, and the policy bundle hash in a checked-in `dependencies.lock.json`. A changed binary/plugin interface must fail visibly, not be "fixed" by weakening client validation.
 

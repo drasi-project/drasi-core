@@ -144,23 +144,17 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         .build()?;
     let mut definition = DesiredInstance::from(graph.snapshot().select(GraphSelection::All)?);
     let secret_id = ResourceId::try_new("configuration")?;
-    definition.graphs[0]
-        .topology
-        .resources
-        .push(ResourceSpecification {
-            id: secret_id.clone(),
-            role: ResourceRole::SecretStore,
-            ownership: ResourceOwnership::Borrowed,
-            binding: Arc::from("host.configuration"),
-        });
-    definition.graphs[0]
-        .topology
-        .resource_configurations
-        .insert(
-            secret_id.clone(),
-            json!({"kind":"configuration","secrets":{"capture-path":output_path}}),
-        );
-    let capture = definition.graphs[0]
+    definition.topology.resources.push(ResourceSpecification {
+        id: secret_id.clone(),
+        role: ResourceRole::SecretStore,
+        ownership: ResourceOwnership::Borrowed,
+        binding: Arc::from("host.configuration"),
+    });
+    definition.topology.resource_configurations.insert(
+        secret_id.clone(),
+        json!({"kind":"configuration","secrets":{"capture-path":output_path}}),
+    );
+    let capture = definition
         .topology
         .components
         .iter_mut()
@@ -200,7 +194,7 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         .await?;
     assert!(receipt.durable);
     assert!(core.reconcile_desired_state().await?.converged());
-    let handle = core.get_computation_graph("managed-native").await?;
+    let handle = core.computation_control()?;
     let generation = handle.observed().components[&id("counter")].generation;
     core.apply_desired_state(receipt.revision, "same-config", definition)
         .await?;
@@ -234,13 +228,8 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
     assert_eq!(restored.desired_configuration()?.revision, receipt.revision);
     assert!(restored.management_status().await?.converged());
     assert_eq!(
-        restored
-            .get_computation_graph("managed-native")
-            .await?
-            .observed()
-            .components
-            .len(),
-        2
+        restored.computation_control()?.observed().components.len(),
+        3
     );
     assert!(restored
         .load_configuration_snapshot("running-definition")

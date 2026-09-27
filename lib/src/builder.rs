@@ -148,10 +148,7 @@ pub struct DrasiLibBuilder {
     secret_store_provider: Option<Arc<dyn SecretStoreProvider>>,
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     default_index_backend: Option<crate::indexes::StorageBackendRef>,
-    computation_graphs: Vec<(
-        crate::computation::v1::ComputationGraph,
-        crate::computation::v1::ComputationOptions,
-    )>,
+    component_batches: Vec<crate::computation::v1::ComponentBatch>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -194,13 +191,9 @@ impl DrasiLibBuilder {
         self
     }
 
-    /// Register an additional computation graph with instance-owned execution.
-    pub fn with_computation_graph(
-        mut self,
-        graph: crate::computation::v1::ComputationGraph,
-        options: crate::computation::v1::ComputationOptions,
-    ) -> Self {
-        self.computation_graphs.push((graph, options));
+    /// Add components and their connections to the instance graph.
+    pub fn with_components(mut self, components: crate::computation::v1::ComponentBatch) -> Self {
+        self.component_batches.push(components);
         self
     }
 
@@ -223,7 +216,7 @@ impl DrasiLibBuilder {
             secret_store_provider: None,
             default_recovery_policy: None,
             default_index_backend: None,
-            computation_graphs: Vec::new(),
+            component_batches: Vec::new(),
         }
     }
 
@@ -543,20 +536,20 @@ impl DrasiLibBuilder {
             && (!builder.source_instances.is_empty()
                 || !builder.reaction_instances.is_empty()
                 || !builder.query_configs.is_empty()
-                || !builder.computation_graphs.is_empty())
+                || !builder.component_batches.is_empty())
         {
             return Err(DrasiError::invalid_config(
                 "persistent instances restore authoritative definitions; add reconstructible components through apply_desired_state instead of preconstructed builder objects",
             ));
         }
-        let graphs = std::mem::take(&mut builder.computation_graphs);
+        let batches = std::mem::take(&mut builder.component_batches);
         let core =
-            crate::computation::instance::build_instance(builder.build_inner(), graphs).await?;
+            crate::computation::instance::build_instance(builder.build_inner(), batches).await?;
         if let Some(options) = management {
             let persistent = options.store.is_some();
             let opened = crate::management::Management::open(
                 core.config.id.clone(),
-                core.computation_registry.clone(),
+                core.instance_graph.clone(),
                 core.running.clone(),
                 core.is_shutdown.clone(),
                 options,

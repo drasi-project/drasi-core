@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::{
     ComponentFactory, ComputationTopologyFactory, ContinuousQueryFactory, FactoryRegistry,
@@ -24,26 +24,31 @@ use super::{
 impl FactoryRegistry {
     /// Built-in native components and legacy plugin adapters.
     pub fn standard() -> Self {
-        let factories: Vec<Arc<dyn ComponentFactory>> = vec![
-            Arc::new(ContinuousQueryFactory::default()),
-            Arc::new(MiddlewareTransformerFactory::default()),
-            Arc::new(TransactionTransformerFactory::default()),
-            Arc::new(LegacySourceFactory::default()),
-            Arc::new(SourcePluginAdapterFactory::default()),
-            Arc::new(LegacyReactionFactory::default()),
-            Arc::new(ReactionPluginAdapterFactory::default()),
-            Arc::new(QueryReplayFactory::default()),
-            Arc::new(QueryResultsOutletFactory::default()),
-            Arc::new(WalReplaySourceFactory::default()),
-            Arc::new(ComputationTopologyFactory::default()),
-            Arc::new(super::QueryScheduledSourceFactory::default()),
-        ];
-        let mut registry = Self::default();
-        for factory in factories {
-            registry
-                .register(factory)
-                .expect("standard component implementations are unique");
-        }
-        registry
+        static STANDARD: OnceLock<FactoryRegistry> = OnceLock::new();
+        STANDARD
+            .get_or_init(|| {
+                let factories: Vec<Arc<dyn ComponentFactory>> = vec![
+                    Arc::new(ContinuousQueryFactory::default()),
+                    Arc::new(MiddlewareTransformerFactory::default()),
+                    Arc::new(TransactionTransformerFactory::default()),
+                    Arc::new(LegacySourceFactory::default()),
+                    Arc::new(SourcePluginAdapterFactory::default()),
+                    Arc::new(LegacyReactionFactory::default()),
+                    Arc::new(ReactionPluginAdapterFactory::default()),
+                    Arc::new(QueryReplayFactory::default()),
+                    Arc::new(QueryResultsOutletFactory::default()),
+                    Arc::new(WalReplaySourceFactory::default()),
+                    Arc::new(ComputationTopologyFactory::default()),
+                    Arc::new(super::QueryScheduledSourceFactory::default()),
+                ];
+                let mut registry = Self::default();
+                for factory in factories {
+                    registry
+                        .register(factory)
+                        .expect("standard component implementations are unique");
+                }
+                registry
+            })
+            .clone()
     }
 }

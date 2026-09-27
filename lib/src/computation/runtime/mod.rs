@@ -25,6 +25,7 @@ mod tests;
 // Ordinary API declarations own their plugin/configuration records immediately;
 // the graph factory is the only path that validates and realizes those records.
 
+use super::instance::ComputationHandle;
 use super::v1::*;
 use crate::{
     config::{QueryConfig, RuntimeConfig},
@@ -302,7 +303,7 @@ impl Runtime {
 
     pub(crate) async fn initialize(
         self: &Arc<Self>,
-        registry: &super::instance::ComputationRegistry,
+        graph_owner: &super::instance::InstanceGraph,
     ) -> anyhow::Result<()> {
         let mut builder = self
             .services
@@ -326,9 +327,7 @@ impl Runtime {
         let observer: Arc<dyn PublicationObserver> = self.events.clone();
         graph.inspector().observe(&observer);
         graph.reserve_component_id(&self.config.id);
-        let handle = registry
-            .add(graph, ComputationOptions { auto_start: false })
-            .await?;
+        let handle = graph_owner.initialize(graph).await?;
         self.parent
             .set(handle.clone())
             .map_err(|_| anyhow::anyhow!("native runtime already initialized"))?;
@@ -340,6 +339,40 @@ impl Runtime {
             .get()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("native runtime is not initialized"))
+    }
+    pub(crate) fn plugin_services(&self) -> LegacyPluginServices {
+        self.services.clone()
+    }
+
+    pub(crate) fn infrastructure_resources(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        ordinary: &BTreeSet<&str>,
+    ) -> anyhow::Result<BTreeSet<ResourceId>> {
+        let mut resources: BTreeSet<_> = self
+            .services
+            .dependencies()
+            .into_values()
+            .flatten()
+            .collect();
+        for (name, _) in self.config.index_factory.configured_providers() {
+            resources.insert(index_resource_id(&name)?);
+        }
+        for (id, specification) in &publication.desired.specifications {
+            if ordinary.contains(id.as_str()) {
+                resources.extend(specification.dependencies.values().flatten().cloned());
+                resources.extend(
+                    publication
+                        .desired
+                        .component_resources
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+            }
+        }
+        Ok(resources)
     }
     pub(crate) fn inspector(&self) -> anyhow::Result<ComputationInspector> {
         Ok(self.parent()?.inspector())
@@ -1547,6 +1580,12 @@ impl Runtime {
     pub(crate) async fn source(&self, id: &str) -> anyhow::Result<Arc<dyn Source>> {
         match self.record(id, "source").await?.value {
             Value::Source(source) => Ok(source.source.clone()),
+            _ => unreachable!(),
+        }
+    }
+    pub(crate) async fn source_host(&self, id: &str) -> anyhow::Result<Arc<SourcePluginHost>> {
+        match self.record(id, "source").await?.value {
+            Value::Source(source) => Ok(source.borrowed.clone()),
             _ => unreachable!(),
         }
     }

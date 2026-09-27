@@ -12,19 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::v1::{
-    ComputationGraph, ComputationHandle, ComputationInfo, ComputationOptions, StartReport,
-    StopReport,
-};
+use super::v1::{ComponentBatch, ComputationInfo, GraphSelection, ReconciliationReport};
 use crate::{DrasiError, DrasiLib, Result};
-
-/// A separately registered user graph and its instance startup policy.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RegisteredComputationConfiguration {
-    pub options: ComputationOptions,
-    pub graph: super::v1::GraphConfigurationSnapshot,
-}
 
 /// Complete user configuration, excluding generated query-internal graphs.
 /// The existing source/query/reaction representation is retained under `instance`.
@@ -36,8 +25,6 @@ pub struct InstanceConfigurationSnapshot {
     pub instance: crate::ConfigurationSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_components: Option<super::v1::GraphConfigurationSnapshot>,
-    #[serde(default)]
-    pub graphs: Vec<RegisteredComputationConfiguration>,
 }
 
 impl DrasiLib {
@@ -54,11 +41,6 @@ impl DrasiLib {
         let control = self.computation_control()?;
         for _ in 0..3 {
             let root = control.registry_snapshot();
-            let handles = self.computation_registry.list().await?;
-            let publications: Vec<_> = handles
-                .iter()
-                .map(|handle| handle.control().registry_snapshot())
-                .collect();
             let instance = match self
                 .computation_runtime
                 .configuration_snapshot_at(&root)
@@ -93,7 +75,17 @@ impl DrasiLib {
                 .filter(|id| !ordinary.contains(id.as_str()))
                 .cloned()
                 .collect();
-            let native_components = if native_ids.is_empty() {
+            let infrastructure = self
+                .computation_runtime
+                .infrastructure_resources(&root, &ordinary)?;
+            let native_resources: Vec<_> = root
+                .desired
+                .resources
+                .keys()
+                .filter(|id| !infrastructure.contains(*id))
+                .cloned()
+                .collect();
+            let native_components = if native_ids.is_empty() && native_resources.is_empty() {
                 None
             } else {
                 let mut snapshot = root.configuration_snapshot().map_err(anyhow::Error::from)?;
@@ -101,46 +93,37 @@ impl DrasiLib {
                     .desired
                     .select(GraphSelection::Exact(native_ids.iter().cloned().collect()))
                     .map_err(anyhow::Error::from)?;
+                for id in native_resources {
+                    if !snapshot
+                        .topology
+                        .resources
+                        .iter()
+                        .any(|resource| resource.id == id)
+                    {
+                        snapshot
+                            .topology
+                            .resources
+                            .push(root.desired.resources[&id].clone());
+                    }
+                    if let Some(recipe) = root.desired.resource_configurations.get(&id) {
+                        snapshot
+                            .topology
+                            .resource_configurations
+                            .insert(id, recipe.clone());
+                    }
+                }
                 snapshot
                     .configurations
                     .retain(|id, _| native_ids.contains(id));
                 Some(snapshot)
             };
-            let mut graphs = Vec::new();
-            for (handle, publication) in handles.iter().zip(&publications) {
-                if publication.desired.id == root.desired.id {
-                    continue;
-                }
-                graphs.push(RegisteredComputationConfiguration {
-                    options: ComputationOptions {
-                        auto_start: handle.info().auto_start,
-                    },
-                    graph: publication
-                        .configuration_snapshot()
-                        .map_err(anyhow::Error::from)?,
-                });
-            }
-            let current = self.computation_registry.list().await?;
-            if current.len() != handles.len()
-                || current
-                    .iter()
-                    .zip(&handles)
-                    .any(|(left, right)| !left.same_instance(right))
-                || !Arc::ptr_eq(&root, &control.registry_snapshot())
-                || handles
-                    .iter()
-                    .zip(&publications)
-                    .any(|(handle, publication)| {
-                        !Arc::ptr_eq(publication, &handle.control().registry_snapshot())
-                    })
-            {
+            if !Arc::ptr_eq(&root, &control.registry_snapshot()) {
                 continue;
             }
             return Ok(InstanceConfigurationSnapshot {
                 version: 1,
                 instance,
                 native_components,
-                graphs,
             });
         }
         Err(DrasiError::invalid_state(
@@ -164,22 +147,15 @@ impl DrasiLib {
             })
     }
 
-    /// Inspect every host-visible native scope, including ordinary query
-    /// execution graphs and independently registered graphs. Scope ownership and
+    /// Inspect the ComputationGraph and its QueryGraphs. Scope ownership and
     /// host-known shared dependencies are explicit; private plugin internals
     /// are not inferred. Individual scopes are coherent, not globally atomic.
     pub async fn inspect_computation_inventory(&self) -> Result<super::v1::ComputationInventory> {
         self.state_guard.require_initialized()?;
-        let mut inventory = self.computation_runtime.inventory().await?;
-        for graph in self.computation_registry.list().await? {
-            let scope = super::v1::ComputationScope::root(graph.id());
-            if !inventory.scopes.contains_key(&scope) {
-                inventory
-                    .insert(scope, None, graph.inspector().topology())
-                    .map_err(anyhow::Error::from)?;
-            }
-        }
-        Ok(inventory)
+        self.computation_runtime
+            .inventory()
+            .await
+            .map_err(DrasiError::from)
     }
 
     /// Inspect a query's internal native graph, including its concrete index,
@@ -246,17 +222,21 @@ impl DrasiLib {
         id: &str,
     ) -> Result<std::sync::Arc<super::v1::SourcePluginHost>> {
         self.state_guard.require_initialized()?;
-        let source = self.source_instance(id).await.map_err(|error| {
-            if error
-                .downcast_ref::<crate::managers::ComponentNotFoundError>()
-                .is_some()
-            {
-                DrasiError::component_not_found("source", id)
-            } else {
-                DrasiError::from(error)
-            }
-        })?;
-        Ok(super::v1::SourcePluginHost::borrowed(source))
+        let source = self
+            .computation_runtime
+            .source_host(id)
+            .await
+            .map_err(|error| {
+                if error
+                    .downcast_ref::<crate::managers::ComponentNotFoundError>()
+                    .is_some()
+                {
+                    DrasiError::component_not_found("source", id)
+                } else {
+                    DrasiError::from(error)
+                }
+            })?;
+        Ok(source)
     }
     pub async fn borrow_computation_reaction(
         &self,
@@ -281,13 +261,10 @@ impl DrasiLib {
         super::v1::ReactionPluginHost::borrowed(reaction, catalog)
             .map_err(|error| DrasiError::invalid_config(error.to_string()))
     }
-    pub fn computation_pipeline(
-        &self,
-        graph_id: &str,
-    ) -> Result<super::v1::ComputationPipelineBuilder> {
-        let services = self.computation_plugin_services(graph_id)?;
+    pub fn computation_pipeline(&self) -> Result<super::v1::ComputationPipelineBuilder> {
+        let services = self.computation_plugin_services()?;
         super::v1::ComputationPipelineBuilder::new(
-            graph_id,
+            super::components::INSTANCE_GRAPH_ID,
             services,
             self.middleware_registry.clone(),
             self.config.index_factory.clone(),
@@ -312,9 +289,6 @@ impl DrasiLib {
         if let Err(error) = runtime.start_native_components().await {
             failures.push(format!("native components: {error:#}"));
         }
-        if let Err(error) = self.computation_registry.start_auto().await {
-            failures.push(format!("additional graphs: {error:#}"));
-        }
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("instance shutdown interrupted startup");
         }
@@ -327,157 +301,95 @@ impl DrasiLib {
         }
         Ok(())
     }
-    /// Borrow instance services through graph-specific state and WAL namespaces.
-    pub fn computation_plugin_services(
-        &self,
-        graph_id: &str,
-    ) -> Result<super::v1::LegacyPluginServices> {
+    /// Borrow the instance's injected services.
+    pub fn computation_plugin_services(&self) -> Result<super::v1::LegacyPluginServices> {
         self.state_guard.require_initialized()?;
-        let mut services = self
-            .computation_registry
-            .services
-            .lock()
-            .map_err(|_| DrasiError::invalid_state("computation services binding poisoned"))?;
-        if let Some(services) = services.get(graph_id) {
-            return Ok(services.clone());
-        }
-        let wal = self
-            .computation_registry
-            .wal
-            .lock()
-            .map_err(|_| DrasiError::invalid_state("computation WAL binding poisoned"))?
-            .clone();
-        let scoped = super::v1::LegacyPluginServices::scoped(
-            &self.config.id,
-            graph_id,
-            Some(self.config.state_store_provider.clone()),
-            self.config.identity_provider.clone(),
-            wal,
-        )
-        .map_err(|error| DrasiError::invalid_config(error.to_string()))?
-        .with_secret_store(self.config.secret_store_provider.clone());
-        services.insert(graph_id.to_owned(), scoped.clone());
-        Ok(scoped)
+        Ok(self.computation_runtime.plugin_services())
     }
-    pub async fn inspect_computation_graph(
-        &self,
-        id: &str,
-    ) -> Result<super::v1::ComputationInspector> {
-        Ok(self.get_computation_graph(id).await?.inspector())
+    pub fn inspect_computation_graph(&self) -> Result<super::v1::ComputationInspector> {
+        Ok(self.computation_control()?.inspector())
     }
-    /// Read and subscribe to the existing log registry under this graph's
-    /// execution scope. Use the plugin's own ID for logs from wrapped plugins.
+    /// Read and subscribe to the instance's component log registry.
     /// Native transformers use Query and sinks use Reaction as log categories.
     pub async fn subscribe_computation_logs(
         &self,
-        graph_id: &str,
         component_type: crate::channels::ComponentType,
         component_id: &str,
     ) -> Result<(
         Vec<crate::managers::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
     )> {
-        self.get_computation_graph(graph_id).await?;
+        self.computation_component(component_id)?;
         super::v1::ComponentId::try_new(component_id)
             .map_err(|error| DrasiError::invalid_config(error.to_string()))?;
         let key = crate::managers::ComponentLogKey::new(
-            format!("{}::computation::{graph_id}", self.config.id),
+            self.config.id.clone(),
             component_type,
             component_id,
         );
         Ok(self.log_registry.subscribe_by_key(&key).await)
     }
-    /// Register an additional graph under instance-owned execution.
-    /// The instance owns its driver; failures stay inspectable on the handle.
-    pub async fn add_computation_graph(
-        &self,
-        graph: ComputationGraph,
-        options: ComputationOptions,
-    ) -> Result<ComputationHandle> {
-        if let Err(error) = self.computation_control()?.require_configuration_write() {
-            return Err(super::instance::reject_graph(
-                graph,
-                options,
-                anyhow::Error::from(error).into(),
-            )
-            .await);
-        }
-        let _lifecycle = self.computation_registry.lifecycle.lock().await;
-        if let Some(management) = self.management.get() {
-            let configuration = match management.configuration() {
-                Ok(configuration) => configuration,
-                Err(error) => {
-                    return Err(super::instance::reject_graph(graph, options, error.into()).await);
-                }
-            };
-            if configuration
+    pub async fn computation_info(&self) -> Result<ComputationInfo> {
+        self.state_guard.require_initialized()?;
+        Ok(self.instance_graph.get().await?.info())
+    }
+
+    /// Add a batch to the instance graph, retaining failed declarations and
+    /// exposing construction and activation outcomes in the returned report.
+    pub async fn add_components(&self, batch: ComponentBatch) -> Result<ReconciliationReport> {
+        let control = self.computation_control();
+        let pending = self
+            .instance_graph
+            .retain(batch, control.as_ref().ok().cloned());
+        let result: Result<ReconciliationReport> = async {
+            let control = control?;
+            control
+                .require_configuration_write()
+                .map_err(anyhow::Error::from)?;
+            let _lifecycle = self.instance_graph.lifecycle.lock().await;
+            if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(DrasiError::invalid_state("instance has been shut down"));
+            }
+            let mut batch = pending.take().await?;
+            let current = control.registry_snapshot();
+            let mut ids: std::collections::BTreeSet<_> = current
                 .desired
-                .graphs
+                .nodes
                 .iter()
-                .any(|desired| desired.topology.graph_id == graph.snapshot().id.as_ref())
-            {
-                return Err(super::instance::reject_graph(
-                    graph,
-                    options,
-                    DrasiError::invalid_state("graph ID is owned by managed configuration"),
-                )
-                .await);
+                .map(|node| node.descriptor.id().clone())
+                .collect();
+            for component in &batch.definition.components {
+                if !ids.insert(component.descriptor.id().clone()) {
+                    return Err(DrasiError::already_exists(
+                        "component",
+                        component.descriptor.id().to_string(),
+                    ));
+                }
             }
-        }
-        if let Err(error) = self.state_guard.require_initialized() {
-            return Err(super::instance::reject_graph(graph, options, error).await);
-        }
-        if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(super::instance::reject_graph(
-                graph,
-                options,
-                DrasiError::invalid_state("instance has been shut down"),
-            )
-            .await);
-        }
-        let handle = self.computation_registry.add(graph, options).await?;
-        if options.auto_start && self.is_running().await {
-            if let Err(error) = handle.control().request_auto_start().await {
-                log::error!(
-                    "Computation {} was added but its driver cannot accept activation: {error}",
-                    handle.id()
-                );
+            if batch.definition.graph_id != current.desired.id.as_ref() {
+                return Err(DrasiError::invalid_config(
+                    "component definition does not belong to the instance ComputationGraph",
+                ));
             }
+            batch.bindings.defer_activation |= !self.is_running().await;
+            batch.bindings.deferred_management_validation = true;
+            control
+                .add_components(batch)
+                .await
+                .map_err(|error| DrasiError::from(anyhow::Error::from(error)))
         }
-        Ok(handle)
-    }
-
-    pub async fn get_computation_graph(&self, id: &str) -> Result<ComputationHandle> {
-        self.state_guard.require_initialized()?;
-        self.computation_registry.get(id).await
-    }
-
-    pub async fn list_computation_graphs(&self) -> Result<Vec<ComputationInfo>> {
-        self.state_guard.require_initialized()?;
-        Ok(self
-            .computation_registry
-            .list()
-            .await?
-            .iter()
-            .map(ComputationHandle::info)
-            .collect())
-    }
-
-    pub async fn start_computation_graph(&self, id: &str) -> Result<StartReport> {
-        self.get_computation_graph(id).await?.start().await
-    }
-
-    pub async fn stop_computation_graph(&self, id: &str) -> Result<StopReport> {
-        self.get_computation_graph(id).await?.stop().await
-    }
-
-    pub async fn remove_computation_graph(&self, id: &str) -> Result<()> {
-        self.get_computation_graph(id)
-            .await?
-            .control()
-            .require_configuration_write()
-            .map_err(anyhow::Error::from)?;
-        self.state_guard.require_initialized()?;
-        self.computation_registry.remove(id).await
+        .await;
+        match result {
+            Ok(report) => {
+                if let Err(error) = pending.cleanup().await {
+                    let detail = error.to_string();
+                    return Err(super::instance::components_cleanup_error(
+                        pending, error, detail,
+                    ));
+                }
+                Ok(report)
+            }
+            Err(error) => Err(super::instance::reject_components(pending, error).await),
+        }
     }
 }

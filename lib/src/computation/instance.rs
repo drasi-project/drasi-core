@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::{stream::FuturesUnordered, StreamExt};
 use std::{
     collections::BTreeMap,
     ops::{Deref, DerefMut},
@@ -24,27 +23,15 @@ use std::{
 use tokio::{sync::watch, task::JoinHandle};
 
 use super::v1::{
-    ComputationGraph, DeploymentReport, DesiredMutation, GraphControl, GraphError, GraphRevision,
-    GraphSelection, GraphSnapshot, GraphState, ObservedGraph, OperationSummary, StartReport,
-    StopReport, TopologyBindings,
+    ComponentBatch, ComputationGraph, DeploymentReport, DesiredMutation, GraphControl, GraphError,
+    GraphRevision, GraphSelection, GraphState, ObservedGraph, OperationSummary, ResourceHandle,
+    ResourceId, ResourceOwnership, StartReport, TopologyBindings,
 };
 use crate::error::{DrasiError, Result};
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ComputationOptions {
-    pub auto_start: bool,
-}
-impl Default for ComputationOptions {
-    fn default() -> Self {
-        Self { auto_start: true }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ComputationInfo {
     pub id: String,
-    pub auto_start: bool,
     pub state: GraphState,
     pub revision: GraphRevision,
     pub driver_error: Option<Arc<str>>,
@@ -106,7 +93,7 @@ impl std::error::Error for ComputationCleanupError {
 
 struct RejectedComputations {
     core: Mutex<Option<crate::DrasiLib>>,
-    graphs: Vec<Arc<GraphSlot>>,
+    batches: Vec<Arc<PendingComponents>>,
     cleanup: tokio::sync::Mutex<()>,
 }
 impl RejectedComputations {
@@ -131,23 +118,9 @@ impl RejectedComputations {
                 Err(error) => failures.push(error.to_string()),
             }
         }
-        for slot in &self.graphs {
-            if slot
-                .0
-                .lock()
-                .map_err(|_| operation("registration", "cleanup", "graph ownership poisoned"))?
-                .is_none()
-            {
-                continue;
-            }
-            let mut graph = slot
-                .take()
-                .map_err(|error| operation("registration", "cleanup", error))?;
-            match graph.dispose().await {
-                Ok(()) => {
-                    graph.graph.take();
-                }
-                Err(error) => failures.push(format!("{}: {error}", graph.snapshot().id)),
+        for batch in &self.batches {
+            if let Err(error) = batch.cleanup().await {
+                failures.push(error.to_string());
             }
         }
         if failures.is_empty() {
@@ -160,10 +133,7 @@ impl RejectedComputations {
 impl Drop for RejectedComputations {
     fn drop(&mut self) {
         let pending = self.core.get_mut().map_or(true, |core| core.is_some())
-            || self
-                .graphs
-                .iter()
-                .any(|slot| slot.0.lock().map_or(true, |graph| graph.is_some()));
+            || self.batches.iter().any(|batch| !batch.complete());
         if pending {
             log::warn!("Computation rollback owner dropped before cleanup completed; asynchronous resource cleanup is not guaranteed");
         }
@@ -232,7 +202,6 @@ impl Drop for TaskLease<'_> {
 
 struct Entry {
     id: String,
-    options: ComputationOptions,
     graph: Arc<GraphSlot>,
     control: Arc<OnceLock<GraphControl>>,
     cancel: watch::Sender<bool>,
@@ -243,9 +212,9 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(mut graph: ComputationGraph, options: ComputationOptions, instance: &str) -> Arc<Self> {
+    fn new(mut graph: ComputationGraph, instance: &str) -> Arc<Self> {
         let id = graph.snapshot().id.to_string();
-        graph.set_execution_scope(Arc::from(format!("{instance}::computation::{id}")));
+        graph.set_execution_scope(Arc::from(instance));
         let graph = Arc::new(GraphSlot(Mutex::new(Some(graph))));
         let control = Arc::new(OnceLock::new());
         let (cancel, mut cancellation) = watch::channel(false);
@@ -283,7 +252,6 @@ impl Entry {
         });
         Arc::new(Self {
             id,
-            options,
             graph,
             control,
             cancel,
@@ -319,10 +287,13 @@ impl Entry {
         }
     }
 
-    async fn shutdown(&self) -> Result<()> {
+    async fn shutdown(&self, pending: &[Arc<PendingComponents>]) -> Result<()> {
         self.request_shutdown();
         let _cleanup = self.cleanup.lock().await;
         if self.disposed.load(Ordering::Acquire) {
+            for batch in pending {
+                batch.cleanup().await?;
+            }
             return Ok(());
         }
         let task = self
@@ -341,6 +312,9 @@ impl Entry {
         } else {
             Ok(())
         };
+        for batch in pending {
+            batch.cleanup().await?;
+        }
         let mut graph = self
             .graph
             .take()
@@ -383,15 +357,11 @@ fn operation(id: &str, action: &str, error: impl std::fmt::Display) -> DrasiErro
 /// An instance-owned graph handle. The underlying controller remains the only
 /// graph state writer; this handle does not acquire a graph lock while it runs.
 #[derive(Clone)]
-pub struct ComputationHandle {
+pub(crate) struct ComputationHandle {
     entry: Arc<Entry>,
 }
 
 impl ComputationHandle {
-    pub(super) fn same_instance(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.entry, &other.entry)
-    }
-
     pub fn id(&self) -> &str {
         &self.entry.id
     }
@@ -401,9 +371,6 @@ impl ComputationHandle {
             .get()
             .expect("published graph control")
             .clone()
-    }
-    pub fn desired(&self) -> Arc<GraphSnapshot> {
-        self.control().desired_snapshot()
     }
     pub fn observed(&self) -> Arc<ObservedGraph> {
         self.control().observed()
@@ -419,7 +386,6 @@ impl ComputationHandle {
         };
         ComputationInfo {
             id: self.id().to_owned(),
-            auto_start: self.entry.options.auto_start,
             state: control.state(),
             revision: control.desired_snapshot().revision,
             driver_error,
@@ -471,46 +437,26 @@ impl ComputationHandle {
             .await
             .map_err(|error| operation(self.id(), "start", error))
     }
-    /// Soft stop: keep the controller, instances and resources for restart.
-    /// A failed safe-boundary wait is surfaced even when forced stop succeeds.
-    pub async fn stop(&self) -> Result<StopReport> {
-        self.deployment().await?;
-        let control = self.control();
-        let revision = control.desired_snapshot().revision;
-        let quiesced = control
-            .quiesce_components(revision, GraphSelection::All)
-            .await;
-        let result = control
-            .stop_components(revision, GraphSelection::All)
-            .await
-            .map_err(|error| operation(self.id(), "stop", error))?;
-        quiesced.map_err(|error| operation(self.id(), "quiesce before stop", error))?;
-        Ok(result)
-    }
-    /// Permanent cancellation and awaited cleanup. Failed cleanup remains owned
-    /// and can be retried through this handle or DrasiLib shutdown/removal.
-    pub async fn shutdown(&self) -> Result<()> {
-        self.entry.shutdown().await
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        self.entry.shutdown(&[]).await
     }
 }
 
-pub(crate) struct ComputationRegistry {
+pub(crate) struct InstanceGraph {
     pub(crate) lifecycle: tokio::sync::Mutex<()>,
     instance_id: String,
-    pub(crate) wal: Mutex<Option<Arc<dyn crate::wal::WalProvider>>>,
-    pub(crate) services: Mutex<BTreeMap<String, super::v1::LegacyPluginServices>>,
-    entries: Mutex<BTreeMap<String, Arc<Entry>>>,
+    entry: Mutex<Option<Arc<Entry>>>,
+    pending: Mutex<Vec<Arc<PendingComponents>>>,
     closed: AtomicBool,
 }
 
-impl ComputationRegistry {
+impl InstanceGraph {
     pub(crate) fn new(instance_id: String) -> Self {
         Self {
             lifecycle: tokio::sync::Mutex::new(()),
             instance_id,
-            wal: Mutex::new(None),
-            services: Mutex::new(BTreeMap::new()),
-            entries: Mutex::new(BTreeMap::new()),
+            entry: Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
         }
     }
@@ -518,23 +464,17 @@ impl ComputationRegistry {
 
 pub(crate) async fn build_instance(
     build: impl std::future::Future<Output = Result<crate::DrasiLib>>,
-    graphs: Vec<(ComputationGraph, ComputationOptions)>,
+    batches: Vec<ComponentBatch>,
 ) -> Result<crate::DrasiLib> {
     let mut ids = std::collections::BTreeSet::new();
-    let invalid = graphs.iter().find_map(|(graph, _)| {
-        if graph.state() != GraphState::Ready {
-            Some(DrasiError::invalid_state(
-                "only fresh computation graphs can be registered",
-            ))
-        } else if !ids.insert(graph.snapshot().id.clone()) {
-            Some(DrasiError::already_exists(
-                "computation",
-                graph.snapshot().id.to_string(),
-            ))
-        } else {
-            None
-        }
-    });
+    let invalid = batches
+        .iter()
+        .flat_map(|batch| &batch.definition.components)
+        .find_map(|component| {
+            let id = component.descriptor.id();
+            (!ids.insert(id.clone()))
+                .then(|| DrasiError::already_exists("component", id.to_string()))
+        });
     let built = if let Some(error) = invalid {
         Err(error)
     } else {
@@ -542,27 +482,27 @@ pub(crate) async fn build_instance(
     };
     let core = match built {
         Ok(core) => core,
-        Err(error) => return Err(dispose_rejected(graphs, None, error).await),
+        Err(error) => return Err(dispose_rejected(batches, None, error).await),
     };
-    let mut graphs = graphs.into_iter();
-    while let Some((graph, options)) = graphs.next() {
-        if let Err(error) = core.add_computation_graph(graph, options).await {
-            return Err(dispose_rejected(graphs.collect(), Some(core), error).await);
+    let mut batches = batches.into_iter();
+    while let Some(batch) = batches.next() {
+        if let Err(error) = core.add_components(batch).await {
+            return Err(dispose_rejected(batches.collect(), Some(core), error).await);
         }
     }
     Ok(core)
 }
 
 async fn dispose_rejected(
-    graphs: Vec<(ComputationGraph, ComputationOptions)>,
+    batches: Vec<ComponentBatch>,
     core: Option<crate::DrasiLib>,
     error: DrasiError,
 ) -> DrasiError {
     let owner = RejectedComputations {
         core: Mutex::new(core),
-        graphs: graphs
+        batches: batches
             .into_iter()
-            .map(|(graph, _)| Arc::new(GraphSlot(Mutex::new(Some(graph)))))
+            .map(|batch| PendingComponents::new(batch, None))
             .collect(),
         cleanup: tokio::sync::Mutex::new(()),
     };
@@ -576,12 +516,30 @@ async fn dispose_rejected(
     }
 }
 
-pub(crate) async fn reject_graph(
-    graph: ComputationGraph,
-    options: ComputationOptions,
+pub(crate) async fn reject_components(
+    batch: Arc<PendingComponents>,
     error: DrasiError,
 ) -> DrasiError {
-    dispose_rejected(vec![(graph, options)], None, error).await
+    match batch.cleanup().await {
+        Ok(()) => error,
+        Err(cleanup) => components_cleanup_error(batch, error, cleanup.to_string()),
+    }
+}
+
+pub(crate) fn components_cleanup_error(
+    batch: Arc<PendingComponents>,
+    cause: DrasiError,
+    detail: String,
+) -> DrasiError {
+    DrasiError::Internal(anyhow::Error::new(ComputationCleanupError {
+        cause,
+        detail,
+        owner: RejectedComputations {
+            core: Mutex::new(None),
+            batches: vec![batch],
+            cleanup: tokio::sync::Mutex::new(()),
+        },
+    }))
 }
 
 pub(crate) async fn cleanup_failed_instance(
@@ -591,176 +549,183 @@ pub(crate) async fn cleanup_failed_instance(
     dispose_rejected(Vec::new(), Some(core), error).await
 }
 
-impl ComputationRegistry {
-    pub(crate) fn is_empty(&self) -> Result<bool> {
-        Ok(self.entries()?.is_empty())
-    }
+impl InstanceGraph {
     pub(crate) fn request_shutdown(&self) {
         self.closed.store(true, Ordering::Release);
-        let entries = self.entries.lock().unwrap_or_else(|error| {
-            log::error!("Cancelling computations through poisoned registry: {error}");
+        let entry = self.entry.lock().unwrap_or_else(|error| {
+            log::error!("Cancelling computation through poisoned ownership: {error}");
             error.into_inner()
         });
-        for entry in entries.values() {
+        if let Some(entry) = entry.as_ref() {
             entry.request_shutdown();
         }
     }
-    fn entries(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, Arc<Entry>>>> {
-        self.entries
-            .lock()
-            .map_err(|_| DrasiError::invalid_state("computation registry ownership poisoned"))
-    }
-    pub(crate) async fn add(
-        &self,
-        graph: ComputationGraph,
-        options: ComputationOptions,
-    ) -> Result<ComputationHandle> {
-        let id = graph.snapshot().id.to_string();
-        if graph.state() != GraphState::Ready {
-            return Err(reject_graph(
-                graph,
-                options,
-                DrasiError::invalid_state("only a fresh graph can be registered"),
-            )
-            .await);
-        }
-        let mut candidate = Some(graph);
-        let result = (|| {
-            let mut entries = self.entries()?;
-            if self.closed.load(Ordering::Acquire) {
+    pub(crate) async fn initialize(&self, graph: ComputationGraph) -> Result<ComputationHandle> {
+        let entry = {
+            let mut current = self
+                .entry
+                .lock()
+                .map_err(|_| DrasiError::invalid_state("instance graph ownership poisoned"))?;
+            if current.is_some() || self.closed.load(Ordering::Acquire) {
                 return Err(DrasiError::invalid_state(
-                    "computation registry is shut down",
+                    "instance graph is already initialized or closed",
                 ));
             }
-            if entries.contains_key(&id) {
-                return Err(DrasiError::already_exists("computation", id));
-            }
-            let entry = Entry::new(
-                candidate.take().expect("unregistered graph"),
-                options,
-                &self.instance_id,
-            );
-            entries.insert(id, entry.clone());
-            Ok(entry)
-        })();
-        let entry = match result {
-            Ok(entry) => entry,
-            Err(error) => {
-                return Err(
-                    reject_graph(candidate.take().expect("rejected graph"), options, error).await,
-                )
-            }
+            let entry = Entry::new(graph, &self.instance_id);
+            *current = Some(entry.clone());
+            entry
         };
         entry.ready().await
     }
-    pub(crate) async fn get(&self, id: &str) -> Result<ComputationHandle> {
+    pub(crate) async fn get(&self) -> Result<ComputationHandle> {
         let entry = self
-            .entries()?
-            .get(id)
-            .cloned()
-            .ok_or_else(|| DrasiError::component_not_found("computation", id))?;
+            .entry
+            .lock()
+            .map_err(|_| DrasiError::invalid_state("instance graph ownership poisoned"))?
+            .clone()
+            .ok_or_else(|| DrasiError::invalid_state("instance graph is not initialized"))?;
         entry.ready().await
     }
-    pub(crate) async fn list(&self) -> Result<Vec<ComputationHandle>> {
-        let entries: Vec<_> = self.entries()?.values().cloned().collect();
-        let mut result = Vec::new();
-        for entry in entries {
-            result.push(entry.ready().await?);
-        }
-        Ok(result)
-    }
-    pub(crate) async fn remove(&self, id: &str) -> Result<()> {
-        let handle = self.get(id).await?;
-        handle.shutdown().await?;
-        let mut entries = self.entries()?;
-        if entries
-            .get(id)
-            .is_some_and(|entry| Arc::ptr_eq(entry, &handle.entry))
-        {
-            entries.remove(id);
-        }
-        Ok(())
-    }
-    pub(crate) async fn start_auto(&self) -> anyhow::Result<()> {
-        let mut failures = Vec::new();
-        let mut pending: FuturesUnordered<_> = self
-            .list()
-            .await?
-            .into_iter()
-            .filter(|handle| handle.entry.options.auto_start)
-            .map(|handle| async move {
-                let result = handle.start().await;
-                (handle, result)
-            })
-            .collect();
-        while let Some((handle, result)) = pending.next().await {
-            match result {
-                Ok(report) if report.summary == OperationSummary::Completed => {}
-                Ok(_) => failures.push(format!("{}: incomplete startup", handle.id())),
-                Err(error) => failures.push(format!("{}: {error}", handle.id())),
-            }
-        }
-        if !failures.is_empty() {
-            anyhow::bail!("computation startup failed: {}", failures.join("; "));
-        }
-        Ok(())
-    }
-    pub(crate) async fn stop_all(&self) -> anyhow::Result<()> {
-        self.stop_all_except(None).await
-    }
-    pub(crate) async fn stop_all_except(&self, excluded: Option<&str>) -> anyhow::Result<()> {
-        let mut failures = Vec::new();
-        let mut pending: FuturesUnordered<_> = self
-            .list()
-            .await?
-            .into_iter()
-            .filter(|handle| !*handle.entry.cancel.borrow())
-            .filter(|handle| Some(handle.id()) != excluded)
-            .map(|handle| async move {
-                let result = handle.stop().await;
-                (handle, result)
-            })
-            .collect();
-        while let Some((handle, result)) = pending.next().await {
-            match result {
-                Ok(report) if report.summary == OperationSummary::Completed => {}
-                Ok(_) => failures.push(format!("{}: incomplete stop", handle.id())),
-                Err(error) => failures.push(format!("{}: {error}", handle.id())),
-            }
-        }
-        if !failures.is_empty() {
-            anyhow::bail!("computation stop failed: {}", failures.join("; "));
-        }
-        Ok(())
+    pub(crate) fn retain(
+        &self,
+        batch: ComponentBatch,
+        control: Option<GraphControl>,
+    ) -> Arc<PendingComponents> {
+        let batch = PendingComponents::new(batch, control);
+        let mut pending = self.pending.lock().unwrap_or_else(|error| {
+            log::error!("Retaining component ownership through poisoned cleanup state: {error}");
+            error.into_inner()
+        });
+        pending.retain(|batch| !batch.complete());
+        pending.push(batch.clone());
+        batch
     }
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         self.request_shutdown();
-        let entries: Vec<_> = self.entries()?.values().cloned().collect();
-        for entry in &entries {
-            entry.request_shutdown();
-        }
-        let mut failures = Vec::new();
-        for entry in entries {
-            if let Err(error) = entry.shutdown().await {
-                failures.push(format!("{}: {error}", entry.id));
+        let entry = self
+            .entry
+            .lock()
+            .map_err(|_| DrasiError::invalid_state("instance graph ownership poisoned"))?
+            .clone();
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| DrasiError::invalid_state("component cleanup ownership poisoned"))?
+            .clone();
+        if let Some(entry) = entry {
+            entry.shutdown(&pending).await?;
+        } else {
+            for batch in pending {
+                batch.cleanup().await?;
             }
-        }
-        if !failures.is_empty() {
-            anyhow::bail!("computation shutdown failed: {}", failures.join("; "));
         }
         Ok(())
     }
 }
 
-impl Drop for ComputationRegistry {
+impl Drop for InstanceGraph {
     fn drop(&mut self) {
-        for entry in self
-            .entries
+        if let Some(entry) = self
+            .entry
             .get_mut()
             .unwrap_or_else(|error| error.into_inner())
-            .values()
+            .as_ref()
         {
             entry.request_shutdown();
+        }
+    }
+}
+
+pub(crate) struct PendingComponents {
+    value: tokio::sync::Mutex<Option<ComponentBatch>>,
+    resources: tokio::sync::Mutex<BTreeMap<ResourceId, ResourceHandle>>,
+    control: Option<GraphControl>,
+    done: AtomicBool,
+}
+
+impl PendingComponents {
+    fn new(batch: ComponentBatch, control: Option<GraphControl>) -> Arc<Self> {
+        let resources = batch
+            .definition
+            .resources
+            .iter()
+            .filter(|resource| resource.ownership == ResourceOwnership::Graph)
+            .filter_map(|resource| {
+                batch
+                    .bindings
+                    .resources
+                    .get(&resource.id)
+                    .map(|handle| (resource.id.clone(), handle.clone()))
+            })
+            .collect();
+        Arc::new(Self {
+            value: tokio::sync::Mutex::new(Some(batch)),
+            resources: tokio::sync::Mutex::new(resources),
+            control,
+            done: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) async fn take(&self) -> Result<ComponentBatch> {
+        self.value
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| DrasiError::invalid_state("component batch was already submitted"))
+    }
+
+    fn complete(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn cleanup(&self) -> Result<()> {
+        let mut resources = self.resources.lock().await;
+        let existing = self
+            .control
+            .as_ref()
+            .map(|control| control.registry_snapshot());
+        let ids: Vec<_> = resources.keys().cloned().collect();
+        let mut failures = Vec::new();
+        for id in ids {
+            let resource = resources[&id].clone();
+            let adopted = existing.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .desired
+                    .resources
+                    .keys()
+                    .filter_map(|id| snapshot.resource(id).ok())
+                    .any(|current| current.same_shared_instance(&resource))
+            });
+            if !adopted {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), resource.shutdown())
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        failures.push(format!("{id}: {error:#}"));
+                        continue;
+                    }
+                    Err(error) => {
+                        failures.push(format!("{id}: {error}"));
+                        continue;
+                    }
+                }
+            }
+            resources.remove(&id);
+        }
+        if !failures.is_empty() {
+            return Err(operation("components", "cleanup", failures.join("; ")));
+        }
+        self.value.lock().await.take();
+        self.done.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Drop for PendingComponents {
+    fn drop(&mut self) {
+        if !self.resources.get_mut().is_empty() {
+            log::warn!("Component batch dropped before awaited resource cleanup completed");
         }
     }
 }

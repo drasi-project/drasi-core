@@ -1,7 +1,7 @@
 # Optional managed configuration
 
-DrasiLib can accept a complete desired set of computation graphs, reconcile it
-with its live graph instances, and optionally commit every accepted definition
+DrasiLib can accept desired component definitions, reconcile them with its
+ComputationGraph, and optionally commit every accepted definition
 to an external transactional store. **Persistence is off by default.**
 
 This is configuration durability, not automatic persistence of event data or
@@ -34,7 +34,7 @@ create a new instance to restart after shutdown. In lightweight direct-addition
 mode the caller supplies new source/query/reaction objects again, with the same
 processing-storage identities; opaque objects are not serialized automatically.
 In persistent managed mode, supply the factories, resource resolver and
-configuration store to the new builder. It reloads the accepted graph set without
+configuration store to the new builder. It reloads the accepted definition without
 resubmitting `apply_desired_state`, including declarations whose factory is
 temporarily unavailable.
 
@@ -63,8 +63,10 @@ supplies executable validators for custom persisted records. See the
 
 ## Desired-state API
 
-`management::DesiredInstance` contains `version: 1` and a list of `DesiredGraph`
-entries, each with an `auto_start` policy and a complete `DesiredTopology`.
+`management::DesiredInstance` contains `version: 1` and a `topology` describing
+managed components, their connections and resource recipes. Each component has
+its own `lifecycle.auto_start` policy. `DesiredInstance::from(topology)` creates
+an instance-scoped definition from an assembled topology.
 
 ```rust,ignore
 let previous = drasi.desired_configuration()?;
@@ -77,13 +79,13 @@ let receipt = drasi.apply_desired_state(
 assert!(receipt.durable); // only when a ConfigurationStore is configured
 let status = drasi.reconcile_desired_state().await?;
 if !status.converged() {
-    // Inspect status.graphs and each graph's coherent runtime observations.
+    // Inspect status.error, status.resource_errors and component observations.
 }
 ```
 
-The whole supplied managed graph set is authoritative:
+The supplied definition is authoritative for its managed members:
 
-- Missing managed graphs/components are removed.
+- Omitted managed components and resources are removed.
 - Unchanged healthy components are preserved rather than reconstructed.
 - Changed definitions use ComputationGraph's scoped reconciliation.
 - Missing factories and constructor failures remain declared and inspectable.
@@ -91,17 +93,17 @@ The whole supplied managed graph set is authoritative:
 - Failed cleanup remains visible and retryable; persistence does not make
   lifecycle effects atomically rollbackable.
 
-Generated internal query graphs and the internal observability source are runtime
+QueryGraphs and the internal observability source are runtime
 implementation details, not user reconstruction recipes. In memory-only mode,
 unmanaged object-injected components may coexist; applying managed definitions
-does not implicitly adopt or delete them. A conflicting unmanaged graph name is
-rejected.
+does not implicitly adopt or delete them. Conflicting component or resource IDs
+are rejected. All members belong to the same ComputationGraph.
 
 In persistent mode, preconstructed builder components and ordinary imperative
 configuration mutations are rejected with guidance to use `apply_desired_state`.
 They cannot be promised automatic reconstruction. Use factory specifications for
-sources, queries, transformers and sinks. Managed graph controls also reject
-configuration writes that bypass this API. Read-only inspection, data processing
+sources, queries, transformers and sinks. Controller operations also reject
+configuration writes to managed members that bypass this API. Read-only inspection, data processing
 and runtime start/stop remain available.
 
 This is an explicit contract: metadata on an arbitrary Rust object is not a
@@ -119,10 +121,10 @@ work.
 `AcceptanceReceipt` contains the request ID, definition revision and `durable`.
 Acceptance does not mean readiness. `management_status().await` combines the last
 management pass with live component observations; `reconcile_desired_state()`
-waits for another pass. Inspect per-graph and per-component failures rather than
+waits for another pass. Inspect operation, resource and component failures rather than
 treating an accepted request as a fully operational graph.
 
-Definition revisions differ from each running graph's `GraphRevision`.
+Definition revisions differ from the ComputationGraph's `GraphRevision`.
 Expected-revision checks prevent lost concurrent updates. Reusing a request ID
 with the same definition returns its original receipt; different content under
 that ID is an error. An identical current target need not advance the definition

@@ -20,8 +20,10 @@ feature opt-in.
 | `ObservedGraph` | Current creation, execution, health and failure information |
 | `ComputationInspector` | Consistent snapshots and the most recent 256 controller publications |
 | `ResourceHandle` | An actual supplied object and, where applicable, its cleanup owner |
-| `ComputationRegistry` | DrasiLib's registered graphs and their owned tasks |
-| `ComputationInventory` | Combined view of registered graphs and their nested query graphs |
+| `InstanceGraph` (internal) | Owns the DrasiLib instance's ComputationGraph task and cleanup |
+| `ScopedGraph` (internal) | Owns a query's QueryGraph task and cleanup |
+| `ComponentBatch` | Component declarations and supplied bindings added to the instance graph |
+| `ComputationInventory` | Combined view of the ComputationGraph and its owned QueryGraphs |
 
 An instance's source/query/reaction records are owned by its graph. Compatibility
 inspection responses are derived from those records, not used to recover
@@ -29,12 +31,10 @@ membership or decide removals. Ordinary component operations and any retained
 manager-style accessors are graph-backed APIs, not a second execution engine.
 
 `DrasiLib::get_graph().await` returns the compatibility snapshot directly.
-`component_graph()` is now a weak, read-only asynchronous view: it is not an
-`Arc<RwLock<ComponentGraph>>`, has no node/relationship mutation methods, and
-cannot store runtime instances. Existing callers must remove graph-lock and
-direct-mutation code rather than using that view as another lifecycle owner.
+`component_graph()` provides a weak, read-only asynchronous view with no
+node/relationship mutation methods or runtime-instance storage.
 
-DrasiLib owns a task for each registered graph and each query's nested graph.
+DrasiLib owns its ComputationGraph task, and each query owns its QueryGraph task.
 Inside a graph, the controller polls its component futures and serializes mutable
 calls to each component. Independent query tasks can use different Tokio workers.
 The in-process graph APIs support both single-thread and multi-thread Tokio
@@ -558,12 +558,11 @@ let snapshot = drasi.snapshot_computation_configuration().await?;
 let json = serde_json::to_string_pretty(&snapshot)?;
 ```
 
-The versioned result contains `instance` (the ordinary configuration),
-`native_components` (native additions to the root), and `graphs` (separately
-registered graphs plus their startup policies). Generated query-internal graphs
-are not duplicated as independent user configuration.
+The versioned result contains `instance` (the ordinary configuration) and
+`native_components` (native declarations and resource recipes in the same
+ComputationGraph). QueryGraphs are not independent user configuration.
 
-Each graph includes its desired topology and a configuration entry for every
+The native section includes its desired topology and a configuration entry for every
 component: submitted values before construction, captured values from the
 component getter, or an explicit unavailability reason. Factory definitions
 remain present when creation fails. Captures occur at construction and

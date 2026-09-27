@@ -162,12 +162,85 @@ impl GraphControl {
             .send(Command::Reconcile {
                 preview,
                 bindings,
+                management_access: self.management_access,
                 reply,
             })
             .await
             .map_err(|_| GraphError::ControllerClosed)?;
         result.await.map_err(|_| GraphError::ControllerClosed)?
     }
+}
+
+pub(super) fn check_protected(
+    graph: &ComputationGraph,
+    preview: &ReconciliationPreview,
+) -> GraphResult<()> {
+    let old = graph.snapshot.select(GraphSelection::All)?;
+    let target = &preview.desired;
+    for id in &graph.protected_components {
+        if old
+            .components
+            .iter()
+            .find(|node| node.descriptor.id() == id)
+            != target
+                .components
+                .iter()
+                .find(|node| node.descriptor.id() == id)
+            || preview.replace.contains(id)
+            || preview.update.contains(id)
+            || preview.restart.contains(id)
+            || old.component_resources.get(id) != target.component_resources.get(id)
+            || old.component_plugins.get(id) != target.component_plugins.get(id)
+            || old.readiness_required.contains(id) != target.readiness_required.contains(id)
+        {
+            return Err(topology(format!("component {id} is managed by DrasiLib")));
+        }
+    }
+    for id in &graph.protected_resources {
+        if old.resources.iter().find(|resource| &resource.id == id)
+            != target.resources.iter().find(|resource| &resource.id == id)
+            || old.resource_configurations.get(id) != target.resource_configurations.get(id)
+            || preview.resources.contains(id)
+            || preview.remove_resources.contains(id)
+        {
+            return Err(topology(format!("resource {id} is managed by DrasiLib")));
+        }
+    }
+    let protected_edges = |topology: &DesiredTopology| {
+        topology
+            .relationships
+            .iter()
+            .chain(&topology.boundary_relationships)
+            .filter(|edge| {
+                graph
+                    .protected_components
+                    .contains(&edge.definition.from.component)
+                    || graph
+                        .protected_components
+                        .contains(&edge.definition.to.component)
+            })
+            .map(|edge| (edge.definition.clone(), edge.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let protected_links = |links: &[(ComponentId, ComponentId)]| {
+        links
+            .iter()
+            .filter(|(from, to)| {
+                graph.protected_components.contains(from) || graph.protected_components.contains(to)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
+    if protected_edges(&old) != protected_edges(target)
+        || protected_links(&old.subscriptions) != protected_links(&target.subscriptions)
+        || protected_links(&old.control_connections) != protected_links(&target.control_connections)
+        || (!graph.protected_components.is_empty()
+            && (old.requirements != target.requirements
+                || old.allow_incomplete != target.allow_incomplete))
+    {
+        return Err(topology("connection configuration is managed by DrasiLib"));
+    }
+    Ok(())
 }
 
 fn selected_ids(
@@ -1488,6 +1561,8 @@ pub(super) async fn execute(
     cancel: &mut watch::Receiver<bool>,
     supplied: ReconciliationPreview,
     bindings: TopologyBindings,
+    commands: &mut mpsc::Receiver<Command>,
+    deferred_commands: &mut VecDeque<Command>,
 ) -> GraphResult<ReconciliationReport> {
     check_revision(graph, supplied.revision)?;
     if supplied.desired.graph_id != graph.snapshot.id.as_ref() {
@@ -1731,7 +1806,37 @@ pub(super) async fn execute(
         &mut report,
     )
     .await?;
-    realize(graph, operations, controls, cancel, &plan, &mut report).await?;
+    realize(
+        graph,
+        operations,
+        controls,
+        cancel,
+        &plan,
+        &mut report,
+        commands,
+        deferred_commands,
+    )
+    .await?;
+    let deadline = tokio::time::sleep(graph.cleanup_timeout);
+    tokio::pin!(deadline);
+    while operations.starting.is_some() || operations.stopping.is_some() {
+        operations.advance_start(graph)?;
+        operations.advance_stop(graph)?;
+        if operations.starting.is_none() && operations.stopping.is_none() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            _ = &mut deadline => return Err(GraphError::ReconciliationTimeout),
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_control(graph, completion); }
+            }
+            completion = operations.futures.next(), if !operations.futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+            }
+        }
+    }
     resume(graph, operations, &plan.pause)?;
     let start: BTreeSet<_> = plan
         .create
@@ -2147,17 +2252,146 @@ fn commit_desired(
     Ok(())
 }
 
+async fn create_component(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    index: usize,
+    commands: &mut mpsc::Receiver<Command>,
+    deferred_commands: &mut VecDeque<Command>,
+) -> GraphResult<CreationOutcome> {
+    let id = graph.nodes[index].descriptor.id().clone();
+    if let Some(specification) = graph.snapshot.specifications.get(&id) {
+        let resources: Vec<_> = specification
+            .dependencies
+            .values()
+            .flatten()
+            .chain(
+                specification
+                    .configuration
+                    .values()
+                    .filter_map(|value| match value {
+                        ConfigurationValue::Reference { resource, .. } => Some(resource),
+                        _ => None,
+                    }),
+            )
+            .filter(|resource| !graph.resource_handles.contains_key(*resource))
+            .cloned()
+            .collect();
+        let dependencies: Vec<_> = graph
+            .snapshot
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.policy.required_for_creation
+                    && edge.definition.to.component == id
+                    && graph.observed().components[&edge.definition.from.component].realization
+                        != RealizationState::Created
+            })
+            .map(|edge| edge.definition.from.component.clone())
+            .collect();
+        if !resources.is_empty() || !dependencies.is_empty() {
+            update(graph, |state| {
+                state
+                    .components
+                    .get_mut(&id)
+                    .expect("component")
+                    .realization = RealizationState::Blocked
+            });
+            return Ok(CreationOutcome::Blocked {
+                dependencies,
+                resources,
+            });
+        }
+    }
+    operations.attach_control(graph, index)?;
+    operations.launch(graph, index, Operation::Create)?;
+    let mut peers = graph.peers.subscribe();
+    while operations.active.contains_key(&index)
+        || operations.stop_after_abort.contains(&index)
+        || operations
+            .stopping
+            .as_ref()
+            .is_some_and(|group| group.pending.contains(&index))
+    {
+        operations.advance_additions(graph)?;
+        operations.advance_start(graph)?;
+        operations.advance_stop(graph)?;
+        tokio::select! {
+            biased;
+            _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_control(graph, completion); }
+            }
+            changed = peers.changed() => { changed.map_err(|_| GraphError::ControllerClosed)?; }
+            completion = operations.futures.next(), if !operations.futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+            }
+            command = commands.recv() => match command {
+                Some(Command::Add { addition, management_access, reply }) => {
+                    accept_addition(graph, operations, addition, management_access, reply);
+                }
+                Some(Command::HandleStop { component, generation, reply }) => {
+                    stop_handle(graph, operations, component, generation, true, reply)?;
+                }
+                Some(command) => deferred_commands.push_back(command),
+                None => return Err(GraphError::ControllerClosed),
+            }
+        }
+    }
+    let observed = graph.observed();
+    let node = &observed.components[&id];
+    Ok(if let Some(failure) = &node.failure {
+        CreationOutcome::CreationFailed(failure.clone())
+    } else if !matches!(
+        graph.components[index].take()?.component,
+        Component::Deferred { .. } | Component::Unresolved(_)
+    ) {
+        update(graph, |state| {
+            state
+                .components
+                .get_mut(&id)
+                .expect("constructed component")
+                .realization = RealizationState::Created;
+        });
+        CreationOutcome::Created
+    } else {
+        CreationOutcome::Blocked {
+            dependencies: Vec::new(),
+            resources: Vec::new(),
+        }
+    })
+}
+
 async fn realize(
-    graph: &ComputationGraph,
+    graph: &mut ComputationGraph,
     operations: &mut Operations,
     controls: &mut PipeGuard,
     cancel: &mut watch::Receiver<bool>,
     plan: &ReconciliationPreview,
     report: &mut ReconciliationReport,
+    commands: &mut mpsc::Receiver<Command>,
+    deferred_commands: &mut VecDeque<Command>,
 ) -> GraphResult<()> {
-    for &index in &graph.order {
+    for index in graph.order.clone() {
         let id = graph.nodes[index].descriptor.id();
         if !plan.create.contains(id) && !plan.replace.contains(id) && !plan.update.contains(id) {
+            continue;
+        }
+        if !plan.update.contains(id) {
+            let id = id.clone();
+            let outcome = create_component(
+                graph,
+                operations,
+                controls,
+                cancel,
+                index,
+                commands,
+                deferred_commands,
+            )
+            .await?;
+            report.creation.insert(id, outcome);
             continue;
         }
         let slot = graph.components[index].clone();

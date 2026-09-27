@@ -304,7 +304,16 @@ async fn ordinary_operations_share_the_single_computation_runtime() {
             .await
             .unwrap();
     }
-    assert_eq!(core.list_computation_graphs().await.unwrap().len(), 1);
+    assert_eq!(
+        core.inspect_computation_inventory()
+            .await
+            .unwrap()
+            .scopes
+            .values()
+            .filter(|scope| scope.owner.is_none())
+            .count(),
+        1
+    );
     core.list_sources().await.unwrap();
     core.list_queries().await.unwrap();
     core.list_reactions().await.unwrap();
@@ -393,7 +402,16 @@ async fn query_manager_is_a_shared_graph_backed_facade() {
         .unwrap();
     let clone = core.clone();
     assert!(std::ptr::eq(core.query_manager(), clone.query_manager()));
-    assert_eq!(core.list_computation_graphs().await.unwrap().len(), 1);
+    assert_eq!(
+        core.inspect_computation_inventory()
+            .await
+            .unwrap()
+            .scopes
+            .values()
+            .filter(|scope| scope.owner.is_none())
+            .count(),
+        1
+    );
     let query = core
         .query_manager()
         .get_query_instance("query")
@@ -1792,10 +1810,10 @@ async fn runtime_services_are_declared_once_and_bound_to_public_component_ids() 
         .await
         .unwrap();
     let runtime = core.computation_runtime.as_ref();
-    let scoped = core.computation_plugin_services("separate-graph").unwrap();
+    let scoped = core.computation_plugin_services().unwrap();
     assert!(
         scoped.wal.is_some(),
-        "native instance WAL must also reach separately hosted graphs"
+        "native components must receive the instance WAL"
     );
     assert!(scoped.state_store.is_some());
     assert!(scoped.identity.is_some());
@@ -2045,7 +2063,7 @@ async fn index_aliases_share_one_node_and_query_dependencies_follow_reconfigurat
 async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_removed_queries() {
     let query_id = ComponentId::try_new("query").unwrap();
     let extra_id = "lib-query/7175657279";
-    let extra = ComputationGraph::builder(extra_id)
+    let extra = ComponentBatch::builder()
         .service(Box::new(NativeService {
             descriptor: ComponentDescriptor::try_new(query_id.clone(), vec![]).unwrap(),
             starts: Arc::new(AtomicUsize::new(0)),
@@ -2058,6 +2076,18 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         id: "known-source-plugin".into(),
         version: "1.2.3".into(),
     };
+    let independent_core = builder()
+        .with_id(extra_id)
+        .with_components(extra.auto_start(false))
+        .build()
+        .await
+        .unwrap();
+    independent_core
+        .computation_component("query")
+        .unwrap()
+        .wait_created()
+        .await
+        .unwrap();
     let core = builder()
         .with_source_metadata(
             source,
@@ -2069,7 +2099,6 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         .with_default_index_provider("primary", Arc::new(DeferredPersistentProvider))
         .with_query(config("query", Some("source")))
         .with_query(config("unresolved", Some("missing")))
-        .with_computation_graph(extra, ComputationOptions { auto_start: false })
         .build()
         .await
         .unwrap();
@@ -2086,20 +2115,29 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     let inventory = core.inspect_computation_inventory().await.unwrap();
     let root = ComputationScope::root("__drasi_lib_runtime__");
     let nested = root.nested(query_id.clone());
-    let independent = ComputationScope::root(extra_id);
-    assert_eq!(inventory.scopes.len(), 3);
+    let independent = independent_core
+        .inspect_computation_inventory()
+        .await
+        .unwrap();
+    assert_ne!(inventory.instance_id, independent.instance_id);
+    assert_eq!(inventory.scopes.len(), 2);
+    assert_eq!(independent.scopes.len(), 1);
     assert_eq!(
         inventory.scopes[&nested].topology.graph_id.as_ref(),
         extra_id
     );
-    assert!(inventory.scopes[&independent].owner.is_none());
+    assert!(independent.scopes[&root].owner.is_none());
+    assert!(independent.scopes[&root]
+        .topology
+        .nodes
+        .contains_key(&GraphEntityId::Component(query_id.clone())));
     let owner = inventory.scopes[&nested].owner.as_ref().unwrap();
     assert_eq!(
         owner.component,
         root.entity(GraphEntityId::Component(query_id.clone()))
     );
     assert_eq!(owner.generation, handle.generation());
-    for scope in [&root, &nested, &independent] {
+    for scope in [&root, &nested] {
         assert!(inventory.scopes[scope]
             .topology
             .nodes
@@ -2159,7 +2197,11 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
     core.remove_query("query").await.unwrap();
     let after = core.inspect_computation_inventory().await.unwrap();
     assert!(!after.scopes.contains_key(&nested));
-    assert!(after.scopes.contains_key(&independent));
+    assert!(independent_core
+        .computation_component("query")
+        .unwrap()
+        .observed()
+        .is_ok());
     assert!(!after
         .links
         .iter()
@@ -2169,6 +2211,7 @@ async fn inventory_includes_all_scopes_without_aliasing_names_or_retaining_remov
         "earlier snapshots remain immutable"
     );
     core.shutdown().await.unwrap();
+    independent_core.shutdown().await.unwrap();
 }
 
 #[tokio::test]

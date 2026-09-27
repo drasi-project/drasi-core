@@ -1,6 +1,6 @@
 # package	binary	case	profile	contract
 # These cases protect graph-only capabilities even if a whole test file is deleted.
-drasi-lib	computation_configuration_snapshot	instance_snapshot_covers_ordinary_native_and_additional_graphs_without_pausing_work	all	Whole-instance configuration does not borrow or cancel processing operations.
+drasi-lib	computation_configuration_snapshot	instance_snapshot_covers_ordinary_and_native_components_without_pausing_work	all	Whole-instance configuration does not borrow or cancel processing operations.
 drasi-lib	computation_configuration_snapshot	factory_definition_survives_creation_failure_and_exports_without_an_instance	all	Failed construction retains exportable declared configuration.
 drasi-lib	computation_configuration_snapshot	in_place_configuration_changes_publish_with_the_new_revision_not_old_snapshots	all	Configuration publications are revision-coherent and detached.
 drasi-lib	computation_configuration_snapshot	opaque_components_export_an_explicit_configuration_error_not_an_empty_configuration	all	Unavailable configuration is explicit rather than a false empty snapshot.
@@ -29,8 +29,8 @@ drasi-lib	computation_resource_observation	queued_reports_cannot_restore_retired
 drasi-lib	computation_topology	imported_external_components_must_be_supplied_and_execute_in_a_fresh_graph	all	Topology import requires real external bindings.
 drasi-lib	computation_inspection	orphan_relationships_remain_queryable_and_history_eviction_is_explicit	all	Inspection exposes unresolved references and bounded-history loss.
 drasi-lib	computation_instance	cancelled_shutdown_retains_the_driver_and_actual_async_cleanup_owner	all	Instance cancellation cannot detach cleanup responsibility.
-drasi-lib	computation_pipeline_parity	same_instance_existing_plugins_join_middleware_and_restart_current_thread	extra-capabilities	Ordinary and direct graph paths produce equal joined middleware results.
-drasi-lib	computation_pipeline_parity	same_instance_existing_plugins_join_middleware_and_restart_multi_thread	extra-capabilities	Paired results and independent graph lifecycles under parallel polling.
+drasi-lib	computation_pipeline_parity	existing_plugins_join_middleware_and_restart_current_thread	extra-capabilities	Ordinary and native component paths produce equal joined middleware results.
+drasi-lib	computation_pipeline_parity	existing_plugins_join_middleware_and_restart_multi_thread	extra-capabilities	Paired results and independent instance lifecycles under parallel polling.
 drasi-lib	computation_consumer_recovery	partial_handling_failure_restarts_from_the_last_successfully_handled_delta	all	Consumer recovery acknowledges handled work only.
 drasi-lib	computation_query_configuration	native_query_executes_synthetic_joins_and_the_configured_source_middleware_pipeline	all	Native query configuration preserves joins and middleware.
 drasi-lib	computation_middleware_recovery	redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_from_rocksdb	extra-capabilities	Middleware progress and pending output survive durable reopen.
@@ -54,7 +54,7 @@ drasi-plugin-sdk	computation_factories	concurrent_descriptor_creation_uses_insta
 drasi-plugin-sdk	computation_factories	existing_bootstrap_identity_secret_and_index_descriptors_keep_their_real_contracts	all	Real provider descriptors preserve bootstrap/identity contracts and atomic RocksDB commit, rollback and reopen.
 lib-integration-tests	computation_management	unavailable_commit_confirmation_is_explicit_and_reconcile_reloads_authoritative_state	all	Unknown commit outcomes cannot expose stale configuration as authoritative.
 lib-integration-tests	computation_remote_effects	direct_additions_and_each_stage_restart_preserve_real_effects_and_saved_positions	all	Direct additions after instance startup and independent source/query/reaction restarts preserve saved positions and exact HTTP/gRPC effects.
-lib-integration-tests	computation_factory_lifecycle	bulk_factory_graphs_restore_definitions_state_backlog_and_independent_stage_positions	all	Two factory-built graphs restore configuration, aggregate state, pending input/output and consumer positions without interfering with each other.
+lib-integration-tests	computation_factory_lifecycle	bulk_factories_restore_instances_state_backlog_and_independent_stage_positions	all	Two instances restore factory configuration, aggregate state, pending input/output and consumer positions without interfering with each other.
 lib-integration-tests	computation_factory_lifecycle	factory_restart_replays_input_accepted_while_the_query_was_stopped	all	A durable pipe retains accepted input independently of the stopped query's checkpoint.
 lib-integration-tests	computation_factory_lifecycle	source_restart_with_pipe_ahead_preserves_transport_identity_on_later_reconstruction	all	Prior replay cannot make restored transport counters collide with durable input history.
 lib-integration-tests	computation_factory_lifecycle	process_restart_restores_bulk_factories_and_pending_input_without_resubmitting_configuration	all	Actual process death and temporarily missing factories do not lose accepted definitions or pending source work.
@@ -86,3 +86,9 @@ drasi-index-garnet	computation_resources	graph_indexes_checkpoint_and_output_com
 drasi-index-garnet	computation_resources	native_retention_handles_staged_appends_and_full_width_sequences	all	Backend retention preserves exact full-width positions and staged appends.
 drasi-index-garnet	outbox_live_results_tests	test_garnet_outbox_sequence_order_is_exact_above_double_precision	all	Backend sequence ordering cannot round positions through floating point.
 drasi-index-garnet	outbox_live_results_tests	test_garnet_live_results_atomic_batch	all	Backend live-result batches retain atomic mutation boundaries.
+drasi-lib	lib	computation::runtime::tests::lifecycle_tests::query_graph_ownership_and_sibling_progress_on_current_thread	all	QueryGraphs remain owned by their query nodes; replacing one query preserves shared sources and sibling execution on a current-thread runtime.
+drasi-lib	lib	computation::runtime::tests::lifecycle_tests::query_graph_ownership_and_sibling_progress_on_multiple_threads	all	QueryGraphs retain independent generations, resources and exact sibling output while a query is replaced across runtime workers.
+drasi-lib	lib	computation::runtime::tests::lifecycle_tests::direct_and_factory_additions_preserve_one_root_and_existing_query_graphs	all	Direct and factory component additions share root identity without rebuilding an existing QueryGraph or accepting a cross-kind ID collision.
+lib-integration-tests	computation_remote_effects	ordinary_reconstruction_preserves_durable_identity_and_pending_work	all	Ordinary reconstruction preserves query identities, row signatures, output generations and completed reaction effects while replaying pending input and output.
+lib-integration-tests	computation_management	pending_managed_construction_allows_unrelated_admission_and_component_stop	all	A pending factory leaves unrelated component admission and activation responsive and permits its own construction to be stopped without losing accepted configuration.
+drasi-lib	computation_pipeline_parity	separately_assembled_pipelines_share_one_root_without_helper_collisions	extra-capabilities	Repeated pipeline batches reuse canonical factories and shared source resources without helper-ID collisions or changes to an existing QueryGraph.

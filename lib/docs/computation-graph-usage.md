@@ -57,9 +57,7 @@ let drasi = DrasiLib::builder()
 drasi.start().await?;
 ```
 
-The add, update, remove, status and result APIs all use ComputationGraph. Remove
-old `ExecutionMode` imports and `with_execution_mode` calls. Existing plugin
-adapters do not provide a fallback to ComponentGraph.
+The add, update, remove, status and result APIs use the instance's ComputationGraph.
 
 ## Add a component and wait for readiness
 
@@ -154,8 +152,8 @@ let query_graph = drasi.inspect_query_computation("order-names").await?;
 let inventory = drasi.inspect_computation_inventory().await?;
 ```
 
-The inventory includes the instance, query graphs and separately registered
-graphs. Logs and metrics use the existing DrasiLib APIs. Failure objects may
+The inventory includes the ComputationGraph and its owned QueryGraphs.
+Logs and metrics use the DrasiLib APIs. Failure objects may
 contain configuration or provider details; do not publish them as sanitized
 error messages without checking them.
 
@@ -170,8 +168,8 @@ error messages without checking them.
 ## Stop and clean up
 
 `stop()` stops processing without deleting the component declarations. Restart
-is subject to plugin support. For example, a consumed ApplicationSource receiver
-requires reconstruction rather than assuming the same object can start again.
+is subject to the component's restart contract. ApplicationSource retains its
+input handles and buffered work across stop/start.
 
 Always finish with:
 
@@ -210,13 +208,32 @@ cargo run --locked -p drasi-lib --example computation_instance
 ```
 
 The first [example](../examples/computation_graph.rs) builds direct processing
-chains. The second [example](../examples/computation_instance.rs) hosts an
-ordinary pipeline and an additional graph over a shared application source.
-Both use the same ComputationGraph runtime.
+chains. The second [example](../examples/computation_instance.rs) uses two DrasiLib
+instances to process subscriptions to a shared application source.
 
-A standalone `GraphRun` must be awaited by its caller. A graph registered through
-`add_computation_graph` or `with_computation_graph` has its task owned by DrasiLib.
-Borrowing a source does not transfer ownership of its start/stop lifecycle.
+A standalone `GraphRun` must be awaited by its caller. Within DrasiLib, submit
+component batches to its owned ComputationGraph:
+
+```rust,ignore
+use drasi_lib::computation::v1::ComponentBatch;
+
+let batch = ComponentBatch::builder()
+    .source(source)
+    .transformer(transformer)
+    .sink(sink)
+    .bind_stream(source_output, source_stream)
+    .bind_stream(transformer_output, transformer_stream)
+    .connect(source_to_transformer, input_pipe)
+    .connect(transformer_to_sink, output_pipe)
+    .build()?;
+let report = drasi.add_components(batch).await?;
+```
+
+`with_components(batch)` supplies a batch during instance construction.
+`computation_pipeline()` assembles existing source/query/reaction contracts into
+a batch. Component IDs share the instance namespace; batches do not define
+independent execution owners. Borrowing a source does not transfer ownership
+of its start/stop lifecycle.
 
 ## Use Server or the test framework
 

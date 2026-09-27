@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 
 use super::*;
-use crate::computation::{instance::ComputationRegistry, v1::*};
+use crate::computation::{instance::InstanceGraph, v1::*};
 
 enum Command {
     Apply {
@@ -38,14 +38,14 @@ pub(crate) struct Management {
     desired: watch::Receiver<CommittedConfiguration>,
     status: watch::Receiver<ManagementStatus>,
     task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    registry: Arc<ComputationRegistry>,
+    graph: Arc<InstanceGraph>,
     running: Arc<RwLock<bool>>,
     confirmed: Arc<AtomicBool>,
 }
 
 struct Driver {
     instance_id: String,
-    registry: Arc<ComputationRegistry>,
+    graph: Arc<InstanceGraph>,
     running: Arc<RwLock<bool>>,
     shutdown: Arc<AtomicBool>,
     factories: FactoryRegistry,
@@ -54,7 +54,7 @@ struct Driver {
     current: CommittedConfiguration,
     receipts: BTreeMap<String, (DesiredInstance, AcceptanceReceipt)>,
     snapshots: BTreeMap<String, CommittedConfiguration>,
-    owned: BTreeSet<String>,
+    applied: DesiredTopology,
     desired: watch::Sender<CommittedConfiguration>,
     status: watch::Sender<ManagementStatus>,
     confirmed: Arc<AtomicBool>,
@@ -85,7 +85,7 @@ impl ResourceConstructor for ManagedResource {
 impl Management {
     pub(crate) async fn open(
         instance_id: String,
-        registry: Arc<ComputationRegistry>,
+        graph: Arc<InstanceGraph>,
         running: Arc<RwLock<bool>>,
         shutdown: Arc<AtomicBool>,
         options: ManagementOptions,
@@ -119,23 +119,20 @@ impl Management {
             persistent: store.is_some(),
             reconciling: true,
             error: None,
-            graphs: Vec::new(),
+            applied: false,
+            converged: false,
+            resource_errors: BTreeMap::new(),
         });
         let confirmed = Arc::new(AtomicBool::new(true));
         let mut driver = Driver {
             instance_id,
-            registry: registry.clone(),
+            graph: graph.clone(),
             running: running.clone(),
             shutdown,
             factories: options.factories,
             resolver: options.resources,
             store,
-            owned: current
-                .desired
-                .graphs
-                .iter()
-                .map(|graph| graph.topology.graph_id.clone())
-                .collect(),
+            applied: DesiredInstance::default().topology,
             current,
             receipts: BTreeMap::new(),
             snapshots: BTreeMap::new(),
@@ -150,7 +147,7 @@ impl Management {
             desired: desired_rx,
             status: status_rx,
             task: tokio::sync::Mutex::new(Some(task)),
-            registry,
+            graph,
             running,
             confirmed,
         };
@@ -210,42 +207,23 @@ impl Management {
             status.error = None;
         }
         let running = *self.running.read().await;
-        let handles = self.registry.list().await?;
-        for report in &mut status.graphs {
-            let target = desired
-                .desired
-                .graphs
-                .iter()
-                .find(|graph| graph.topology.graph_id == report.graph_id);
-            let handle = handles.iter().find(|graph| graph.id() == report.graph_id);
-            if let Some(handle) = handle {
-                report.resource_errors = resource_errors(&handle.observed());
-            }
-            report.converged = match (target, handle) {
-                (Some(target), Some(handle)) => {
-                    report.applied
-                        && report.error.is_none()
-                        && report.resource_errors.is_empty()
-                        && graph_converged(target, &handle.observed(), running)
-                }
-                _ => false,
-            };
-        }
+        let handle = self.graph.get().await?;
+        status.resource_errors = resource_errors(&handle.observed(), &desired.desired.topology);
+        status.converged = status.applied
+            && status.error.is_none()
+            && status.resource_errors.is_empty()
+            && graph_converged(&desired.desired.topology, &handle.observed(), running);
         let latest = self.desired.borrow().revision;
         if latest != desired.revision {
             status.revision = latest;
             status.reconciling = true;
-            for graph in &mut status.graphs {
-                graph.converged = false;
-            }
+            status.converged = false;
         }
         if !self.confirmed.load(Ordering::Acquire) {
             status
                 .error
                 .get_or_insert_with(|| ManagementError::ConfigurationUnconfirmed.to_string());
-            for graph in &mut status.graphs {
-                graph.converged = false;
-            }
+            status.converged = false;
         }
         Ok(status)
     }
@@ -293,9 +271,7 @@ impl Driver {
             status.error = Some(format!(
                 "configuration state could not be confirmed: {error:#}"
             ));
-            for graph in &mut status.graphs {
-                graph.converged = false;
-            }
+            status.converged = false;
         });
     }
 
@@ -348,19 +324,9 @@ impl Driver {
             persistent: self.store.is_some(),
             reconciling: true,
             error: None,
-            graphs: self
-                .current
-                .desired
-                .graphs
-                .iter()
-                .map(|graph| GraphManagementStatus {
-                    graph_id: graph.topology.graph_id.clone(),
-                    applied: false,
-                    converged: false,
-                    error: None,
-                    resource_errors: BTreeMap::new(),
-                })
-                .collect(),
+            applied: false,
+            converged: false,
+            resource_errors: BTreeMap::new(),
         });
     }
 
@@ -374,17 +340,41 @@ impl Driver {
             !self.shutdown.load(Ordering::Acquire),
             "instance is shut down"
         );
-        let registry = self.registry.clone();
-        let _lifecycle = registry.lifecycle.lock().await;
-        for graph in self.registry.list().await? {
-            anyhow::ensure!(
-                self.owned.contains(graph.id())
-                    || !desired
-                        .graphs
+        let graph = self.graph.clone();
+        let _lifecycle = graph.lifecycle.lock().await;
+        if self.store.is_none() {
+            if let Some((prior, receipt)) = self.receipts.get(&request) {
+                if prior != &desired {
+                    return Err(ManagementError::RequestConflict.into());
+                }
+                return Ok(receipt.clone());
+            }
+            if expected != self.current.revision {
+                return Err(ManagementError::RevisionConflict {
+                    expected,
+                    actual: self.current.revision,
+                }
+                .into());
+            }
+        }
+        let control = graph.get().await?.control();
+        self.protect(&control, &desired.topology).await?;
+        let admission =
+            check_ownership(&control, &self.applied, &desired.topology).and_then(|()| {
+                anyhow::ensure!(
+                    desired
+                        .topology
+                        .components
                         .iter()
-                        .any(|target| target.topology.graph_id == graph.id()),
-                "desired configuration cannot adopt an unmanaged graph implicitly",
-            );
+                        .all(|node| node.descriptor.id().as_str() != self.instance_id),
+                    "instance identity is reserved"
+                );
+                Ok(())
+            });
+        if let Err(error) = admission {
+            self.protect(&control, &self.current.desired.topology)
+                .await?;
+            return Err(error);
         }
         if let Some(store) = &self.store {
             let result = store.commit(expected, &request, &desired).await;
@@ -411,23 +401,12 @@ impl Driver {
                 }
             }
             self.adopt_committed(committed)?;
+            self.protect(&control, &self.current.desired.topology)
+                .await?;
             if result.is_ok() {
                 self.pending();
             }
             return result;
-        }
-        if let Some((prior, receipt)) = self.receipts.get(&request) {
-            if prior != &desired {
-                return Err(ManagementError::RequestConflict.into());
-            }
-            return Ok(receipt.clone());
-        }
-        if expected != self.current.revision {
-            return Err(ManagementError::RevisionConflict {
-                expected,
-                actual: self.current.revision,
-            }
-            .into());
         }
         if desired != self.current.desired {
             self.current.revision = self
@@ -448,81 +427,65 @@ impl Driver {
         Ok(receipt)
     }
 
-    async fn realize_graph(&mut self, desired: &DesiredGraph) -> GraphManagementStatus {
-        let id = &desired.topology.graph_id;
-        let mut status = GraphManagementStatus {
-            graph_id: id.clone(),
+    async fn protect(&self, control: &GraphControl, desired: &DesiredTopology) -> Result<()> {
+        control
+            .protect_components(
+                self.applied
+                    .components
+                    .iter()
+                    .chain(&desired.components)
+                    .map(|node| node.descriptor.id().clone())
+                    .collect(),
+                self.applied
+                    .resources
+                    .iter()
+                    .chain(&desired.resources)
+                    .map(|resource| resource.id.clone())
+                    .collect(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn realize(&mut self, desired: &DesiredTopology) -> ManagementStatus {
+        let id = &desired.graph_id;
+        let mut status = ManagementStatus {
+            revision: self.current.revision,
+            persistent: self.store.is_some(),
+            reconciling: false,
             applied: false,
             converged: false,
             error: None,
             resource_errors: BTreeMap::new(),
         };
         let result: Result<()> = async {
-            let current = self
-                .registry
-                .list()
-                .await?
-                .into_iter()
-                .find(|graph| graph.id() == id);
-            let handle = match current {
-                Some(handle)
-                    if matches!(
-                        handle.info().state,
-                        GraphState::Failed
-                            | GraphState::Cancelled
-                            | GraphState::CleanupRequired
-                            | GraphState::Completed
-                    ) =>
-                {
-                    self.registry.remove(id).await?;
-                    self.registry
-                        .add(
-                            ComputationGraph::empty(id.as_str())?,
-                            ComputationOptions { auto_start: false },
-                        )
-                        .await?
-                }
-                Some(handle) => handle,
-                None => {
-                    let graph = ComputationGraph::empty(id.as_str())?;
-                    self.registry
-                        .add(graph, ComputationOptions { auto_start: false })
-                        .await?
-                }
-            };
+            let handle = self.graph.get().await?;
             let public_control = handle.control();
-            public_control.protect_configuration();
+            self.protect(&public_control, desired).await?;
+            check_ownership(&public_control, &self.applied, desired)?;
             let control = public_control.management_control();
             let actual = control.desired_snapshot();
-            let mut target = desired.topology.clone();
-            target.revision = actual.revision;
             let old = actual.select(GraphSelection::All)?;
-            let mut changes = Vec::new();
-            if !equivalent(&old, &target)? {
-                changes.push(DesiredMutation::SetTopology(target.clone()));
-            }
             let observed = control.observed();
             let mut bindings = TopologyBindings {
                 factories: self.factories.clone(),
                 deferred_management_validation: true,
-                defer_activation: !*self.running.read().await || !desired.auto_start,
+                defer_activation: !*self.running.read().await,
                 ..Default::default()
             };
-            let mut resources_changed = false;
-            for resource in &target.resources {
+            for resource in &desired.resources {
                 let current_resource = observed.resources.get(&resource.id);
                 let needs_resource = old.resources.iter().find(|prior| prior.id == resource.id)
                     != Some(resource)
                     || old.resource_configurations.get(&resource.id)
-                        != target.resource_configurations.get(&resource.id)
+                        != desired.resource_configurations.get(&resource.id)
                     || current_resource.map_or(true, |state| {
                         state.realization != ResourceRealization::Created
                     });
                 if !needs_resource {
                     continue;
                 }
-                resources_changed = true;
-                let configuration = target
+                let configuration = desired
                     .resource_configurations
                     .get(&resource.id)
                     .context("missing provider construction recipe")?;
@@ -537,40 +500,20 @@ impl Driver {
                     }),
                 );
             }
-            if resources_changed && changes.is_empty() {
-                changes.push(DesiredMutation::SetTopology(target.clone()));
-            }
-            for node in &target.components {
-                if observed
-                    .components
-                    .get(node.descriptor.id())
-                    .is_some_and(|node| {
-                        node.failure.as_ref().is_some_and(|failure| {
-                            failure.disposition == FailureDisposition::Retryable
-                        })
-                    })
-                {
-                    changes.push(DesiredMutation::Retry(GraphSelection::Exact(vec![node
-                        .descriptor
-                        .id()
-                        .clone()])));
-                }
-            }
-            if !changes.is_empty() {
-                let preview = control.preview(actual.revision, changes).await?;
-                let report = control.reconcile(preview, bindings).await?;
-                status.resource_errors = resource_errors(&control.observed());
-                if report.committed {
-                    status.applied = true;
-                } else {
-                    anyhow::bail!("graph transition did not commit: {:?}", report.failures);
-                }
-            } else {
+            let report = control
+                .reconcile_components(self.applied.clone(), desired.clone(), bindings)
+                .await?;
+            status.resource_errors = resource_errors(&control.observed(), desired);
+            if report.committed {
                 status.applied = true;
+                self.applied = desired.clone();
+            } else {
+                anyhow::bail!("component transition did not commit: {:?}", report.failures);
             }
-            if *self.running.read().await && desired.auto_start {
+            self.protect(&public_control, desired).await?;
+            if *self.running.read().await {
                 let state = control.observed();
-                let start: Vec<_> = target
+                let start: Vec<_> = desired
                     .components
                     .iter()
                     .filter(|node| node.lifecycle.auto_start)
@@ -600,14 +543,12 @@ impl Driver {
                     .components
                     .iter()
                     .filter(|(id, node)| {
-                        (!desired.auto_start
-                            || target.components.iter().any(|target| {
-                                target.descriptor.id() == *id && !target.lifecycle.auto_start
-                            }))
-                            && matches!(
-                                node.lifecycle,
-                                ComponentLifecycle::Running | ComponentLifecycle::Starting
-                            )
+                        desired.components.iter().any(|target| {
+                            target.descriptor.id() == *id && !target.lifecycle.auto_start
+                        }) && matches!(
+                            node.lifecycle,
+                            ComponentLifecycle::Running | ComponentLifecycle::Starting
+                        )
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
@@ -621,7 +562,7 @@ impl Driver {
                 }
             }
             let observed = control.observed();
-            status.resource_errors = resource_errors(&observed);
+            status.resource_errors = resource_errors(&observed, desired);
             status.converged = status.resource_errors.is_empty()
                 && graph_converged(desired, &observed, *self.running.read().await);
             Ok(())
@@ -639,68 +580,11 @@ impl Driver {
             !self.shutdown.load(Ordering::Acquire),
             "instance is shut down"
         );
-        let registry = self.registry.clone();
-        let _lifecycle = registry.lifecycle.lock().await;
+        let graph = self.graph.clone();
+        let _lifecycle = graph.lifecycle.lock().await;
         self.refresh_committed().await?;
         let desired = self.current.desired.clone();
-        let ids: BTreeSet<_> = desired
-            .graphs
-            .iter()
-            .map(|graph| graph.topology.graph_id.clone())
-            .collect();
-        let mut reports = Vec::new();
-        for id in self.owned.difference(&ids).cloned().collect::<Vec<_>>() {
-            let present = registry.list().await?.iter().any(|graph| graph.id() == id);
-            if present {
-                let removal: Result<()> = async {
-                    let handle = registry.get(&id).await?;
-                    if !matches!(
-                        handle.info().state,
-                        GraphState::Failed | GraphState::Cancelled | GraphState::CleanupRequired
-                    ) {
-                        let empty = ComputationGraph::empty(id.as_str())?
-                            .snapshot()
-                            .select(GraphSelection::All)?;
-                        let control = handle.control().management_control();
-                        let preview = control
-                            .preview(
-                                control.desired_snapshot().revision,
-                                vec![DesiredMutation::SetTopology(empty)],
-                            )
-                            .await?;
-                        let result = control
-                            .reconcile(preview, TopologyBindings::default())
-                            .await?;
-                        anyhow::ensure!(result.committed, "graph removal cleanup is incomplete");
-                    }
-                    registry.remove(&id).await?;
-                    Ok(())
-                }
-                .await;
-                if let Err(error) = removal {
-                    reports.push(GraphManagementStatus {
-                        graph_id: id,
-                        applied: false,
-                        converged: false,
-                        error: Some(format!("graph removal remains pending: {error}")),
-                        resource_errors: BTreeMap::new(),
-                    });
-                    continue;
-                }
-            }
-            self.owned.remove(&id);
-        }
-        self.owned.extend(ids);
-        for graph in &desired.graphs {
-            reports.push(self.realize_graph(graph).await);
-        }
-        let status = ManagementStatus {
-            revision: self.current.revision,
-            persistent: self.store.is_some(),
-            reconciling: false,
-            error: None,
-            graphs: reports,
-        };
+        let status = self.realize(&desired.topology).await;
         self.status.send_replace(status.clone());
         Ok(status)
     }
@@ -794,8 +678,8 @@ impl Driver {
             }
         }
         loop {
-            let graphs = self.registry.shutdown().await;
-            if graphs.is_ok() {
+            let stopped = self.graph.shutdown().await;
+            if stopped.is_ok() {
                 if let Some(store) = &self.store {
                     if let Err(error) = store.close().await {
                         log::error!("Closing dropped configuration session failed: {error}");
@@ -806,23 +690,22 @@ impl Driver {
                     break;
                 }
             } else {
-                log::error!("Dropped managed instance retains store ownership until cleanup succeeds: graphs={graphs:?}");
+                log::error!("Dropped managed instance retains store ownership until cleanup succeeds: {stopped:?}");
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
 }
 
-fn graph_converged(desired: &DesiredGraph, observed: &ObservedGraph, running: bool) -> bool {
-    desired.topology.resources.iter().all(|resource| {
+fn graph_converged(desired: &DesiredTopology, observed: &ObservedGraph, running: bool) -> bool {
+    desired.resources.iter().all(|resource| {
         observed.resources.get(&resource.id).is_some_and(|state| {
             state.realization == ResourceRealization::Created && state.failure.is_none()
         })
-    }) && desired.topology.components.iter().all(|node| {
+    }) && desired.components.iter().all(|node| {
         node.descriptor.ports().iter().all(|port| {
             let endpoint = Endpoint::new(node.descriptor.id().clone(), port.id().clone());
             desired
-                .topology
                 .relationships
                 .iter()
                 .any(|edge| edge.definition.from == endpoint || edge.definition.to == endpoint)
@@ -832,22 +715,28 @@ fn graph_converged(desired: &DesiredGraph, observed: &ObservedGraph, running: bo
             .is_some_and(|actual| {
                 actual.realization == RealizationState::Created
                     && actual.failure.is_none()
-                    && if running && desired.auto_start && node.lifecycle.auto_start {
+                    && if running && node.lifecycle.auto_start {
                         actual.lifecycle == ComponentLifecycle::Running
                     } else {
                         actual.lifecycle == ComponentLifecycle::Stopped
                     }
             })
-    }) && observed
-        .relationships
-        .values()
-        .all(|edge| edge.binding == BindingState::Bound)
+    }) && desired.relationships.iter().all(|edge| {
+        observed
+            .relationships
+            .get(&edge.definition)
+            .is_some_and(|state| state.binding == BindingState::Bound)
+    })
 }
 
-fn resource_errors(observed: &ObservedGraph) -> BTreeMap<ResourceId, String> {
+fn resource_errors(
+    observed: &ObservedGraph,
+    desired: &DesiredTopology,
+) -> BTreeMap<ResourceId, String> {
     observed
         .resources
         .iter()
+        .filter(|(id, _)| desired.resources.iter().any(|resource| &resource.id == *id))
         .filter_map(|(id, resource)| {
             resource
                 .failure
@@ -865,7 +754,7 @@ fn valid_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn equivalent(left: &DesiredTopology, right: &DesiredTopology) -> Result<bool> {
+pub(crate) fn equivalent(left: &DesiredTopology, right: &DesiredTopology) -> Result<bool> {
     let mut left = left.clone();
     let mut right = right.clone();
     canonical_graph(&mut left);
@@ -890,21 +779,16 @@ fn canonical_graph(graph: &mut DesiredTopology) {
 
 pub(super) fn normalize(mut desired: DesiredInstance) -> Result<DesiredInstance> {
     anyhow::ensure!(desired.version == 1, "unsupported desired instance version");
-    let mut ids = BTreeSet::new();
-    for graph in &mut desired.graphs {
-        let topology = &mut graph.topology;
+    {
+        let topology = &mut desired.topology;
         anyhow::ensure!(
-            !topology.graph_id.starts_with("__"),
-            "internal graph IDs are reserved"
-        );
-        anyhow::ensure!(
-            ids.insert(topology.graph_id.clone()),
-            "duplicate desired graph"
+            topology.graph_id == crate::computation::components::INSTANCE_GRAPH_ID,
+            "definition does not belong to the instance ComputationGraph"
         );
         topology.validate_structure()?;
         anyhow::ensure!(
             topology.boundary_relationships.is_empty(),
-            "managed graphs require complete boundary definitions"
+            "managed components require complete boundary definitions"
         );
         anyhow::ensure!(
             topology
@@ -929,8 +813,168 @@ pub(super) fn normalize(mut desired: DesiredInstance) -> Result<DesiredInstance>
         );
         canonical_graph(topology);
     }
-    desired
-        .graphs
-        .sort_by(|left, right| left.topology.graph_id.cmp(&right.topology.graph_id));
     Ok(desired)
+}
+
+fn check_ownership(
+    control: &GraphControl,
+    previous: &DesiredTopology,
+    desired: &DesiredTopology,
+) -> Result<()> {
+    let current = control.desired_snapshot();
+    for node in &desired.components {
+        let id = node.descriptor.id();
+        anyhow::ensure!(
+            !current.nodes.iter().any(|node| node.descriptor.id() == id)
+                || previous
+                    .components
+                    .iter()
+                    .any(|node| node.descriptor.id() == id),
+            "desired configuration cannot adopt unmanaged component {id}"
+        );
+    }
+    for resource in &desired.resources {
+        anyhow::ensure!(
+            !current.resources.contains_key(&resource.id)
+                || previous.resources.iter().any(|old| old.id == resource.id),
+            "desired configuration cannot adopt unmanaged resource {}",
+            resource.id
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn compose_definition(
+    mut current: DesiredTopology,
+    previous: &DesiredTopology,
+    desired: &DesiredTopology,
+) -> Result<DesiredTopology> {
+    let old_nodes: BTreeSet<_> = previous
+        .components
+        .iter()
+        .map(|node| node.descriptor.id().clone())
+        .collect();
+    let old_resources: BTreeSet<_> = previous
+        .resources
+        .iter()
+        .map(|resource| resource.id.clone())
+        .collect();
+    let changed: BTreeSet<_> = previous
+        .components
+        .iter()
+        .filter(|node| {
+            desired
+                .components
+                .iter()
+                .find(|next| next.descriptor.id() == node.descriptor.id())
+                != Some(*node)
+        })
+        .map(|node| node.descriptor.id().clone())
+        .collect();
+    let detached: BTreeSet<_> = changed
+        .iter()
+        .flat_map(|id| {
+            current
+                .component_resources
+                .get(id)
+                .into_iter()
+                .flatten()
+                .cloned()
+        })
+        .collect();
+    current
+        .components
+        .retain(|node| !old_nodes.contains(node.descriptor.id()));
+    current
+        .components
+        .extend(desired.components.iter().cloned());
+    current
+        .resources
+        .retain(|resource| !old_resources.contains(&resource.id));
+    current.resources.extend(desired.resources.iter().cloned());
+    current
+        .resource_configurations
+        .retain(|id, _| !old_resources.contains(id));
+    current
+        .resource_configurations
+        .extend(desired.resource_configurations.clone());
+    current
+        .relationships
+        .retain(|edge| !previous.relationships.contains(edge));
+    current
+        .relationships
+        .extend(desired.relationships.iter().cloned());
+    current
+        .control_connections
+        .retain(|edge| !previous.control_connections.contains(edge));
+    current
+        .control_connections
+        .extend(desired.control_connections.iter().cloned());
+    current
+        .subscriptions
+        .retain(|edge| !previous.subscriptions.contains(edge));
+    current
+        .subscriptions
+        .extend(desired.subscriptions.iter().cloned());
+    current
+        .readiness_required
+        .retain(|id| !old_nodes.contains(id));
+    current
+        .readiness_required
+        .extend(desired.readiness_required.iter().cloned());
+    current
+        .component_resources
+        .retain(|id, _| !changed.contains(id));
+    current
+        .component_resources
+        .extend(desired.component_resources.clone());
+    current
+        .component_plugins
+        .retain(|id, _| !changed.contains(id));
+    current
+        .component_plugins
+        .extend(desired.component_plugins.clone());
+    current.requirements = PipeRequirements::new(
+        current
+            .requirements
+            .required()
+            .iter()
+            .chain(desired.requirements.required())
+            .copied(),
+    );
+    let referenced: BTreeSet<_> = current
+        .component_resources
+        .values()
+        .flatten()
+        .cloned()
+        .chain(current.components.iter().flat_map(|node| {
+            match &node.construction {
+                ComponentConstruction::Factory(spec) => spec
+                    .dependencies
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .chain(spec.configuration.values().filter_map(|value| match value {
+                        ConfigurationValue::Reference { resource, .. } => Some(resource.clone()),
+                        _ => None,
+                    }))
+                    .collect::<Vec<_>>(),
+                ComponentConstruction::External { .. } => Vec::new(),
+            }
+        }))
+        .chain(
+            current
+                .relationships
+                .iter()
+                .chain(&current.boundary_relationships)
+                .flat_map(|edge| edge.pipe.resource_dependencies().into_keys()),
+        )
+        .collect();
+    current.resources.retain(|resource| {
+        !detached.contains(&resource.id)
+            || !resource.id.as_str().starts_with("attached/")
+            || referenced.contains(&resource.id)
+    });
+    current.validate_structure()?;
+    Ok(current)
 }

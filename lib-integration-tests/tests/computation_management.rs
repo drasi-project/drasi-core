@@ -184,7 +184,7 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         .apply_desired_state(0, "first", desired(&[("a", false), ("b", false)]))
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
-    let handle = core.get_computation_graph("application").await?;
+    let handle = core.computation_control()?;
     let before = handle.observed();
     assert_eq!(count.load(Ordering::SeqCst), 2);
     let repeated = core
@@ -220,9 +220,8 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         .is_err());
     assert!(
         handle
-            .control()
             .set_lifecycle_policy(
-                handle.desired().revision,
+                handle.desired_snapshot().revision,
                 ComponentId::try_new("a")?,
                 LifecyclePolicy { auto_start: false }
             )
@@ -235,7 +234,15 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
     core.apply_desired_state(second.revision, "remove-all", DesiredInstance::default())
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
-    assert!(core.get_computation_graph("application").await.is_err());
+    let remaining = core.computation_control()?.desired_snapshot();
+    assert!(!remaining
+        .nodes
+        .iter()
+        .any(|node| ["a", "b", "c"].contains(&node.descriptor.id().as_str())));
+    assert!(remaining
+        .nodes
+        .iter()
+        .any(|node| node.descriptor.id().as_str() == "__component_graph__"));
     core.shutdown().await?;
     Ok(())
 }
@@ -254,7 +261,7 @@ async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_re
         .await?;
     let report = a.reconcile_desired_state().await?;
     assert!(!report.converged());
-    let observed = a.get_computation_graph("application").await?.observed();
+    let observed = a.computation_control()?.observed();
     assert_eq!(
         observed.components[&ComponentId::try_new("bad")?].realization,
         RealizationState::CreationFailed
@@ -263,10 +270,7 @@ async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_re
         .failure
         .is_some());
     assert_eq!(
-        a.desired_configuration()?.desired.graphs[0]
-            .topology
-            .components
-            .len(),
+        a.desired_configuration()?.desired.topology.components.len(),
         2
     );
     assert_eq!(
@@ -277,10 +281,7 @@ async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_re
         .await?;
     b.reconcile_desired_state().await?;
     assert_eq!(
-        b.desired_configuration()?.desired.graphs[0]
-            .topology
-            .components
-            .len(),
+        b.desired_configuration()?.desired.topology.components.len(),
         1
     );
     a.shutdown().await?;
@@ -295,13 +296,8 @@ async fn redb_recovers_every_declaration_and_isolates_instances_snapshots_and_re
         1
     );
     assert_eq!(
-        restored
-            .get_computation_graph("application")
-            .await?
-            .observed()
-            .components
-            .len(),
-        2
+        restored.computation_control()?.observed().components.len(),
+        3
     );
     restored
         .apply_desired_state(1, "fix", desired(&[("good", false), ("bad", false)]))
@@ -337,8 +333,7 @@ async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() ->
         .await?;
     assert!(!core.reconcile_desired_state().await?.converged());
     assert!(core
-        .get_computation_graph("application")
-        .await?
+        .computation_control()?
         .observed()
         .components
         .contains_key(&ComponentId::try_new("missing")?));
@@ -356,10 +351,7 @@ async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() ->
         .await
         .is_err());
     assert!(core
-        .add_computation_graph(
-            ComputationGraph::empty("untracked")?,
-            ComputationOptions::default()
-        )
+        .add_components(ComponentBatch::builder().build()?)
         .await
         .is_err());
     core.shutdown().await?;
@@ -373,8 +365,7 @@ async fn stored_definitions_and_snapshots_are_encrypted_and_wrong_keys_fail() ->
     let store = RedbConfigurationStore::new(&path, [9; 32])?;
     let session = store.open("instance").await?;
     let mut definition = desired(&[("credential-component", false)]);
-    let ComponentConstruction::Factory(spec) =
-        &mut definition.graphs[0].topology.components[0].construction
+    let ComponentConstruction::Factory(spec) = &mut definition.topology.components[0].construction
     else {
         unreachable!()
     };
@@ -785,8 +776,8 @@ fn process_crashes_before_commit_after_commit_and_during_creation_recover_exact_
                             .revision,
                         1
                     );
-                    let graph = core.get_computation_graph("application").await?;
-                    assert_eq!(graph.observed().components.len(), 2);
+                    let graph = core.computation_control()?;
+                    assert_eq!(graph.observed().components.len(), 3);
                     assert_eq!(
                         graph.observed().components[&ComponentId::try_new("failed")?].realization,
                         RealizationState::CreationFailed
@@ -851,10 +842,7 @@ async fn blocked_creation_does_not_delay_durable_acceptance_and_cancelled_waits_
     tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
     assert!(!core.management_status().await?.converged());
     assert_eq!(
-        core.get_computation_graph("application")
-            .await?
-            .observed()
-            .components[&ComponentId::try_new("pending")?]
+        core.computation_control()?.observed().components[&ComponentId::try_new("pending")?]
             .realization,
         RealizationState::Creating
     );
@@ -878,6 +866,7 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
         fail: Arc<AtomicBool>,
         cleaned: Arc<AtomicUsize>,
     }
+
     #[async_trait]
     impl ResourceCleanup for Cleanup {
         async fn shutdown(&self) -> Result<()> {
@@ -941,21 +930,17 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
         .await?;
     let mut first = desired(&[("component", false)]);
     let resource = ResourceId::try_new("state")?;
-    first.graphs[0]
-        .topology
-        .resources
-        .push(ResourceSpecification {
-            id: resource.clone(),
-            role: ResourceRole::StateStore,
-            ownership: ResourceOwnership::Graph,
-            binding: Arc::from("provider"),
-        });
-    first.graphs[0]
+    first.topology.resources.push(ResourceSpecification {
+        id: resource.clone(),
+        role: ResourceRole::StateStore,
+        ownership: ResourceOwnership::Graph,
+        binding: Arc::from("provider"),
+    });
+    first
         .topology
         .resource_configurations
         .insert(resource.clone(), json!({"value":1}));
-    let ComponentConstruction::Factory(spec) =
-        &mut first.graphs[0].topology.components[0].construction
+    let ComponentConstruction::Factory(spec) = &mut first.topology.components[0].construction
     else {
         unreachable!()
     };
@@ -968,7 +953,7 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
     assert!(core.reconcile_desired_state().await?.converged());
     assert_eq!(created.load(Ordering::SeqCst), 1);
     fail.store(true, Ordering::SeqCst);
-    first.graphs[0]
+    first
         .topology
         .resource_configurations
         .insert(resource, json!({"value":2}));
@@ -984,13 +969,16 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
 }
 
 #[tokio::test]
-async fn desired_changes_do_not_implicitly_adopt_programmatically_added_graphs() -> Result<()> {
+async fn desired_changes_preserve_direct_components_and_reject_implicit_adoption() -> Result<()> {
+    let batch = ComponentBatch::builder()
+        .service(Box::new(Service {
+            descriptor: ComponentDescriptor::try_new(ComponentId::try_new("new")?, Vec::new())?,
+            config: json!({"direct":true}),
+        }))
+        .build()?;
     let core = DrasiLib::builder()
         .with_component_factories(registry(Arc::new(AtomicUsize::new(0))))
-        .with_computation_graph(
-            ComputationGraph::empty("application")?,
-            ComputationOptions { auto_start: false },
-        )
+        .with_components(batch)
         .build()
         .await?;
     assert!(core
@@ -998,6 +986,85 @@ async fn desired_changes_do_not_implicitly_adopt_programmatically_added_graphs()
         .await
         .is_err());
     assert_eq!(core.desired_configuration()?.revision, 0);
+    core.computation_component("new")?.start().await?;
+    let generation = core.computation_component("new")?.generation();
+    core.apply_desired_state(0, "managed", desired(&[("managed", false)]))
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    core.apply_desired_state(1, "remove-managed", DesiredInstance::default())
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(core.computation_component("new")?.generation(), generation);
+    assert!(core.computation_component("managed").is_err());
     core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_managed_construction_allows_unrelated_admission_and_component_stop() -> Result<()>
+{
+    struct GatedFactory {
+        inner: Factory,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl ComponentFactory for GatedFactory {
+        fn descriptor(&self) -> &FactoryDescriptor {
+            self.inner.descriptor()
+        }
+        fn validate(&self, specification: &ComponentSpecification) -> Result<()> {
+            self.inner.validate(specification)
+        }
+        async fn create(
+            &self,
+            context: ConstructionContext,
+        ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.create(context).await
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(GatedFactory {
+        inner: Factory::new(created.clone()),
+        entered: entered.clone(),
+        release: Arc::new(tokio::sync::Notify::new()),
+    }))?;
+    let core = DrasiLib::builder()
+        .with_component_factories(factories)
+        .build()
+        .await?;
+    core.start().await?;
+    core.apply_desired_state(0, "pending", desired(&[("pending", false)]))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    let unrelated = tokio::time::timeout(
+        Duration::from_secs(2),
+        core.add_computation_component(ComponentAddition::new(ConstructedComponent::service(
+            Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(
+                    ComponentId::try_new("unrelated")?,
+                    Vec::new(),
+                )?,
+                config: json!({"unrelated":true}),
+            }),
+        ))),
+    )
+    .await??;
+    tokio::time::timeout(Duration::from_secs(2), unrelated.wait_started()).await??;
+    let pending = core.computation_component("pending")?;
+    tokio::time::timeout(Duration::from_secs(2), pending.stop()).await??;
+    assert_eq!(
+        created.load(Ordering::Acquire),
+        0,
+        "cancelled construction must not complete"
+    );
+    assert_eq!(unrelated.observed()?.lifecycle, ComponentLifecycle::Running);
+    assert_eq!(core.desired_configuration()?.revision, 1);
+    assert!(core.computation_component("pending").is_ok());
+    tokio::time::timeout(Duration::from_secs(2), core.shutdown()).await??;
     Ok(())
 }

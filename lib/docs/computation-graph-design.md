@@ -5,14 +5,14 @@
 [Implementation reference](computation-graph-reference.md)
 
 ComputationGraph manages components and moves changes between them inside a
-DrasiLib instance. It owns the components, their connections, their resources
+DrasiLib instance. Each instance has one ComputationGraph. It owns the components, their connections, their resources
 and the decisions about when to create, start, stop or replace them.
 
 This describes the implementation in this branch.
 **ComputationGraph is the only execution engine.**
 
 Optional [managed configuration](managed-configuration.md) adds durable
-desired-state acceptance, full graph-set reconciliation and named snapshots
+desired-state acceptance, component reconciliation and named snapshots
 directly to DrasiLib. Factories, storage and provider resolution are supplied
 externally; ordinary object injection remains the default without persistence.
 
@@ -94,14 +94,14 @@ Exact API state names and transitions are in the
 
 ## Queries run independently
 
-A query added through DrasiLib owns a smaller graph containing its source
+A query added through DrasiLib owns a QueryGraph containing its source
 connections, evaluator, result delivery and storage bindings.
 
-Each query graph has an owned Tokio task. Independent queries can therefore run
+Each QueryGraph has an owned Tokio task. Independent queries can therefore run
 on different workers in a multi-thread runtime. A single-thread runtime also
 works. ComputationGraph does not allocate one dedicated thread per component.
 
-Pausing the containing query waits for its smaller graph to pause. Shutdown
+Pausing the containing query waits for its QueryGraph to pause. Shutdown
 waits for its task before releasing query resources. Cancelling the caller's
 wait does not abandon that task.
 
@@ -213,10 +213,10 @@ Borrowed providers remain the responsibility of their owner.
 
 ## What inspection shows
 
-Inspection includes the instance graph, each query's smaller graph and separately
-registered graphs. It shows components, connections, known resources, plugin
-versions and dependencies. Repeated component names in different graphs remain
-distinguishable.
+Inspection includes the ComputationGraph and each query's QueryGraph. It shows
+components, connections, known resources, plugin versions and dependencies.
+Application component IDs are unique within the DrasiLib instance. QueryGraph
+internals are identified through their owning query.
 
 It reports actual supplied or reported objects, not guesses about private plugin
 internals. Resource links do not prove that a provider was used for every event.
@@ -224,8 +224,8 @@ Plugin references describe components' implementations, not every installed
 plugin binary.
 
 Logs, metrics, recent state changes and per-change timing data support diagnosis.
-Each graph's snapshot is consistent; combining several running graphs is not a
-single atomic snapshot of the whole instance.
+Each graph's snapshot is consistent; combining the ComputationGraph with live
+QueryGraph observations is not a single atomic snapshot of all execution state.
 
 ## Current limits
 

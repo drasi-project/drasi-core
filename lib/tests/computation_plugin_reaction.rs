@@ -19,6 +19,11 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_lib::{computation::v1::*, DrasiLib, Reaction, StateStoreProvider};
+#[allow(dead_code)]
+#[path = "computation_support/instance.rs"]
+mod instance_support;
+use instance_support::{instance_graph_id, InstalledComponents};
+
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -102,7 +107,7 @@ async fn make_graph(
     catalog: QueryResultsCatalog,
     services: &LegacyPluginServices,
     index_path: &Path,
-) -> ComputationGraph {
+) -> ComponentBatch {
     make_graph_query(
         host,
         catalog,
@@ -118,10 +123,10 @@ async fn make_graph_query(
     services: &LegacyPluginServices,
     text: &str,
     index_path: &Path,
-) -> ComputationGraph {
+) -> ComponentBatch {
     let query = ContinuousQueryTransformer::new_with_options(
         ContinuousQueryDefinition {
-            graph_id: "reactions".into(),
+            graph_id: instance_graph_id(),
             id: id("query"),
             query: text.into(),
             language: ComputationQueryLanguage::Cypher,
@@ -143,7 +148,7 @@ async fn make_graph_query(
     .expect("catalogue");
     let factory = Arc::new(ReactionPluginAdapterFactory::default());
     let mut builder = services
-        .declare(ComputationGraph::builder("reactions"))
+        .declare(ComputationGraph::builder(instance_graph_id()))
         .expect("services")
         .source(Box::new(IdleSource(
             ComponentDescriptor::try_new(
@@ -226,7 +231,7 @@ async fn make_graph_query(
             .provide_resource(resource(name), handle)
             .expect("provide");
     }
-    builder.build().expect("graph")
+    builder.build_components().expect("components")
 }
 
 #[tokio::test]
@@ -242,10 +247,8 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
         .build()
         .await
         .expect("instance");
-    let services = drasi
-        .computation_plugin_services("reactions")
-        .expect("services");
-    let catalog = QueryResultsCatalog::new("reactions").expect("catalogue");
+    let services = drasi.computation_plugin_services().expect("services");
+    let catalog = QueryResultsCatalog::new(instance_graph_id()).expect("catalogue");
     let (reaction, report) =
         drasi_reaction_snapshot_test::SnapshotTestReaction::new("snapshot", vec!["query".into()]);
     let host = ReactionPluginHost::owned(
@@ -259,8 +262,7 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
     )
     .expect("host");
     let graph = make_graph(host, catalog, &services, &temp.path().join("indexes")).await;
-    let managed = drasi
-        .add_computation_graph(graph, ComputationOptions { auto_start: false })
+    let managed = InstalledComponents::add(&drasi, graph.auto_start(false))
         .await
         .expect("register");
     let started = tokio::time::timeout(Duration::from_secs(10), managed.start())
@@ -288,8 +290,8 @@ async fn existing_snapshot_plugin_uses_native_query_snapshot_and_bootstrap_conte
     assert!(state
         .get("snapshot", "checkpoint:query")
         .await
-        .expect("legacy namespace")
-        .is_none());
+        .expect("instance namespace")
+        .is_some());
     drasi.shutdown().await.expect("shutdown");
 }
 
@@ -350,10 +352,8 @@ impl Reaction for FailingBootstrap {
 async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
     let temp = test_root();
     let drasi = DrasiLib::builder().build().await.expect("instance");
-    let services = drasi
-        .computation_plugin_services("reactions")
-        .expect("services");
-    let catalog = QueryResultsCatalog::new("reactions").expect("catalogue");
+    let services = drasi.computation_plugin_services().expect("services");
+    let catalog = QueryResultsCatalog::new(instance_graph_id()).expect("catalogue");
     let calls = Arc::new(AtomicUsize::new(0));
     let reaction = FailingBootstrap {
         failure: Arc::new(AtomicBool::new(true)),
@@ -369,13 +369,14 @@ async fn failed_plugin_bootstrap_cannot_persist_a_staged_checkpoint() {
         },
     )
     .expect("host");
-    let managed = drasi
-        .add_computation_graph(
-            make_graph(host, catalog, &services, &temp.path().join("indexes")).await,
-            ComputationOptions { auto_start: false },
-        )
-        .await
-        .expect("register");
+    let managed = InstalledComponents::add(
+        &drasi,
+        make_graph(host, catalog, &services, &temp.path().join("indexes"))
+            .await
+            .auto_start(false),
+    )
+    .await
+    .expect("register");
     assert_eq!(
         managed.start().await.expect("partial start").summary,
         OperationSummary::CompletedWithFailures
@@ -426,10 +427,8 @@ async fn existing_snapshot_reaction_accepts_empty_and_aggregate_native_snapshots
             .build()
             .await
             .expect("instance");
-        let services = drasi
-            .computation_plugin_services("reactions")
-            .expect("services");
-        let catalog = QueryResultsCatalog::new("reactions").expect("catalogue");
+        let services = drasi.computation_plugin_services().expect("services");
+        let catalog = QueryResultsCatalog::new(instance_graph_id()).expect("catalogue");
         let (reaction, report) = drasi_reaction_snapshot_test::SnapshotTestReaction::new(
             "snapshot",
             vec!["query".into()],
@@ -443,8 +442,7 @@ async fn existing_snapshot_reaction_accepts_empty_and_aggregate_native_snapshots
         .expect("host");
         let graph =
             make_graph_query(host, catalog, &services, text, &temp.path().join("indexes")).await;
-        let handle = drasi
-            .add_computation_graph(graph, ComputationOptions { auto_start: false })
+        let handle = InstalledComponents::add(&drasi, graph.auto_start(false))
             .await
             .expect("register");
         let started = tokio::time::timeout(Duration::from_secs(5), handle.start())
@@ -607,9 +605,7 @@ async fn persisted_reaction_checkpoint_is_reset_for_a_new_volatile_query_incarna
     let destination = MaterializedReaction::default();
     for name in ["A", "B"] {
         let drasi = materialization_instance(state.clone()).await;
-        let services = drasi
-            .computation_plugin_services("reactions")
-            .expect("services");
+        let services = drasi.computation_plugin_services().expect("services");
         let catalog = QueryResultsCatalog::new("reactions").expect("catalogue");
         let mut query = snapshot_query(&catalog, name).await;
         query.start().await.expect("bootstrap native query");
@@ -649,9 +645,7 @@ async fn a_gap_after_a_sequence_zero_checkpoint_discards_prior_materialized_stat
             .expect("state"),
     ))
     .await;
-    let services = drasi
-        .computation_plugin_services("reactions")
-        .expect("services");
+    let services = drasi.computation_plugin_services().expect("services");
     let catalog = QueryResultsCatalog::new("reactions").expect("catalogue");
     let mut query = snapshot_query(&catalog, "A").await;
     query.start().await.expect("query bootstrap");

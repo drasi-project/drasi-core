@@ -111,13 +111,7 @@ fn desired(capacity: usize) -> Result<DesiredInstance> {
     topology
         .resource_configurations
         .insert(id, serde_json::to_value(definition(capacity))?);
-    Ok(DesiredInstance {
-        version: 1,
-        graphs: vec![DesiredGraph {
-            auto_start: false,
-            topology,
-        }],
-    })
+    Ok(topology.into())
 }
 
 fn event(sequence: u64) -> Result<ChangeEnvelope> {
@@ -159,6 +153,17 @@ async fn live_same_path_journal_replacement_preserves_unhandled_data_and_closes_
     let (core, resolver) = open(directory.path()).await?;
     core.apply_desired_state(0, "initial", desired(2)?).await?;
     assert!(core.reconcile_desired_state().await?.converged());
+    let configuration = core.snapshot_computation_configuration().await?;
+    let native = configuration
+        .native_components
+        .as_ref()
+        .context("resource-only configuration")?;
+    assert!(native.topology.components.is_empty());
+    assert_eq!(native.topology.resources.len(), 1);
+    assert!(native
+        .topology
+        .resource_configurations
+        .contains_key(&ResourceId::try_new("journal")?));
     let old = resolver.channel()?;
     old.publish(&event(1)?).await?;
     old.publish(&event(2)?).await?;
@@ -216,7 +221,7 @@ async fn failed_resource_replacement_leaves_an_explicit_retryable_target_and_kee
     );
     let failed = core.management_status().await?;
     assert!(!failed.converged());
-    assert!(failed.graphs[0].error.is_some() || !failed.graphs[0].resource_errors.is_empty());
+    assert!(failed.error.is_some() || !failed.resource_errors.is_empty());
     let recovered = core.reconcile_desired_state().await?;
     assert!(recovered.converged(), "{recovered:?}");
     assert_eq!(resolver.channel()?.progress().await?.accepted, 1);
@@ -537,7 +542,7 @@ async fn listener_handover_retries_cleanup_and_survives_cancelled_wait_without_r
     unrelated.connect().await?;
     assert_eq!(unrelated.starts.load(Ordering::Acquire), 1);
     old.fail_cleanup.store(true, Ordering::Release);
-    desired.graphs[0].topology.resource_configurations.insert(
+    desired.topology.resource_configurations.insert(
         ResourceId::try_new("changed")?,
         serde_json::json!({"listen":old.address.to_string()}),
     );
@@ -590,7 +595,7 @@ async fn wrong_role_resource_is_not_injected_and_retains_cleanup_ownership_until
     let (core, resolver, mut desired) = listeners().await?;
     let old = resolver.listener("changed")?;
     let id = ResourceId::try_new("changed")?;
-    desired.graphs[0].topology.resource_configurations.insert(
+    desired.topology.resource_configurations.insert(
         id.clone(),
         serde_json::json!({"listen":old.address.to_string()}),
     );
@@ -599,8 +604,8 @@ async fn wrong_role_resource_is_not_injected_and_retains_cleanup_ownership_until
     core.configuration_receipt("replace").await?;
     let status = core.management_status().await?;
     assert!(!status.converged());
-    assert!(status.graphs[0].resource_errors[&id].contains("role differs"));
-    let graph = core.get_computation_graph("listeners").await?;
+    assert!(status.resource_errors[&id].contains("role differs"));
+    let graph = core.computation_control()?;
     assert_eq!(
         graph.observed().resources[&id].realization,
         ResourceRealization::CleanupRequired
@@ -814,8 +819,7 @@ fn traffic_factory(
 
 fn traffic_desired(capacity: usize, version: u64) -> Result<DesiredInstance> {
     let mut target = desired(capacity)?;
-    let graph = &mut target.graphs[0];
-    graph.auto_start = true;
+    let graph = &mut target;
     let journal = ResourceId::try_new("journal")?;
     let mut channel = definition(capacity);
     channel
@@ -982,7 +986,7 @@ async fn live_traffic_transition(
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     core.start().await?;
-    let graph = core.get_computation_graph("managed").await?;
+    let graph = core.computation_control()?;
     let before = graph.observed();
     let mut expected_versions = Vec::new();
     let mut capacity = 2;
@@ -1034,7 +1038,7 @@ async fn live_traffic_transition(
         })?;
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            graph.control().subscribe_observed().wait_for(|state| {
+            graph.subscribe_observed().wait_for(|state| {
                 state.components[&paused].lifecycle == ComponentLifecycle::Quiescing
             }),
         )
@@ -1081,7 +1085,7 @@ async fn live_traffic_transition(
             let failed = core.management_status().await?;
             assert!(!failed.converged(), "failed replacement cannot look ready");
             assert!(
-                failed.graphs[0].resource_errors[&ResourceId::try_new("journal")?]
+                failed.resource_errors[&ResourceId::try_new("journal")?]
                     .contains("injected replacement construction failure"),
                 "{failed:?}"
             );
@@ -1178,13 +1182,13 @@ async fn live_traffic_transition(
         );
     }
     let target = traffic_desired(capacity, 8)?;
-    let specification = &target.graphs[0].topology.resources[0];
+    let specification = &target.topology.resources[0];
     let reopened = resolver
         .resolve(
             "active-handover",
-            "managed",
+            &target.topology.graph_id,
             specification,
-            &target.graphs[0].topology.resource_configurations[&specification.id],
+            &target.topology.resource_configurations[&specification.id],
         )
         .await?;
     let channel = reopened.get::<QosChannel>()?;
@@ -1265,11 +1269,11 @@ async fn active_handover_crash_worker() -> Result<()> {
         .await?;
     assert!(receipt.durable);
     assert_eq!(receipt.revision, 2);
-    let graph = core.get_computation_graph("managed").await?;
+    let graph = core.computation_control()?;
     let producer = ComponentId::try_new("producer")?;
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        graph.control().subscribe_observed().wait_for(|state| {
+        graph.subscribe_observed().wait_for(|state| {
             state.components[&producer].lifecycle == ComponentLifecycle::Quiescing
         }),
     )

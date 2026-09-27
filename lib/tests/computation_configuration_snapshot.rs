@@ -88,7 +88,7 @@ fn values(snapshot: &GraphConfigurationSnapshot, name: &str) -> serde_json::Valu
 }
 
 #[tokio::test]
-async fn instance_snapshot_covers_ordinary_native_and_additional_graphs_without_pausing_work() {
+async fn instance_snapshot_covers_ordinary_and_native_components_without_pausing_work() {
     let core = DrasiLib::builder()
         .with_id("configuration-owner")
         .with_query(
@@ -114,16 +114,13 @@ async fn instance_snapshot_covers_ordinary_native_and_additional_graphs_without_
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .expect("service is holding its processing lease");
-    let extra = ComputationGraph::builder("extra")
+    let extra = ComponentBatch::builder()
         .service(Box::new(Configured::new("extra-service", "second")))
         .build()
         .expect("extra graph");
-    core.add_computation_graph(extra, ComputationOptions { auto_start: false })
+    core.add_components(extra.auto_start(false))
         .await
-        .expect("register extra graph")
-        .deployment()
-        .await
-        .expect("extra creation");
+        .expect("extra component creation");
 
     let before = reads.load(Ordering::SeqCst);
     let snapshot = tokio::time::timeout(
@@ -139,20 +136,24 @@ async fn instance_snapshot_covers_ordinary_native_and_additional_graphs_without_
     let root = snapshot.native_components.as_ref().expect("native root");
     assert_eq!(
         root.topology.components.len(),
-        1,
+        2,
         "ordinary components are not duplicated"
     );
     assert_eq!(
         values(root, "native"),
         json!({"setting": "private-property-value"})
     );
-    assert_eq!(snapshot.graphs.len(), 1);
-    assert!(!snapshot.graphs[0].options.auto_start);
-    assert_eq!(snapshot.graphs[0].graph.topology.graph_id, "extra");
-    assert_eq!(
-        values(&snapshot.graphs[0].graph, "extra-service"),
-        json!({"setting": "second"})
+    assert!(
+        !root
+            .topology
+            .components
+            .iter()
+            .find(|component| component.descriptor.id() == &id("extra-service"))
+            .unwrap()
+            .lifecycle
+            .auto_start
     );
+    assert_eq!(values(root, "extra-service"), json!({"setting": "second"}));
     assert_eq!(
         reads.load(Ordering::SeqCst),
         before,
@@ -250,26 +251,27 @@ impl ComponentFactory for Factory {
 async fn factory_definition_survives_creation_failure_and_exports_without_an_instance() {
     let factory = Arc::new(Factory::new(true));
     let definition = factory.specification("retain-me");
-    let graph = ComputationGraph::builder("failed-config")
-        .component(definition.clone(), factory)
+    let mut graph = ComputationGraph::builder("failed-config")
+        .component(definition.clone(), factory.clone())
         .build()
         .unwrap();
     assert!(matches!(
         graph.configuration_snapshot().unwrap().configurations[&id("configured")],
         CapturedComponentConfiguration::Declared { .. }
     ));
-    let core = DrasiLib::builder().build().await.unwrap();
-    let handle = core
-        .add_computation_graph(graph, ComputationOptions { auto_start: false })
-        .await
+    graph.dispose().await.unwrap();
+    let batch = ComponentBatch::builder()
+        .component(definition.clone(), factory)
+        .build()
         .unwrap();
-    let report = handle.deployment().await.unwrap();
+    let core = DrasiLib::builder().build().await.unwrap();
+    let report = core.add_components(batch.auto_start(false)).await.unwrap();
     assert!(matches!(
-        report.components[&id("configured")],
+        report.creation[&id("configured")],
         CreationOutcome::CreationFailed(_)
     ));
     let snapshot = core.snapshot_computation_configuration().await.unwrap();
-    let captured = &snapshot.graphs[0].graph;
+    let captured = snapshot.native_components.as_ref().unwrap();
     assert!(matches!(
         &captured.configurations[&id("configured")],
         CapturedComponentConfiguration::Declared { values } if values == &definition.configuration

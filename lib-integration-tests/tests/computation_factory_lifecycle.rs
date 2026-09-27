@@ -29,8 +29,8 @@ use std::{
 
 const DEADLINE: Duration = Duration::from_secs(15);
 
-fn effect_sequences(root: &Path, graph: &str) -> Result<Vec<u64>> {
-    let records = std::fs::read_to_string(root.join(format!("{graph}.jsonl")))?;
+fn effect_sequences(root: &Path, instance: &str) -> Result<Vec<u64>> {
+    let records = std::fs::read_to_string(root.join(format!("{instance}.jsonl")))?;
     records
         .lines()
         .map(|line| {
@@ -56,43 +56,56 @@ fn effect_sequences(root: &Path, graph: &str) -> Result<Vec<u64>> {
 struct Resources {
     wal: Arc<RedbWalProvider>,
     state: Arc<RedbStateStoreProvider>,
-    indexes: Arc<dyn ComputationIndexProvider>,
+    indexes: BTreeMap<String, Arc<dyn ComputationIndexProvider>>,
+    configuration: Arc<RedbConfigurationStore>,
     catalogs: Mutex<BTreeMap<String, QueryResultsCatalog>>,
     channels: Mutex<BTreeMap<String, Weak<QosChannel>>>,
 }
 
 impl Resources {
     fn new(root: &Path) -> Result<Arc<Self>> {
+        let indexes = ["left", "right"]
+            .into_iter()
+            .map(|instance| {
+                let provider: Arc<dyn ComputationIndexProvider> =
+                    LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+                        root.join("indexes").join(instance),
+                        false,
+                        false,
+                    )));
+                (instance.to_owned(), provider)
+            })
+            .collect();
         Ok(Arc::new(Self {
             wal: Arc::new(RedbWalProvider::new(root.join("wal"))),
             state: Arc::new(RedbStateStoreProvider::new(root.join("consumers.redb"))?),
-            indexes: LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
-                root.join("indexes"),
-                false,
-                false,
-            ))),
+            indexes,
+            configuration: Arc::new(RedbConfigurationStore::new(
+                root.join("config.redb"),
+                [37; 32],
+            )?),
             catalogs: Mutex::new(BTreeMap::new()),
             channels: Mutex::new(BTreeMap::new()),
         }))
     }
-    fn channel(&self, graph: &str, resource: &str) -> Result<Arc<QosChannel>> {
+    fn channel(&self, instance: &str, resource: &str) -> Result<Arc<QosChannel>> {
         self.channels
             .lock()
             .expect("channel observations")
-            .get(&format!("{graph}/{resource}"))
+            .get(&format!("{instance}/{resource}"))
             .and_then(Weak::upgrade)
             .context("QoS channel")
     }
-    fn catalog(&self, graph: &str) -> Result<QueryResultsCatalog> {
+    fn catalog(&self, instance: &str) -> Result<QueryResultsCatalog> {
         self.catalogs
             .lock()
             .expect("query catalogs")
-            .get(graph)
+            .get(instance)
             .cloned()
             .context("query catalog")
     }
-    async fn append(&self, graph: &str, id: u64) -> Result<()> {
-        let partition = format!("{graph}-input");
+    async fn append(&self, instance: &str, id: u64) -> Result<()> {
+        let partition = format!("{instance}-input");
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -122,14 +135,14 @@ fn channel_definition() -> QosChannelDefinition {
 impl ManagementResourceResolver for Resources {
     async fn resolve(
         &self,
-        _: &str,
-        graph: &str,
+        instance: &str,
+        graph_id: &str,
         specification: &ResourceSpecification,
         config: &Value,
     ) -> Result<ResourceHandle> {
         let handle = match config["kind"].as_str().context("resource kind")? {
             "wal" => {
-                let partition = format!("{graph}-input");
+                let partition = format!("{instance}-input");
                 self.wal
                     .register(&partition, WriteAheadLogConfig::default())
                     .await?;
@@ -143,26 +156,26 @@ impl ManagementResourceResolver for Resources {
             }
             "indexes" => ResourceHandle::new(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(self.indexes.clone())),
+                Arc::new(QueryIndexProviderResource(self.indexes[instance].clone())),
             ),
             "progress" => ResourceHandle::new(
                 ResourceRole::Checkpoint,
                 Arc::new(QuerySourceProgressResource(Arc::new(
-                    QuerySourceProgress::new(graph, ComponentId::try_new("query")?)?,
+                    QuerySourceProgress::new(graph_id, ComponentId::try_new("query")?)?,
                 ))),
             ),
             "catalog" => {
-                let catalog = QueryResultsCatalog::new(graph)?;
+                let catalog = QueryResultsCatalog::new(graph_id)?;
                 self.catalogs
                     .lock()
                     .expect("query catalogs")
-                    .insert(graph.to_owned(), catalog.clone());
+                    .insert(instance.to_owned(), catalog.clone());
                 ResourceHandle::new(ResourceRole::QueryCatalog, Arc::new(catalog))
             }
             "consumer" => ResourceHandle::new(
                 ResourceRole::Checkpoint,
                 Arc::new(ConsumerProgressResource(Arc::new(
-                    StateStoreConsumerProgress::new(graph, "reaction", self.state.clone())?,
+                    StateStoreConsumerProgress::new(instance, "reaction", self.state.clone())?,
                 ))),
             ),
             kind @ ("output" | "incoming") => {
@@ -172,7 +185,9 @@ impl ManagementResourceResolver for Resources {
                     } else {
                         incoming_definition()
                     },
-                    self.indexes.create_indexes(graph, kind).await?,
+                    self.indexes[instance]
+                        .create_indexes(graph_id, kind)
+                        .await?,
                     FactoryRegistry::standard()
                         .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
                     kind,
@@ -181,7 +196,7 @@ impl ManagementResourceResolver for Resources {
                 self.channels
                     .lock()
                     .expect("channel observations")
-                    .insert(format!("{graph}/{kind}"), Arc::downgrade(&channel));
+                    .insert(format!("{instance}/{kind}"), Arc::downgrade(&channel));
                 channel.resource()
             }
             kind => anyhow::bail!("unsupported resource recipe {kind}"),
@@ -324,191 +339,182 @@ fn incoming_definition() -> QosChannelDefinition {
     }
 }
 
-fn desired(root: &Path, durable_input: bool) -> Result<DesiredInstance> {
-    let mut graphs = Vec::new();
-    for graph in ["left", "right"] {
-        let mut topology = ComputationGraph::empty(graph)?
-            .snapshot()
-            .select(GraphSelection::All)?;
-        for (id, role, owned) in [
-            ("wal", ResourceRole::Wal, false),
-            ("indexes", ResourceRole::IndexBackend, false),
-            ("progress", ResourceRole::Checkpoint, false),
-            ("catalog", ResourceRole::QueryCatalog, false),
-            ("consumer", ResourceRole::Checkpoint, false),
-            ("output", ResourceRole::StateStore, true),
-        ] {
-            topology.resources.push(ResourceSpecification {
-                id: resource(id),
-                role,
-                ownership: if owned {
-                    ResourceOwnership::Graph
-                } else {
-                    ResourceOwnership::Borrowed
-                },
-                binding: id.into(),
-            });
-            topology
-                .resource_configurations
-                .insert(resource(id), json!({"kind":id}));
-        }
-        if durable_input {
-            topology.resources.push(ResourceSpecification {
-                id: resource("incoming"),
-                role: ResourceRole::StateStore,
-                ownership: ResourceOwnership::Graph,
-                binding: "incoming".into(),
-            });
-            topology
-                .resource_configurations
-                .insert(resource("incoming"), json!({"kind":"incoming"}));
-        }
-        let source = ComponentSpecification {
-            descriptor: source_descriptor()?,
-            role: ComponentRole::Source,
-            completion: None,
-            implementation: WalReplaySourceFactory::default()
-                .descriptor()
-                .implementation
-                .clone(),
-            configuration_version: 1,
-            configuration: BTreeMap::from([(
+fn desired(root: &Path, instance: &str, durable_input: bool) -> Result<DesiredInstance> {
+    let mut topology = DesiredInstance::default().topology;
+    for (id, role, owned) in [
+        ("wal", ResourceRole::Wal, false),
+        ("indexes", ResourceRole::IndexBackend, false),
+        ("progress", ResourceRole::Checkpoint, false),
+        ("catalog", ResourceRole::QueryCatalog, false),
+        ("consumer", ResourceRole::Checkpoint, false),
+        ("output", ResourceRole::StateStore, true),
+    ] {
+        topology.resources.push(ResourceSpecification {
+            id: resource(id),
+            role,
+            ownership: if owned {
+                ResourceOwnership::Graph
+            } else {
+                ResourceOwnership::Borrowed
+            },
+            binding: id.into(),
+        });
+        topology
+            .resource_configurations
+            .insert(resource(id), json!({"kind":id}));
+    }
+    if durable_input {
+        topology.resources.push(ResourceSpecification {
+            id: resource("incoming"),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Graph,
+            binding: "incoming".into(),
+        });
+        topology
+            .resource_configurations
+            .insert(resource("incoming"), json!({"kind":"incoming"}));
+    }
+    let source = ComponentSpecification {
+        descriptor: source_descriptor()?,
+        role: ComponentRole::Source,
+        completion: None,
+        implementation: WalReplaySourceFactory::default()
+            .descriptor()
+            .implementation
+            .clone(),
+        configuration_version: 1,
+        configuration: BTreeMap::from([(
+            Arc::from("stream"),
+            ConfigurationValue::Literal(json!("source/out")),
+        )]),
+        dependencies: BTreeMap::from([
+            (Arc::from("wal"), vec![resource("wal")]),
+            (Arc::from("source_progress"), vec![resource("progress")]),
+        ]),
+    };
+    let definition = ContinuousQueryDefinition {
+        graph_id: topology.graph_id.clone(),
+        id: ComponentId::try_new("query")?,
+        query: "MATCH (n:Item) RETURN sum(n.value) AS total".into(),
+        language: ComputationQueryLanguage::Cypher,
+        output_stream: StreamId::try_new("query/out")?,
+        outbox_capacity: NonZeroUsize::new(16).expect("query outbox"),
+    };
+    let query = ComponentSpecification {
+        descriptor: definition.descriptor(),
+        role: ComponentRole::Query,
+        completion: None,
+        implementation: ContinuousQueryFactory::default()
+            .descriptor()
+            .implementation
+            .clone(),
+        configuration_version: 1,
+        configuration: BTreeMap::from([
+            (
+                Arc::from("query"),
+                ConfigurationValue::Literal(json!(definition.query)),
+            ),
+            (
                 Arc::from("stream"),
-                ConfigurationValue::Literal(json!("source/out")),
-            )]),
-            dependencies: BTreeMap::from([
-                (Arc::from("wal"), vec![resource("wal")]),
-                (Arc::from("source_progress"), vec![resource("progress")]),
-            ]),
-        };
-        let definition = ContinuousQueryDefinition {
-            graph_id: graph.into(),
-            id: ComponentId::try_new("query")?,
-            query: "MATCH (n:Item) RETURN sum(n.value) AS total".into(),
-            language: ComputationQueryLanguage::Cypher,
-            output_stream: StreamId::try_new("query/out")?,
-            outbox_capacity: NonZeroUsize::new(16).expect("query outbox"),
-        };
-        let query = ComponentSpecification {
-            descriptor: definition.descriptor(),
-            role: ComponentRole::Query,
-            completion: None,
-            implementation: ContinuousQueryFactory::default()
-                .descriptor()
-                .implementation
-                .clone(),
-            configuration_version: 1,
-            configuration: BTreeMap::from([
-                (
-                    Arc::from("query"),
-                    ConfigurationValue::Literal(json!(definition.query)),
-                ),
-                (
-                    Arc::from("stream"),
-                    ConfigurationValue::Literal(json!("query/out")),
-                ),
-                (
-                    Arc::from("outbox_capacity"),
-                    ConfigurationValue::Literal(json!(16)),
-                ),
-            ]),
-            dependencies: BTreeMap::from([
-                (Arc::from("indexes"), vec![resource("indexes")]),
-                (Arc::from("source_progress"), vec![resource("progress")]),
-                (Arc::from("catalog"), vec![resource("catalog")]),
-            ]),
-        };
-        let reaction = ComponentSpecification {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("reaction")?,
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?,
-            role: ComponentRole::Sink,
-            completion: Some(SinkCompletion::Handled),
-            implementation: ReactionFactory::new()?.descriptor().implementation.clone(),
-            configuration_version: 1,
-            configuration: BTreeMap::from([(
-                Arc::from("path"),
-                ConfigurationValue::Literal(json!(root.join(format!("{graph}.jsonl")))),
-            )]),
-            dependencies: BTreeMap::from([(Arc::from("progress"), vec![resource("consumer")])]),
-        };
-        for (spec, stream) in [
-            (source, Some("source/out")),
-            (query, Some("query/out")),
-            (reaction, None),
-        ] {
-            topology.components.push(DesiredComponent {
-                descriptor: spec.descriptor.clone(),
-                role: spec.role,
-                completion: spec.completion,
-                streams: match stream {
-                    Some(value) => {
-                        BTreeMap::from([(PortId::try_new("out")?, StreamId::try_new(value)?)])
-                    }
-                    None => BTreeMap::new(),
-                },
-                lifecycle: LifecyclePolicy::default(),
-                input_merge: InputMergePolicy::Arrival,
-                construction: ComponentConstruction::Factory(spec),
-            });
-        }
-        topology.relationships = vec![
-            DesiredRelationship {
-                definition: EdgeDefinition::new(
-                    endpoint("source", "out")?,
-                    endpoint("query", "in")?,
-                ),
-                policy: RelationshipPolicy::default(),
-                pipe: if durable_input {
-                    DesiredPipe::Qos(incoming_definition().pipe(resource("incoming"), "query"))
-                } else {
-                    DesiredPipe::Bounded { capacity: 2 }
-                },
+                ConfigurationValue::Literal(json!("query/out")),
+            ),
+            (
+                Arc::from("outbox_capacity"),
+                ConfigurationValue::Literal(json!(16)),
+            ),
+        ]),
+        dependencies: BTreeMap::from([
+            (Arc::from("indexes"), vec![resource("indexes")]),
+            (Arc::from("source_progress"), vec![resource("progress")]),
+            (Arc::from("catalog"), vec![resource("catalog")]),
+        ]),
+    };
+    let reaction = ComponentSpecification {
+        descriptor: ComponentDescriptor::try_new(
+            ComponentId::try_new("reaction")?,
+            vec![PortDescriptor::new(
+                PortId::try_new("in")?,
+                PortDirection::Input,
+                QueryChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )?,
+        role: ComponentRole::Sink,
+        completion: Some(SinkCompletion::Handled),
+        implementation: ReactionFactory::new()?.descriptor().implementation.clone(),
+        configuration_version: 1,
+        configuration: BTreeMap::from([(
+            Arc::from("path"),
+            ConfigurationValue::Literal(json!(root.join(format!("{instance}.jsonl")))),
+        )]),
+        dependencies: BTreeMap::from([(Arc::from("progress"), vec![resource("consumer")])]),
+    };
+    for (spec, stream) in [
+        (source, Some("source/out")),
+        (query, Some("query/out")),
+        (reaction, None),
+    ] {
+        topology.components.push(DesiredComponent {
+            descriptor: spec.descriptor.clone(),
+            role: spec.role,
+            completion: spec.completion,
+            streams: match stream {
+                Some(value) => {
+                    BTreeMap::from([(PortId::try_new("out")?, StreamId::try_new(value)?)])
+                }
+                None => BTreeMap::new(),
             },
-            DesiredRelationship {
-                definition: EdgeDefinition::new(
-                    endpoint("query", "out")?,
-                    endpoint("reaction", "in")?,
-                ),
-                policy: RelationshipPolicy::default(),
-                pipe: DesiredPipe::Qos(channel_definition().pipe(resource("output"), "reaction")),
-            },
-        ];
-        graphs.push(DesiredGraph {
-            auto_start: true,
-            topology,
+            lifecycle: LifecyclePolicy::default(),
+            input_merge: InputMergePolicy::Arrival,
+            construction: ComponentConstruction::Factory(spec),
         });
     }
-    Ok(DesiredInstance { version: 1, graphs })
+    topology.relationships = vec![
+        DesiredRelationship {
+            definition: EdgeDefinition::new(endpoint("source", "out")?, endpoint("query", "in")?),
+            policy: RelationshipPolicy::default(),
+            pipe: if durable_input {
+                DesiredPipe::Qos(incoming_definition().pipe(resource("incoming"), "query"))
+            } else {
+                DesiredPipe::Bounded { capacity: 2 }
+            },
+        },
+        DesiredRelationship {
+            definition: EdgeDefinition::new(endpoint("query", "out")?, endpoint("reaction", "in")?),
+            policy: RelationshipPolicy::default(),
+            pipe: DesiredPipe::Qos(channel_definition().pipe(resource("output"), "reaction")),
+        },
+    ];
+    Ok(topology.into())
 }
 
 async fn open(root: &Path, reaction_available: bool) -> Result<(DrasiLib, Arc<Resources>)> {
     let resources = Resources::new(root)?;
+    let core = open_instance(resources.clone(), "left", reaction_available).await?;
+    Ok((core, resources))
+}
+
+async fn open_instance(
+    resources: Arc<Resources>,
+    instance: &str,
+    reaction_available: bool,
+) -> Result<DrasiLib> {
     let mut factories = FactoryRegistry::standard();
     if reaction_available {
         factories.register(Arc::new(ReactionFactory::new()?))?;
     }
     let core = DrasiLib::builder()
-        .with_id("factory-lifecycle")
-        .with_configuration_store(Arc::new(RedbConfigurationStore::new(
-            root.join("config.redb"),
-            [37; 32],
-        )?))
+        .with_id(instance)
+        .with_configuration_store(resources.configuration.clone())
         .with_component_factories(factories)
         .with_management_resources(resources.clone())
         .build()
         .await?;
-    Ok((core, resources))
+    Ok(core)
 }
 
-async fn wait_query(resources: &Resources, graph: &str, sequence: u64) -> Result<()> {
-    let catalog = resources.catalog(graph)?;
+async fn wait_query(resources: &Resources, instance: &str, sequence: u64) -> Result<()> {
+    let catalog = resources.catalog(instance)?;
     tokio::time::timeout(DEADLINE, async {
         loop {
             let snapshot = catalog.snapshot("query", DEADLINE).await?;
@@ -533,11 +539,11 @@ async fn wait_query(resources: &Resources, graph: &str, sequence: u64) -> Result
     .await?
 }
 
-async fn wait_delivery(resources: &Resources, graph: &str, sequence: u64) -> Result<()> {
-    wait_query(resources, graph, sequence).await?;
+async fn wait_delivery(resources: &Resources, instance: &str, sequence: u64) -> Result<()> {
+    wait_query(resources, instance, sequence).await?;
     tokio::time::timeout(DEADLINE, async {
         loop {
-            let channel = resources.channel(graph, "output")?.progress().await?;
+            let channel = resources.channel(instance, "output")?.progress().await?;
             if channel.accepted >= sequence && channel.processed["reaction"] == channel.accepted {
                 return Ok::<_, anyhow::Error>(());
             }
@@ -547,9 +553,8 @@ async fn wait_delivery(resources: &Resources, graph: &str, sequence: u64) -> Res
     .await?
 }
 
-async fn stage(core: &DrasiLib, graph: &str, component: &str, start: bool) -> Result<()> {
-    let handle = core.get_computation_graph(graph).await?;
-    let control = handle.control();
+async fn stage(core: &DrasiLib, component: &str, start: bool) -> Result<()> {
+    let control = core.computation_control()?;
     let selected = GraphSelection::Exact(vec![ComponentId::try_new(component)?]);
     if start {
         let report = tokio::time::timeout(
@@ -570,7 +575,7 @@ async fn stage(core: &DrasiLib, graph: &str, component: &str, start: bool) -> Re
 }
 
 #[tokio::test]
-async fn bulk_factory_graphs_restore_definitions_state_backlog_and_independent_stage_positions(
+async fn bulk_factories_restore_instances_state_backlog_and_independent_stage_positions(
 ) -> Result<()> {
     for durable_input in [false, true] {
         tokio::time::timeout(Duration::from_secs(60), factory_lifecycle(durable_input)).await??;
@@ -580,43 +585,42 @@ async fn bulk_factory_graphs_restore_definitions_state_backlog_and_independent_s
 
 async fn factory_lifecycle(durable_input: bool) -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let target = desired(directory.path(), durable_input)?;
     let (core, resources) = open(directory.path(), false).await?;
-    core.apply_desired_state(0, "configure-both", target.clone())
+    let right = open_instance(resources.clone(), "right", false).await?;
+    for (instance, core) in [("left", &core), ("right", &right)] {
+        core.apply_desired_state(
+            0,
+            "configure",
+            desired(directory.path(), instance, durable_input)?,
+        )
         .await?;
-    let pending = core.reconcile_desired_state().await?;
-    assert!(!pending.converged());
-    assert!(
-        pending
-            .graphs
-            .iter()
-            .all(|graph| graph.resource_errors.is_empty()),
-        "{pending:?}"
-    );
-    for graph in ["left", "right"] {
-        let observed = core.get_computation_graph(graph).await?.observed();
-        assert_eq!(observed.components.len(), 3);
+        let pending = core.reconcile_desired_state().await?;
+        assert!(!pending.converged());
+        assert!(pending.resource_errors.is_empty(), "{pending:?}");
+        let observed = core.computation_control()?.observed();
+        assert_eq!(observed.components.len(), 4);
         assert!(observed.components[&ComponentId::try_new("reaction")?]
             .failure
             .as_ref()
             .is_some_and(|failure| failure.cause.to_string().contains("not registered")));
+        core.register_component_factory(Arc::new(ReactionFactory::new()?))
+            .await?;
+        let realized = core.reconcile_desired_state().await?;
+        assert!(
+            realized.converged(),
+            "{realized:?}; left={:?}",
+            core.computation_control()?.observed()
+        );
+        core.snapshot_desired_configuration("configured").await?;
+        core.start().await?;
     }
-    core.register_component_factory(Arc::new(ReactionFactory::new()?))
-        .await?;
-    let realized = core.reconcile_desired_state().await?;
-    assert!(
-        realized.converged(),
-        "{realized:?}; left={:?}",
-        core.get_computation_graph("left").await?.observed()
-    );
     let configuration = core.desired_configuration()?;
-    core.snapshot_desired_configuration("configured").await?;
-    core.start().await?;
-    for graph in ["left", "right"] {
-        resources.append(graph, 1).await?;
-        wait_delivery(&resources, graph, 1).await?;
+    let right_configuration = right.desired_configuration()?;
+    for instance in ["left", "right"] {
+        resources.append(instance, 1).await?;
+        wait_delivery(&resources, instance, 1).await?;
     }
-    stage(&core, "left", "source", false).await?;
+    stage(&core, "source", false).await?;
     resources.append("left", 2).await?;
     resources.append("right", 2).await?;
     wait_delivery(&resources, "right", 2).await?;
@@ -628,13 +632,13 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
             .as_of_sequence,
         1
     );
-    stage(&core, "left", "source", true).await?;
+    stage(&core, "source", true).await?;
     wait_delivery(&resources, "left", 2).await?;
-    stage(&core, "left", "query", false).await?;
+    stage(&core, "query", false).await?;
     resources.append("left", 3).await?;
-    stage(&core, "left", "query", true).await?;
+    stage(&core, "query", true).await?;
     wait_delivery(&resources, "left", 3).await?;
-    stage(&core, "left", "reaction", false).await?;
+    stage(&core, "reaction", false).await?;
     resources.append("left", 4).await?;
     resources.append("left", 5).await?;
     wait_query(&resources, "left", 5).await?;
@@ -649,16 +653,24 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
     resources.append("left", 6).await?;
     wait_query(&resources, "left", 6).await?;
     tokio::time::timeout(DEADLINE, core.shutdown()).await??;
-    drop((core, resources));
+    right.shutdown().await?;
+    drop((core, right, resources));
 
     let (restored, resources) = open(directory.path(), true).await?;
+    let right = open_instance(resources.clone(), "right", true).await?;
     assert_eq!(restored.desired_configuration()?, configuration);
     assert_eq!(
         restored.load_configuration_snapshot("configured").await?,
         Some(configuration)
     );
     restored.start().await?;
-    let left = restored.get_computation_graph("left").await?;
+    assert_eq!(right.desired_configuration()?, right_configuration);
+    assert_eq!(
+        right.load_configuration_snapshot("configured").await?,
+        Some(right_configuration)
+    );
+    right.start().await?;
+    let left = restored.computation_control()?;
     wait_delivery(&resources, "left", 6)
         .await
         .with_context(|| format!("restore pending left output: {:?}", left.observed()))?;
@@ -670,11 +682,12 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
         .with_context(|| format!("resume fresh left input: {:?}", left.observed()))?;
     wait_delivery(&resources, "right", 3).await?;
     restored.shutdown().await?;
-    for (graph, count) in [("left", 7), ("right", 3)] {
+    right.shutdown().await?;
+    for (instance, count) in [("left", 7), ("right", 3)] {
         assert_eq!(
-            effect_sequences(directory.path(), graph)?,
+            effect_sequences(directory.path(), instance)?,
             (1..=count).collect::<Vec<_>>(),
-            "{graph} effects"
+            "{instance} effects"
         );
     }
     Ok(())
@@ -684,13 +697,13 @@ async fn factory_lifecycle(durable_input: bool) -> Result<()> {
 async fn factory_restart_replays_input_accepted_while_the_query_was_stopped() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let (core, resources) = open(directory.path(), true).await?;
-    core.apply_desired_state(0, "initial", desired(directory.path(), true)?)
+    core.apply_desired_state(0, "initial", desired(directory.path(), "left", true)?)
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     core.start().await?;
     resources.append("left", 1).await?;
     wait_delivery(&resources, "left", 1).await?;
-    stage(&core, "left", "query", false).await?;
+    stage(&core, "query", false).await?;
     resources.append("left", 2).await?;
     tokio::time::timeout(DEADLINE, async {
         loop {
@@ -707,7 +720,7 @@ async fn factory_restart_replays_input_accepted_while_the_query_was_stopped() ->
     drop((core, resources));
     let (core, resources) = open(directory.path(), true).await?;
     core.start().await?;
-    let left = core.get_computation_graph("left").await?;
+    let left = core.computation_control()?;
     wait_delivery(&resources, "left", 2)
         .await
         .with_context(|| format!("accepted input recovery: {:?}", left.observed()))?;
@@ -725,13 +738,13 @@ async fn source_restart_with_pipe_ahead_preserves_transport_identity_on_later_re
 ) -> Result<()> {
     let directory = tempfile::tempdir()?;
     let (core, resources) = open(directory.path(), true).await?;
-    core.apply_desired_state(0, "initial", desired(directory.path(), true)?)
+    core.apply_desired_state(0, "initial", desired(directory.path(), "left", true)?)
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     core.start().await?;
     resources.append("left", 1).await?;
     wait_delivery(&resources, "left", 1).await?;
-    stage(&core, "left", "reaction", false).await?;
+    stage(&core, "reaction", false).await?;
     for sequence in 2..=4 {
         resources.append("left", sequence).await?;
     }
@@ -750,9 +763,9 @@ async fn source_restart_with_pipe_ahead_preserves_transport_identity_on_later_re
         Ok::<_, anyhow::Error>(())
     })
     .await??;
-    stage(&core, "left", "source", false).await?;
-    stage(&core, "left", "source", true).await?;
-    stage(&core, "left", "reaction", true).await?;
+    stage(&core, "source", false).await?;
+    stage(&core, "source", true).await?;
+    stage(&core, "reaction", true).await?;
     wait_delivery(&resources, "left", 5).await?;
     tokio::time::timeout(DEADLINE, async {
         loop {
@@ -770,10 +783,10 @@ async fn source_restart_with_pipe_ahead_preserves_transport_identity_on_later_re
     let (core, resources) = open(directory.path(), true).await?;
     core.start().await?;
     resources.append("left", 6).await?;
-    let graph = core.get_computation_graph("left").await?;
+    let instance = core.computation_control()?;
     wait_delivery(&resources, "left", 6)
         .await
-        .with_context(|| format!("transport identity after replay: {:?}", graph.observed()))?;
+        .with_context(|| format!("transport identity after replay: {:?}", instance.observed()))?;
     core.shutdown().await?;
     assert_eq!(
         effect_sequences(directory.path(), "left")?,
@@ -787,15 +800,18 @@ async fn source_restart_with_pipe_ahead_preserves_transport_identity_on_later_re
 async fn factory_lifecycle_crash_worker() -> Result<()> {
     let root = PathBuf::from(std::env::var("DRASI_FACTORY_LIFECYCLE_ROOT")?);
     let (core, resources) = open(&root, true).await?;
-    core.apply_desired_state(0, "initial", desired(&root, true)?)
-        .await?;
-    assert!(core.reconcile_desired_state().await?.converged());
-    core.start().await?;
-    for graph in ["left", "right"] {
-        resources.append(graph, 1).await?;
-        wait_delivery(&resources, graph, 1).await?;
+    let right = open_instance(resources.clone(), "right", true).await?;
+    for (instance, core) in [("left", &core), ("right", &right)] {
+        core.apply_desired_state(0, "initial", desired(&root, instance, true)?)
+            .await?;
+        assert!(core.reconcile_desired_state().await?.converged());
+        core.start().await?;
     }
-    stage(&core, "left", "query", false).await?;
+    for instance in ["left", "right"] {
+        resources.append(instance, 1).await?;
+        wait_delivery(&resources, instance, 1).await?;
+    }
+    stage(&core, "query", false).await?;
     resources.append("left", 2).await?;
     tokio::time::timeout(DEADLINE, async {
         loop {
@@ -837,16 +853,26 @@ async fn process_restart_restores_bulk_factories_and_pending_input_without_resub
         String::from_utf8_lossy(&worker.stderr)
     );
     let (core, resources) = open(directory.path(), false).await?;
-    assert_eq!(core.desired_configuration()?.revision, 1);
-    assert_eq!(core.desired_configuration()?.desired.graphs.len(), 2);
-    assert!(
-        !core.management_status().await?.converged(),
-        "missing factory must remain visible"
-    );
-    core.register_component_factory(Arc::new(ReactionFactory::new()?))
-        .await?;
-    assert!(core.reconcile_desired_state().await?.converged());
-    core.start().await?;
+    let right = open_instance(resources.clone(), "right", false).await?;
+    for core in [&core, &right] {
+        assert_eq!(core.desired_configuration()?.revision, 1);
+        assert_eq!(
+            core.desired_configuration()?
+                .desired
+                .topology
+                .components
+                .len(),
+            3
+        );
+        assert!(
+            !core.management_status().await?.converged(),
+            "missing factory must remain visible"
+        );
+        core.register_component_factory(Arc::new(ReactionFactory::new()?))
+            .await?;
+        assert!(core.reconcile_desired_state().await?.converged());
+        core.start().await?;
+    }
     wait_delivery(&resources, "left", 2).await?;
     wait_delivery(&resources, "right", 1).await?;
     resources.append("left", 3).await?;
@@ -854,8 +880,9 @@ async fn process_restart_restores_bulk_factories_and_pending_input_without_resub
     wait_delivery(&resources, "left", 3).await?;
     wait_delivery(&resources, "right", 2).await?;
     core.shutdown().await?;
-    for (graph, expected) in [("left", vec![1, 2, 3]), ("right", vec![1, 2])] {
-        assert_eq!(effect_sequences(directory.path(), graph)?, expected);
+    right.shutdown().await?;
+    for (instance, expected) in [("left", vec![1, 2, 3]), ("right", vec![1, 2])] {
+        assert_eq!(effect_sequences(directory.path(), instance)?, expected);
     }
     Ok(())
 }

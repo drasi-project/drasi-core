@@ -262,7 +262,7 @@ impl ResourceHandle {
         Arc::ptr_eq(&self.value, &other.value)
     }
 
-    pub(super) fn same_shared_instance(&self, other: &Self) -> bool {
+    pub(crate) fn same_shared_instance(&self, other: &Self) -> bool {
         self.role == other.role
             && self.value.as_ref().type_id() == other.value.as_ref().type_id()
             && (self.same_instance(other)

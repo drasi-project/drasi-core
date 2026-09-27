@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
 };
@@ -61,6 +61,13 @@ struct Instance {
 }
 
 impl InstanceSlot {
+    pub(super) fn take_unstarted(&self) -> Component {
+        let mut value = self.value.lock().expect("unstarted component ownership");
+        let instance = value.take().expect("unstarted component");
+        assert!(!instance.attempted && instance.inputs.is_empty() && instance.outputs.is_empty());
+        instance.component
+    }
+
     pub(super) fn new(component: Component, generation: ComponentGeneration) -> Arc<Self> {
         let id = component.descriptor().id().clone();
         Self::declared(id, component, generation)
@@ -176,17 +183,36 @@ pub(super) enum Command {
     AutoStart,
     Add {
         addition: super::ComponentAddition,
+        management_access: bool,
         reply: oneshot::Sender<GraphResult<(ComponentId, ComponentGeneration)>>,
+    },
+    AddComponents {
+        batch: crate::computation::v1::ComponentBatch,
+        management_access: bool,
+        reply: oneshot::Sender<GraphResult<reconcile::ReconciliationReport>>,
+    },
+    ReconcileComponents {
+        previous: super::DesiredTopology,
+        desired: super::DesiredTopology,
+        bindings: super::TopologyBindings,
+        reply: oneshot::Sender<GraphResult<reconcile::ReconciliationReport>>,
+    },
+    ProtectComponents {
+        components: BTreeSet<ComponentId>,
+        resources: BTreeSet<super::ResourceId>,
+        reply: oneshot::Sender<GraphResult<()>>,
     },
     ControlConnections {
         connections: Vec<(ComponentId, ComponentId)>,
         subscriptions: bool,
+        management_access: bool,
         reply: oneshot::Sender<GraphResult<()>>,
     },
     ControlHandler {
         component: ComponentId,
         generation: ComponentGeneration,
         handler: Arc<dyn crate::computation::v1::ControlHandler>,
+        management_access: bool,
         reply: oneshot::Sender<GraphResult<()>>,
     },
     HandleStart {
@@ -203,6 +229,7 @@ pub(super) enum Command {
         component: ComponentId,
         generation: ComponentGeneration,
         required: bool,
+        management_access: bool,
         reply: oneshot::Sender<GraphResult<()>>,
     },
     ObserveResources {
@@ -220,6 +247,7 @@ pub(super) enum Command {
         generation: ComponentGeneration,
         port: PortId,
         stream: crate::computation::v1::StreamId,
+        management_access: bool,
         reply: oneshot::Sender<GraphResult<()>>,
     },
     Preview {
@@ -230,6 +258,7 @@ pub(super) enum Command {
     Reconcile {
         preview: reconcile::ReconciliationPreview,
         bindings: super::TopologyBindings,
+        management_access: bool,
         reply: oneshot::Sender<GraphResult<reconcile::ReconciliationReport>>,
     },
     Start {
@@ -252,6 +281,7 @@ pub(super) enum Command {
         revision: GraphRevision,
         component: ComponentId,
         policy: LifecyclePolicy,
+        management_access: bool,
         reply: oneshot::Sender<GraphResult<GraphRevision>>,
     },
     Health {
@@ -261,7 +291,93 @@ pub(super) enum Command {
     },
 }
 
+fn configuration_access(graph: &ComputationGraph, management_access: bool) -> GraphResult<()> {
+    if !management_access
+        && graph
+            .management_protected
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err(topology(
+            "managed configuration must be changed through DrasiLib::apply_desired_state",
+        ));
+    }
+    Ok(())
+}
+
+fn component_configuration_access(
+    graph: &ComputationGraph,
+    management_access: bool,
+    id: &ComponentId,
+) -> GraphResult<()> {
+    configuration_access(graph, management_access)?;
+    if !management_access && graph.protected_components.contains(id) {
+        return Err(topology(format!("component {id} is managed by DrasiLib")));
+    }
+    Ok(())
+}
+
+fn addition_id(pending: &Option<super::ComponentAddition>) -> &ComponentId {
+    pending
+        .as_ref()
+        .expect("pending component addition")
+        .definition
+        .descriptor
+        .id()
+}
+
 impl GraphControl {
+    pub(crate) async fn reconcile_components(
+        &self,
+        previous: super::DesiredTopology,
+        desired: super::DesiredTopology,
+        bindings: super::TopologyBindings,
+    ) -> GraphResult<reconcile::ReconciliationReport> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::ReconcileComponents {
+                previous,
+                desired,
+                bindings,
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
+    pub(crate) async fn add_components(
+        &self,
+        batch: crate::computation::v1::ComponentBatch,
+    ) -> GraphResult<reconcile::ReconciliationReport> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::AddComponents {
+                batch,
+                management_access: self.management_access,
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
+    pub(crate) async fn protect_components(
+        &self,
+        components: BTreeSet<ComponentId>,
+        resources: BTreeSet<super::ResourceId>,
+    ) -> GraphResult<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::ProtectComponents {
+                components,
+                resources,
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
     /// Park selected processing at safe boundaries without stopping instances.
     /// Incoming work from selected producers drains first; other input queues
     /// remain owned by the parked component. No external-effect drain is implied.
@@ -325,7 +441,8 @@ impl GraphControl {
         self.request_start(revision, selection, false).await
     }
 
-    pub(crate) async fn start_requested(
+    /// Start selected components explicitly, independently of auto-start defaults.
+    pub async fn start_requested(
         &self,
         revision: GraphRevision,
         selection: GraphSelection,
@@ -382,6 +499,7 @@ impl GraphControl {
                 revision,
                 component,
                 policy,
+                management_access: self.management_access,
                 reply,
             })
             .await
@@ -2148,6 +2266,111 @@ impl Operations {
     }
 }
 
+fn accept_addition(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    addition: super::ComponentAddition,
+    management_access: bool,
+    reply: oneshot::Sender<GraphResult<(ComponentId, ComponentGeneration)>>,
+) {
+    let validation_error = addition.bindings.validation_error.clone();
+    let deferred = addition.bindings.defer_activation;
+    let activate = addition.definition.lifecycle.auto_start && !deferred;
+    let mut pending = Some(addition);
+    let permission = configuration_access(graph, management_access).and_then(|_| {
+        if !management_access
+            && (graph.protected_components.contains(addition_id(&pending))
+                || pending
+                    .as_ref()
+                    .expect("pending addition")
+                    .resources
+                    .iter()
+                    .any(|resource| graph.protected_resources.contains(&resource.id)))
+        {
+            Err(topology("component configuration is managed by DrasiLib"))
+        } else {
+            Ok(())
+        }
+    });
+    match permission.and_then(|_| super::addition::insert(graph, &mut pending)) {
+        Ok((index, id, generation)) => {
+            if deferred {
+                graph.deferred_activation.insert(id.clone());
+            }
+            if activate {
+                operations.pending_auto_start.insert(index, false);
+            }
+            let setup = operations
+                .attach_control(graph, index)
+                .and_then(|_| operations.refresh_connections(graph))
+                .and_then(|_| match validation_error {
+                    Some(cause) => Err(GraphError::Reported { cause }),
+                    None => operations.launch(graph, index, Operation::Create),
+                });
+            if let Err(error) = setup {
+                let phase = super::addition::creation_phase(&error);
+                let failure = failure(error, phase);
+                update(graph, |state| {
+                    let node = state.components.get_mut(&id).expect("added component");
+                    node.realization = RealizationState::CreationFailed;
+                    node.failure = Some(failure);
+                });
+            }
+            let _ = reply.send(Ok((id, generation)));
+        }
+        Err(error) => {
+            let addition = super::addition::RejectedAddition::new(
+                pending.take().expect("rejected addition retains ownership"),
+            );
+            let mut rejected = graph.rejected_additions.lock().unwrap_or_else(|error| {
+                log::error!("Retaining rejected resources through poisoned registry: {error}");
+                error.into_inner()
+            });
+            rejected.retain(|addition| !addition.complete());
+            rejected.push(addition.clone());
+            let _ = reply.send(Err(GraphError::AdditionRejected {
+                cause: Box::new(error),
+                addition,
+            }));
+        }
+    }
+}
+
+fn stop_handle(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    component: ComponentId,
+    generation: ComponentGeneration,
+    defer_restart: bool,
+    reply: oneshot::Sender<GraphResult<StopReport>>,
+) -> GraphResult<()> {
+    let valid = graph
+        .ids
+        .get(&component)
+        .filter(|index| graph.components[**index].generation == generation)
+        .copied()
+        .ok_or(GraphError::StaleGeneration)
+        .and_then(|index| {
+            if operations.stopping.is_some() {
+                Err(GraphError::OperationInProgress)
+            } else {
+                Ok(index)
+            }
+        });
+    match valid {
+        Ok(index) => {
+            if defer_restart {
+                graph.deferred_activation.insert(component);
+            }
+            operations.begin_stop(graph, BTreeSet::from([index]), reply)?;
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn run(
     graph: &mut ComputationGraph,
     cancel: &mut watch::Receiver<bool>,
@@ -2159,6 +2382,7 @@ pub(super) async fn run(
     }
     let mut controls = deploy(graph, cancel).await?;
     let mut operations = Operations::default();
+    let mut deferred_commands = VecDeque::new();
     for index in graph.order.clone() {
         operations.attach_control(graph, index)?;
     }
@@ -2208,9 +2432,15 @@ pub(super) async fn run(
                     operations.complete(graph, completion, &controls)?;
                 }
             }
-            command = commands.recv() => match command {
-                Some(Command::ReadinessPolicy { component, generation, required, reply }) => {
+            command = async {
+                match deferred_commands.pop_front() {
+                    Some(command) => Some(command),
+                    None => commands.recv().await,
+                }
+            } => match command {
+                Some(Command::ReadinessPolicy { component, generation, required, management_access, reply }) => {
                     let result = (|| {
+                        component_configuration_access(graph, management_access, &component)?;
                         let state = graph.observed();
                         let node = state.components.get(&component)
                             .filter(|node| node.generation == generation)
@@ -2242,8 +2472,9 @@ pub(super) async fn run(
                         }
                     }
                 }
-                Some(Command::BindStream { component, generation, port, stream, reply }) => {
+                Some(Command::BindStream { component, generation, port, stream, management_access, reply }) => {
                     let result = (|| {
+                        component_configuration_access(graph, management_access, &component)?;
                         let index = *graph.ids.get(&component).ok_or(GraphError::StaleGeneration)?;
                         let state = graph.observed();
                         if state.components[&component].generation != generation {
@@ -2311,55 +2542,97 @@ pub(super) async fn run(
                         }
                     }
                 }
-                Some(Command::Add { addition, reply }) => {
-                    let validation_error = addition.bindings.validation_error.clone();
-                    let deferred = addition.bindings.defer_activation;
-                    let activate = addition.definition.lifecycle.auto_start
-                        && !addition.bindings.defer_activation;
-                    let mut pending = Some(addition);
-                    match super::addition::insert(graph, &mut pending) {
-                        Ok((index, id, generation)) => {
-                            if deferred {
-                                graph.deferred_activation.insert(id.clone());
-                            }
-                            if activate {
-                                operations.pending_auto_start.insert(index, false);
-                            }
-                            let setup = operations.attach_control(graph, index)
-                                .and_then(|_| operations.refresh_connections(graph))
-                                .and_then(|_| match validation_error {
-                                    Some(cause) => Err(GraphError::Reported { cause }),
-                                    None => operations.launch(graph, index, Operation::Create),
-                                });
-                            if let Err(error) = setup {
-                                let phase = super::addition::creation_phase(&error);
-                                let failure = failure(error, phase);
-                                update(graph, |state| {
-                                    let node = state.components.get_mut(&id).expect("added component");
-                                    node.realization = RealizationState::CreationFailed;
-                                    node.failure = Some(failure);
-                                });
-                            }
-                            let _ = reply.send(Ok((id, generation)));
+                Some(Command::ReconcileComponents { previous, desired, bindings, reply }) => {
+                    let prepared = (|| {
+                        let current = graph.snapshot.select(GraphSelection::All)?;
+                        let target = crate::management::compose_definition(current.clone(), &previous, &desired)
+                            .map_err(|error| topology(format!("{error:#}")))?;
+                        let mut changes = Vec::new();
+                        if !crate::management::equivalent(&current, &target).map_err(|error| topology(error.to_string()))?
+                            || !bindings.resource_constructors.is_empty()
+                        {
+                            changes.push(reconcile::DesiredMutation::SetTopology(target));
                         }
-                        Err(error) => {
-                            let addition = super::addition::RejectedAddition::new(
-                                pending.take().expect("rejected addition retains its ownership")
-                            );
-                            let mut rejected = graph.rejected_additions.lock().unwrap_or_else(|error| {
-                                log::error!("Retaining rejected resources through poisoned registry: {error}");
-                                error.into_inner()
-                            });
-                            rejected.retain(|addition| !addition.complete());
-                            rejected.push(addition.clone());
-                            let _ = reply.send(Err(GraphError::AdditionRejected {
-                                cause: Box::new(error), addition,
-                            }));
+                        let observed = graph.observed();
+                        for node in &desired.components {
+                            if observed.components.get(node.descriptor.id()).is_some_and(|node| {
+                                node.failure.as_ref().is_some_and(|failure| failure.disposition == FailureDisposition::Retryable)
+                            }) {
+                                changes.push(reconcile::DesiredMutation::Retry(GraphSelection::Exact(vec![node.descriptor.id().clone()])));
+                            }
                         }
-                    }
+                        if changes.is_empty() { Ok(None) }
+                        else { reconcile::preview(graph, changes).map(Some) }
+                    })();
+                    let result = match prepared {
+                        Ok(Some(preview)) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands, &mut deferred_commands).await,
+                        Ok(None) => Ok(reconcile::ReconciliationReport {
+                            revision: graph.snapshot.revision,
+                            summary: OperationSummary::Completed,
+                            committed: true,
+                            creation: BTreeMap::new(),
+                            startup: None,
+                            removed: BTreeSet::new(),
+                            failures: Vec::new(),
+                        }),
+                        Err(error) => Err(error),
+                    };
+                    let cancelled = matches!(&result, Err(GraphError::Cancelled));
+                    let _ = reply.send(result);
+                    if cancelled { return Err(GraphError::Cancelled); }
                 }
-                Some(Command::ControlConnections { connections, subscriptions, reply }) => {
-                    let result = if connections.iter().any(|(from, to)| {
+                Some(Command::AddComponents { mut batch, management_access, reply }) => {
+                    let prepared = (|| {
+                        configuration_access(graph, management_access)?;
+                        if batch.definition.graph_id != graph.snapshot.id.as_ref() {
+                            return Err(topology("component definition does not belong to this graph"));
+                        }
+                        let target = crate::computation::components::append_definition(
+                            graph.snapshot.select(GraphSelection::All)?,
+                            &batch.definition,
+                            &graph.resource_handles,
+                            &batch.bindings.resources,
+                        ).map_err(|error| topology(format!("{error:#}")))?;
+                        batch.bindings.resources.retain(|id, supplied| {
+                            !graph.resource_handles.get(id).is_some_and(|existing| existing.same_shared_instance(supplied))
+                        });
+                        let preview = reconcile::preview(graph, vec![reconcile::DesiredMutation::SetTopology(target)])?;
+                        if !management_access {
+                            reconcile::check_protected(graph, &preview)?;
+                        }
+                        Ok(preview)
+                    })();
+                    let result = match prepared {
+                        Ok(preview) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, batch.bindings, &mut commands, &mut deferred_commands).await,
+                        Err(error) => Err(error),
+                    };
+                    let cancelled = matches!(&result, Err(GraphError::Cancelled));
+                    let _ = reply.send(result);
+                    if cancelled { return Err(GraphError::Cancelled); }
+                }
+                Some(Command::ProtectComponents { components, resources, reply }) => {
+                    graph.protected_components = components;
+                    graph.protected_resources = resources;
+                    let _ = reply.send(Ok(()));
+                }
+                Some(Command::Add { addition, management_access, reply }) => {
+                    accept_addition(graph, &mut operations, addition, management_access, reply);
+                }
+                Some(Command::ControlConnections { connections, subscriptions, management_access, reply }) => {
+                    let protected = |connections: &[(ComponentId, ComponentId)]| {
+                        connections.iter().filter(|(from, to)| {
+                            graph.protected_components.contains(from) || graph.protected_components.contains(to)
+                        }).cloned().collect::<BTreeSet<_>>()
+                    };
+                    let old = if subscriptions { graph.snapshot.subscriptions.as_ref() } else { graph.snapshot.control_connections.as_ref() };
+                    let permission = configuration_access(graph, management_access).and_then(|_| {
+                        if !management_access && protected(old) != protected(&connections) {
+                            Err(topology("connection configuration is managed by DrasiLib"))
+                        } else { Ok(()) }
+                    });
+                    let result = if let Err(error) = permission {
+                        Err(error)
+                    } else if connections.iter().any(|(from, to)| {
                         from == to || !graph.ids.contains_key(to)
                             || (!subscriptions && !graph.ids.contains_key(from))
                     }) {
@@ -2383,12 +2656,12 @@ pub(super) async fn run(
                     };
                     let _ = reply.send(result);
                 }
-                Some(Command::ControlHandler { component, generation, handler, reply }) => {
-                    let result = graph.ids.get(&component)
+                Some(Command::ControlHandler { component, generation, handler, management_access, reply }) => {
+                    let result = component_configuration_access(graph, management_access, &component).and_then(|_| graph.ids.get(&component)
                         .filter(|index| graph.components[**index].generation == generation)
                         .and_then(|index| operations.control_handlers.get(index))
                         .ok_or(GraphError::StaleGeneration)
-                        .map(|handlers| { handlers.send_replace(Some(handler)); });
+                        .map(|handlers| { handlers.send_replace(Some(handler)); }));
                     let _ = reply.send(result);
                 }
                 Some(Command::HandleStart { component, generation, reply }) => {
@@ -2411,27 +2684,23 @@ pub(super) async fn run(
                     }
                 }
                 Some(Command::HandleStop { component, generation, reply }) => {
-                    let valid = graph.ids.get(&component)
-                        .filter(|index| graph.components[**index].generation == generation)
-                        .copied().ok_or(GraphError::StaleGeneration)
-                        .and_then(|index| {
-                            if operations.stopping.is_some() {
-                                Err(GraphError::OperationInProgress)
-                            } else {
-                                Ok(index)
-                            }
-                        });
-                    match valid {
-                        Ok(index) => operations.begin_stop(graph, BTreeSet::from([index]), reply)?,
-                        Err(error) => { let _ = reply.send(Err(error)); }
-                    }
+                    stop_handle(graph, &mut operations, component, generation, false, reply)?;
                 }
                 Some(Command::Preview { revision, changes, reply }) => {
                     let result = check_revision(graph, revision).and_then(|_| reconcile::preview(graph, changes));
                     let _ = reply.send(result);
                 }
-                Some(Command::Reconcile { preview, bindings, reply }) => {
-                    let result = reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings).await;
+                Some(Command::Reconcile { preview, bindings, management_access, reply }) => {
+                    let permission = configuration_access(graph, management_access).and_then(|_| {
+                        if !management_access {
+                            reconcile::check_protected(graph, &preview)?;
+                        }
+                        Ok(())
+                    });
+                    let result = match permission {
+                        Ok(()) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands, &mut deferred_commands).await,
+                        Err(error) => Err(error),
+                    };
                     let cancelled = matches!(&result, Err(GraphError::Cancelled));
                     let _ = reply.send(result);
                     if cancelled { return Err(GraphError::Cancelled); }
@@ -2471,8 +2740,9 @@ pub(super) async fn run(
                     let _ = reply.send(result);
                     if was_cancelled { return Err(GraphError::Cancelled); }
                 }
-                Some(Command::Policy { revision, component, policy, reply }) => {
+                Some(Command::Policy { revision, component, policy, management_access, reply }) => {
                     let result = check_revision(graph, revision).and_then(|_| {
+                        component_configuration_access(graph, management_access, &component)?;
                         if operations.starting.is_some() || operations.stopping.is_some() {
                             return Err(GraphError::OperationInProgress);
                         }

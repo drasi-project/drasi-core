@@ -12,50 +12,43 @@ pub(crate) use runtime::Management;
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+pub(crate) use runtime::{compose_definition, equivalent};
 use serde::{Deserialize, Serialize};
 
 use crate::computation::v1::{
     DesiredTopology, FactoryRegistry, ResourceHandle, ResourceId, ResourceSpecification,
 };
 
-/// Complete user-managed graph set for one DrasiLib instance. Omitted graphs
-/// are removed. Generated ordinary-query implementation graphs are not recipes.
+/// Declaratively managed components in a DrasiLib instance. QueryGraph
+/// internals and instance-provided services are not reconstruction recipes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredInstance {
     pub version: u32,
-    pub graphs: Vec<DesiredGraph>,
+    pub topology: DesiredTopology,
 }
 
 impl Default for DesiredInstance {
     fn default() -> Self {
         Self {
             version: 1,
-            graphs: Vec::new(),
+            topology: crate::computation::v1::ComputationGraph::empty(
+                crate::computation::components::INSTANCE_GRAPH_ID,
+            )
+            .expect("instance graph identity")
+            .snapshot()
+            .select(crate::computation::v1::GraphSelection::All)
+            .expect("empty component definition"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DesiredGraph {
-    #[serde(default = "default_auto_start")]
-    pub auto_start: bool,
-    pub topology: DesiredTopology,
-}
-
-fn default_auto_start() -> bool {
-    true
-}
-
 impl From<DesiredTopology> for DesiredInstance {
-    fn from(topology: DesiredTopology) -> Self {
+    fn from(mut topology: DesiredTopology) -> Self {
+        topology.graph_id = crate::computation::components::INSTANCE_GRAPH_ID.into();
         Self {
             version: 1,
-            graphs: vec![DesiredGraph {
-                auto_start: true,
-                topology,
-            }],
+            topology,
         }
     }
 }
@@ -111,31 +104,23 @@ impl Default for ManagementOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphManagementStatus {
-    pub graph_id: String,
-    pub applied: bool,
-    pub converged: bool,
-    pub error: Option<String>,
-    pub resource_errors: BTreeMap<ResourceId, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagementStatus {
     pub revision: u64,
     pub persistent: bool,
     pub reconciling: bool,
     pub error: Option<String>,
-    pub graphs: Vec<GraphManagementStatus>,
+    pub applied: bool,
+    pub converged: bool,
+    pub resource_errors: BTreeMap<ResourceId, String>,
 }
 
 impl ManagementStatus {
     pub fn converged(&self) -> bool {
         !self.reconciling
             && self.error.is_none()
-            && self
-                .graphs
-                .iter()
-                .all(|graph| graph.converged && graph.error.is_none())
+            && self.applied
+            && self.converged
+            && self.resource_errors.is_empty()
     }
 }
 
@@ -146,7 +131,7 @@ impl crate::DrasiLib {
             ))
     }
 
-    /// Durably accept a complete managed graph set before construction. The
+    /// Durably accept managed component definitions before construction. The
     /// receipt means accepted, not ready. Call reconcile_desired_state to wait
     /// for a pass and inspect individual creation/activation failures.
     pub async fn apply_desired_state(

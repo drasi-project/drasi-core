@@ -153,10 +153,9 @@
 //! [`TransactionalTransformer`] implementations in one shared storage transaction,
 //! with isolated step state and no internal pipes or independently scheduled nodes.
 
-pub use super::instance::{
-    ComputationCleanupError, ComputationHandle, ComputationInfo, ComputationOptions,
-};
-pub use super::instance_ops::{InstanceConfigurationSnapshot, RegisteredComputationConfiguration};
+pub use super::components::{ComponentBatch, ComponentBatchBuilder};
+pub use super::instance::{ComputationCleanupError, ComputationInfo};
+pub use super::instance_ops::InstanceConfigurationSnapshot;
 
 mod binary_codec;
 mod bounded_pipe;

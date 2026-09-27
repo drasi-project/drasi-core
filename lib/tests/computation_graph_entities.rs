@@ -2157,23 +2157,23 @@ async fn plugin_versions_group_dependents_and_remove_the_last_derived_node() {
 }
 
 #[tokio::test]
-async fn plugin_family_inventory_traverses_all_versions_without_aliasing_graph_scopes() {
+async fn plugin_family_inventory_traverses_all_versions_without_aliasing_component_ids() {
     let first_version = plugin("postgres", "1.2.0");
     let second_version = plugin("postgres", "1.3.0");
     let unrelated = plugin("postgres-extra", "1.2.0");
-    let left = ComputationGraph::builder("left")
-        .service(service("shared-name", Some(first_version.clone())))
+    let left = ComponentBatch::builder()
+        .service(service("left-source", Some(first_version.clone())))
         .service(service("next-version", Some(second_version.clone())))
         .build()
         .expect("left graph");
-    let right = ComputationGraph::builder("right")
-        .service(service("shared-name", Some(second_version.clone())))
+    let right = ComponentBatch::builder()
+        .service(service("right-source", Some(second_version.clone())))
         .service(service("unrelated", Some(unrelated)))
         .build()
         .expect("right graph");
     let instance = drasi_lib::DrasiLib::builder()
-        .with_computation_graph(left, ComputationOptions { auto_start: false })
-        .with_computation_graph(right, ComputationOptions { auto_start: false })
+        .with_components(left.auto_start(false))
+        .with_components(right.auto_start(false))
         .build()
         .await
         .expect("instance");
@@ -2181,14 +2181,14 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_graph_s
         .inspect_computation_inventory()
         .await
         .expect("inventory");
-    let left = ComputationScope::root("left");
-    let right = ComputationScope::root("right");
-    let right_component = right.entity(GraphEntityId::Component(component("shared-name")));
+    let control = instance.computation_control().unwrap();
+    let root = ComputationScope::root(control.desired_snapshot().id.clone());
+    let right_component = root.entity(GraphEntityId::Component(component("right-source")));
     assert_eq!(
         inventory.plugin_family_dependents("postgres"),
         BTreeSet::from([
-            left.entity(GraphEntityId::Component(component("shared-name"))),
-            left.entity(GraphEntityId::Component(component("next-version"))),
+            root.entity(GraphEntityId::Component(component("left-source"))),
+            root.entity(GraphEntityId::Component(component("next-version"))),
             right_component.clone(),
         ])
     );
@@ -2200,19 +2200,36 @@ async fn plugin_family_inventory_traverses_all_versions_without_aliasing_graph_s
     );
     assert!(inventory.plugin_family_dependents("unknown").is_empty());
     assert_eq!(
-        inspected_family(&inventory.scopes[&left].topology, "postgres").version_count(),
+        inspected_family(&inventory.scopes[&root].topology, "postgres").version_count(),
         2
     );
     assert_eq!(
-        inspected_family(&inventory.scopes[&right].topology, "postgres").version_count(),
+        inventory
+            .scopes
+            .values()
+            .filter(|scope| scope.owner.is_none())
+            .count(),
         1
     );
     let family_id = GraphEntityId::PluginFamily(Arc::from("postgres"));
-    assert_eq!(inventory.dependents(&left.entity(family_id)).count(), 2);
-    instance
-        .remove_computation_graph("left")
+    assert_eq!(inventory.dependents(&root.entity(family_id)).count(), 2);
+    let preview = control
+        .preview(
+            control.desired_snapshot().revision,
+            vec![DesiredMutation::RemoveComponents {
+                selection: GraphSelection::Exact(vec![
+                    component("left-source"),
+                    component("next-version"),
+                ]),
+                policy: RemovalPolicy::Reject,
+            }],
+        )
         .await
-        .expect("remove scope");
+        .unwrap();
+    control
+        .reconcile(preview, TopologyBindings::default())
+        .await
+        .unwrap();
     let current = instance
         .inspect_computation_inventory()
         .await

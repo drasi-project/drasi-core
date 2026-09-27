@@ -27,7 +27,7 @@ async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_chan
         .build()
         .await
         .expect("instance");
-    let pipeline = drasi.computation_pipeline("descriptors").expect("pipeline");
+    let pipeline = drasi.computation_pipeline().expect("pipeline");
     let source = SourcePluginFactory::new(
         Arc::new(drasi_source_mock::descriptor::MockSourceDescriptor),
         "mock",
@@ -77,10 +77,7 @@ async fn existing_descriptors_construct_native_graph_plugins_without_an_abi_chan
         .reaction(reaction, true)
         .build()
         .expect("graph");
-    drasi
-        .add_computation_graph(graph, ComputationOptions::default())
-        .await
-        .expect("register");
+    drasi.add_components(graph).await.expect("register");
     drasi.start().await.expect("start");
     let event = tokio::time::timeout(Duration::from_secs(5), output.recv())
         .await
@@ -196,14 +193,8 @@ async fn concurrent_descriptor_creation_uses_instance_secrets_without_global_res
     let second = SourcePluginFactory::new(descriptor.clone(), "two", recipe.clone(), true)
         .expect("second recipe");
     let (a, b) = tokio::join!(
-        first.host(
-            one.computation_plugin_services("graph")
-                .expect("first services")
-        ),
-        second.host(
-            two.computation_plugin_services("graph")
-                .expect("second services")
-        ),
+        first.host(one.computation_plugin_services().expect("first services")),
+        second.host(two.computation_plugin_services().expect("second services")),
     );
     let a = a.expect("first source");
     let b = b.expect("second source");
@@ -278,9 +269,7 @@ async fn existing_bootstrap_identity_secret_and_index_descriptors_keep_their_rea
         .build()
         .await
         .expect("instance");
-    let services = drasi
-        .computation_plugin_services("families")
-        .expect("services");
+    let services = drasi.computation_plugin_services().expect("services");
     let bootstrap = BootstrapPluginFactory::new(
         Arc::new(drasi_bootstrap_noop::descriptor::NoOpBootstrapDescriptor),
         PluginConfiguration::new("noop", "1.0.0", serde_json::json!({})),

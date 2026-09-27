@@ -61,8 +61,7 @@ impl IndexBackendPlugin for FactoryProvider {
     }
 }
 
-/// Translates the existing query configuration and plugin contracts into a
-/// native graph. Legacy managers never execute these queries or forward results.
+/// Assemble source subscriptions, queries and reactions for a DrasiLib instance.
 pub struct ComputationPipelineBuilder {
     graph_id: String,
     services: LegacyPluginServices,
@@ -87,6 +86,13 @@ fn resource(kind: &str, id: &str) -> GraphResult<ResourceId> {
 }
 fn endpoint(component: ComponentId, port: &str) -> Endpoint {
     Endpoint::new(component, PortId::try_new(port).expect("constant port"))
+}
+
+fn builtin_factory<T: ComponentFactory + Default>() -> Arc<dyn ComponentFactory> {
+    FactoryRegistry::standard()
+        .get(&T::default().descriptor().implementation)
+        .expect("pipeline factory is registered")
+        .clone()
 }
 
 impl ComputationPipelineBuilder {
@@ -182,8 +188,8 @@ impl ComputationPipelineBuilder {
         }
         Ok(self)
     }
-    pub fn build(self) -> GraphResult<ComputationGraph> {
-        self.build_with_subscriptions().map(|(graph, _)| graph)
+    pub fn build(self) -> GraphResult<ComponentBatch> {
+        self.build_with_subscriptions()?.0.into_component_batch()
     }
 
     pub(crate) fn build_with_subscriptions(
@@ -265,7 +271,11 @@ impl ComputationPipelineBuilder {
         let mut builder = self
             .services
             .declare(ComputationGraph::builder(self.graph_id.as_str()))?;
-        let catalog_id = ResourceId::try_new("query-catalog")?;
+        let assembly = self.queries.first().map(|query| query.id.as_str());
+        let catalog_id = match assembly.filter(|_| !self.runtime_compatibility) {
+            Some(query) => resource("query-catalog", query)?,
+            None => ResourceId::try_new("query-catalog")?,
+        };
         builder = builder
             .declare_resource(ResourceSpecification {
                 id: catalog_id.clone(),
@@ -277,7 +287,10 @@ impl ComputationPipelineBuilder {
                 catalog_id.clone(),
                 ResourceHandle::new(ResourceRole::QueryCatalog, Arc::new(self.catalog.clone())),
             )?;
-        let middleware_id = ResourceId::try_new("query-middleware")?;
+        let middleware_id = match assembly.filter(|_| !self.runtime_compatibility) {
+            Some(query) => resource("query-middleware", query)?,
+            None => ResourceId::try_new("query-middleware")?,
+        };
         builder = builder
             .declare_resource(ResourceSpecification {
                 id: middleware_id.clone(),
@@ -321,10 +334,14 @@ impl ComputationPipelineBuilder {
                     .provide_resource(id, bootstrap)?;
             }
         }
-        let source_factory = Arc::new(SourcePluginAdapterFactory::default());
-        let query_factory = Arc::new(ContinuousQueryFactory::default());
-        let outlet_id = ComponentId::try_new("__computation_results__")?;
-        let outlet_factory = Arc::new(QueryResultsOutletFactory::default());
+        let source_factory = builtin_factory::<SourcePluginAdapterFactory>();
+        let query_factory = builtin_factory::<ContinuousQueryFactory>();
+        let outlet_id =
+            ComponentId::try_new(match assembly.filter(|_| !self.runtime_compatibility) {
+                Some(query) => format!("query-results/{}", encoded(query)),
+                None => "__computation_results__".into(),
+            })?;
+        let outlet_factory = builtin_factory::<QueryResultsOutletFactory>();
         builder = builder
             .component(
                 ComponentSpecification {
@@ -552,7 +569,7 @@ impl ComputationPipelineBuilder {
             }
             let scheduled = ComponentId::try_new(format!("scheduled/{}", encoded(&config.id)))?;
             let scheduled_stream = StreamId::try_new(format!("{scheduled}/out"))?;
-            let scheduled_factory = Arc::new(QueryScheduledSourceFactory::default());
+            let scheduled_factory = builtin_factory::<QueryScheduledSourceFactory>();
             let scheduled_edge = EdgeDefinition::new(
                 endpoint(scheduled.clone(), "out"),
                 endpoint(query_id.clone(), "in"),
@@ -796,7 +813,7 @@ impl ComputationPipelineBuilder {
                     }),
                 );
         }
-        let reaction_factory = Arc::new(ReactionPluginAdapterFactory::default());
+        let reaction_factory = builtin_factory::<ReactionPluginAdapterFactory>();
         for (host, auto_start) in self.reactions {
             let id = Self::reaction_component_id(host.id())?;
             let host_id = resource("reaction-host", host.id())?;

@@ -112,17 +112,16 @@ impl EnvelopeSink for Sink {
         Ok(())
     }
 }
-fn graph(
-    id: &str,
+fn components(
     calls: Arc<Calls>,
 ) -> (
-    ComputationGraph,
+    ComponentBatch,
     mpsc::Sender<OutputEnvelope>,
     mpsc::Receiver<ChangeEnvelope>,
 ) {
     let (input, receiver) = mpsc::channel(8);
     let (sender, output) = mpsc::channel(8);
-    let graph = ComputationGraph::builder(id)
+    let graph = ComponentBatch::builder()
         .declare_resource(ResourceSpecification {
             id: ResourceId::try_new("cleanup").expect("resource"),
             role: ResourceRole::StateStore,
@@ -176,42 +175,36 @@ async fn roundtrip(
 
 async fn instance_lifecycle() {
     let calls = Arc::new(Calls::default());
-    let (graph, input, mut output_rx) = graph("managed", calls.clone());
+    let (components, input, mut output_rx) = components(calls.clone());
     let drasi = DrasiLib::builder()
         .with_id("managed-instance")
-        .with_computation_graph(graph, ComputationOptions::default())
+        .with_components(components)
         .build()
         .await
         .expect("instance");
-    let handle = drasi
-        .get_computation_graph("managed")
-        .await
-        .expect("handle");
+    let handle = drasi.computation_control().expect("instance controller");
     let (_, mut logs) = drasi
-        .subscribe_computation_logs(
-            "managed",
-            drasi_lib::channels::ComponentType::Source,
-            "native-source",
-        )
+        .subscribe_computation_logs(drasi_lib::channels::ComponentType::Source, "native-source")
         .await
         .expect("scoped logs");
-    handle.deployment().await.expect("deployment");
-    assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
-    assert!(!drasi
-        .get_graph()
+    drasi
+        .computation_component("native-source")
+        .unwrap()
+        .wait_created()
         .await
+        .unwrap();
+    assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
+    assert!(handle
+        .desired_snapshot()
         .nodes
         .iter()
-        .any(|node| node.id == "native-source"));
+        .any(|node| node.descriptor.id().as_str() == "native-source"));
     drasi.start().await.expect("start instance");
     let message = tokio::time::timeout(Duration::from_secs(5), logs.recv())
         .await
         .expect("missing native log")
         .expect("log");
-    assert_eq!(
-        message.instance_id,
-        "managed-instance::computation::managed"
-    );
+    assert_eq!(message.instance_id, "managed-instance");
     roundtrip(&input, &mut output_rx, 1).await;
     let mut instance_events = drasi.subscribe_all_component_events();
     drasi.stop().await.expect("soft stop");
@@ -240,7 +233,10 @@ async fn instance_lifecycle() {
     assert_eq!(calls.starts.load(Ordering::SeqCst), 2);
     drasi.shutdown().await.expect("await all drivers");
     assert_eq!(calls.disposals.load(Ordering::SeqCst), 1);
-    assert!(handle.start().await.is_err());
+    assert!(handle
+        .start_requested(handle.desired_snapshot().revision, GraphSelection::All)
+        .await
+        .is_err());
     assert!(drasi.start().await.is_err());
 }
 #[tokio::test(flavor = "current_thread")]
@@ -257,52 +253,71 @@ async fn managed_driver_runs_and_restarts_on_multiple_threads() {
 }
 
 #[tokio::test]
-async fn graph_registration_and_errors_are_independent_of_ordinary_component_ids() {
+async fn component_batches_share_identity_and_preserve_existing_instance_members() {
     let drasi = DrasiLib::builder().build().await.expect("instance");
-    let original_graphs: Vec<_> = drasi
-        .list_computation_graphs()
-        .await
-        .expect("ordinary runtime graph")
-        .into_iter()
-        .map(|graph| graph.id)
+    let control = drasi.computation_control().unwrap();
+    let original: Vec<_> = control
+        .desired_snapshot()
+        .nodes
+        .iter()
+        .map(|node| node.descriptor.id().clone())
         .collect();
     let calls = Arc::new(Calls::default());
-    let (graph, input, mut output_rx) = graph("manual", calls.clone());
-    let handle = drasi
-        .add_computation_graph(graph, ComputationOptions { auto_start: false })
+    let (batch, input, mut output_rx) = components(calls.clone());
+    drasi
+        .add_components(batch.auto_start(false))
         .await
         .expect("register");
-    drasi.start().await.expect("legacy instance");
+    drasi.start().await.expect("instance");
     assert_eq!(calls.starts.load(Ordering::SeqCst), 0);
-    let (duplicate, _, _) = self::graph("manual", Arc::new(Calls::default()));
+    let (duplicate, _, _) = components(Arc::new(Calls::default()));
     assert!(matches!(
-        drasi
-            .add_computation_graph(duplicate, ComputationOptions::default())
-            .await,
+        drasi.add_components(duplicate).await,
         Err(DrasiError::AlreadyExists { .. })
     ));
-    handle.start().await.expect("manual native activation");
-    roundtrip(&input, &mut output_rx, 1).await;
-    drasi
-        .remove_computation_graph("manual")
+    control
+        .start_requested(
+            control.desired_snapshot().revision,
+            GraphSelection::Exact(vec![component("native-source"), component("native-sink")]),
+        )
         .await
-        .expect("remove native graph");
+        .expect("manual native activation");
+    roundtrip(&input, &mut output_rx, 1).await;
+    let preview = control
+        .preview(
+            control.desired_snapshot().revision,
+            vec![
+                DesiredMutation::RemoveComponents {
+                    selection: GraphSelection::Exact(vec![
+                        component("native-source"),
+                        component("native-sink"),
+                    ]),
+                    policy: RemovalPolicy::Reject,
+                },
+                DesiredMutation::RemoveResource {
+                    resource: ResourceId::try_new("cleanup").unwrap(),
+                    policy: RemovalPolicy::Reject,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    control
+        .reconcile(preview, TopologyBindings::default())
+        .await
+        .unwrap();
     assert!(drasi.is_running().await);
-    assert!(matches!(
-        drasi.get_computation_graph("manual").await,
-        Err(DrasiError::ComponentNotFound { .. })
-    ));
+    assert!(drasi.computation_component("native-source").is_err());
     assert_eq!(
-        drasi
-            .list_computation_graphs()
-            .await
-            .expect("list")
-            .into_iter()
-            .map(|graph| graph.id)
+        control
+            .desired_snapshot()
+            .nodes
+            .iter()
+            .map(|node| node.descriptor.id().clone())
             .collect::<Vec<_>>(),
-        original_graphs
+        original
     );
-    drasi.shutdown().await.expect("shutdown legacy");
+    drasi.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -310,12 +325,19 @@ async fn cancelled_shutdown_retains_the_driver_and_actual_async_cleanup_owner() 
     let drasi = DrasiLib::builder().build().await.expect("instance");
     let calls = Arc::new(Calls::default());
     calls.hold_stop.store(true, Ordering::Release);
-    let (graph, _input, _) = graph("cleanup", calls.clone());
-    let handle = drasi
-        .add_computation_graph(graph, ComputationOptions { auto_start: false })
+    let (batch, _input, _) = components(calls.clone());
+    drasi
+        .add_components(batch.auto_start(false))
         .await
         .expect("register");
-    handle.start().await.expect("start");
+    let handle = drasi.computation_control().unwrap();
+    handle
+        .start_requested(
+            handle.desired_snapshot().revision,
+            GraphSelection::Exact(vec![component("native-source"), component("native-sink")]),
+        )
+        .await
+        .expect("start");
     let mut shutdown = Box::pin(drasi.shutdown());
     tokio::select! {
         result = &mut shutdown => panic!("cleanup was not awaited: {result:?}"),
@@ -332,14 +354,14 @@ async fn cancelled_shutdown_retains_the_driver_and_actual_async_cleanup_owner() 
 }
 
 #[tokio::test]
-async fn builder_rejection_awaits_all_owned_graph_resources_without_starting_drivers() {
+async fn builder_rejection_awaits_all_owned_resources_without_starting_components() {
     let first = Arc::new(Calls::default());
     let second = Arc::new(Calls::default());
-    let (one, _, _) = graph("duplicate", first.clone());
-    let (two, _, _) = graph("duplicate", second.clone());
+    let (one, _, _) = components(first.clone());
+    let (two, _, _) = components(second.clone());
     let result = DrasiLib::builder()
-        .with_computation_graph(one, ComputationOptions::default())
-        .with_computation_graph(two, ComputationOptions::default())
+        .with_components(one)
+        .with_components(two)
         .build()
         .await;
     assert!(matches!(result, Err(DrasiError::AlreadyExists { .. })));
@@ -350,9 +372,9 @@ async fn builder_rejection_awaits_all_owned_graph_resources_without_starting_dri
 }
 
 #[tokio::test]
-async fn query_creation_failure_retains_transferred_graphs_until_explicit_cleanup() {
+async fn query_creation_failure_retains_component_resources_until_explicit_cleanup() {
     let calls = Arc::new(Calls::default());
-    let (graph, _, _) = graph("cleanup", calls.clone());
+    let (batch, _, _) = components(calls.clone());
     let mut query = drasi_lib::Query::cypher("invalid")
         .query("MATCH (n) RETURN n")
         .build();
@@ -361,7 +383,7 @@ async fn query_creation_failure_retains_transferred_graphs_until_explicit_cleanu
     ));
     let drasi = DrasiLib::builder()
         .with_query(query)
-        .with_computation_graph(graph, ComputationOptions::default())
+        .with_components(batch)
         .build()
         .await
         .expect("node-first builder retains failed query declarations");
@@ -378,7 +400,7 @@ async fn query_creation_failure_retains_transferred_graphs_until_explicit_cleanu
     drasi
         .shutdown()
         .await
-        .expect("dispose every transferred graph");
+        .expect("dispose transferred resources");
     assert_eq!(calls.disposals.load(Ordering::SeqCst), 1);
 }
 
@@ -387,11 +409,11 @@ async fn failed_builder_rollback_returns_the_actual_retryable_cleanup_owner() {
     let first = Arc::new(Calls::default());
     let second = Arc::new(Calls::default());
     first.fail_dispose.store(true, Ordering::Release);
-    let (one, _, _) = graph("duplicate", first.clone());
-    let (two, _, _) = graph("duplicate", second.clone());
+    let (one, _, _) = components(first.clone());
+    let (two, _, _) = components(second.clone());
     let error = match DrasiLib::builder()
-        .with_computation_graph(one, ComputationOptions::default())
-        .with_computation_graph(two, ComputationOptions::default())
+        .with_components(one)
+        .with_components(two)
         .build()
         .await
     {
@@ -419,16 +441,10 @@ async fn rejected_registration_keeps_failed_cleanup_separate_from_the_live_graph
     let live = Arc::new(Calls::default());
     let rejected = Arc::new(Calls::default());
     rejected.fail_dispose.store(true, Ordering::Release);
-    let (original, _, _) = graph("same", live.clone());
-    drasi
-        .add_computation_graph(original, ComputationOptions::default())
-        .await
-        .expect("original");
-    let (duplicate, _, _) = graph("same", rejected.clone());
-    let error = match drasi
-        .add_computation_graph(duplicate, ComputationOptions::default())
-        .await
-    {
+    let (original, _, _) = components(live.clone());
+    drasi.add_components(original).await.expect("original");
+    let (duplicate, _, _) = components(rejected.clone());
+    let error = match drasi.add_components(duplicate).await {
         Ok(_) => panic!("duplicate registration succeeded"),
         Err(error) => error,
     };
@@ -443,11 +459,12 @@ async fn rejected_registration_keeps_failed_cleanup_separate_from_the_live_graph
         .expect("retry");
     assert_eq!(rejected.disposals.load(Ordering::SeqCst), 2);
     assert_eq!(live.disposals.load(Ordering::SeqCst), 0);
-    drasi
-        .get_computation_graph("same")
-        .await
-        .expect("original still registered")
-        .start()
+    let control = drasi.computation_control().unwrap();
+    control
+        .start_requested(
+            control.desired_snapshot().revision,
+            GraphSelection::Exact(vec![component("native-source"), component("native-sink")]),
+        )
         .await
         .expect("original starts");
     drasi.shutdown().await.expect("shutdown");

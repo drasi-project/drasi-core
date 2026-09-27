@@ -49,23 +49,42 @@ fn graph() -> ComputationGraph {
         .expect("graph")
 }
 
+fn components() -> ComponentBatch {
+    ComponentBatch::builder()
+        .source(Box::new(FiniteSource::new("source", vec![])))
+        .sink(Box::new(CollectSink::new(
+            "sink",
+            &["in"],
+            Arc::new(Mutex::new(Vec::new())),
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .relationship_policy(
+            edge("source", "sink"),
+            RelationshipPolicy {
+                required_for_binding: false,
+                orphan_permitted: true,
+                ..Default::default()
+            },
+        )
+        .build()
+        .unwrap()
+}
+
 #[tokio::test]
-async fn inspection_history_is_coherent_and_keeps_managed_graph_scopes_separate() {
+async fn inspection_history_is_coherent_for_instance_components() {
     let drasi = DrasiLib::builder().build().await.expect("instance");
-    let handle = drasi
-        .add_computation_graph(graph(), ComputationOptions { auto_start: false })
-        .await
-        .expect("register");
-    handle.deployment().await.expect("deploy");
-    let inspector = drasi
-        .inspect_computation_graph("inspected")
-        .await
-        .expect("inspection");
+    drasi.add_components(components()).await.expect("register");
+    let inspector = drasi.inspect_computation_graph().expect("inspection");
     let before = inspector.snapshot().sequence;
-    let control = handle.control();
+    let control = drasi.computation_control().unwrap();
+    let revision = control.desired_snapshot().revision;
     control
         .set_lifecycle_policy(
-            GraphRevision(1),
+            revision,
             component("sink"),
             LifecyclePolicy { auto_start: false },
         )
@@ -76,13 +95,15 @@ async fn inspection_history_is_coherent_and_keeps_managed_graph_scopes_separate(
     for snapshot in snapshots {
         assert_eq!(snapshot.desired.revision, snapshot.observed.revision);
     }
-    assert_eq!(inspector.snapshot().desired.revision, GraphRevision(2));
-    assert!(!drasi
-        .get_graph()
-        .await
+    assert_eq!(
+        inspector.snapshot().desired.revision,
+        GraphRevision(revision.0 + 1)
+    );
+    assert!(control
+        .desired_snapshot()
         .nodes
         .iter()
-        .any(|node| node.id == "sink"));
+        .any(|node| node.descriptor.id().as_str() == "sink"));
     drasi.shutdown().await.expect("shutdown");
 }
 
@@ -135,15 +156,14 @@ async fn computation_topology_is_queryable_as_typed_graph_changes() {
 #[tokio::test]
 async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit() {
     let drasi = DrasiLib::builder().build().await.expect("instance");
-    let handle = drasi
-        .add_computation_graph(graph(), ComputationOptions { auto_start: false })
+    drasi
+        .add_components(components().auto_start(false))
         .await
         .expect("register");
-    handle.deployment().await.expect("deployment");
-    let control = handle.control();
+    let control = drasi.computation_control().unwrap();
     let preview = control
         .preview(
-            GraphRevision(1),
+            control.desired_snapshot().revision,
             vec![DesiredMutation::Unbind {
                 edge: edge("source", "sink"),
                 policy: RemovalPolicy::Orphan,
@@ -155,7 +175,7 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
         .reconcile(preview, TopologyBindings::default())
         .await
         .expect("unbind");
-    let inspector = handle.inspector();
+    let inspector = control.inspector();
     let mut source = ComputationTopologySource::new(
         component("topology"),
         stream("topology"),
@@ -176,10 +196,29 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
     .expect("query");
     query.start().await.expect("query start");
     source.start().await.expect("topology start");
-    for _ in 0..9 {
-        let envelope = source
-            .next()
+    let topology = inspector.topology();
+    let initial_events = 1
+        + topology.nodes.len()
+        + topology.links.len()
+        + topology
+            .nodes
+            .values()
+            .filter(|entity| {
+                matches!(
+                    entity,
+                    GraphEntity::Component(_)
+                        | GraphEntity::Resource(_)
+                        | GraphEntity::Pipe(_)
+                        | GraphEntity::SubscriptionPipe(_)
+                )
+            })
+            .count()
+        + inspector.snapshot().desired.edges.len()
+        + inspector.snapshot().desired.unbound_relationships.len() * 4;
+    for _ in 0..initial_events {
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), source.next())
             .await
+            .expect("initial topology must be finite and complete")
             .expect("event")
             .expect("topology")
             .envelope;

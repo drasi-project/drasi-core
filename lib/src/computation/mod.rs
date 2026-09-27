@@ -21,6 +21,7 @@
 //! plugins and graph-owned query recovery. Server configuration and plugin loading
 //! remain the embedding host's responsibility; legacy plugin ABIs are unchanged.
 
+pub(crate) mod components;
 pub(crate) mod instance;
 mod instance_ops;
 mod internal;

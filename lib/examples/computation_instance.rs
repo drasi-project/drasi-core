@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! One DrasiLib instance, one shared plugin source, two independent computation graphs.
+//! Two DrasiLib instances sharing a host-owned source subscription.
 //! Run: cargo run -p drasi-lib --example computation_instance
 
 use drasi_lib::{
-    computation::v1::{
-        ComputationOptions, ReactionPluginHost, ReactionPluginOptions, SourceSubscriptionOptions,
-    },
+    computation::v1::{ReactionPluginHost, ReactionPluginOptions, SourceSubscriptionOptions},
     DrasiLib,
 };
 use drasi_reaction_application::ApplicationReaction;
@@ -54,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    let pipeline = drasi.computation_pipeline("additional-orders")?;
+    let observer = DrasiLib::builder().with_id("observer").build().await?;
+    let pipeline = observer.computation_pipeline()?;
     let (additional_reaction, additional_handle) =
         ApplicationReaction::new("additional-output", vec![query.id.clone()]);
     let mut additional_output = additional_handle
@@ -75,12 +74,10 @@ async fn main() -> anyhow::Result<()> {
         .query(query)
         .reaction(reaction, true)
         .build()?;
-    let handle = drasi
-        .add_computation_graph(graph, ComputationOptions::default())
-        .await?;
+    observer.add_components(graph).await?;
 
-    // The instance releases the shared source's startup fence after both paths subscribe.
     drasi.start().await?;
+    observer.start().await?;
     input
         .send_node_insert(
             "one",
@@ -100,13 +97,13 @@ async fn main() -> anyhow::Result<()> {
         ordinary.results == additional.results,
         "query results differ"
     );
-    println!("Both graphs produced: {:?}", additional.results);
+    println!("Both instances produced: {:?}", additional.results);
     println!(
-        "Additional graph revision: {:?}",
-        handle.inspector().snapshot().desired.revision
+        "Observer computation revision: {:?}",
+        observer.computation_info().await?.revision
     );
 
-    drasi.stop_computation_graph("additional-orders").await?;
+    observer.stop().await?;
     input
         .send_node_insert(
             "two",
@@ -119,12 +116,10 @@ async fn main() -> anyhow::Result<()> {
     let result = tokio::time::timeout(Duration::from_secs(5), ordinary_output.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("ordinary output stopped"))?;
-    println!(
-        "After stopping only the additional graph: {:?}",
-        result.results
-    );
-    // This transient source has no replay: events sent while the extra graph is stopped
+    println!("After stopping the observer instance: {:?}", result.results);
+    // This transient source has no replay: events sent while the observer is stopped
     // are intentionally not recoverable by that subscriber.
+    observer.shutdown().await?;
     drasi.shutdown().await?;
     Ok(())
 }

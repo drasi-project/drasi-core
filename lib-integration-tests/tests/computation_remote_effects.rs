@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -848,5 +848,155 @@ async fn direct_lifecycle(transport: Transport) -> Result<()> {
         assert_eq!(effects[offset + 3].row, json!({"name": name}));
     }
     server.close().await?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct DurableFixture {
+    query_graph: String,
+    sequence: u64,
+    config_hash: u64,
+    output_generation: u64,
+    rows: BTreeMap<u64, Value>,
+    checkpoint: ReactionCheckpoint,
+    effects: Vec<Effect>,
+}
+
+async fn capture_fixture(pipeline: &Pipeline, recorder: &Recorder) -> Result<DurableFixture> {
+    use futures::StreamExt;
+
+    let query = pipeline
+        .core
+        .query_manager()
+        .get_query_instance(QUERY)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let snapshot = query.fetch_snapshot().await?;
+    let checkpoint = checkpoint(pipeline)
+        .await?
+        .context("durable reaction checkpoint")?;
+    anyhow::ensure!(
+        checkpoint.sequence == snapshot.as_of_sequence,
+        "fixture must include completed handling of the entire query output"
+    );
+    Ok(DurableFixture {
+        query_graph: pipeline
+            .core
+            .inspect_query_computation(QUERY)
+            .await?
+            .snapshot()
+            .desired
+            .id
+            .to_string(),
+        sequence: snapshot.as_of_sequence,
+        config_hash: snapshot.config_hash,
+        output_generation: snapshot.output_generation,
+        rows: snapshot.stream_keyed().collect().await,
+        checkpoint,
+        effects: recorder.effects()?,
+    })
+}
+
+#[tokio::test]
+async fn ordinary_reconstruction_preserves_durable_identity_and_pending_work() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(60), durable_reconstruction()).await?
+}
+
+async fn durable_reconstruction() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let directory = std::env::var_os("DRASI_ORDINARY_RECOVERY_FIXTURE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temporary.path().to_owned());
+    std::fs::create_dir_all(&directory)?;
+    let fixture_path = directory.join("fixture.json");
+    let expected: Option<DurableFixture> = match std::fs::read(&fixture_path) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::ensure!(
+                std::fs::read_dir(&directory)?.next().transpose()?.is_none(),
+                "a nonempty recovery fixture must have a saved expectation"
+            );
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let server = RecordingServer::start(
+        &directory.join("receiver.jsonl"),
+        Transport::Http,
+        Fault::None,
+    )
+    .await?;
+    let first = pipeline(&directory, &server.endpoint, Transport::Http).await?;
+    if let Some(expected) = expected {
+        wait_sequence(&first, expected.sequence).await?;
+        assert_eq!(
+            capture_fixture(&first, &server.recorder).await?,
+            expected,
+            "reconstruction must reopen the same query state and completed reaction position"
+        );
+    } else {
+        seed(&first.source).await?;
+        wait_complete(&first).await?;
+        assert_eq!(
+            server.recorder.effects()?,
+            expected_effects(&first.core, Transport::Http).await?
+        );
+    }
+    let before = capture_fixture(&first, &server.recorder).await?;
+    let output_name = format!("pending-output-{}", before.sequence + 1);
+    let input_name = format!("pending-input-{}", before.sequence + 2);
+    first.core.stop_reaction(REACTION).await?;
+    append_member(&first, &output_name).await?;
+    let query = first
+        .core
+        .query_manager()
+        .get_query_instance(QUERY)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    tokio::time::timeout(DEADLINE, async {
+        while query.fetch_snapshot().await?.as_of_sequence != before.sequence + 1 {
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    assert_eq!(checkpoint(&first).await?, Some(before.checkpoint.clone()));
+    drop(query);
+    first.core.stop_query(QUERY).await?;
+    append_member(&first, &input_name).await?;
+    assert_eq!(server.recorder.effects()?, before.effects);
+    first.core.shutdown().await?;
+    drop(first);
+
+    let restored = pipeline(&directory, &server.endpoint, Transport::Http).await?;
+    wait_sequence(&restored, before.sequence + 2).await?;
+    let after = capture_fixture(&restored, &server.recorder).await?;
+    assert_eq!(after.query_graph, before.query_graph);
+    assert_eq!(after.config_hash, before.config_hash);
+    assert_eq!(after.output_generation, before.output_generation);
+    assert_eq!(after.checkpoint.config_hash, before.checkpoint.config_hash);
+    assert_eq!(after.rows.len(), before.rows.len() + 2);
+    for (signature, row) in &before.rows {
+        assert_eq!(after.rows.get(signature), Some(row));
+    }
+    assert_eq!(after.effects.len(), before.effects.len() + 2);
+    assert_eq!(
+        &after.effects[..before.effects.len()],
+        before.effects.as_slice()
+    );
+    for (offset, name) in [&output_name, &input_name].into_iter().enumerate() {
+        let effect = &after.effects[before.effects.len() + offset];
+        assert_eq!(effect.query, QUERY);
+        assert_eq!(effect.sequence, before.sequence + offset as u64 + 1);
+        assert_eq!(effect.row, json!({"name": name}));
+    }
+    restored.core.shutdown().await?;
+    drop(restored);
+    server.close().await?;
+    let mut file = File::create(fixture_path)?;
+    serde_json::to_writer_pretty(&mut file, &after)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    File::open(&directory)?.sync_all()?;
     Ok(())
 }

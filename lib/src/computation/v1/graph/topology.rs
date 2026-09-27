@@ -75,6 +75,7 @@ pub struct DesiredRelationship {
 #[serde(deny_unknown_fields)]
 pub struct DesiredTopology {
     pub version: u32,
+    #[serde(default = "instance_graph_id")]
     pub graph_id: String,
     pub revision: GraphRevision,
     pub components: Vec<DesiredComponent>,
@@ -99,12 +100,23 @@ pub struct DesiredTopology {
     pub allow_incomplete: bool,
 }
 
+fn instance_graph_id() -> String {
+    crate::computation::components::INSTANCE_GRAPH_ID.into()
+}
+
 #[derive(Default, Clone)]
 pub struct FactoryRegistry {
     pub(super) factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
 }
 
 impl FactoryRegistry {
+    pub fn get(
+        &self,
+        implementation: &ImplementationIdentity,
+    ) -> Option<&Arc<dyn ComponentFactory>> {
+        self.factories.get(implementation)
+    }
+
     pub fn envelope_codec(
         &self,
         max_bytes: NonZeroUsize,
@@ -172,7 +184,7 @@ pub struct TopologyBindings {
 }
 
 impl DesiredPipe {
-    pub(super) fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
+    pub(crate) fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
         match self {
             Self::Retained(config) => config.resource_dependencies(),
             Self::Qos(config) => config.resource_dependencies(),
@@ -244,6 +256,13 @@ impl DesiredPipe {
 }
 
 impl DesiredTopology {
+    pub fn build_components(
+        &self,
+        bindings: TopologyBindings,
+    ) -> GraphResult<crate::computation::v1::ComponentBatch> {
+        self.build(bindings)?.into_component_batch()
+    }
+
     /// Validate graph structure without constructing components or requiring
     /// factories/resources to be available. Component-specific creation failures
     /// remain runtime outcomes.
