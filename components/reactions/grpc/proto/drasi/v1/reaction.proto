@@ -45,9 +45,12 @@ message ProcessResultsRequest {
 }
 
 message ProcessResultsResponse {
+    // True only after all requested items have completed successfully.
     bool success = 1;
     string message = 2;
     string error = 3;
+    // Must equal the request's item count when success is true. Zero/omitted,
+    // partial or excessive counts do not acknowledge a nonempty batch.
     uint32 items_processed = 4;
 }
 

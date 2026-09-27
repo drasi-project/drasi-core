@@ -623,6 +623,38 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
         .contains("committed contents"));
     middleware.stop().await.unwrap();
     drop(middleware);
+    let progress = Arc::new(QuerySourceProgress::new(GRAPH, definition().id).unwrap());
+    let mut verified = MiddlewareTransformer::new_durable(
+        definition(),
+        registry.clone(),
+        provider.clone(),
+        options(2),
+    )
+    .await
+    .unwrap()
+    .with_source_progress(progress.clone())
+    .unwrap();
+    verified.start().await.unwrap();
+    assert_eq!(
+        progress.snapshot().transport_sequences[&stream("source")],
+        1,
+        "rejected changed input must not commit its transport position"
+    );
+    let replay = verified
+        .transform(input(event("source", 1, 8, change(1, &["a"], false), true)))
+        .await
+        .unwrap();
+    assert_eq!(logical(&replay[0].envelope), 1);
+    assert_eq!(
+        progress.snapshot().transport_sequences[&stream("source")],
+        8
+    );
+    assert_eq!(
+        progress.snapshot().checkpoints[&SourceProgressKey::Source("source".into())].sequence,
+        1
+    );
+    verified.stop().await.unwrap();
+    drop(verified);
     let mut changed = definition();
     changed.output_stream = stream("different");
     let mut middleware =
@@ -1909,7 +1941,11 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
             .sequence,
         Some(2)
     );
-    assert_eq!(next.envelope.system().sequence(), 1);
+    assert_eq!(
+        next.envelope.system().sequence(),
+        2,
+        "transport progress must survive reconstruction"
+    );
     let output = middleware.transform(input(next.envelope)).await.unwrap();
     assert_eq!(logical(&output[0].envelope), 2);
     assert_eq!(output[0].envelope.system().sequence(), 3);

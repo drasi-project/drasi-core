@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
 use tonic::transport::Channel;
@@ -71,6 +71,8 @@ pub(crate) async fn send_batch_with_retry_with_limit(
     timeout_ms: u64,
     max_retry_duration: Duration,
 ) -> Result<(bool, Option<ReactionServiceClient<Channel>>)> {
+    let expected_items = u32::try_from(batch.len())
+        .context("gRPC reaction batch exceeds the acknowledgement count range")?;
     let mut retries = 0;
     let mut backoff = Duration::from_millis(100);
     let start_time = std::time::Instant::now();
@@ -152,6 +154,12 @@ pub(crate) async fn send_batch_with_retry_with_limit(
                 );
 
                 if resp.success {
+                    anyhow::ensure!(
+                        resp.items_processed == expected_items,
+                        "gRPC receiver reported success for {} of {} items; the batch is not fully acknowledged",
+                        resp.items_processed,
+                        expected_items
+                    );
                     trace!(
                         "Successfully sent batch - size: {}, query_id: {}, time: {:?}",
                         batch.len(),

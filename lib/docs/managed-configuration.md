@@ -29,6 +29,15 @@ not require every component to construct successfully. Call `start()` to activat
 configured auto-start components. Start/stop are runtime operations: restart
 uses the persisted auto-start policies, not the last observed Running state.
 
+`stop()` followed by `start()` resumes the same instance. `shutdown()` is terminal:
+create a new instance to restart after shutdown. In lightweight direct-addition
+mode the caller supplies new source/query/reaction objects again, with the same
+processing-storage identities; opaque objects are not serialized automatically.
+In persistent managed mode, supply the factories, resource resolver and
+configuration store to the new builder. It reloads the accepted graph set without
+resubmitting `apply_desired_state`, including declarations whose factory is
+temporarily unavailable.
+
 Dynamic libraries are **not required**. Static factories work equally well.
 For dynamic plugins, the application loads/verifies libraries with Host SDK at
 startup and passes `PluginRegistry::computation_factory_registry()`. Core never

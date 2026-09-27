@@ -60,6 +60,7 @@ enum Fault {
     CommittedThenWait,
     DeliverySequence,
     DeliveryConfirmed,
+    InputTransport,
 }
 
 struct Injection {
@@ -120,7 +121,9 @@ impl CheckpointStore for Checkpoints {
         sequence: u64,
         position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
-        let fault = if key == DELIVERY_SEQUENCE {
+        let fault = if key.starts_with("\0computation:input-transport:v1:") {
+            Some(Fault::InputTransport)
+        } else if key == DELIVERY_SEQUENCE {
             Some(Fault::DeliverySequence)
         } else if key == DELIVERED {
             Some(Fault::DeliveryConfirmed)
@@ -1043,5 +1046,208 @@ async fn strict_recovery_output_validation(backend: Backend) {
             Some(QueryRecoveryError::Inconsistent(_))
         ));
         query.stop().await.expect("cleanup");
+    }
+}
+
+fn replayed_source_input(transport: u64) -> InputEnvelope {
+    let original = input(1);
+    let change = GraphChangeCodec::decode_changes(&original.envelope)
+        .expect("original source change")
+        .remove(0);
+    let source = drasi_lib::channels::SourceEventWrapper::new(
+        "people".into(),
+        drasi_lib::channels::SourceEvent::Change(change),
+        chrono::DateTime::from_timestamp_millis(1000).expect("timestamp"),
+        1,
+    );
+    InputEnvelope {
+        port: PortId::try_new("in").expect("port"),
+        envelope: GraphChangeCodec::encode_source_event(
+            Arc::new(source),
+            &ComponentId::try_new("source").expect("source"),
+            StreamId::try_new("source/out").expect("stream"),
+            transport,
+            None,
+        )
+        .expect("source envelope"),
+    }
+}
+
+#[tokio::test]
+async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_duplicate_input() {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        let directory = tempfile::tempdir().expect("storage");
+        let base = provider_for(directory.path(), backend);
+        let fault = Injection::new(Fault::InputTransport);
+        let progress = Arc::new(
+            QuerySourceProgress::new("faults", ComponentId::try_new("query").expect("query"))
+                .expect("progress"),
+        );
+        {
+            let query = ContinuousQueryTransformer::new(
+                definition(false),
+                Arc::new(Provider {
+                    inner: base.clone(),
+                    fault: fault.clone(),
+                }),
+            )
+            .await
+            .expect("query")
+            .with_source_progress(progress.clone())
+            .expect("source progress");
+            let mut query = TransactionTransformer::from_query(query);
+            query.start().await.expect("start");
+            fault.armed.store(true, Ordering::Release);
+            assert!(query.transform(replayed_source_input(11)).await.is_err());
+            assert_eq!(
+                query
+                    .query_results()
+                    .expect("query results")
+                    .snapshot()
+                    .expect("snapshot")
+                    .as_of_sequence,
+                0
+            );
+            assert!(progress.snapshot().checkpoints.is_empty());
+            assert!(progress.snapshot().transport_sequences.is_empty());
+            query.stop().await.expect("cleanup");
+        }
+        {
+            let stored = base
+                .create_indexes("faults", "query")
+                .await
+                .expect("reopen failed transaction");
+            let checkpoints = stored
+                .checkpoint_store()
+                .expect("checkpoints")
+                .read_all_checkpoints()
+                .await
+                .expect("durable checkpoints");
+            assert!(checkpoints
+                .keys()
+                .all(|key| !key.starts_with("computation:input:")
+                    && !key.starts_with("\0computation:input-transport:v1:")));
+            assert!(stored
+                .outbox_writer()
+                .expect("outbox")
+                .read_from("query", 0)
+                .await
+                .expect("durable output")
+                .is_empty());
+            assert!(stored
+                .live_results_writer()
+                .expect("rows")
+                .read_snapshot("query")
+                .await
+                .expect("durable rows")
+                .is_empty());
+            stored
+                .cleanup()
+                .expect("owner")
+                .shutdown()
+                .await
+                .expect("release observer");
+        }
+        {
+            let query = ContinuousQueryTransformer::new(
+                definition(false),
+                Arc::new(Provider {
+                    inner: base.clone(),
+                    fault: fault.clone(),
+                }),
+            )
+            .await
+            .expect("reopen")
+            .with_source_progress(progress.clone())
+            .expect("progress");
+            let mut query = TransactionTransformer::from_query(query);
+            query.start().await.expect("start after rollback");
+            let output = query
+                .transform(replayed_source_input(11))
+                .await
+                .expect("replay rolled-back input");
+            assert_eq!(output.len(), 1);
+            query.delivery_completed(&output).await.expect("confirm");
+            assert_eq!(
+                progress.snapshot().checkpoints[&SourceProgressKey::Source("people".into())]
+                    .sequence,
+                1
+            );
+            assert_eq!(
+                progress.snapshot().transport_sequences
+                    [&StreamId::try_new("source/out").expect("stream")],
+                11
+            );
+            fault.armed.store(true, Ordering::Release);
+            assert!(
+                query.transform(replayed_source_input(12)).await.is_err(),
+                "duplicate progress must not hide persistence failure"
+            );
+            query.stop().await.expect("cleanup");
+        }
+        {
+            let stored = base
+                .create_indexes("faults", "query")
+                .await
+                .expect("independent durable inspection");
+            let all = stored
+                .checkpoint_store()
+                .expect("checkpoints")
+                .read_all_checkpoints()
+                .await
+                .expect("committed checkpoints");
+            let transport: Vec<_> = all
+                .iter()
+                .filter(|(key, _)| key.starts_with("\0computation:input-transport:v1:"))
+                .collect();
+            assert_eq!(transport.len(), 1);
+            assert_eq!(
+                transport[0].1.sequence, 11,
+                "failed duplicate receipt cannot advance transport progress"
+            );
+            assert_eq!(
+                stored
+                    .outbox_writer()
+                    .expect("outbox")
+                    .read_from("query", 0)
+                    .await
+                    .expect("committed outputs")
+                    .len(),
+                1
+            );
+            stored
+                .cleanup()
+                .expect("owner")
+                .shutdown()
+                .await
+                .expect("close observer");
+        }
+        let query = ContinuousQueryTransformer::new(definition(false), base)
+            .await
+            .expect("reopen")
+            .with_source_progress(progress.clone())
+            .expect("progress");
+        let mut query = TransactionTransformer::from_query(query);
+        query.start().await.expect("start");
+        assert!(query
+            .transform(replayed_source_input(12))
+            .await
+            .expect("duplicate retry")
+            .is_empty());
+        assert_eq!(
+            query
+                .query_results()
+                .expect("query results")
+                .snapshot()
+                .expect("snapshot")
+                .as_of_sequence,
+            1
+        );
+        assert_eq!(
+            progress.snapshot().transport_sequences
+                [&StreamId::try_new("source/out").expect("stream")],
+            12
+        );
+        query.stop().await.expect("stop");
     }
 }

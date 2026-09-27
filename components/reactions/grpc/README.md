@@ -183,6 +183,15 @@ serialize and deserialize in `camelCase` when supplied via descriptor configurat
 | `outputFormat` | `OutputFormat` | `canonicalJson` | `with_output_format` | Controls default `payload` behavior when no body template applies: `canonicalJson` emits the canonical JSON item in `payload`; `proto` omits `payload` unless a template applies. |
 | `outputTemplates` | `Option<OutputTemplates>` | `None` | `with_output_templates` | Optional Handlebars body templates and per-template metadata extensions — see [Output templates and per-query routing](#output-templates-and-per-query-routing). When present but containing neither a `defaultTemplate` nor any `routes` entry, a warning is logged at startup (the configuration is a no-op). |
 
+The receiver must return `success: true` **and** `items_processed` equal to the
+number of items in that request. A missing/zero, partial or excessive count does
+not acknowledge a nonempty batch. Under `strict`, an inconsistent success reply
+stops the reaction without advancing its checkpoint; fixing the receiver and
+restarting replays the complete unacknowledged query result. Any already completed
+prefix can therefore repeat: receivers needing duplicate-free effects must make
+their actions idempotent. An HTTP/gRPC transport success alone does not prove
+that every business action finished.
+
 Builder-only settings (not stored on `GrpcReactionConfig`):
 
 | Setter | Default | Description |

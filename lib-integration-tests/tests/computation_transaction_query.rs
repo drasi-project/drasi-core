@@ -433,3 +433,237 @@ fn scheduled_work_and_its_committed_output_survive_process_crashes() -> Result<(
     }
     Ok(())
 }
+
+fn scheduled_input(
+    sequence: u64,
+    active: bool,
+    due: u64,
+    effective_from: u64,
+) -> Result<InputEnvelope> {
+    let element = Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("source", "one"),
+            labels: Arc::from([Arc::from("Item")]),
+            effective_from,
+        },
+        properties: ElementPropertyMap::from(
+            serde_json::json!({"active":active,"due":due,"name":"one"}),
+        ),
+    };
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: GraphChangeCodec::encode_change(
+            if sequence == 1 {
+                SourceChange::Insert { element }
+            } else {
+                SourceChange::Update { element }
+            },
+            StreamId::try_new("input/out")?,
+            sequence,
+            None,
+        )?,
+    })
+}
+
+async fn scheduled_pair(
+    root: &Path,
+    progress: Arc<QuerySourceProgress>,
+) -> Result<(TransactionTransformer, QueryScheduledSource)> {
+    let scheduling = Arc::new(QuerySchedulingResource::default());
+    let mut query = TransactionTransformer::query(
+        ContinuousQueryDefinition {
+            graph_id: "timer-pressure".into(),
+            id: ComponentId::try_new("query")?,
+            query: "MATCH (n:Item) WHERE drasi.trueLater(n.active, n.due) RETURN n.name AS name"
+                .into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out")?,
+            outbox_capacity: NonZeroUsize::new(4).expect("query retention"),
+        },
+        provider(root),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await?
+    .with_scheduling(scheduling.clone())?
+    .with_source_progress(progress)?;
+    let mut source = QueryScheduledSource::new(
+        ComponentId::try_new("clock")?,
+        StreamId::try_new("clock/out")?,
+        scheduling,
+    )?;
+    query.start().await?;
+    source.start().await?;
+    Ok((query, source))
+}
+
+#[tokio::test]
+async fn cancelled_timer_and_backpressured_live_output_recover_without_recalculation_or_cursor_confusion(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let progress = Arc::new(QuerySourceProgress::new(
+        "timer-pressure",
+        ComponentId::try_new("query")?,
+    )?);
+    let mut output_definition = definition("query", &["receiver"]);
+    output_definition.capacity = NonZeroUsize::new(1).expect("one-slot output");
+    let outgoing = QosChannel::persistent(
+        output_definition.clone(),
+        provider(directory.path())
+            .create_indexes("timer-pressure", "output")
+            .await?,
+        FactoryRegistry::standard()
+            .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
+        "output",
+    )
+    .await?;
+    let mut connection = endpoint(&outgoing, &output_definition, "receiver")?;
+    let mut receiver = connection.pipe.take_receiver()?;
+    {
+        let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+        assert!(query
+            .transform(scheduled_input(1, true, 2000, 1000)?)
+            .await?
+            .is_empty());
+        let stale = tokio::time::timeout(Duration::from_secs(3), clock.next())
+            .await??
+            .context("scheduled hint")?;
+        assert!(query
+            .transform(scheduled_input(2, false, 2000, 1500)?)
+            .await?
+            .is_empty());
+        assert!(
+            query
+                .transform(InputEnvelope {
+                    port: PortId::try_new("in")?,
+                    envelope: stale.envelope
+                })
+                .await?
+                .is_empty(),
+            "a hint cannot revive cancelled work"
+        );
+        assert!(query.continue_transform().await?.is_empty());
+        assert!(!query.has_pending_emissions());
+        assert!(query
+            .transform(scheduled_input(3, true, 3000, 2500)?)
+            .await?
+            .is_empty());
+        let due = tokio::time::timeout(Duration::from_secs(3), clock.next())
+            .await??
+            .context("replacement hint")?;
+        let added = query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: due.envelope,
+            })
+            .await?;
+        assert_eq!(added.len(), 1);
+        let result = QueryChangeCodec::to_legacy_result(&added[0].envelope)?;
+        assert!(
+            matches!(result.results.as_slice(), [drasi_lib::channels::ResultDiff::Add { data, .. }] if data == &serde_json::json!({"name":"one"}))
+        );
+        outgoing.publish(&added[0].envelope).await?;
+        query.delivery_completed(&added).await?;
+        assert!(query.continue_transform().await?.is_empty());
+        assert!(!query.has_pending_emissions());
+        let deleted = query
+            .transform(scheduled_input(4, false, 3000, 3500)?)
+            .await?;
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(QueryChangeCodec::query_sequence(&deleted[0].envelope)?, 2);
+        {
+            let blocked = outgoing.publish(&deleted[0].envelope);
+            tokio::pin!(blocked);
+            assert!(
+                futures::poll!(blocked).is_pending(),
+                "the prior output has not been handled"
+            );
+        }
+        assert_eq!(outgoing.progress().await?.accepted, 1);
+        assert_eq!(outgoing.progress().await?.processed["receiver"], 0);
+        clock.stop().await?;
+        query.stop().await?;
+    }
+    {
+        let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+        assert_eq!(
+            progress.snapshot().checkpoints
+                [&SourceProgressKey::Stream(StreamId::try_new("input/out")?)]
+                .sequence,
+            4
+        );
+        assert!(query.has_pending_emissions());
+        assert!(
+            query
+                .transform(scheduled_input(5, true, 5000, 4500)?)
+                .await
+                .is_err(),
+            "recovered output must be drained before accepting new live input"
+        );
+        let replay = query.continue_transform().await?;
+        assert_eq!(replay.len(), 1);
+        assert_eq!(QueryChangeCodec::query_sequence(&replay[0].envelope)?, 2);
+        assert_eq!(replay[0].envelope.system().sequence(), 3);
+        let result = QueryChangeCodec::to_legacy_result(&replay[0].envelope)?;
+        assert!(
+            matches!(result.results.as_slice(), [drasi_lib::channels::ResultDiff::Delete { data, .. }] if data == &serde_json::json!({"name":"one"}))
+        );
+        let first = receiver.receive().await?.context("held timer output")?;
+        assert_eq!(QueryChangeCodec::query_sequence(first.envelope())?, 1);
+        first
+            .into_parts()
+            .1
+            .context("timer output ack")?
+            .complete(HandlingOutcome::Handled)
+            .await?;
+        outgoing.publish(&replay[0].envelope).await?;
+        query.delivery_completed(&replay).await?;
+        let second = receiver.receive().await?.context("replayed deletion")?;
+        assert_eq!(QueryChangeCodec::query_sequence(second.envelope())?, 2);
+        second
+            .into_parts()
+            .1
+            .context("deletion ack")?
+            .complete(HandlingOutcome::Handled)
+            .await?;
+        let repeated = GraphChangeCodec::encode_futures_due(
+            &ComponentId::try_new("clock")?,
+            StreamId::try_new("clock/out")?,
+            99,
+            chrono::DateTime::from_timestamp_millis(3000).context("due time")?,
+        )?;
+        assert!(query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: repeated
+            })
+            .await?
+            .is_empty());
+        assert_eq!(
+            progress.snapshot().checkpoints
+                [&SourceProgressKey::Stream(StreamId::try_new("input/out")?)]
+                .sequence,
+            4
+        );
+        let snapshot = query.query_results().context("query results")?.snapshot()?;
+        assert!(snapshot.rows.is_empty());
+        assert_eq!(snapshot.as_of_sequence, 2);
+        clock.stop().await?;
+        query.stop().await?;
+    }
+    let (mut query, mut clock) = scheduled_pair(directory.path(), progress).await?;
+    assert!(!query.has_pending_emissions());
+    assert_eq!(
+        query
+            .query_results()
+            .context("query results")?
+            .replay(0)?
+            .len(),
+        2
+    );
+    clock.stop().await?;
+    query.stop().await?;
+    outgoing.shutdown().await?;
+    Ok(())
+}

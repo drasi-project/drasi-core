@@ -446,8 +446,8 @@ mod persistent_progress {
         );
         assert_eq!(
             next.envelope.system().sequence(),
-            1,
-            "new adapter sequence is independent from durable raw progress"
+            3,
+            "new adapter continues the committed transport sequence instead of reusing it"
         );
         let output = query
             .transform(InputEnvelope {

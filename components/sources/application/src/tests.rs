@@ -17,7 +17,67 @@
 #[cfg(test)]
 mod tests {
     use crate::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
+    use drasi_lib::Source;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn restart_preserves_existing_handles_buffered_input_and_source_sequence() {
+        let (source, handle) = create_test_application_source("restart-source").await;
+        let mut subscription = source
+            .subscribe(drasi_lib::config::SourceSubscriptionSettings {
+                source_id: "restart-source".into(),
+                query_id: "query".into(),
+                enable_bootstrap: false,
+                nodes: Default::default(),
+                relations: Default::default(),
+                resume_from: None,
+                resume_sequence: None,
+                request_position_handle: false,
+            })
+            .await
+            .expect("subscription");
+        source.start().await.expect("first start");
+        for sequence in 1..=4 {
+            source.stop().await.expect("joined stop");
+            let sender = if sequence % 2 == 0 {
+                source.get_handle()
+            } else {
+                handle.clone()
+            };
+            sender
+                .send_node_insert(
+                    sequence.to_string(),
+                    vec!["Item"],
+                    PropertyMapBuilder::new()
+                        .with_integer("value", sequence)
+                        .build(),
+                )
+                .await
+                .expect("buffer while stopped");
+            source.start().await.expect("restart source");
+            let event = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                subscription.receiver.recv(),
+            )
+            .await
+            .expect("delivery deadline")
+            .expect("source event");
+            assert_eq!(event.sequence, sequence as u64);
+            let drasi_lib::channels::SourceEvent::Change(
+                drasi_core::models::SourceChange::Insert { element },
+            ) = &event.event
+            else {
+                panic!("expected source insert");
+            };
+            assert_eq!(
+                element.get_reference().element_id.as_ref(),
+                sequence.to_string()
+            );
+        }
+        source.stop().await.expect("final joined stop");
+        assert!(source.base.task_handle.read().await.is_none());
+        assert!(source.prune_task.read().await.is_none());
+    }
 
     /// Helper to create an application source for testing
     async fn create_test_application_source(

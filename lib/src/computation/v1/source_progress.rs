@@ -43,6 +43,9 @@ pub struct SourceProgressSnapshot {
     pub persistent: bool,
     pub reset_generation: u64,
     pub checkpoints: BTreeMap<SourceProgressKey, SourceCheckpoint>,
+    /// Consumed transport positions are not source resume cursors. Replayed
+    /// logical input can advance these without advancing `checkpoints`.
+    pub transport_sequences: BTreeMap<StreamId, u64>,
     pub failure: Option<Arc<str>>,
 }
 
@@ -137,6 +140,16 @@ impl QuerySourceProgress {
     pub(super) fn confirm(&self, key: SourceProgressKey, checkpoint: SourceCheckpoint) {
         self.state.send_modify(|state| {
             Arc::make_mut(state).checkpoints.insert(key, checkpoint);
+        });
+    }
+    pub(super) fn confirm_input(&self, input: &super::producer_progress::GraphInputProgress) {
+        self.state.send_modify(|state| {
+            let state = Arc::make_mut(state);
+            input.record_transport(&mut state.transport_sequences);
+            state.checkpoints.insert(
+                input.identity.clone(),
+                SourceCheckpoint::new(input.sequence, input.position.clone()),
+            );
         });
     }
 }

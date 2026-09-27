@@ -171,6 +171,14 @@ is confirmed, then remain available within the query's ordinary replay window.
 The query retains its result snapshot and logical result sequence; a replay gets
 a fresh transport sequence without applying query state changes again.
 
+Wrapped source input also has two positions: the original source/WAL position
+used to suppress repeated computation, and the consumed transport sequence used
+by the pipe. The transaction stores these separately. Replayed logical input can
+advance transport progress without evaluating the query or transactional steps
+again. A `WalReplaySource` connected to its owning `QuerySourceProgress` restores
+both positions so reconstruction does not reuse a transport sequence already
+accepted by a durable pipe.
+
 `QueryScheduledSource` is independently reusable through
 `QuerySchedulingResource`. The transaction-bound query exposes only committed
 schedule observations to it. A due notification never removes work; the query

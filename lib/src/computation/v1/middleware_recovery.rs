@@ -177,6 +177,7 @@ struct Recovered {
     confirmed: u64,
     retained: VecDeque<RetainedOutput>,
     checkpoints: BTreeMap<SourceProgressKey, SourceCheckpoint>,
+    transport_sequences: BTreeMap<StreamId, u64>,
 }
 
 /// Shared commit/replay ownership for durable middleware and transactional sequences.
@@ -317,6 +318,7 @@ impl TransformStore {
             bootstrap_complete: true,
             persistent: true,
             checkpoints: self.state()?.checkpoints.clone(),
+            transport_sequences: self.state()?.transport_sequences.clone(),
             ..Default::default()
         })
     }
@@ -473,6 +475,7 @@ impl TransformStore {
             "middleware journal does not reach its committed head"
         );
         let mut checkpoints = BTreeMap::new();
+        let mut transport_sequences = BTreeMap::new();
         for (key, checkpoint) in &saved {
             if key.starts_with("computation:input:") {
                 let mapping = saved
@@ -507,6 +510,11 @@ impl TransformStore {
                     );
                 }
                 checkpoints.insert(super::query::progress_identity(key)?, checkpoint.clone());
+            } else if key.starts_with(super::producer_progress::INPUT_TRANSPORT_PREFIX) {
+                transport_sequences.insert(
+                    super::producer_progress::transport_identity(key, checkpoint)?,
+                    checkpoint.sequence,
+                );
             } else if let Some(input) = key.strip_prefix(INPUT_OWNER_PREFIX) {
                 let owner: GraphProducerIdentity = serde_json::from_slice(
                     checkpoint
@@ -554,6 +562,7 @@ impl TransformStore {
             confirmed,
             retained,
             checkpoints,
+            transport_sequences,
         })
     }
 
@@ -722,14 +731,34 @@ impl TransformStore {
             );
         }
         if saved.is_some_and(|saved| saved.sequence >= progress.sequence) {
-            if let Some(entry) = self.state()?.retained.iter().find(|entry| {
-                entry.input.key == progress.key && entry.input.sequence == progress.sequence
-            }) {
-                anyhow::ensure!(
-                    entry.input.matches(&receipt, &self.codec)?,
-                    "replayed middleware input changed its committed contents or position"
+            let replay_sequence = self
+                .state()?
+                .retained
+                .iter()
+                .find(|entry| {
+                    entry.input.key == progress.key && entry.input.sequence == progress.sequence
+                })
+                .map(|entry| {
+                    anyhow::ensure!(
+                        entry.input.matches(&receipt, &self.codec)?,
+                        "replayed middleware input changed its committed contents or position"
+                    );
+                    Ok::<_, anyhow::Error>(entry.logical_sequence)
+                })
+                .transpose()?;
+            if progress.needs_transport_update(checkpoint.as_ref()).await? {
+                self.transaction
+                    .run(async {
+                        progress.stage_transport(checkpoint.as_ref()).await?;
+                        Ok(())
+                    })
+                    .await?;
+                progress.record_transport(
+                    &mut self.state.as_mut().expect("recovered").transport_sequences,
                 );
-                return self.replay(entry.logical_sequence).await.map(Some);
+            }
+            if let Some(sequence) = replay_sequence {
+                return self.replay(sequence).await.map(Some);
             }
             // Only confirmed entries may be evicted. Their durable outgoing
             // pipes, rather than a second middleware evaluation, own redelivery.
@@ -823,6 +852,7 @@ impl TransformStore {
             logical_sequence,
             envelope: envelope.clone(),
         });
+        progress.record_transport(&mut state.transport_sequences);
         state.checkpoints.insert(
             progress.identity,
             SourceCheckpoint::new(progress.sequence, progress.position),

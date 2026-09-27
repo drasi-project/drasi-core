@@ -37,6 +37,122 @@ use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, Prope
 use drasi_wal_redb::RedbWalProvider;
 use tempfile::TempDir;
 
+struct HeadFailure {
+    inner: Arc<RedbWalProvider>,
+    fail: AtomicBool,
+}
+
+#[async_trait]
+impl WalProvider for HeadFailure {
+    async fn register(
+        &self,
+        id: &str,
+        config: drasi_lib::wal::WriteAheadLogConfig,
+    ) -> Result<(), drasi_lib::wal::WalError> {
+        self.inner.register(id, config).await
+    }
+    async fn append(
+        &self,
+        id: &str,
+        event: &drasi_core::models::SourceChange,
+    ) -> Result<u64, drasi_lib::wal::WalError> {
+        self.inner.append(id, event).await
+    }
+    async fn read_from(
+        &self,
+        id: &str,
+        seq: u64,
+    ) -> Result<Vec<(u64, drasi_core::models::SourceChange)>, drasi_lib::wal::WalError> {
+        self.inner.read_from(id, seq).await
+    }
+    async fn prune_up_to(&self, id: &str, seq: u64) -> Result<u64, drasi_lib::wal::WalError> {
+        self.inner.prune_up_to(id, seq).await
+    }
+    async fn head_sequence(&self, id: &str) -> Result<u64, drasi_lib::wal::WalError> {
+        if self.fail.load(Ordering::Acquire) {
+            return Err(drasi_lib::wal::WalError::StorageError(
+                "injected head read failure".into(),
+            ));
+        }
+        self.inner.head_sequence(id).await
+    }
+    async fn oldest_sequence(&self, id: &str) -> Result<Option<u64>, drasi_lib::wal::WalError> {
+        self.inner.oldest_sequence(id).await
+    }
+    async fn event_count(&self, id: &str) -> Result<u64, drasi_lib::wal::WalError> {
+        self.inner.event_count(id).await
+    }
+    async fn delete_wal(&self, id: &str) -> Result<(), drasi_lib::wal::WalError> {
+        self.inner.delete_wal(id).await
+    }
+}
+
+#[tokio::test]
+async fn durable_ingress_rejects_before_wal_start_instead_of_acknowledging_volatile_data() {
+    let (_source, handle) = ApplicationSource::new(
+        "not-started",
+        app_config(Some(durability_config(
+            true,
+            100,
+            CapacityPolicy::RejectIncoming,
+        ))),
+    )
+    .unwrap();
+    assert!(
+        handle
+            .send_node_insert("one", vec!["Item"], PropertyMapBuilder::new().build())
+            .await
+            .is_err(),
+        "durability was requested but no WAL has been initialized"
+    );
+}
+
+#[tokio::test]
+async fn unreadable_wal_head_fails_start_and_retry_keeps_the_original_source_handle() {
+    let directory = TempDir::new().unwrap();
+    let wal = Arc::new(HeadFailure {
+        inner: Arc::new(RedbWalProvider::new(directory.path())),
+        fail: AtomicBool::new(true),
+    });
+    let (source, handle) = ApplicationSource::new(
+        "head-failure",
+        app_config(Some(durability_config(
+            true,
+            100,
+            CapacityPolicy::RejectIncoming,
+        ))),
+    )
+    .unwrap();
+    init_source_with_wal(&source, wal.clone(), "head-failure").await;
+    let started = source.start().await;
+    assert!(
+        started.is_err(),
+        "a storage outage must not look like an empty WAL"
+    );
+    assert!(handle
+        .send_node_insert(
+            "before-ready",
+            vec!["Item"],
+            PropertyMapBuilder::new().build()
+        )
+        .await
+        .is_err());
+    wal.fail.store(false, Ordering::Release);
+    source.start().await.expect("retry after WAL recovers");
+    let mut receiver = subscribe_fresh(&source, "head-failure").await;
+    handle
+        .send_node_insert("saved", vec!["Item"], PropertyMapBuilder::new().build())
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.sequence, 1);
+    assert_eq!(wal.head_sequence("head-failure").await.unwrap(), 1);
+    source.stop().await.unwrap();
+}
+
 /// Helper: create a DurabilityConfig with the given policy
 fn durability_config(
     enabled: bool,
@@ -136,7 +252,6 @@ async fn subscribe_with_resume(
 // ============================================================
 
 #[tokio::test]
-#[ignore]
 async fn test_wal_disabled_no_persistence() {
     let config = app_config(None);
     let (source, _handle) = ApplicationSource::new("disabled-src", config).unwrap();
@@ -159,7 +274,6 @@ async fn test_wal_disabled_no_persistence() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_wal_enabled_events_persisted() {
     let config = app_config(Some(durability_config(
         true,
@@ -216,7 +330,6 @@ async fn test_wal_enabled_events_persisted() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_capacity_exhaustion_reject_incoming() {
     // redb WAL requires max_events >= 16
     let config = app_config(Some(durability_config(
@@ -266,7 +379,6 @@ async fn test_capacity_exhaustion_reject_incoming() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_deprovision_removes_wal() {
     let config = app_config(Some(durability_config(
         true,
@@ -306,7 +418,6 @@ async fn test_deprovision_removes_wal() {
 // ============================================================
 
 #[tokio::test]
-#[ignore]
 async fn test_crash_recovery_resumes_sequence() {
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
@@ -371,7 +482,6 @@ async fn test_crash_recovery_resumes_sequence() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_replay_via_subscribe() {
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
@@ -523,7 +633,6 @@ async fn test_concurrent_writes_monotonic_sequences() {
 /// 6. Verify it receives ONLY events after the checkpoint position
 /// 7. Verify new live events also arrive correctly
 #[tokio::test]
-#[ignore]
 async fn test_resume_from_position_end_to_end() {
     let tmp = TempDir::new().unwrap();
 

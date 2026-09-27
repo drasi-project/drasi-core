@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
 use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
@@ -185,6 +185,7 @@ impl GraphProducerProgress {
 
 pub(super) struct GraphInputProgress {
     stream: StreamId,
+    transport_sequence: Option<u64>,
     pub key: String,
     pub identity: SourceProgressKey,
     pub sequence: u64,
@@ -200,6 +201,7 @@ impl GraphInputProgress {
             key: super::query::progress_key(stream.as_str(), None),
             identity: SourceProgressKey::Stream(stream.clone()),
             stream,
+            transport_sequence: None,
             sequence,
             position: input.system().source_position().cloned(),
             producer: None,
@@ -215,6 +217,7 @@ impl GraphInputProgress {
         {
             return Ok(Self {
                 stream: input.system().stream().clone(),
+                transport_sequence: None,
                 key: super::query::progress_key(input.system().stream().as_str(), None),
                 identity: SourceProgressKey::Stream(input.system().stream().clone()),
                 sequence: progress.sequence,
@@ -231,6 +234,7 @@ impl GraphInputProgress {
         });
         Ok(Self {
             stream: input.system().stream().clone(),
+            transport_sequence: stable.map(|_| input.system().sequence()),
             key: super::query::progress_key(
                 input.system().stream().as_str(),
                 stable.map(|(source, _)| source),
@@ -319,6 +323,72 @@ impl GraphInputProgress {
         }
         store
             .stage_checkpoint(&self.key, self.sequence, self.position.as_ref())
-            .await
+            .await?;
+        self.stage_transport(store).await
+    }
+
+    pub async fn stage_transport(&self, store: &dyn CheckpointStore) -> Result<(), IndexError> {
+        if self.needs_transport_update(store).await? {
+            store
+                .stage_checkpoint(
+                    &self.transport_key(),
+                    self.transport_sequence.expect("transport update"),
+                    None,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn transport_key(&self) -> String {
+        format!(
+            "{INPUT_TRANSPORT_PREFIX}{}",
+            super::query::progress_key(self.stream.as_str(), None)
+        )
+    }
+
+    pub async fn needs_transport_update(
+        &self,
+        store: &dyn CheckpointStore,
+    ) -> Result<bool, IndexError> {
+        let Some(sequence) = self.transport_sequence else {
+            return Ok(false);
+        };
+        let key = self.transport_key();
+        let saved = store.read_checkpoint(&key).await?;
+        if let Some(saved) = &saved {
+            transport_identity(&key, saved)
+                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+        }
+        Ok(saved
+            .as_ref()
+            .map_or(true, |saved| saved.sequence < sequence))
+    }
+
+    pub fn record_transport(&self, checkpoints: &mut BTreeMap<StreamId, u64>) {
+        if let Some(sequence) = self.transport_sequence {
+            let saved = checkpoints.entry(self.stream.clone()).or_insert(sequence);
+            *saved = (*saved).max(sequence);
+        }
+    }
+}
+
+pub(super) const INPUT_TRANSPORT_PREFIX: &str = "\0computation:input-transport:v1:";
+
+pub(super) fn transport_identity(
+    key: &str,
+    checkpoint: &SourceCheckpoint,
+) -> anyhow::Result<StreamId> {
+    let key = key
+        .strip_prefix(INPUT_TRANSPORT_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("invalid input transport checkpoint"))?;
+    let identity = super::query::progress_identity(key)?;
+    anyhow::ensure!(
+        checkpoint.source_position.is_none(),
+        "invalid input transport checkpoint"
+    );
+    match identity {
+        SourceProgressKey::Stream(stream) => Ok(stream),
+        SourceProgressKey::Source(_) => anyhow::bail!("input transport checkpoint is not a stream"),
     }
 }

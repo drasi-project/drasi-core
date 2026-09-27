@@ -98,19 +98,25 @@ cargo() {
                 if ($1 == package && $2 == binary) {
                     found[$3] = 1;
                     ignored[$3] = 1;
-                    drivers[$4] = 1;
+                    if ($4 != "-") {
+                        found[$4] = 1;
+                        drivers[$4] = 1;
+                    }
                 }
                 next;
             }
             FILENAME == ARGV[5] {
-                if ($6 == package && $7 == binary && ($5 == "all" || $5 == profile || ($5 == "default" && package == "drasi-lib"))) found[$8] = 1;
+                if ($6 == package && $7 == binary && ($5 == "all" || $5 == profile || ($5 == "default" && package == "drasi-lib"))) {
+                    found[$8] = 1;
+                    if ($1 == "M02") omitted_requirement = $8;
+                }
             }
             END {
                 for (name in replacements) found[name] = 1;
                 for (name in found) {
                     if (omit == "capability" && name == "imported_external_components_must_be_supplied_and_execute_in_a_fresh_graph") continue;
                     if (omit == "mapping" && name == "full_pipeline_preserves_main_ownership_subscription_and_removal_results") continue;
-                    if (omit == "requirement" && name == "live_same_path_journal_replacement_preserves_unhandled_data_and_closes_the_old_owner") continue;
+                    if (omit == "requirement" && name == omitted_requirement) continue;
                     if (listing == "true") {
                         print name ": test";
                     } else if (omit != "execution" || binary != "lib" || omitted++) {

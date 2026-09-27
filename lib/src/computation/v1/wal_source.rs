@@ -129,6 +129,8 @@ impl ComputationComponent for WalReplaySource {
                     "WAL resume position exceeds an uninitialized middleware recovery boundary"
                 );
             }
+            let transport = snapshot.transport_sequences.get(&self.stream);
+            self.producer_sequence = self.producer_sequence.max(transport.copied().unwrap_or(0));
         }
         self.read().await
     }

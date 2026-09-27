@@ -19,6 +19,8 @@ drasi-core.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true
+drasi-reaction-http.workspace = true
+drasi-reaction-grpc.workspace = true
 drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
 drasi-index-garnet.workspace = true
 drasi-plugin-sdk.workspace = true
@@ -42,3 +44,7 @@ bytes = "1"
 rmp-serde = "1"
 futures = "0.3"
 shared-tests = { path = "../shared-tests" }
+axum = "0.8"
+tonic = "0.14"
+prost-types = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }

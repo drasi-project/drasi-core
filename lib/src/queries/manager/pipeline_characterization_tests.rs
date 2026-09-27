@@ -1519,6 +1519,14 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
         result_rx.try_recv().is_err(),
         "failed output must not be dispatched"
     );
+    let source_component = crate::computation::v1::ComputationPipelineBuilder::source_component_id(
+        QUERY_ID, SOURCE_ID,
+    )
+    .unwrap();
+    let transport_key = format!(
+        "\0computation:input-transport:v1:{}",
+        progress_key(&format!("{source_component}/out"), None)
+    );
 
     assert_eq!(
         backend.trace.snapshot(),
@@ -1528,6 +1536,11 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 source_id: progress_key("", Some(SOURCE_ID)),
                 sequence: 1,
                 source_position: Some(first_position.clone()),
+            },
+            TraceEvent::CheckpointStaged {
+                source_id: transport_key.clone(),
+                sequence: 1,
+                source_position: None,
             },
             TraceEvent::OutboxAppendAttempt {
                 query_id: QUERY_ID.to_string(),
@@ -1539,7 +1552,16 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             },
             TraceEvent::SessionRollback,
         ],
-        "an output failure must roll back input progress and the already staged outbox append"
+        "an output failure must roll back source/transport progress and the already staged outbox append"
+    );
+    assert!(
+        backend
+            .checkpoint_store
+            .read_checkpoint(&transport_key)
+            .await
+            .unwrap()
+            .is_none(),
+        "transport progress must roll back with the failed output"
     );
 
     assert!(
@@ -1732,6 +1754,11 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 sequence: 2,
                 source_position: Some(Bytes::from_static(b"position-3")),
             },
+            TraceEvent::CheckpointStaged {
+                source_id: transport_key,
+                sequence: 2,
+                source_position: None,
+            },
             TraceEvent::OutboxAppendAttempt {
                 query_id: QUERY_ID.to_string(),
                 sequence: 2,
@@ -1758,7 +1785,7 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             },
             TraceEvent::SessionCommit,
         ],
-        "committed input is deduplicated before a session, and new output commits before dispatch"
+        "unchanged committed input is deduplicated before a session, and new output commits before dispatch"
     );
     assert_eq!(
         backend

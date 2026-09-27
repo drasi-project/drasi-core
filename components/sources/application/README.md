@@ -40,6 +40,7 @@ use std::collections::HashMap;
 // Create minimal configuration
 let config = ApplicationSourceConfig {
     properties: HashMap::new(),
+    durability: None,
 };
 
 // Create source and handle
@@ -55,6 +56,8 @@ source.set_bootstrap_provider(Box::new(my_bootstrap_provider)).await;
 pub struct ApplicationSourceConfig {
     /// Application-specific properties (flexible key-value map)
     pub properties: HashMap<String, serde_json::Value>,
+    /// Optional WAL-before-acknowledgement persistence for injected events.
+    pub durability: Option<drasi_lib::DurabilityConfig>,
 }
 ```
 
@@ -68,6 +71,19 @@ pub struct ApplicationSourceConfig {
 **Note**: The Application Source has minimal configuration requirements since it operates entirely in-process. The `properties` field is primarily for metadata and custom application logic.
 
 **Auto-Start Behavior**: When `auto_start=true` (default), the source starts immediately if added to a running DrasiLib instance. If added before `drasi.start()` is called, it starts when the DrasiLib starts. When `auto_start=false`, the source must be started manually via `drasi.start_source("source-id")`.
+
+### Stop, restart and durable readiness
+
+Stopping the source joins its processing and WAL-pruning tasks without destroying
+the input receiver. Existing handles remain usable, queued input survives a
+same-instance restart, and an interrupted dispatch retains its original event
+and sequence. The bounded input queue still applies backpressure while stopped.
+
+When WAL durability is enabled, `send()` rejects input until a successful source
+start has initialized the WAL. A failed WAL-head read fails startup rather than
+pretending the log is empty. Once initialized, input submitted while stopped is
+still persisted before `send()` acknowledges it; source restart resumes that
+same log. Without durability, queued input survives stop/start, not process death.
 
 ## Input Schema
 

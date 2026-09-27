@@ -28,6 +28,19 @@ struct Journals {
 }
 
 impl Journals {
+    fn new(directory: &std::path::Path) -> Arc<Self> {
+        Arc::new(Self {
+            indexes: LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+                directory.join("data"),
+                false,
+                false,
+            ))),
+            latest: Mutex::new(None),
+            fail: AtomicBool::new(false),
+            crash: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
     fn channel(&self) -> Result<Arc<QosChannel>> {
         self.latest
             .lock()
@@ -126,16 +139,7 @@ fn event(sequence: u64) -> Result<ChangeEnvelope> {
 }
 
 async fn open(directory: &std::path::Path) -> Result<(DrasiLib, Arc<Journals>)> {
-    let resolver = Arc::new(Journals {
-        indexes: LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
-            directory.join("data"),
-            false,
-            false,
-        ))),
-        latest: Mutex::new(None),
-        fail: AtomicBool::new(false),
-        crash: std::sync::atomic::AtomicUsize::new(0),
-    });
+    let resolver = Journals::new(directory);
     let core = DrasiLib::builder()
         .with_id("resource-handover")
         .with_configuration_store(Arc::new(RedbConfigurationStore::new(
@@ -620,5 +624,725 @@ async fn wrong_role_resource_is_not_injected_and_retains_cleanup_ownership_until
     assert_eq!(resolver.created.load(Ordering::Acquire), 4);
     core.shutdown().await?;
     assert!(replacement.socket.lock().await.is_none());
+    Ok(())
+}
+
+struct TrafficProbe {
+    send: tokio::sync::mpsc::Sender<ChangeEnvelope>,
+    receive: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<ChangeEnvelope>>,
+    pulled: tokio::sync::watch::Sender<u64>,
+    handled: tokio::sync::watch::Sender<Vec<(u64, ChangeEnvelope)>>,
+    gate: Mutex<Option<Arc<Gate>>>,
+    fail_handling: AtomicBool,
+    handling_failures: std::sync::atomic::AtomicUsize,
+    created: std::sync::atomic::AtomicUsize,
+    starts: std::sync::atomic::AtomicUsize,
+    stops: std::sync::atomic::AtomicUsize,
+    drops: std::sync::atomic::AtomicUsize,
+}
+
+impl TrafficProbe {
+    fn new() -> Arc<Self> {
+        let (send, receive) = tokio::sync::mpsc::channel(16);
+        Arc::new(Self {
+            send,
+            receive: tokio::sync::Mutex::new(receive),
+            pulled: tokio::sync::watch::channel(0).0,
+            handled: tokio::sync::watch::channel(Vec::new()).0,
+            gate: Mutex::new(None),
+            fail_handling: AtomicBool::new(false),
+            handling_failures: 0.into(),
+            created: 0.into(),
+            starts: 0.into(),
+            stops: 0.into(),
+            drops: 0.into(),
+        })
+    }
+
+    async fn wait_handled(&self, count: usize) -> Result<()> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.handled
+                .subscribe()
+                .wait_for(|events| events.len() >= count),
+        )
+        .await??;
+        Ok(())
+    }
+}
+
+struct TrafficNode {
+    descriptor: ComponentDescriptor,
+    version: u64,
+    probe: Arc<TrafficProbe>,
+}
+
+impl Drop for TrafficNode {
+    fn drop(&mut self) {
+        self.probe.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[async_trait]
+impl ComputationComponent for TrafficNode {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn configuration(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({"version": self.version}))
+    }
+    async fn start(&mut self) -> Result<()> {
+        self.probe.starts.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        self.probe.stops.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for TrafficNode {
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        let next = self.probe.receive.lock().await.recv().await;
+        next.map(|envelope| {
+            self.probe.pulled.send_replace(envelope.system().sequence());
+            Ok(OutputEnvelope {
+                port: PortId::try_new("out")?,
+                envelope,
+            })
+        })
+        .transpose()
+    }
+}
+
+#[async_trait]
+impl EnvelopeSink for TrafficNode {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
+        let gate = self.probe.gate.lock().expect("handler gate").take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+        if self.probe.fail_handling.swap(false, Ordering::AcqRel) {
+            self.probe.handling_failures.fetch_add(1, Ordering::AcqRel);
+            anyhow::bail!("injected failure before handling the held event");
+        }
+        self.probe
+            .handled
+            .send_modify(|seen| seen.push((self.version, input.envelope)));
+        Ok(())
+    }
+}
+
+struct TrafficFactory {
+    descriptor: FactoryDescriptor,
+    probes: BTreeMap<String, Arc<TrafficProbe>>,
+}
+
+#[async_trait]
+impl ComponentFactory for TrafficFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, _: &ComponentSpecification) -> Result<()> {
+        Ok(())
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        let probe = self
+            .probes
+            .get(context.component_id.as_str())
+            .context("undeclared traffic fixture")
+            .map_err(ComponentCreationError::terminal)?
+            .clone();
+        let version = context.configuration()["version"]
+            .as_u64()
+            .context("invalid traffic version")
+            .map_err(ComponentCreationError::terminal)?;
+        probe.created.fetch_add(1, Ordering::AcqRel);
+        let node = Box::new(TrafficNode {
+            descriptor: context.specification.descriptor.clone(),
+            version,
+            probe,
+        });
+        Ok(if self.descriptor.role == ComponentRole::Source {
+            ConstructedComponent::source(node)
+        } else {
+            ConstructedComponent::sink(node)
+        })
+    }
+}
+
+fn traffic_factory(
+    role: ComponentRole,
+    probes: BTreeMap<String, Arc<TrafficProbe>>,
+) -> Result<TrafficFactory> {
+    Ok(TrafficFactory {
+        descriptor: FactoryDescriptor {
+            implementation: ImplementationIdentity::try_new(
+                if role == ComponentRole::Source {
+                    "test/traffic-source"
+                } else {
+                    "test/traffic-sink"
+                },
+                "1",
+            )?,
+            role,
+            configuration_version: 1,
+            configuration: ConfigurationSchema {
+                fields: BTreeMap::from([(
+                    Arc::from("version"),
+                    ConfigurationField {
+                        value_type: ConfigurationType::Integer,
+                        required: true,
+                        secret: false,
+                    },
+                )]),
+                allow_additional: false,
+            },
+            dependencies: BTreeMap::new(),
+        },
+        probes,
+    })
+}
+
+fn traffic_desired(capacity: usize, version: u64) -> Result<DesiredInstance> {
+    let mut target = desired(capacity)?;
+    let graph = &mut target.graphs[0];
+    graph.auto_start = true;
+    let journal = ResourceId::try_new("journal")?;
+    let mut channel = definition(capacity);
+    channel
+        .subscribers
+        .insert("mirror".into(), SubscriptionStart::Earliest);
+    graph
+        .topology
+        .resource_configurations
+        .insert(journal.clone(), serde_json::to_value(&channel)?);
+    for (id, source) in [
+        ("producer", true),
+        ("consumer", false),
+        ("mirror", false),
+        ("heartbeat", true),
+        ("observer", false),
+    ] {
+        let component = ComponentId::try_new(id)?;
+        let descriptor = ComponentDescriptor::try_new(
+            component.clone(),
+            vec![PortDescriptor::new(
+                PortId::try_new(if source { "out" } else { "in" })?,
+                if source {
+                    PortDirection::Output
+                } else {
+                    PortDirection::Input
+                },
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )?;
+        let role = if source {
+            ComponentRole::Source
+        } else {
+            ComponentRole::Sink
+        };
+        graph.topology.components.push(DesiredComponent {
+            descriptor: descriptor.clone(),
+            role,
+            completion: (!source).then_some(SinkCompletion::Handled),
+            streams: if source {
+                BTreeMap::from([(
+                    PortId::try_new("out")?,
+                    StreamId::try_new(format!("{id}/out"))?,
+                )])
+            } else {
+                BTreeMap::new()
+            },
+            lifecycle: LifecyclePolicy::default(),
+            input_merge: InputMergePolicy::Arrival,
+            construction: ComponentConstruction::Factory(ComponentSpecification {
+                descriptor,
+                role,
+                completion: (!source).then_some(SinkCompletion::Handled),
+                implementation: ImplementationIdentity::try_new(
+                    if source {
+                        "test/traffic-source"
+                    } else {
+                        "test/traffic-sink"
+                    },
+                    "1",
+                )?,
+                configuration_version: 1,
+                configuration: BTreeMap::from([(
+                    Arc::from("version"),
+                    ConfigurationValue::Literal(serde_json::json!(if id == "consumer" {
+                        version
+                    } else {
+                        0
+                    })),
+                )]),
+                dependencies: BTreeMap::new(),
+            }),
+        });
+    }
+    for (source, sink) in [
+        ("producer", "consumer"),
+        ("producer", "mirror"),
+        ("heartbeat", "observer"),
+    ] {
+        graph.topology.relationships.push(DesiredRelationship {
+            definition: EdgeDefinition::new(
+                Endpoint::new(ComponentId::try_new(source)?, PortId::try_new("out")?),
+                Endpoint::new(ComponentId::try_new(sink)?, PortId::try_new("in")?),
+            ),
+            policy: RelationshipPolicy::default(),
+            pipe: if source == "producer" {
+                DesiredPipe::Qos(channel.pipe(journal.clone(), sink))
+            } else {
+                DesiredPipe::Bounded { capacity: 1 }
+            },
+        });
+    }
+    Ok(target)
+}
+
+async fn wait_journal(channel: &QosChannel, accepted: u64, processed: u64) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let progress = channel.progress().await?;
+            if progress.accepted == accepted
+                && progress
+                    .processed
+                    .values()
+                    .all(|cursor| *cursor == processed)
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?
+}
+
+struct Traffic {
+    core: DrasiLib,
+    resolver: Arc<Journals>,
+    probes: BTreeMap<String, Arc<TrafficProbe>>,
+}
+
+async fn open_traffic(directory: &std::path::Path) -> Result<Traffic> {
+    let resolver = Journals::new(directory);
+    let probes: BTreeMap<_, _> = ["producer", "consumer", "mirror", "heartbeat", "observer"]
+        .into_iter()
+        .map(|id| (id.to_owned(), TrafficProbe::new()))
+        .collect();
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(traffic_factory(
+        ComponentRole::Source,
+        probes.clone(),
+    )?))?;
+    factories.register(Arc::new(traffic_factory(
+        ComponentRole::Sink,
+        probes.clone(),
+    )?))?;
+    let core = DrasiLib::builder()
+        .with_id("active-handover")
+        .with_configuration_store(Arc::new(RedbConfigurationStore::new(
+            directory.join("config.redb"),
+            [31; 32],
+        )?))
+        .with_management_resources(resolver.clone())
+        .with_component_factories(factories)
+        .build()
+        .await?;
+    Ok(Traffic {
+        core,
+        resolver,
+        probes,
+    })
+}
+
+async fn live_traffic_transition(
+    replace_journal: bool,
+    fail_construction: bool,
+    fail_handling: bool,
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let Traffic {
+        core,
+        resolver,
+        probes,
+    } = open_traffic(directory.path()).await?;
+    core.apply_desired_state(0, "initial", traffic_desired(2, 0)?)
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    core.start().await?;
+    let graph = core.get_computation_graph("managed").await?;
+    let before = graph.observed();
+    let mut expected_versions = Vec::new();
+    let mut capacity = 2;
+    for iteration in 0..8_u64 {
+        let first = iteration * 4 + 1;
+        let old = resolver.channel()?;
+        let gate = Arc::new(Gate::default());
+        *probes["consumer"].gate.lock().expect("handler gate") = Some(gate.clone());
+        probes["consumer"]
+            .fail_handling
+            .store(fail_handling, Ordering::Release);
+        for sequence in first..=first + capacity as u64 {
+            probes["producer"].send.send(event(sequence)?).await?;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified()).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            probes["producer"]
+                .pulled
+                .subscribe()
+                .wait_for(|sequence| *sequence == first + capacity as u64),
+        )
+        .await??;
+        let full = old.progress().await?;
+        assert_eq!(full.accepted, first + capacity as u64 - 1);
+        assert_eq!(full.processed["consumer"], first - 1);
+        let new_capacity = if replace_journal {
+            if capacity == 2 {
+                3
+            } else {
+                2
+            }
+        } else {
+            capacity
+        };
+        resolver.fail.store(fail_construction, Ordering::Release);
+        let receipt = core
+            .apply_desired_state(
+                iteration + 1,
+                format!("replace-{iteration}"),
+                traffic_desired(new_capacity, iteration + 1)?,
+            )
+            .await?;
+        assert!(receipt.durable);
+        let paused = ComponentId::try_new(if replace_journal {
+            "producer"
+        } else {
+            "consumer"
+        })?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            graph.control().subscribe_observed().wait_for(|state| {
+                state.components[&paused].lifecycle == ComponentLifecycle::Quiescing
+            }),
+        )
+        .await??;
+        assert!(!core.management_status().await?.converged());
+        assert_eq!(
+            probes["consumer"].stops.load(Ordering::Acquire),
+            iteration as usize
+        );
+        if !fail_construction {
+            let waiting = core.reconcile_desired_state();
+            tokio::pin!(waiting);
+            assert!(
+                futures::poll!(waiting).is_pending(),
+                "the handler still owns unfinished input"
+            );
+        }
+        let heartbeat = GraphChangeCodec::encode_change(
+            SourceChange::Delete {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("heartbeat", "tick"),
+                    labels: Arc::from([Arc::from("Item")]),
+                    effective_from: iteration,
+                },
+            },
+            StreamId::try_new("heartbeat/out")?,
+            iteration + 1,
+            None,
+        )?;
+        probes["heartbeat"].send.send(heartbeat.clone()).await?;
+        probes["observer"]
+            .wait_handled(iteration as usize + 1)
+            .await?;
+        assert_eq!(
+            GraphChangeCodec::decode_changes(
+                &probes["observer"].handled.borrow()[iteration as usize].1
+            )?,
+            GraphChangeCodec::decode_changes(&heartbeat)?
+        );
+        gate.release.notify_one();
+        core.configuration_receipt(format!("replace-{iteration}"))
+            .await?;
+        if fail_construction {
+            let failed = core.management_status().await?;
+            assert!(!failed.converged(), "failed replacement cannot look ready");
+            assert!(
+                failed.graphs[0].resource_errors[&ResourceId::try_new("journal")?]
+                    .contains("injected replacement construction failure"),
+                "{failed:?}"
+            );
+            assert!(
+                !resolver.fail.load(Ordering::Acquire),
+                "the intended constructor fault must execute"
+            );
+            assert!(
+                old.progress().await.is_err(),
+                "retired storage must not remain usable"
+            );
+        }
+        let status = core.reconcile_desired_state().await?;
+        assert!(status.converged(), "{status:?}");
+        let current = resolver.channel()?;
+        if replace_journal {
+            assert!(!Arc::ptr_eq(&old, &current));
+            assert!(matches!(
+                old.publish(&event(first + 3)?).await,
+                Err(PipeError::Closed)
+            ));
+        } else {
+            assert!(Arc::ptr_eq(&old, &current));
+        }
+        for sequence in first + capacity as u64 + 1..=first + 3 {
+            probes["producer"].send.send(event(sequence)?).await?;
+        }
+        wait_journal(&current, first + 3, first + 3).await?;
+        for offset in 0..4 {
+            expected_versions.push(
+                if !fail_handling && (replace_journal && offset <= capacity || offset == 0) {
+                    iteration
+                } else {
+                    iteration + 1
+                },
+            );
+        }
+        capacity = new_capacity;
+        let observed = graph.observed();
+        for id in ["producer", "mirror", "heartbeat", "observer"] {
+            let component = ComponentId::try_new(id)?;
+            assert_eq!(
+                observed.components[&component].generation,
+                before.components[&component].generation
+            );
+            assert_eq!(probes[id].created.load(Ordering::Acquire), 1, "{id}");
+            assert_eq!(probes[id].starts.load(Ordering::Acquire), 1, "{id}");
+            assert_eq!(probes[id].stops.load(Ordering::Acquire), 0, "{id}");
+        }
+        assert_eq!(
+            probes["consumer"].created.load(Ordering::Acquire),
+            iteration as usize + 2
+        );
+        assert_eq!(
+            probes["consumer"].drops.load(Ordering::Acquire),
+            iteration as usize + 1
+        );
+        assert_eq!(
+            probes["consumer"].handling_failures.load(Ordering::Acquire),
+            if fail_handling {
+                iteration as usize + 1
+            } else {
+                0
+            }
+        );
+    }
+    for id in ["consumer", "mirror"] {
+        let seen = probes[id].handled.borrow();
+        assert_eq!(seen.len(), 32, "{id}");
+        for (index, (version, envelope)) in seen.iter().enumerate() {
+            let expected = event(index as u64 + 1)?;
+            assert_eq!(envelope.id(), expected.id(), "{id} at {index}");
+            assert_eq!(
+                GraphChangeCodec::decode_changes(envelope)?,
+                GraphChangeCodec::decode_changes(&expected)?
+            );
+            if id == "consumer" {
+                assert_eq!(
+                    *version, expected_versions[index],
+                    "wrong handler at {index}"
+                );
+            }
+        }
+    }
+    core.shutdown().await?;
+    for probe in probes.values() {
+        assert_eq!(
+            probe.created.load(Ordering::Acquire),
+            probe.drops.load(Ordering::Acquire)
+        );
+        assert_eq!(
+            probe.starts.load(Ordering::Acquire),
+            probe.stops.load(Ordering::Acquire)
+        );
+    }
+    let target = traffic_desired(capacity, 8)?;
+    let specification = &target.graphs[0].topology.resources[0];
+    let reopened = resolver
+        .resolve(
+            "active-handover",
+            "managed",
+            specification,
+            &target.graphs[0].topology.resource_configurations[&specification.id],
+        )
+        .await?;
+    let channel = reopened.get::<QosChannel>()?;
+    wait_journal(&channel, 32, 32).await?;
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_full_queues_preserve_exact_work_across_sink_and_journal_replacement() -> Result<()> {
+    for (journal, construction, handling) in [
+        (false, false, false),
+        (false, false, true),
+        (true, false, false),
+        (true, true, false),
+    ] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            live_traffic_transition(journal, construction, handling),
+        )
+        .await??;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_full_queues_preserve_exact_work_across_sink_and_journal_replacement_multithread(
+) -> Result<()> {
+    for (journal, construction, handling) in [
+        (false, false, false),
+        (false, false, true),
+        (true, false, false),
+        (true, true, false),
+    ] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            live_traffic_transition(journal, construction, handling),
+        )
+        .await??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "active full-queue handover crash worker invoked by the parent test"]
+async fn active_handover_crash_worker() -> Result<()> {
+    let directory = std::path::PathBuf::from(std::env::var("DRASI_ACTIVE_HANDOVER_ROOT")?);
+    let Traffic {
+        core,
+        resolver,
+        probes,
+    } = open_traffic(&directory).await?;
+    core.apply_desired_state(0, "initial", traffic_desired(2, 0)?)
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    core.start().await?;
+    let gate = Arc::new(Gate::default());
+    *probes["consumer"].gate.lock().expect("handler gate") = Some(gate.clone());
+    for sequence in 1..=3 {
+        probes["producer"].send.send(event(sequence)?).await?;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified()).await?;
+    probes["mirror"].wait_handled(2).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let progress = resolver.channel()?.progress().await?;
+            assert_eq!(progress.processed["consumer"], 0);
+            if progress.accepted == 2 && progress.processed["mirror"] == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    let receipt = core
+        .apply_desired_state(1, "replace-active", traffic_desired(3, 1)?)
+        .await?;
+    assert!(receipt.durable);
+    assert_eq!(receipt.revision, 2);
+    let graph = core.get_computation_graph("managed").await?;
+    let producer = ComponentId::try_new("producer")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        graph.control().subscribe_observed().wait_for(|state| {
+            state.components[&producer].lifecycle == ComponentLifecycle::Quiescing
+        }),
+    )
+    .await??;
+    std::process::exit(83);
+}
+
+#[tokio::test]
+async fn crash_during_full_queue_handover_preserves_each_subscribers_exact_obligation() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "active_handover_crash_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("DRASI_ACTIVE_HANDOVER_ROOT", directory.path())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    assert_eq!(
+        output.status.code(),
+        Some(83),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let Traffic {
+        core,
+        resolver,
+        probes,
+    } = open_traffic(directory.path()).await?;
+    assert_eq!(core.desired_configuration()?.revision, 2);
+    assert_eq!(
+        core.configuration_receipt("replace-active")
+            .await?
+            .context("committed receipt")?
+            .revision,
+        2
+    );
+    let channel = resolver.channel()?;
+    let restored = channel.progress().await?;
+    assert_eq!(restored.accepted, 2);
+    assert_eq!(
+        restored.processed,
+        BTreeMap::from([("consumer".into(), 0), ("mirror".into(), 2)])
+    );
+    core.start().await?;
+    wait_journal(&channel, 2, 2).await?;
+    // Input 3 was offered, but never durably accepted before the crash.
+    probes["producer"].send.send(event(3)?).await?;
+    wait_journal(&channel, 3, 3).await?;
+    core.shutdown().await?;
+    let consumer = probes["consumer"].handled.borrow();
+    assert_eq!(consumer.len(), 3);
+    for (index, (version, envelope)) in consumer.iter().enumerate() {
+        assert_eq!(*version, 1);
+        assert_eq!(envelope.id(), event(index as u64 + 1)?.id());
+        assert_eq!(
+            GraphChangeCodec::decode_changes(envelope)?,
+            GraphChangeCodec::decode_changes(&event(index as u64 + 1)?)?
+        );
+    }
+    let mirror = probes["mirror"].handled.borrow();
+    assert_eq!(
+        mirror.len(),
+        1,
+        "the already-handled prefix must not be replayed"
+    );
+    assert_eq!(mirror[0].1.id(), event(3)?.id());
     Ok(())
 }

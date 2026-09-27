@@ -1186,6 +1186,19 @@ subprocess workers require a passing parent driver. The sole existing DLL stress
 quarantine has an owner and expiry and cannot qualify resource-lifetime safety.
 Redis compatibility is not a claim of retained-volume Garnet product recovery.
 
+The integration profile includes live replacement with full persistent multicast
+queues, failed handlers/construction, cancelled waits and independent branch
+traffic. Real HTTP/gRPC receivers record effects to a synced journal before
+replying; partial replies and abrupt runtime death must leave the complete
+unacknowledged query result replayable. The PostgreSQL case kills and restarts
+an owned container at a stable port, using a pinned multi-architecture image and
+a retained Docker volume, then compares recovered query rows and source
+checkpoints with the database. These bounded scenarios do not replace longer
+soak tests or qualify every connector/backend. Scheduled-query coverage also
+combines cancelled/rescheduled timers with a full durable output pipe: recovery
+must replay the original result without recalculation or advancing the live
+source's checkpoint for timer notifications.
+
 Per-profile discovery, execution logs and `qualification.json` are retained in
 the output directory. To enforce the stronger replacement gate:
 

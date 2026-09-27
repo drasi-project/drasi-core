@@ -552,6 +552,7 @@ impl ContinuousQueryTransformer {
             return Ok(());
         };
         let mut checkpoints = BTreeMap::new();
+        let mut transport_sequences = BTreeMap::new();
         let store = self.query()?.resources().checkpoint_store();
         let persistent =
             store.is_some_and(|store| store.is_persistent()) && !self.provider.is_volatile();
@@ -559,6 +560,11 @@ impl ContinuousQueryTransformer {
             for (key, checkpoint) in store.read_all_checkpoints().await? {
                 if key.starts_with(INPUT_PREFIX) {
                     checkpoints.insert(progress_identity(&key)?, checkpoint);
+                } else if key.starts_with(super::producer_progress::INPUT_TRANSPORT_PREFIX) {
+                    transport_sequences.insert(
+                        super::producer_progress::transport_identity(&key, &checkpoint)?,
+                        checkpoint.sequence,
+                    );
                 }
             }
         } else {
@@ -586,6 +592,7 @@ impl ContinuousQueryTransformer {
             persistent,
             reset_generation: self.results.snapshot()?.generation,
             checkpoints,
+            transport_sequences,
             failure: None,
         });
         Ok(())
@@ -1089,28 +1096,39 @@ impl ContinuousQueryTransformer {
         } else {
             None
         };
-        if self
+        let duplicate = self
             .watermarks
             .lock()
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
             .get(&progress.key)
             .is_some_and(|saved| *saved >= progress.sequence)
-        {
+            || saved
+                .as_ref()
+                .is_some_and(|saved| saved.sequence >= progress.sequence);
+        if duplicate {
+            if let Some(checkpoint) = query.resources().checkpoint_store() {
+                if progress
+                    .graph
+                    .needs_transport_update(checkpoint.as_ref())
+                    .await?
+                {
+                    query
+                        .resource_transaction(|| async {
+                            progress.graph.stage_transport(checkpoint.as_ref()).await
+                        })
+                        .await?;
+                    self.publish_source_progress(true).await?;
+                }
+            }
             return Ok(Vec::new());
         }
-        if query.resources().checkpoint_store().is_some() {
-            if saved
-                .as_ref()
-                .is_some_and(|saved| saved.sequence >= progress.sequence)
-            {
-                return Ok(Vec::new());
-            }
-            if progress.position.as_ref().is_some_and(|position| {
+        if query.resources().checkpoint_store().is_some()
+            && progress.position.as_ref().is_some_and(|position| {
                 position.len() > crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES
-            }) {
-                log::warn!("Query {} retains its last valid checkpoint cursor because the new source position is oversized", self.definition.id);
-                progress.position = saved.and_then(|saved| saved.source_position);
-            }
+            })
+        {
+            log::warn!("Query {} retains its last valid checkpoint cursor because the new source position is oversized", self.definition.id);
+            progress.position = saved.and_then(|saved| saved.source_position);
         }
         let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
         self.begin_non_atomic().await?;
@@ -1215,10 +1233,7 @@ impl ContinuousQueryTransformer {
             .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
             .insert(progress.graph.key.clone(), progress.sequence);
         if let Some(confirmation) = &self.source_progress {
-            confirmation.confirm(
-                progress.graph.identity.clone(),
-                SourceCheckpoint::new(progress.sequence, progress.graph.position),
-            );
+            confirmation.confirm_input(&progress.graph);
         }
         // Keep completion timings on the live branch, not in already committed outbox bytes.
         if let Some(output) = &mut output {
