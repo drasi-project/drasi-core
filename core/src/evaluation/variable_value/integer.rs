@@ -41,11 +41,9 @@ impl PartialEq for N {
 
 impl PartialEq<Float> for N {
     fn eq(&self, other: &Float) -> bool {
-        match (self, other.as_f64()) {
-            (N::PosInt(a), Some(b)) => *a as f64 == b,
-            (N::NegInt(a), Some(b)) => *a as f64 == b,
-            _ => false,
-        }
+        other
+            .as_integer_exact()
+            .is_some_and(|integer| integer.n == *self)
     }
 }
 
@@ -205,11 +203,7 @@ impl_from_float!(f64);
 
 impl PartialEq<Float> for Integer {
     fn eq(&self, other: &Float) -> bool {
-        match (self.n, other.as_f64()) {
-            (N::PosInt(a), Some(b)) => a as f64 == b,
-            (N::NegInt(a), Some(b)) => a as f64 == b,
-            _ => false,
-        }
+        other == self
     }
 }
 

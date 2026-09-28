@@ -15,12 +15,12 @@
 use super::*;
 use crate::{
     config::{QueryConfig, QueryLanguage},
-    indexes::{IndexFactory, StorageBackendRef},
+    indexes::{IndexFactory, StorageBackendRef, StorageBackendSpec},
     RecoveryPolicy,
 };
 use async_trait::async_trait;
 use drasi_core::{
-    computation::ComputationIndexProvider,
+    computation::{ComputationIndexProvider, InMemoryComputationProvider},
     interface::{CreatedIndexes, IndexBackendPlugin, IndexError},
     middleware::MiddlewareTypeRegistry,
 };
@@ -665,28 +665,46 @@ impl ComputationPipelineBuilder {
                         .indexes
                         .computation_backend(config.storage_backend.as_ref())
                         .map_err(|error| invalid(error.to_string()))?;
-                    let atomic_output = self
-                        .indexes
-                        .configured_provider(Some(&backend))
-                        .is_some_and(|(_, provider)| provider.supports_atomic_query_output());
-                    let provider = LegacyIndexProviderAdapter::scoped(
-                        Arc::new(FactoryProvider {
-                            factory: self.indexes.clone(),
-                            backend,
-                            volatile,
-                            atomic_output,
-                        }),
-                        self.services.scope.clone(),
-                    )?;
-                    (
-                        provider.resource(),
-                        if atomic_output {
-                            QueryPublicationMode::Atomic
-                        } else {
-                            QueryPublicationMode::NonAtomic
-                        },
-                        ResourceOwnership::Graph,
-                    )
+                    if matches!(
+                        backend,
+                        StorageBackendRef::Inline(StorageBackendSpec::Memory {
+                            enable_archive: false
+                        })
+                    ) {
+                        (
+                            ResourceHandle::new(
+                                ResourceRole::IndexBackend,
+                                Arc::new(QueryIndexProviderResource(Arc::new(
+                                    InMemoryComputationProvider,
+                                ))),
+                            ),
+                            QueryPublicationMode::NonAtomic,
+                            ResourceOwnership::Borrowed,
+                        )
+                    } else {
+                        let atomic_output = self
+                            .indexes
+                            .configured_provider(Some(&backend))
+                            .is_some_and(|(_, provider)| provider.supports_atomic_query_output());
+                        let provider = LegacyIndexProviderAdapter::scoped(
+                            Arc::new(FactoryProvider {
+                                factory: self.indexes.clone(),
+                                backend,
+                                volatile,
+                                atomic_output,
+                            }),
+                            self.services.scope.clone(),
+                        )?;
+                        (
+                            provider.resource(),
+                            if atomic_output {
+                                QueryPublicationMode::Atomic
+                            } else {
+                                QueryPublicationMode::NonAtomic
+                            },
+                            ResourceOwnership::Graph,
+                        )
+                    }
                 };
             builder = builder
                 .declare_resource(ResourceSpecification {

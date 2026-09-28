@@ -17,6 +17,9 @@
 //! RocksDB Index Backend for Drasi
 //!
 //! This crate provides a persistent storage backend for Drasi queries using RocksDB.
+//! Index clearing deletes data within the active transaction (or a standalone
+//! atomic write batch), preserving column families and their configured options.
+//! It does not drop/recreate schema or bypass rollback.
 //!
 //! # Usage
 //!

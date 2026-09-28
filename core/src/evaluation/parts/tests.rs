@@ -34,6 +34,7 @@ macro_rules! variablemap {
 mod multi_part;
 mod single_part_aggregating;
 mod single_part_non_aggregating;
+mod temporal_work;
 
 async fn process_solution(
     query: &Query,

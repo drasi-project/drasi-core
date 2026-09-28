@@ -67,6 +67,10 @@ impl CachedElementIndex {
 
 #[async_trait]
 impl ElementIndex for CachedElementIndex {
+    async fn get_slot_elements(&self, slot: usize) -> Result<ElementStream, IndexError> {
+        self.element_index.get_slot_elements(slot).await
+    }
+
     async fn get_element(
         &self,
         element_ref: &ElementReference,
@@ -315,6 +319,57 @@ async fn get_element_internal(
                 }
                 None => Ok(None),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        in_memory_index::in_memory_element_index::InMemoryElementIndex,
+        models::{ElementMetadata, ElementPropertyMap},
+    };
+
+    #[tokio::test]
+    async fn invalidating_owned_slot_keys_preserves_cache_and_element_lifetimes() {
+        let index = CachedElementIndex::new(Arc::new(InMemoryElementIndex::new()), 3).unwrap();
+        for version in 0..64 {
+            let reference = ElementReference::new("cache-invalidation", &format!("row-{version}"));
+            let mut element = Element::Node {
+                metadata: ElementMetadata {
+                    reference: reference.clone(),
+                    labels: Arc::from([Arc::from("Item")]),
+                    effective_from: version,
+                },
+                properties: ElementPropertyMap::from(serde_json::json!({"value":1})),
+            };
+            index.set_element(&element, &vec![0]).await.unwrap();
+            assert!(index
+                .get_slot_element_by_ref(0, &reference)
+                .await
+                .unwrap()
+                .is_some());
+            let Element::Node { properties, .. } = &mut element else {
+                unreachable!()
+            };
+            *properties = ElementPropertyMap::from(serde_json::json!({"value":2}));
+            index.set_element(&element, &vec![1]).await.unwrap();
+            assert!(index
+                .get_slot_element_by_ref(0, &reference)
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                index
+                    .get_slot_element_by_ref(1, &reference)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(&element)
+            );
+            index.delete_element(&reference).await.unwrap();
+            assert!(index.get_element(&reference).await.unwrap().is_none());
         }
     }
 }

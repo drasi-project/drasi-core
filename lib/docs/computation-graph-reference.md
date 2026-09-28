@@ -374,6 +374,12 @@ retained output and its eviction, and current result rows. Standard index
 providers opt in with `supports_atomic_query_output()`. Their writers must share
 the index session's transaction; merely returning persistent writers is not enough.
 
+Ordinary and native pipeline queries default to direct in-memory indexes with a
+no-op session controller. They do not acquire plugin-I/O task wrappers or claim
+persistent transactional state. An explicitly selected provider, archive-enabled
+memory backend, or `query_provider` override keeps its declared storage and
+cleanup contract.
+
 Non-atomic publication uses a pending-output marker to detect interrupted
 publication. Recovery checks the committed sequence, retained history and
 snapshot before accepting new input. A reset-in-progress configuration marker

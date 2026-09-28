@@ -152,12 +152,19 @@ impl GraphProducerProgress {
     }
 
     fn read(envelope: &ChangeEnvelope, allow_query_ancestor: bool) -> anyhow::Result<Option<Self>> {
+        Self::read_scoped(envelope, allow_query_ancestor).map(|(progress, _)| progress)
+    }
+
+    fn read_scoped(
+        envelope: &ChangeEnvelope,
+        allow_query_ancestor: bool,
+    ) -> anyhow::Result<(Option<Self>, bool)> {
         let Some(entry) = envelope
             .annotations()
             .entries()
             .find(|entry| entry.key() == PROGRESS)
         else {
-            return Ok(None);
+            return Ok((None, false));
         };
         let ContextValue::Bytes(bytes) = entry.value() else {
             anyhow::bail!("graph producer progress is not bytes");
@@ -172,15 +179,39 @@ impl GraphProducerProgress {
             progress.sequence > 0 && progress.identity.component_id.as_str() == entry.contributor(),
             "graph producer progress does not identify the immediate producer"
         );
-        if allow_query_ancestor && progress.identity.stream != *envelope.system().stream() {
-            return Ok(None);
+        if progress.identity.stream != *envelope.system().stream()
+            && (allow_query_ancestor || has_ancestor_stream(envelope, &progress.identity.stream))
+        {
+            return Ok((None, !progress.identity.persistent));
         }
         anyhow::ensure!(
             progress.identity.stream == *envelope.system().stream(),
             "graph producer progress does not identify the immediate producer"
         );
-        Ok(Some(progress))
+        Ok((Some(progress), false))
     }
+}
+
+fn has_ancestor_stream(envelope: &ChangeEnvelope, stream: &StreamId) -> bool {
+    let mut ancestor = envelope.lineage();
+    while let Some(entry) = ancestor {
+        if entry.system().stream() == stream {
+            return true;
+        }
+        ancestor = entry.parent();
+    }
+    false
+}
+
+fn has_distinct_producer_lineage(envelope: &ChangeEnvelope) -> bool {
+    let mut ancestor = envelope.lineage();
+    while let Some(entry) = ancestor {
+        if entry.system().stream() != envelope.system().stream() {
+            return true;
+        }
+        ancestor = entry.parent();
+    }
+    false
 }
 
 pub(super) struct GraphInputProgress {
@@ -210,11 +241,8 @@ impl GraphInputProgress {
     }
 
     pub fn from_envelope(input: &ChangeEnvelope) -> anyhow::Result<Self> {
-        let producer = GraphProducerProgress::from_envelope(input)?;
-        if let Some(progress) = producer
-            .as_ref()
-            .filter(|progress| progress.identity.persistent)
-        {
+        let (producer, inherited_volatile) = GraphProducerProgress::read_scoped(input, false)?;
+        if let Some(progress) = producer.as_ref() {
             return Ok(Self {
                 stream: input.system().stream().clone(),
                 transport_sequence: None,
@@ -222,9 +250,21 @@ impl GraphInputProgress {
                 identity: SourceProgressKey::Stream(input.system().stream().clone()),
                 sequence: progress.sequence,
                 position: None,
-                producer: Some(progress.identity.clone()),
-                volatile_producer: false,
+                producer: progress
+                    .identity
+                    .persistent
+                    .then(|| progress.identity.clone()),
+                volatile_producer: !progress.identity.persistent,
             });
+        }
+        if has_distinct_producer_lineage(input) {
+            let mut progress = Self::from_stream(input, input.system().sequence());
+            // Inherited source metadata is causal history, not this producer's cursor.
+            progress.position = None;
+            // Lineage alone does not declare durability; an explicit volatile
+            // ancestor still cannot become a durable boundary by derivation.
+            progress.volatile_producer = inherited_volatile;
+            return Ok(progress);
         }
         let raw = GraphChangeCodec::source_metadata(input)?;
         let stable = raw.as_ref().and_then(|metadata| {
@@ -250,9 +290,7 @@ impl GraphInputProgress {
                 .map(|position| Bytes::copy_from_slice(position))
                 .or_else(|| input.system().source_position().cloned()),
             producer: None,
-            // Volatile pipelines keep their existing source-progress semantics,
-            // but cannot be mistaken for a durable recovery boundary.
-            volatile_producer: producer.is_some(),
+            volatile_producer: false,
         })
     }
 
@@ -268,12 +306,16 @@ impl GraphInputProgress {
         store: &dyn CheckpointStore,
         persistent: bool,
     ) -> anyhow::Result<Option<SourceCheckpoint>> {
+        let saved = store.read_checkpoint(&self.key).await?;
+        let owner = store.read_checkpoint(&self.owner_key()).await?;
+        anyhow::ensure!(
+            self.producer.is_some() || owner.is_none(),
+            "graph input omitted its committed producer identity"
+        );
         anyhow::ensure!(
             !persistent || !self.volatile_producer,
             "persistent graph processing cannot recover through volatile middleware"
         );
-        let saved = store.read_checkpoint(&self.key).await?;
-        let owner = store.read_checkpoint(&self.owner_key()).await?;
         match (&self.producer, owner) {
             (Some(identity), owner) => {
                 anyhow::ensure!(
@@ -390,5 +432,55 @@ pub(super) fn transport_identity(
     match identity {
         SourceProgressKey::Stream(stream) => Ok(stream),
         SourceProgressKey::Source(_) => anyhow::bail!("input transport checkpoint is not a stream"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deriving_does_not_launder_an_explicit_volatile_producer() {
+        let stream = StreamId::try_new("first/out").unwrap();
+        let mut source = GraphChangeCodec::encode_changes(&[], stream.clone(), 1, None).unwrap();
+        let identity = GraphProducerIdentity::volatile(
+            "scope".into(),
+            "graph".into(),
+            ComponentId::try_new("first").unwrap(),
+            stream,
+        )
+        .unwrap();
+        GraphProducerProgress::annotate(&mut source, &identity, 1).unwrap();
+        let output_stream = StreamId::try_new("second/out").unwrap();
+        let derived =
+            GraphChangeCodec::derive_changes(&source, &[], output_stream.clone(), 1).unwrap();
+        let progress = GraphInputProgress::from_envelope(&derived).unwrap();
+        assert!(progress.volatile_producer);
+        assert_eq!(progress.identity, SourceProgressKey::Stream(output_stream));
+        assert!(GraphProducerProgress::from_envelope(&derived)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn lineage_alone_does_not_invent_a_producer_durability_declaration() {
+        let source =
+            GraphChangeCodec::encode_changes(&[], StreamId::try_new("first/out").unwrap(), 1, None)
+                .unwrap();
+        let derived = GraphChangeCodec::derive_changes(
+            &source,
+            &[],
+            StreamId::try_new("second/out").unwrap(),
+            2,
+        )
+        .unwrap();
+        let progress = GraphInputProgress::from_envelope(&derived).unwrap();
+        assert!(!progress.volatile_producer);
+        assert!(progress.producer.is_none());
+        assert_eq!(progress.sequence, 2);
+        assert_eq!(
+            progress.identity,
+            SourceProgressKey::Stream(StreamId::try_new("second/out").unwrap())
+        );
     }
 }

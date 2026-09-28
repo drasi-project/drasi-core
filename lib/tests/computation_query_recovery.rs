@@ -563,6 +563,173 @@ impl EnvelopeSource for LiveSource {
     }
 }
 
+struct LateBindingSource {
+    descriptor: ComponentDescriptor,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<ChangeEnvelope>,
+}
+
+#[async_trait]
+impl ComputationComponent for LateBindingSource {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for LateBindingSource {
+    async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        Ok(self.receiver.recv().await.map(|envelope| OutputEnvelope {
+            port: PortId::try_new("out").expect("port"),
+            envelope,
+        }))
+    }
+}
+
+struct LateBindingSink {
+    descriptor: ComponentDescriptor,
+    sender: tokio::sync::mpsc::UnboundedSender<ChangeEnvelope>,
+}
+
+#[async_trait]
+impl ComputationComponent for LateBindingSink {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSink for LateBindingSink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Accepted
+    }
+    async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        self.sender.send(input.envelope).map_err(Into::into)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bootstrapped_query_delivers_live_updates_to_second_batch_consumers() -> anyhow::Result<()>
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for (start_before_binding, factory_query) in [(false, false), (true, false), (false, true), (true, true)] {
+            let core = drasi_lib::DrasiLib::builder().build().await?;
+            let query = query(
+                Arc::new(InMemoryComputationProvider),
+                "MATCH (n:Person) RETURN collect({name:n.name}) AS records",
+                QueryRecoveryPolicy::Strict, false, Arc::new(AtomicUsize::new(0)),
+            ).await;
+            let mut quiet_definition = definition("MATCH (n:Person) RETURN count(n) AS count");
+            quiet_definition.id = ComponentId::try_new("quiet")?;
+            quiet_definition.output_stream = StreamId::try_new("quiet/out")?;
+            let quiet = ContinuousQueryTransformer::new_with_options(
+                quiet_definition, Arc::new(InMemoryComputationProvider), QueryOptions::default(),
+            ).await?.with_bootstrap(Arc::new(Bootstrap { calls: Arc::new(AtomicUsize::new(0)), fail: false }));
+            let endpoint = |component: &str, port: &str| Endpoint::new(ComponentId::try_new(component).expect("component"), PortId::try_new(port).expect("port"));
+            let (send_input, receive_input) = tokio::sync::mpsc::unbounded_channel();
+            let (early_sender, mut early_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let source = LateBindingSource {
+                descriptor: ComponentDescriptor::try_new(ComponentId::try_new("source")?, vec![
+                    PortDescriptor::new(PortId::try_new("out")?, PortDirection::Output, GraphChangeCodec::schema().descriptor().clone(), PipeRequirements::default()),
+                ])?, receiver: receive_input,
+            };
+            let sink = |id: &str, sender| -> anyhow::Result<LateBindingSink> {
+                Ok(LateBindingSink { descriptor: ComponentDescriptor::try_new(ComponentId::try_new(id)?, vec![
+                    PortDescriptor::new(PortId::try_new("in")?, PortDirection::Input, QueryChangeCodec::schema().descriptor().clone(), PipeRequirements::default()),
+                ])?, sender })
+            };
+            let first = ComponentBatch::builder().source(Box::new(source))
+                .query(Box::new(quiet)).sink(Box::new(sink("early", early_sender)?));
+            let first = if factory_query {
+                let indexes = ResourceId::try_new("late-binding-indexes")?;
+                let bootstrap = ResourceId::try_new("late-binding-bootstrap")?;
+                let factory = Arc::new(ContinuousQueryFactory::default());
+                let specification = ComponentSpecification {
+                    descriptor: query.descriptor().clone(), role: ComponentRole::Query, completion: None,
+                    implementation: factory.descriptor().implementation.clone(), configuration_version: 1,
+                    configuration: std::collections::BTreeMap::from([
+                        (Arc::from("query"), ConfigurationValue::Literal("MATCH (n:Person) RETURN collect({name:n.name}) AS records".into())),
+                        (Arc::from("stream"), ConfigurationValue::Literal("query/out".into())),
+                    ]),
+                    dependencies: std::collections::BTreeMap::from([
+                        (Arc::from("indexes"), vec![indexes.clone()]),
+                        (Arc::from("bootstrap"), vec![bootstrap.clone()]),
+                    ]),
+                };
+                drop(query);
+                first.declare_resource(ResourceSpecification {
+                    id: indexes.clone(), role: ResourceRole::IndexBackend, ownership: ResourceOwnership::Borrowed, binding: Arc::from("indexes"),
+                })?.provide_resource(indexes, ResourceHandle::new(ResourceRole::IndexBackend,
+                    Arc::new(QueryIndexProviderResource(Arc::new(InMemoryComputationProvider)))))?
+                    .declare_resource(ResourceSpecification {
+                        id: bootstrap.clone(), role: ResourceRole::Bootstrap, ownership: ResourceOwnership::Borrowed, binding: Arc::from("bootstrap"),
+                    })?.provide_resource(bootstrap, ResourceHandle::new(ResourceRole::Bootstrap,
+                        Arc::new(QueryBootstrapResource(Arc::new(Bootstrap { calls: Arc::new(AtomicUsize::new(0)), fail: false })))))?
+                    .component(specification, factory)
+            } else {
+                first.query(Box::new(query))
+            };
+            let first = first
+                .bind_stream(endpoint("source", "out"), StreamId::try_new("source/out")?)
+                .bind_stream(endpoint("query", "out"), StreamId::try_new("query/out")?)
+                .bind_stream(endpoint("quiet", "out"), StreamId::try_new("quiet/out")?)
+                .connect(EdgeDefinition::new(endpoint("source","out"),endpoint("query","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .connect(EdgeDefinition::new(endpoint("source","out"),endpoint("quiet","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .connect(EdgeDefinition::new(endpoint("query","out"),endpoint("early","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .connect(EdgeDefinition::new(endpoint("quiet","out"),endpoint("early","in")), Box::new(BoundedPipeConfig { capacity: 32 }))
+                .build()?;
+            assert!(core.add_components(first).await?.committed);
+            if start_before_binding {
+                core.start().await?;
+                core.computation_component("query")?.wait_started().await?;
+                let reader = core.query_manager().get_query_instance("query").await.map_err(anyhow::Error::msg)?;
+                let snapshot = reader.fetch_snapshot().await?;
+                assert_eq!(core.get_query_results("query").await?.len(), 1);
+                assert_eq!(snapshot.as_of_sequence, 0);
+            }
+            let (late_sender, mut late_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut second = ComponentBatch::builder().sink(Box::new(sink("late", late_sender)?)).build()?;
+            for producer in ["query", "quiet"] {
+                second.definition.relationships.push(DesiredRelationship {
+                    definition: EdgeDefinition::new(endpoint(producer,"out"),endpoint("late","in")),
+                    pipe: DesiredPipe::Bounded { capacity: 32 }, policy: RelationshipPolicy::default(),
+                });
+            }
+            let report = core.add_components(second).await?;
+            assert!(report.committed && report.summary == OperationSummary::Completed, "{report:?}");
+            if !start_before_binding { core.start().await?; }
+            core.computation_component("late")?.wait_started().await?;
+            for (sequence, name) in [(2, "Alicia"), (3, "Alice")] {
+                send_input.send(envelope(sequence, name, true))?;
+                for receiver in [&mut early_receiver, &mut late_receiver] {
+                    let output = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv()).await?
+                        .ok_or_else(|| anyhow::anyhow!("consumer closed after binding"))?;
+                    assert_eq!(output.system().sequence(), sequence - 1);
+                    let decoded = QueryChangeCodec::decode_evaluation(&output)?;
+                    let values = match &decoded[..] {
+                        [drasi_core::evaluation::context::QueryPartEvaluationContext::Aggregation { after, .. }] => after,
+                        _ => anyhow::bail!("expected one aggregation update: {decoded:?}"),
+                    };
+                    assert_eq!(serde_json::to_value(values)?, serde_json::json!({"records":[{"name":name}]}));
+                }
+            }
+            core.shutdown().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn graph_bootstrap_snapshot_and_live_handoff_run_through_real_components() {
     let query = query(

@@ -1,5 +1,17 @@
 # package	binary	case	profile	contract
 # These cases protect graph-only capabilities even if a whole test file is deleted.
+drasi-lib	computation_query_configuration	optional_native_join_replaces_the_unmatched_snapshot_row	all	Optional synthetic joins retract the original null row identity when a matching row arrives.
+drasi-lib	computation_query_configuration	disconnected_native_context_keeps_inventory_and_tracks_context_lifecycle	all	Uncorrelated optional Cypher contexts preserve inventory and process context arrival, updates and deletion.
+drasi-lib	computation_query_configuration	disconnected_gql_context_keeps_inventory_and_tracks_context_lifecycle	all	Uncorrelated optional GQL contexts use the same graph-owned incremental evaluation.
+drasi-lib	computation_query_configuration	optional_list_comprehension_preserves_unknown_and_empty_contexts	all	Missing optional collection context propagates null and remains distinct from an explicitly empty list.
+drasi-lib	computation_query_configuration	native_assignment_list_matches_equal_property_maps	all	List-comprehension filters compare complete assignment maps structurally rather than always rejecting object equality.
+drasi-lib	computation_query_configuration	native_aggregate_count_equals_integer_list_size	all	Equal aggregate float counts and integer collection sizes compare equally without demo casts.
+drasi-lib	computation_query_recovery	bootstrapped_query_delivers_live_updates_to_second_batch_consumers	all	Bootstrapped direct and factory query aggregates deliver live output to consumers bound before startup or in a later running batch.
+drasi-lib	computation_producer_provenance	raw_and_derived_diamond_inputs_keep_distinct_progress_without_losing_provenance	all	Raw and derived diamond paths have independent progress even when they retain identical causal source metadata.
+drasi-lib	computation_temporal_retractions	scheduled_native_retractions_use_the_last_applied_clock	all	Repeated future hints retract each actual temporal contribution exactly once.
+drasi-lib	computation_temporal_retractions	temporal_retraction_clocks_survive_native_query_reconstruction	extra-capabilities	Query reconstruction retains the last applied temporal before-image between due hints.
+drasi-lib	memory_query_provider_isolation	bare_memory_provider_processes_validated_context_updates	all	Bare volatile memory evaluates every context update without persistent storage.
+drasi-lib	memory_query_provider_isolation	default_pipeline_memory_provider_processes_the_same_context_updates	all	Default native memory follows the same direct-memory path and exact results as ordinary queries.
 drasi-lib	computation_configuration_snapshot	instance_snapshot_covers_ordinary_and_native_components_without_pausing_work	all	Whole-instance configuration does not borrow or cancel processing operations.
 drasi-lib	computation_configuration_snapshot	factory_definition_survives_creation_failure_and_exports_without_an_instance	all	Failed construction retains exportable declared configuration.
 drasi-lib	computation_configuration_snapshot	in_place_configuration_changes_publish_with_the_new_revision_not_old_snapshots	all	Configuration publications are revision-coherent and detached.

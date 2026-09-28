@@ -24,7 +24,7 @@ use std::{
 
 use async_stream::stream;
 use drasi_query_ast::ast::{NodeMatch, RelationMatch};
-use futures::{stream::StreamExt, Stream};
+use futures::{stream::StreamExt, FutureExt, Stream};
 #[allow(unused_imports)]
 use tokio::{
     sync::Semaphore,
@@ -35,7 +35,7 @@ use self::solution::MatchPathSolution;
 use crate::{
     evaluation::{context::QueryVariables, EvaluationError},
     interface::{ElementIndex, ElementResult, ElementStream, IndexError, QueryClock},
-    models::Element,
+    models::{Element, ElementReference},
 };
 
 #[cfg(feature = "parallel_solver")]
@@ -74,12 +74,32 @@ impl MatchPathSolver {
         anchor_element: Arc<Element>,
         anchor_slot: usize,
     ) -> Result<HashMap<u64, solution::MatchPathSolution>, EvaluationError> {
+        self.solve_with_exclusion(path, anchor_element, anchor_slot, None)
+            .boxed()
+            .await
+    }
+
+    pub(crate) async fn solve_with_exclusion(
+        &self,
+        path: Arc<match_path::MatchPath>,
+        anchor_element: Arc<Element>,
+        anchor_slot: usize,
+        excluded: Option<ElementReference>,
+    ) -> Result<HashMap<u64, solution::MatchPathSolution>, EvaluationError> {
+        if excluded_element(&anchor_element, excluded.as_ref()) {
+            return Ok(HashMap::new());
+        }
         let total_slots = path.slots.len();
         let mut start_solution = MatchPathSolution::new(total_slots, anchor_slot);
         start_solution.enqueue_slot(anchor_slot, Some(anchor_element));
 
-        let sol_stream =
-            create_solution_stream(start_solution, path.clone(), self.element_index.clone()).await;
+        let sol_stream = create_solution_stream(
+            start_solution,
+            path.clone(),
+            self.element_index.clone(),
+            excluded,
+        )
+        .await;
 
         let mut result = HashMap::new();
         tokio::pin!(sol_stream);
@@ -93,6 +113,19 @@ impl MatchPathSolver {
             }
         }
 
+        let shadowed: Vec<_> = result
+            .iter()
+            .filter(|(_, solution)| solution.solved_slots.values().any(Option::is_none))
+            .filter(|(_, solution)| {
+                result
+                    .values()
+                    .any(|other| other.extends_optional_nulls(solution, &path))
+            })
+            .map(|(signature, _)| *signature)
+            .collect();
+        for signature in shadowed {
+            result.remove(&signature);
+        }
         Ok(result)
     }
 }
@@ -110,6 +143,7 @@ async fn create_solution_stream(
     initial_sol: MatchPathSolution,
     path: Arc<match_path::MatchPath>,
     element_index: Arc<dyn ElementIndex>,
+    excluded: Option<ElementReference>,
 ) -> impl Stream<Item = Result<(u64, MatchPathSolution), EvaluationError>> {
     #[cfg(feature = "parallel_solver")]
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_SOLUTIONS));
@@ -141,16 +175,17 @@ async fn create_solution_stream(
                     let path = path.clone();
                     let element_index = element_index.clone();
                     let cmd_tx = cmd_tx.clone();
+                    let excluded = excluded.clone();
 
                     #[cfg(not(feature = "parallel_solver"))]
-                    try_complete_solution(solution, path, element_index, cmd_tx).await;
+                    try_complete_solution(solution, path, element_index, cmd_tx, excluded).await;
 
                     #[cfg(feature = "parallel_solver")]
                     {
                         let permits = permits.clone();
                         let task = tokio::spawn(async move {
                             let _permit = permits.acquire().await.unwrap();
-                            try_complete_solution(solution, path, element_index, cmd_tx).await;
+                            try_complete_solution(solution, path, element_index, cmd_tx, excluded).await;
                         });
                         task_tx.send(task).unwrap();
                     }
@@ -184,11 +219,16 @@ async fn try_complete_solution(
     path: Arc<match_path::MatchPath>,
     element_index: Arc<dyn ElementIndex>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<SolutionStreamCommand>,
+    excluded: Option<ElementReference>,
 ) {
     while let Some((slot_num, element)) = solution.slot_cursors.pop_front() {
         solution.mark_slot_solved(slot_num, element.clone());
 
-        if let Some(hash) = solution.get_solution_signature() {
+        if solution.get_solution_signature().is_some() {
+            solution.clear_incomplete_optional_paths(&path);
+            let hash = solution
+                .get_solution_signature()
+                .expect("complete solution");
             cmd_tx
                 .send(SolutionStreamCommand::Complete((hash, solution)))
                 .unwrap();
@@ -223,9 +263,14 @@ async fn try_complete_solution(
                 };
 
                 while let Some(adjacent_element) = adjacent_stream.next().await {
-                    found_adjacent = true;
                     match adjacent_element {
-                        Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
+                        Ok(adjacent_element) => {
+                            if excluded_element(&adjacent_element, excluded.as_ref()) {
+                                continue;
+                            }
+                            found_adjacent = true;
+                            adjacent_elements.push(Some(adjacent_element));
+                        }
                         Err(e) => {
                             cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
                             return;
@@ -264,9 +309,14 @@ async fn try_complete_solution(
                 };
 
                 while let Some(adjacent_element) = adjacent_stream.next().await {
-                    found_adjacent = true;
                     match adjacent_element {
-                        Ok(adjacent_element) => adjacent_elements.push(Some(adjacent_element)),
+                        Ok(adjacent_element) => {
+                            if excluded_element(&adjacent_element, excluded.as_ref()) {
+                                continue;
+                            }
+                            found_adjacent = true;
+                            adjacent_elements.push(Some(adjacent_element));
+                        }
                         Err(e) => {
                             cmd_tx.send(SolutionStreamCommand::Error(e.into())).unwrap();
                             return;
@@ -324,7 +374,90 @@ async fn try_complete_solution(
             }
         }
     }
+    if let Some(component) = unvisited_component(&path, &solution) {
+        let anchor = component
+            .iter()
+            .copied()
+            .find(|slot| !path.slots[*slot].optional)
+            .unwrap_or(component[0]);
+        let mut candidates = match element_index.get_slot_elements(anchor).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                cmd_tx
+                    .send(SolutionStreamCommand::Error(error.into()))
+                    .unwrap();
+                return;
+            }
+        };
+        let mut found = false;
+        while let Some(candidate) = candidates.next().await {
+            match candidate {
+                Ok(element) if !excluded_element(&element, excluded.as_ref()) => {
+                    found = true;
+                    let mut branch = solution.clone();
+                    branch.enqueue_slot(anchor, Some(element));
+                    cmd_tx.send(SolutionStreamCommand::Partial(branch)).unwrap();
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    cmd_tx
+                        .send(SolutionStreamCommand::Error(error.into()))
+                        .unwrap();
+                    return;
+                }
+            }
+        }
+        if !found && component.iter().all(|slot| path.slots[*slot].optional) {
+            for slot in component {
+                solution.enqueue_slot(slot, None);
+            }
+            cmd_tx
+                .send(SolutionStreamCommand::Partial(solution))
+                .unwrap();
+        }
+    }
     cmd_tx.send(SolutionStreamCommand::Unsolvable).unwrap();
+}
+
+fn unvisited_component(
+    path: &match_path::MatchPath,
+    solution: &MatchPathSolution,
+) -> Option<Vec<usize>> {
+    let mut visited = vec![false; path.slots.len()];
+    for root in 0..path.slots.len() {
+        if visited[root] {
+            continue;
+        }
+        let mut pending = vec![root];
+        let mut component = Vec::new();
+        while let Some(slot) = pending.pop() {
+            if visited[slot] {
+                continue;
+            }
+            visited[slot] = true;
+            component.push(slot);
+            pending.extend(
+                path.slots[slot]
+                    .in_slots
+                    .iter()
+                    .chain(&path.slots[slot].out_slots)
+                    .copied(),
+            );
+        }
+        if component.iter().all(|slot| !solution.is_slot_solved(*slot)) {
+            component.sort_unstable();
+            return Some(component);
+        }
+    }
+    None
+}
+
+fn excluded_element(element: &Element, excluded: Option<&ElementReference>) -> bool {
+    let Some(excluded) = excluded else {
+        return false;
+    };
+    element.get_reference() == excluded
+        || matches!(element, Element::Relation { in_node, out_node, .. } if in_node == excluded || out_node == excluded)
 }
 
 #[tracing::instrument(skip_all, err, level = "debug")]

@@ -96,6 +96,8 @@ pub enum ResultOwner {
     Function(usize),
     PartCurrent(usize),
     PartDefault(usize),
+    PartTransactionTime(usize),
+    PartRealtime(usize),
 }
 
 #[derive(Debug, Clone)]

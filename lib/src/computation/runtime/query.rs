@@ -224,21 +224,9 @@ impl QueryInstance {
             self.status.subscribe(),
         )?;
         let mut pipeline = pipeline;
-        let (backend, _) = runtime
+        runtime
             .index_factory
             .computation_backend(config.storage_backend.as_ref())?;
-        if matches!(
-            backend,
-            crate::indexes::StorageBackendRef::Inline(crate::indexes::StorageBackendSpec::Memory {
-                enable_archive: false
-            })
-        ) {
-            pipeline = pipeline.query_provider(
-                &config.id,
-                Arc::new(drasi_core::computation::InMemoryComputationProvider),
-                QueryPublicationMode::NonAtomic,
-            )?;
-        }
         for source in sources {
             pipeline = pipeline.source(
                 source.borrowed.clone(),

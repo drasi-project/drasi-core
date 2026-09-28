@@ -555,7 +555,9 @@ The SSE Reaction uses Tokio's broadcast channel to efficiently distribute events
 
 - Channel capacity: 1024 messages
 - Late subscribers receive new events only (no replay)
-- Slow clients may experience message lag if they fall too far behind
+- A client that falls behind the broadcast buffer is disconnected, with the lag
+  logged. It must reconnect and fetch a fresh snapshot; the stream does not
+  silently continue with a truncated tail.
 - Client disconnections are handled automatically
 
 ### CORS Configuration
@@ -579,9 +581,9 @@ The SSE Reaction handles various error conditions gracefully:
 
 - **Port binding failures**: Logged but don't prevent startup
 - **Client disconnections**: Automatically cleaned up
-- **Broadcast channel full**: Old messages are dropped (lagging clients)
+- **Broadcast channel full**: Affected lagging subscribers are disconnected and the loss is logged
 - **No connected clients**: Messages are dropped without error
-- **Slow clients**: May receive lag errors if they fall too far behind
+- **Slow clients**: Must reconnect and resnapshot after disconnection; missed transient events are not replayed
 
 ## Performance Considerations
 
@@ -630,7 +632,7 @@ The SSE Reaction handles various error conditions gracefully:
 - Verify queries are producing output
 
 **Client shows lag errors:**
-- Increase broadcast channel capacity
+- Reconnect and fetch a fresh snapshot before treating the displayed state as current
 - Reduce query result frequency
 - Consider multiple SSE reactions for different query groups
 

@@ -22,16 +22,16 @@ use std::{
 
 use crate::{
     evaluation::functions::aggregation::ValueAccumulator,
-    interface::{ResultIndex, ResultKey, ResultOwner},
+    interface::{IndexError, ResultIndex, ResultKey, ResultOwner},
 };
 
 use super::{
     context::{self, ChangeContext, SideEffects},
     expressions::*,
-    EvaluationError, ExpressionEvaluationContext,
+    EvaluationError, ExpressionEvaluationContext, InstantQueryClock,
 };
+use crate::hashing::SpookyHasher;
 use drasi_query_ast::ast::{ProjectionClause, QueryPart};
-use hashers::jenkins::spooky_hash::SpookyHasher;
 
 use super::context::{query_variables_unchanged, QueryPartEvaluationContext, QueryVariables};
 
@@ -71,6 +71,101 @@ impl QueryPartEvaluator {
     }
 
     pub async fn evaluate(
+        &self,
+        context: QueryPartEvaluationContext,
+        part_num: usize,
+        part: &QueryPart,
+        change_context: &ChangeContext,
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
+        let unchanged = match &context {
+            QueryPartEvaluationContext::Updating { before, after, .. } => {
+                query_variables_unchanged(before, after)
+            }
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                default_before: false,
+                default_after: false,
+                ..
+            } => query_variables_unchanged(before, after),
+            QueryPartEvaluationContext::Noop => return Ok(vec![QueryPartEvaluationContext::Noop]),
+            _ => false,
+        };
+        if unchanged && !change_context.is_future_reprocess {
+            return Ok(vec![QueryPartEvaluationContext::Noop]);
+        }
+
+        let before_key = ResultKey::InputHash(change_context.before_grouping_hash);
+        let transaction_owner = ResultOwner::PartTransactionTime(part_num);
+        let realtime_owner = ResultOwner::PartRealtime(part_num);
+        let transaction_time = self
+            .result_index
+            .get(&before_key, &transaction_owner)
+            .await?;
+        let realtime = self.result_index.get(&before_key, &realtime_owner).await?;
+        let mut observed = change_context.clone();
+        match (transaction_time, realtime) {
+            (
+                Some(ValueAccumulator::TimeMarker {
+                    timestamp: transaction_time,
+                }),
+                Some(ValueAccumulator::TimeMarker {
+                    timestamp: realtime,
+                }),
+            ) => {
+                observed.before_clock =
+                    Arc::new(InstantQueryClock::new(transaction_time, realtime));
+                if observed.is_future_reprocess && realtime > observed.after_clock.get_realtime() {
+                    observed.after_clock = observed.before_clock.clone();
+                }
+                if unchanged
+                    && observed.is_future_reprocess
+                    && transaction_time == observed.after_clock.get_transaction_time()
+                    && realtime == observed.after_clock.get_realtime()
+                {
+                    return Ok(vec![QueryPartEvaluationContext::Noop]);
+                }
+            }
+            (None, None) => {}
+            _ => return Err(IndexError::CorruptedData.into()),
+        }
+
+        let removed = matches!(&context, QueryPartEvaluationContext::Removing { .. });
+        let result = self
+            .evaluate_inner(context, part_num, part, &observed)
+            .await?;
+        if removed {
+            self.result_index
+                .set(before_key.clone(), transaction_owner, None)
+                .await?;
+            self.result_index
+                .set(before_key, realtime_owner, None)
+                .await?;
+        } else {
+            let after_key = ResultKey::InputHash(observed.after_grouping_hash);
+            self.result_index
+                .set(
+                    after_key.clone(),
+                    transaction_owner,
+                    Some(ValueAccumulator::TimeMarker {
+                        timestamp: observed.after_clock.get_transaction_time(),
+                    }),
+                )
+                .await?;
+            self.result_index
+                .set(
+                    after_key,
+                    realtime_owner,
+                    Some(ValueAccumulator::TimeMarker {
+                        timestamp: observed.after_clock.get_realtime(),
+                    }),
+                )
+                .await?;
+        }
+        Ok(result)
+    }
+
+    async fn evaluate_inner(
         &self,
         context: QueryPartEvaluationContext,
         part_num: usize,
@@ -151,11 +246,6 @@ impl QueryPartEvaluator {
                 }
             }
             QueryPartEvaluationContext::Updating { before, after, .. } => {
-                if query_variables_unchanged(&before, &after) && !change_context.is_future_reprocess
-                {
-                    return Ok(vec![QueryPartEvaluationContext::Noop]);
-                };
-
                 let mut grouping_keys = Vec::new();
 
                 let agg_snapshot = match &part.return_clause {
@@ -366,16 +456,6 @@ impl QueryPartEvaluator {
                 default_after,
                 ..
             } => {
-                if let Some(before) = &before {
-                    if query_variables_unchanged(before, &after)
-                        && !change_context.is_future_reprocess
-                        && !default_before
-                        && !default_after
-                    {
-                        return Ok(vec![QueryPartEvaluationContext::Noop]);
-                    }
-                };
-
                 let result_key = ResultKey::groupby_from_variables(&grouping_keys, &after);
 
                 let should_revert = match &before {

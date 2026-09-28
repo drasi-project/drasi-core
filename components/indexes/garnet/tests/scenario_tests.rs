@@ -129,6 +129,92 @@ impl QueryTestConfig for GarnetQueryConfig {
     }
 }
 
+mod optional_match {
+    use super::GarnetQueryConfig;
+    use shared_tests::use_cases::optional_match;
+
+    #[tokio::test]
+    async fn optional_match() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            optional_match::optional_match(&config).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_match_aggregating() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            optional_match::optional_match_aggregating(&config).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_optional_match() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            optional_match::multi_optional_match(&config).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_match_identity_and_join_key_changes() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            optional_match::optional_match_identity_and_join_key_changes(&config).await;
+        }
+    }
+}
+
+mod disconnected_match {
+    use super::GarnetQueryConfig;
+    use shared_tests::use_cases::disconnected_match;
+
+    #[tokio::test]
+    async fn disconnected_optional_contexts_aggregate_coherently() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            disconnected_match::disconnected_optional_contexts_aggregate_coherently(&config).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_optional_lifecycle() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            disconnected_match::disconnected_optional_lifecycle(&config).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_mandatory_lifecycle() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            disconnected_match::disconnected_mandatory_lifecycle(&config).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_matching_reads_current_transaction_writes() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            disconnected_match::disconnected_matching_reads_current_transaction_writes(&config)
+                .await;
+        }
+    }
+}
+
+mod temporal_retractions {
+    use super::GarnetQueryConfig;
+    #[tokio::test]
+    async fn shared_context_future_hints_retract_actual_contributions() {
+        for cached in [false, true] {
+            let config = GarnetQueryConfig::new(cached).await;
+            shared_tests::use_cases::temporal_retractions::shared_context_future_hints_retract_actual_contributions(&config).await;
+        }
+    }
+}
+
 mod building_comfort {
     use super::GarnetQueryConfig;
     use shared_tests::use_cases::*;

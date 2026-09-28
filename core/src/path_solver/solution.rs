@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use hashers::jenkins::spooky_hash::SpookyHasher;
+use crate::hashing::SpookyHasher;
 
 use crate::evaluation::context::QueryVariables;
 use crate::evaluation::variable_value::VariableValue;
@@ -89,6 +89,46 @@ impl MatchPathSolution {
 
     pub fn get_solution_signature(&self) -> Option<SolutionSignature> {
         self.solution_signature
+    }
+
+    pub(crate) fn clear_incomplete_optional_paths(&mut self, match_path: &MatchPath) {
+        // Failed optional paths null only the variables they introduced, not earlier bindings.
+        let mut paths: Vec<_> = match_path.optional_paths.iter().copied().collect();
+        paths.sort_unstable();
+        for path in paths {
+            let incomplete = match_path
+                .slots
+                .iter()
+                .enumerate()
+                .any(|(slot, specification)| {
+                    specification.paths.contains(&path)
+                        && self.solved_slots.get(&slot).is_some_and(Option::is_none)
+                });
+            if incomplete {
+                for (slot, specification) in match_path.slots.iter().enumerate() {
+                    if specification.optional && specification.paths.iter().min() == Some(&path) {
+                        self.mark_slot_solved(slot, None);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn extends_optional_nulls(&self, other: &Self, match_path: &MatchPath) -> bool {
+        let mut extended = false;
+        for (slot, previous) in &other.solved_slots {
+            match (
+                previous,
+                self.solved_slots.get(slot).and_then(Option::as_ref),
+            ) {
+                (Some(previous), Some(current))
+                    if previous.get_reference() == current.get_reference() => {}
+                (None, None) => {}
+                (None, Some(_)) if match_path.slots[*slot].optional => extended = true,
+                _ => return false,
+            }
+        }
+        extended
     }
 
     pub fn get_empty_optional_solution(&self, match_path: &MatchPath) -> Option<MatchPathSolution> {

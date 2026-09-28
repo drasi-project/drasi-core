@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::hashing::SpookyHasher;
 use drasi_query_ast::ast::{self, ProjectionClause, QueryPart};
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;

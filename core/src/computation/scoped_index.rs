@@ -77,6 +77,15 @@ fn scoped_stream(stream: ElementStream, work: Arc<BlockingScope>) -> ElementStre
 
 #[async_trait]
 impl<T: ElementIndex + ?Sized + 'static> ElementIndex for ScopedIndex<T> {
+    async fn get_slot_elements(&self, slot: usize) -> Result<ElementStream, IndexError> {
+        let inner = self.inner.clone();
+        let stream = self
+            .work
+            .run_async(async move { inner.get_slot_elements(slot).await })
+            .await?;
+        Ok(scoped_stream(stream, self.work.clone()))
+    }
+
     async fn get_element(
         &self,
         element_ref: &ElementReference,

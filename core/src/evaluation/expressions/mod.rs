@@ -554,12 +554,19 @@ impl ExpressionEvaluator {
                 (VariableValue::Float(n1), VariableValue::Float(n2)) => {
                     VariableValue::Bool(n1 == n2)
                 }
+                (VariableValue::Integer(integer), VariableValue::Float(float))
+                | (VariableValue::Float(float), VariableValue::Integer(integer)) => {
+                    VariableValue::Bool(float == integer)
+                }
                 (VariableValue::String(s1), VariableValue::String(s2)) => {
                     VariableValue::Bool(s1 == s2)
                 }
                 (VariableValue::Bool(b1), VariableValue::Bool(b2)) => VariableValue::Bool(b1 == b2),
                 (VariableValue::Null, VariableValue::Null) => VariableValue::Bool(true),
                 (VariableValue::List(a1), VariableValue::List(a2)) => VariableValue::Bool(a1 == a2),
+                (VariableValue::Object(a1), VariableValue::Object(a2)) => {
+                    VariableValue::Bool(a1 == a2)
+                }
                 (VariableValue::ElementReference(e1), VariableValue::ElementReference(e2)) => {
                     VariableValue::Bool(e1 == e2)
                 }
@@ -594,32 +601,19 @@ impl ExpressionEvaluator {
                 (VariableValue::Float(n1), VariableValue::Float(n2)) => {
                     VariableValue::Bool(n1 != n2)
                 }
-                (VariableValue::Float(n1), VariableValue::Integer(n2)) => VariableValue::Bool(
-                    n1 != match n2.as_i64() {
-                        Some(n) => n as f64,
-                        None => {
-                            return Err(EvaluationError::InvalidType {
-                                expected: "Integer".to_string(),
-                            })
-                        }
-                    },
-                ),
-                (VariableValue::Integer(n1), VariableValue::Float(n2)) => VariableValue::Bool(
-                    n2 != match n1.as_i64() {
-                        Some(n) => n as f64,
-                        None => {
-                            return Err(EvaluationError::InvalidType {
-                                expected: "Integer".to_string(),
-                            })
-                        }
-                    },
-                ),
+                (VariableValue::Integer(integer), VariableValue::Float(float))
+                | (VariableValue::Float(float), VariableValue::Integer(integer)) => {
+                    VariableValue::Bool(float != integer)
+                }
                 (VariableValue::String(s1), VariableValue::String(s2)) => {
                     VariableValue::Bool(s1 != s2)
                 }
                 (VariableValue::Bool(b1), VariableValue::Bool(b2)) => VariableValue::Bool(b1 != b2),
                 (VariableValue::Null, VariableValue::Null) => VariableValue::Bool(false),
                 (VariableValue::List(a1), VariableValue::List(a2)) => VariableValue::Bool(a1 != a2),
+                (VariableValue::Object(a1), VariableValue::Object(a2)) => {
+                    VariableValue::Bool(a1 != a2)
+                }
                 (VariableValue::Date(date1), VariableValue::Date(date2)) => {
                     VariableValue::Bool(date1 != date2)
                 }
@@ -1902,6 +1896,7 @@ impl ExpressionEvaluator {
             .evaluate_expression(context, &expression.list_expression)
             .await?;
         match items {
+            VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::List(items) => {
                 let mut result = Vec::new();
                 let mut variables = context.clone_variables();
@@ -1947,6 +1942,7 @@ impl ExpressionEvaluator {
             .evaluate_expression(context, &expression.list_expression)
             .await?;
         match items {
+            VariableValue::Null => Ok(VariableValue::Null),
             VariableValue::List(items) => {
                 let mut result = match context.get_variable(accumulator_variable.clone()) {
                     Some(value) => value.clone(),

@@ -137,25 +137,357 @@ fn definition(config: &drasi_lib::config::QueryConfig) -> ContinuousQueryDefinit
     }
 }
 fn input(source: &str, label: &str, properties: serde_json::Value) -> InputEnvelope {
+    change_input(
+        source,
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source, source),
+                    labels: Arc::from([Arc::from(label)]),
+                    effective_from: 1000,
+                },
+                properties: ElementPropertyMap::from(properties),
+            },
+        },
+        1,
+    )
+}
+
+fn change_input(source: &str, change: SourceChange, sequence: u64) -> InputEnvelope {
     InputEnvelope {
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_change(
-            SourceChange::Insert {
-                element: Element::Node {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new(source, source),
-                        labels: Arc::from([Arc::from(label)]),
-                        effective_from: 1000,
-                    },
-                    properties: ElementPropertyMap::from(properties),
-                },
-            },
+            change,
             StreamId::try_new(format!("{source}/out")).expect("stream"),
-            1,
+            sequence,
             None,
         )
         .expect("input"),
     }
+}
+
+async fn disconnected_native_context_lifecycle(language: ComputationQueryLanguage) {
+    let config = drasi_lib::Query::cypher("inventory-context")
+        .query("MATCH (w:workload_requirements) OPTIONAL MATCH (a:AppliedPlan) RETURN w.workload_id AS workload_id, a.fleet_id AS fleet_id")
+        .build();
+    let mut query_definition = definition(&config);
+    query_definition.language = language;
+    let mut query = ContinuousQueryTransformer::new_configured(
+        query_definition,
+        Arc::new(InMemoryComputationProvider),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await
+    .expect("query");
+    query.start().await.expect("start");
+    let plan_update = SourceChange::Update {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("plan", "plan"),
+                labels: Arc::from([Arc::from("AppliedPlan")]),
+                effective_from: 2000,
+            },
+            properties: ElementPropertyMap::from(serde_json::json!({"fleet_id":"updated"})),
+        },
+    };
+    let delete = |source| SourceChange::Delete {
+        metadata: ElementMetadata {
+            reference: ElementReference::new(source, source),
+            labels: Arc::from([]),
+            effective_from: 3000,
+        },
+    };
+    for (change, expected) in [
+        (
+            input(
+                "workload",
+                "workload_requirements",
+                serde_json::json!({"workload_id":"workload"}),
+            ),
+            vec![serde_json::json!({"workload_id":"workload","fleet_id":null})],
+        ),
+        (
+            input(
+                "plan",
+                "AppliedPlan",
+                serde_json::json!({"fleet_id":"demo"}),
+            ),
+            vec![serde_json::json!({"workload_id":"workload","fleet_id":"demo"})],
+        ),
+        (
+            change_input("plan", plan_update, 2),
+            vec![serde_json::json!({"workload_id":"workload","fleet_id":"updated"})],
+        ),
+        (
+            change_input("plan", delete("plan"), 3),
+            vec![serde_json::json!({"workload_id":"workload","fleet_id":null})],
+        ),
+        (change_input("workload", delete("workload"), 2), Vec::new()),
+    ] {
+        let output = query.transform(change).await.expect("change");
+        query.delivery_completed(&output).await.expect("delivery");
+        let rows: Vec<_> = query
+            .results()
+            .snapshot()
+            .expect("snapshot")
+            .rows
+            .values()
+            .map(|row| {
+                serde_json::to_value(QueryChangeCodec::decode_row(row).expect("row").values)
+                    .expect("json")
+            })
+            .collect();
+        assert_eq!(rows, expected);
+    }
+    query.stop().await.expect("stop");
+}
+
+#[tokio::test]
+async fn disconnected_native_context_keeps_inventory_and_tracks_context_lifecycle() {
+    disconnected_native_context_lifecycle(ComputationQueryLanguage::Cypher).await;
+}
+
+#[tokio::test]
+async fn disconnected_gql_context_keeps_inventory_and_tracks_context_lifecycle() {
+    disconnected_native_context_lifecycle(ComputationQueryLanguage::Gql).await;
+}
+
+#[tokio::test]
+async fn optional_list_comprehension_preserves_unknown_and_empty_contexts() {
+    let config = drasi_lib::Query::cypher("optional-list")
+        .query("MATCH (w:Workload) OPTIONAL MATCH (p:Plan) RETURN w.id AS id, [d IN p.assignments WHERE d = 'gpu'] AS matches, size([d IN p.assignments WHERE d = 'gpu']) AS matched")
+        .build();
+    let mut query = ContinuousQueryTransformer::new_configured(
+        definition(&config),
+        Arc::new(InMemoryComputationProvider),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await
+    .expect("query");
+    query.start().await.expect("start");
+    let metadata = ElementMetadata {
+        reference: ElementReference::new("plan", "plan"),
+        labels: Arc::from([Arc::from("Plan")]),
+        effective_from: 2000,
+    };
+    for (change, expected) in [
+        (
+            input("workload", "Workload", serde_json::json!({"id":"workload"})),
+            serde_json::json!({"id":"workload","matches":null,"matched":null}),
+        ),
+        (
+            input(
+                "plan",
+                "Plan",
+                serde_json::json!({"assignments":["gpu","other"]}),
+            ),
+            serde_json::json!({"id":"workload","matches":["gpu"],"matched":1}),
+        ),
+        (
+            change_input(
+                "plan",
+                SourceChange::Update {
+                    element: Element::Node {
+                        metadata: metadata.clone(),
+                        properties: ElementPropertyMap::from(serde_json::json!({"assignments":[]})),
+                    },
+                },
+                2,
+            ),
+            serde_json::json!({"id":"workload","matches":[],"matched":0}),
+        ),
+        (
+            change_input("plan", SourceChange::Delete { metadata }, 3),
+            serde_json::json!({"id":"workload","matches":null,"matched":null}),
+        ),
+    ] {
+        let output = query.transform(change).await.expect("optional list update");
+        query.delivery_completed(&output).await.expect("delivery");
+        let rows: Vec<_> = query
+            .results()
+            .snapshot()
+            .expect("snapshot")
+            .rows
+            .values()
+            .map(|row| {
+                serde_json::to_value(QueryChangeCodec::decode_row(row).expect("row").values)
+                    .expect("json")
+            })
+            .collect();
+        assert_eq!(rows, vec![expected]);
+    }
+    query.stop().await.expect("stop");
+}
+
+#[tokio::test]
+async fn native_assignment_list_matches_equal_property_maps() {
+    let config = drasi_lib::Query::cypher("assignment-maps")
+        .query("MATCH (w:workload_requirements) OPTIONAL MATCH (p:gpu_placements) RETURN w.workload_id AS workload_id, [d IN p.assignments WHERE d = w.assignment] AS matching")
+        .build();
+    let mut query = ContinuousQueryTransformer::new_configured(
+        definition(&config),
+        Arc::new(InMemoryComputationProvider),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await
+    .expect("query");
+    query.start().await.expect("start");
+    let assignment =
+        serde_json::json!({"gpu_id":"gpu-1","workload_revision":"1","memory_mib":4096});
+    for (change, expected) in [
+        (
+            input(
+                "workload",
+                "workload_requirements",
+                serde_json::json!({"workload_id":"workload","assignment":assignment.clone()}),
+            ),
+            serde_json::json!({"workload_id":"workload","matching":null}),
+        ),
+        (
+            input(
+                "plan",
+                "gpu_placements",
+                serde_json::json!({"assignments":[assignment.clone()]}),
+            ),
+            serde_json::json!({"workload_id":"workload","matching":[assignment]}),
+        ),
+    ] {
+        let output = query.transform(change).await.expect("assignment input");
+        query.delivery_completed(&output).await.expect("delivery");
+        let rows: Vec<_> = query
+            .results()
+            .snapshot()
+            .expect("snapshot")
+            .rows
+            .values()
+            .map(|row| {
+                serde_json::to_value(QueryChangeCodec::decode_row(row).expect("row").values)
+                    .expect("json")
+            })
+            .collect();
+        assert_eq!(rows, vec![expected]);
+    }
+    query.stop().await.expect("stop");
+}
+
+#[tokio::test]
+async fn native_aggregate_count_equals_integer_list_size() {
+    let config = drasi_lib::Query::cypher("numeric-count")
+        .query("MATCH (w:workload_requirements) WITH sum(w.replicas) AS count RETURN count, size([1,2]) AS expected, count = size([1,2]) AS equal, count <> size([1,2]) AS unequal")
+        .build();
+    let mut query = ContinuousQueryTransformer::new_configured(
+        definition(&config),
+        Arc::new(InMemoryComputationProvider),
+        QueryOptions::default(),
+        QueryExecutionSettings::default(),
+        None,
+    )
+    .await
+    .expect("query");
+    query.start().await.expect("start");
+    for (replicas, equal, sequence) in [(2, true, 1), (3, false, 2)] {
+        let element = Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("workload", "workload"),
+                labels: Arc::from([Arc::from("workload_requirements")]),
+                effective_from: sequence * 1000,
+            },
+            properties: ElementPropertyMap::from(serde_json::json!({"replicas":replicas})),
+        };
+        let change = if sequence == 1 {
+            SourceChange::Insert { element }
+        } else {
+            SourceChange::Update { element }
+        };
+        let output = query
+            .transform(change_input("workload", change, sequence))
+            .await
+            .expect("count input");
+        query.delivery_completed(&output).await.expect("delivery");
+        let rows: Vec<_> = query
+            .results()
+            .snapshot()
+            .expect("snapshot")
+            .rows
+            .values()
+            .map(|row| {
+                serde_json::to_value(QueryChangeCodec::decode_row(row).expect("row").values)
+                    .expect("json")
+            })
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["count"].as_f64(), Some(f64::from(replicas)));
+        assert_eq!(rows[0]["expected"], 2);
+        assert_eq!(rows[0]["equal"], equal);
+        assert_eq!(rows[0]["unequal"], !equal);
+    }
+    query.stop().await.expect("stop");
+}
+
+#[tokio::test]
+async fn optional_native_join_replaces_the_unmatched_snapshot_row() {
+    let config = drasi_lib::Query::cypher("decision")
+        .query("MATCH (d:DecisionExplanation) OPTIONAL MATCH (d)-[:DECISION_WRITE]->(w:PlanWriteOutcome) RETURN d.decision_id AS decision_id, w.outcome AS outcome")
+        .from_source("decisions").from_source("writes")
+        .with_joins(vec![QueryJoinConfig {
+            id: "DECISION_WRITE".into(),
+            keys: ["DecisionExplanation", "PlanWriteOutcome"].into_iter()
+                .map(|label| QueryJoinKeyConfig { label: label.into(), property: "decision_id".into() }).collect(),
+        }]).build();
+    let mut query = ContinuousQueryTransformer::new_configured(
+        definition(&config),
+        Arc::new(InMemoryComputationProvider),
+        QueryOptions::default(),
+        QueryExecutionSettings::from_legacy_config(&config),
+        None,
+    )
+    .await
+    .expect("query");
+    query.start().await.expect("start");
+    for (change, expected) in [
+        (
+            input(
+                "decisions",
+                "DecisionExplanation",
+                serde_json::json!({"decision_id":"decision"}),
+            ),
+            serde_json::json!({"decision_id":"decision","outcome":null}),
+        ),
+        (
+            input(
+                "writes",
+                "PlanWriteOutcome",
+                serde_json::json!({"decision_id":"decision","outcome":"rejected"}),
+            ),
+            serde_json::json!({"decision_id":"decision","outcome":"rejected"}),
+        ),
+    ] {
+        let output = query.transform(change).await.expect("change");
+        query.delivery_completed(&output).await.expect("delivery");
+        let rows: Vec<_> = query
+            .results()
+            .snapshot()
+            .expect("snapshot")
+            .rows
+            .values()
+            .map(|row| {
+                serde_json::to_value(QueryChangeCodec::decode_row(row).expect("row").values)
+                    .expect("json")
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![expected],
+            "retained rows must retract the unmatched optional identity"
+        );
+    }
+    query.stop().await.expect("stop");
 }
 
 #[tokio::test]

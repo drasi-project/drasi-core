@@ -436,6 +436,51 @@ mod optional_match {
         let test_config = InMemoryQueryConfig::new();
         optional_match::multi_optional_match(&test_config).await;
     }
+
+    #[tokio::test]
+    async fn optional_match_identity_and_join_key_changes() {
+        let test_config = InMemoryQueryConfig::new();
+        optional_match::optional_match_identity_and_join_key_changes(&test_config).await;
+    }
+}
+
+mod disconnected_match {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::disconnected_match;
+
+    #[tokio::test]
+    async fn disconnected_optional_contexts_aggregate_coherently() {
+        disconnected_match::disconnected_optional_contexts_aggregate_coherently(
+            &InMemoryQueryConfig::new(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn disconnected_optional_lifecycle() {
+        disconnected_match::disconnected_optional_lifecycle(&InMemoryQueryConfig::new()).await;
+    }
+
+    #[tokio::test]
+    async fn disconnected_mandatory_lifecycle() {
+        disconnected_match::disconnected_mandatory_lifecycle(&InMemoryQueryConfig::new()).await;
+    }
+
+    #[tokio::test]
+    async fn disconnected_matching_reads_current_transaction_writes() {
+        disconnected_match::disconnected_matching_reads_current_transaction_writes(
+            &InMemoryQueryConfig::new(),
+        )
+        .await;
+    }
+}
+
+mod temporal_retractions {
+    use super::InMemoryQueryConfig;
+    #[tokio::test]
+    async fn shared_context_future_hints_retract_actual_contributions() {
+        crate::use_cases::temporal_retractions::shared_context_future_hints_retract_actual_contributions(&InMemoryQueryConfig::new()).await;
+    }
 }
 
 mod decoder {

@@ -237,6 +237,8 @@ impl GraphChangeCodec {
 
     /// Emit transformed graph changes while preserving the input's annotations,
     /// timestamp, source position and lineage. The output has its own identity.
+    /// Inherited source metadata remains provenance; downstream graph progress
+    /// uses the new stream's sequence, or an explicit immediate producer marker.
     pub fn derive_changes(
         input: &ChangeEnvelope,
         changes: &[SourceChange],

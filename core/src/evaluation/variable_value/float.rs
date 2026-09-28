@@ -39,10 +39,7 @@ impl PartialEq<f64> for Float {
 
 impl PartialEq<Integer> for Float {
     fn eq(&self, other: &Integer) -> bool {
-        match (self.value, other.as_i64()) {
-            (a, Some(b)) => a == b as f64,
-            _ => false,
-        }
+        self.as_integer_exact().as_ref() == Some(other)
     }
 }
 

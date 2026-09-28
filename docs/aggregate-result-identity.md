@@ -29,14 +29,23 @@ grouping-value rules:
 - Lists and objects apply these rules recursively. Order matters in lists;
   object keys matter. Strings, booleans, and numbers remain distinct types.
 
-Grouping-equal values must hash equally. These rules are local to grouping and
-internal change detection; they do not redefine general query comparisons or
-arithmetic. Snapshot/default reconciliation must use the same group identity.
+Grouping-equal values must hash equally. Mixed-numeric expression equality also
+uses exact integral-float conversion, but grouping retains its own hashing and
+element-identity contract. Arithmetic and ordering are unchanged.
+Snapshot/default reconciliation must use the same group identity.
 
 The existing 64-bit, non-cryptographic hash is not a uniqueness proof or a
 tenant-isolation guarantee. Collision disambiguation requires a coordinated
 index/output/persistence design; changing only final signatures, or using a
 random key on every restart, would not provide that guarantee.
+
+All production SpookyHash callers share `drasi_core::hashing::SpookyHasher`.
+It preserves the `hashers` 1.0.1 implementation and seeds while removing that
+dependency's unconditional diagnostic stdout writes. The imported MIT notice is
+retained beside the source. Compatibility tests compare the original and quiet
+implementations across seeded, fragmented and unaligned writes and check both
+64-bit and 128-bit outputs. This logging correction does not change persisted
+hash identities.
 
 ## Default transitions and notifications
 
@@ -52,6 +61,21 @@ nonzero-to-zero changes still emit results. Terminal and some chained aggregates
 retain identity-valued rows under existing empty-group semantics; this is not an
 empty-group-removal policy change. Future reprocessing must still evaluate
 unchanged inputs against the later clock before applying this notification policy.
+
+Each query part records the transaction time and realtime at which its input
+identity was last evaluated. Retractions use that recorded clock, not the older
+timestamp of whichever graph element triggered the current evaluation. This
+prevents repeated timer hints or shared-context updates from subtracting the
+same pre-expiry contribution again. Older timer hints cannot move an evaluated
+part's clock backward. Clock entries participate in the result-index transaction
+and survive query reconstruction; removing an input clears its entries.
+When both the input and its recorded clock are unchanged, repeated/older timer
+hints perform no projection work. Newer clocks still reevaluate the query.
+
+The extra clock-owner keys use the existing `TimeMarker` accumulator encoding.
+They do not change existing row/group hashes. They cannot reconstruct missing
+historical clocks or repair already-corrupted aggregates: rebuild affected
+pre-fix query state from authoritative input.
 
 ## Synthetic join identities
 
@@ -92,6 +116,10 @@ old keys map to new ones. See [pipe QoS and recovery](../lib/docs/computation-gr
 - [Engine identity and emission cases](../core/src/query/tests/aggregate_update_tests.rs):
   materialized snapshots, key migration, chained aggregates, lazy extrema,
   terminal no-ops, and future reprocessing.
+- [Temporal retractions](../shared-tests/src/use_cases/temporal_retractions/mod.rs)
+  and [native restart coverage](../lib/tests/computation_temporal_retractions.rs):
+  shared-context expiry, repeated due hints, exact contribution counts and
+  reconstruction between timer events.
 - [Retained multi-source transitions](../core/src/query/tests/retained_multi_source_tests.rs)
   and [part reconciliation](../core/src/evaluation/parts/tests/multi_part.rs).
 - [Public snapshots/notifications](../lib/tests/aggregate_snapshot_e2e.rs) and

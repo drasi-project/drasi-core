@@ -13,14 +13,15 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Debug,
     hash::{Hash, Hasher},
     sync::Arc,
 };
 
+use crate::hashing::SpookyHasher;
 use drasi_query_ast::ast::Query;
-use hashers::jenkins::spooky_hash::SpookyHasher;
+use futures::FutureExt;
 
 use crate::{
     evaluation::{
@@ -32,7 +33,7 @@ use crate::{
     },
     interface::{ElementIndex, FutureQueue, MiddlewareError, QueryClock},
     middleware::SourceMiddlewarePipelineCollection,
-    models::{Element, SourceChange},
+    models::{Element, ElementReference, SourceChange},
     path_solver::{
         match_path::{MatchPath, SlotElementSpec},
         solution::{MatchPathSolution, SolutionSignature},
@@ -150,20 +151,7 @@ impl QueryEvaluator {
                 };
                 change_results.into_iter().for_each(|ctx| {
                     match &ctx {
-                        QueryPartEvaluationContext::Aggregation {
-                            before,
-                            after,
-                            default_before,
-                            ..
-                        } => {
-                            if let Some(before) = before {
-                                // Default transitions have already reached downstream
-                                // parts; only value changes or creation notify consumers.
-                                if query_variables_unchanged(before, after) && !default_before {
-                                    return;
-                                }
-                            }
-
+                        QueryPartEvaluationContext::Aggregation { .. } => {
                             aggregation_results.insert(ctx);
                         }
                         QueryPartEvaluationContext::Updating { before, after, .. } => {
@@ -178,6 +166,17 @@ impl QueryEvaluator {
             }
 
             for ctx in aggregation_results.into_result_vec() {
+                if let QueryPartEvaluationContext::Aggregation {
+                    before: Some(before),
+                    after,
+                    default_before: false,
+                    ..
+                } = &ctx
+                {
+                    if query_variables_unchanged(before, after) {
+                        continue;
+                    }
+                }
                 result.push(ctx);
             }
         }
@@ -195,6 +194,16 @@ impl QueryEvaluator {
         let mut result = SolutionChangesResult::new();
         let mut before_change_solutions = HashMap::new();
         let mut after_change_solutions = HashMap::new();
+        // Optional matches can replace a null binding with a different MATCH identity.
+        // Compare actual rows around a required anchor instead of inventing an update.
+        let optional_anchor = self
+            .match_path
+            .slots
+            .iter()
+            .any(|slot| slot.optional)
+            .then(|| self.match_path.slots.iter().position(|slot| !slot.optional))
+            .flatten();
+        let mut before_anchors = HashSet::new();
 
         match change {
             SourceChange::Insert { element } => {
@@ -206,19 +215,28 @@ impl QueryEvaluator {
                     .resolve_solutions(element.clone(), affinity_slots, true)
                     .await?;
 
-                for (signature, solution) in solutions {
-                    if let Some(blank_optional_solution) =
-                        solution.get_empty_optional_solution(&self.match_path)
-                    {
-                        before_change_solutions.insert(signature, blank_optional_solution);
+                if let Some(slot) = optional_anchor {
+                    let anchors = Self::required_anchors(&solutions, slot);
+                    before_change_solutions = self
+                        .resolve_required_anchors(&anchors, slot, Some(element.get_reference()))
+                        .await?;
+                    after_change_solutions =
+                        self.resolve_required_anchors(&anchors, slot, None).await?;
+                } else {
+                    for (signature, solution) in solutions {
+                        if let Some(blank_optional_solution) =
+                            solution.get_empty_optional_solution(&self.match_path)
+                        {
+                            before_change_solutions.insert(signature, blank_optional_solution);
+                        }
+                        after_change_solutions.insert(signature, solution);
                     }
-                    after_change_solutions.insert(signature, solution);
                 }
 
                 result.anchor_element = Some(element);
             }
             SourceChange::Update { mut element } => {
-                if let Some(prev_version) = self
+                let previous = if let Some(prev_version) = self
                     .element_index
                     .get_element(element.get_reference())
                     .await?
@@ -233,27 +251,63 @@ impl QueryEvaluator {
                             before_clock.clone(),
                         )
                         .await?;
-                    let solutions = self
-                        .resolve_solutions(prev_version.clone(), affinity_slots, false)
-                        .await?;
-                    for (signature, solution) in solutions {
-                        before_change_solutions.insert(signature, solution);
-                    }
                     element.merge_missing_properties(prev_version.as_ref());
-                    result.before_clock = Some(before_clock);
-                    result.before_anchor_element = Some(prev_version);
-                }
-
+                    Some((prev_version, before_clock, affinity_slots))
+                } else {
+                    None
+                };
                 let element = Arc::new(element);
                 let affinity_slots = self
                     .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
                     .await?;
+                // An isolated context's unchanged slot membership cannot alter
+                // optional connectivity; only its already-matched rows change.
+                let unchanged_isolated_binding = previous.as_ref().is_some_and(|(_, _, before)| {
+                    before == &affinity_slots
+                        && before.iter().all(|slot| {
+                            let slot = &self.match_path.slots[*slot];
+                            slot.in_slots.is_empty() && slot.out_slots.is_empty()
+                        })
+                });
+                let affected_anchor = optional_anchor.filter(|_| !unchanged_isolated_binding);
+                if let Some((prev_version, before_clock, before_slots)) = previous {
+                    let solutions = self
+                        .resolve_solutions(prev_version.clone(), before_slots, false)
+                        .await?;
+                    if let Some(slot) = affected_anchor {
+                        before_anchors = Self::required_anchors(&solutions, slot);
+                        before_change_solutions = self
+                            .resolve_required_anchors(&before_anchors, slot, None)
+                            .await?;
+                    } else {
+                        before_change_solutions.extend(solutions);
+                    }
+                    result.before_clock = Some(before_clock);
+                    result.before_anchor_element = Some(prev_version);
+                }
+
                 let solutions = self
                     .resolve_solutions(element.clone(), affinity_slots, true)
                     .await?;
 
-                for (signature, solution) in solutions {
-                    after_change_solutions.insert(signature, solution);
+                if let Some(slot) = affected_anchor {
+                    let anchors = Self::required_anchors(&solutions, slot);
+                    let newly_affected = anchors.difference(&before_anchors).cloned().collect();
+                    // These anchors had no old path through the changed element.
+                    before_change_solutions.extend(
+                        self.resolve_required_anchors(
+                            &newly_affected,
+                            slot,
+                            Some(element.get_reference()),
+                        )
+                        .await?,
+                    );
+                    before_anchors.extend(anchors);
+                    after_change_solutions = self
+                        .resolve_required_anchors(&before_anchors, slot, None)
+                        .await?;
+                } else {
+                    after_change_solutions.extend(solutions);
                 }
 
                 result.anchor_element = Some(element);
@@ -273,14 +327,20 @@ impl QueryEvaluator {
                     let solutions = self
                         .resolve_solutions(element.clone(), affinity_slots, false)
                         .await?;
-                    for (signature, solution) in solutions {
-                        if let Some(blank_optional_solution) =
-                            solution.get_empty_optional_solution(&self.match_path)
-                        {
-                            after_change_solutions.insert(signature, blank_optional_solution);
+                    if let Some(slot) = optional_anchor {
+                        before_anchors = Self::required_anchors(&solutions, slot);
+                        before_change_solutions = self
+                            .resolve_required_anchors(&before_anchors, slot, None)
+                            .await?;
+                    } else {
+                        for (signature, solution) in solutions {
+                            if let Some(blank_optional_solution) =
+                                solution.get_empty_optional_solution(&self.match_path)
+                            {
+                                after_change_solutions.insert(signature, blank_optional_solution);
+                            }
+                            before_change_solutions.insert(signature, solution);
                         }
-
-                        before_change_solutions.insert(signature, solution);
                     }
                     result.before_clock = Some(before_clock);
                     result.before_anchor_element = Some(element);
@@ -288,6 +348,11 @@ impl QueryEvaluator {
                     match self.element_index.delete_element(&metadata.reference).await {
                         Ok(_) => {}
                         Err(e) => return Err(EvaluationError::from(e)),
+                    }
+                    if let Some(slot) = optional_anchor {
+                        after_change_solutions = self
+                            .resolve_required_anchors(&before_anchors, slot, None)
+                            .await?;
                     }
                 }
             }
@@ -343,6 +408,19 @@ impl QueryEvaluator {
 
         for (sig, before_sol) in &before_change_solutions {
             match after_change_solutions.get(sig) {
+                Some(after_sol)
+                    if optional_anchor.is_some()
+                        && !result.is_future_reprocess
+                        && before_sol.solved_slots == after_sol.solved_slots
+                        && !before_sol.solved_slots.values().flatten().any(|element| {
+                            result
+                                .anchor_element
+                                .as_ref()
+                                .or(result.before_anchor_element.as_ref())
+                                .is_some_and(|anchor| {
+                                    anchor.get_reference() == element.get_reference()
+                                })
+                        }) => {}
                 Some(after_sol) => result.changes.push((
                     *sig,
                     QueryPartEvaluationContext::Updating {
@@ -374,6 +452,49 @@ impl QueryEvaluator {
         }
 
         Ok(result)
+    }
+
+    fn required_anchors(
+        solutions: &HashMap<u64, MatchPathSolution>,
+        slot: usize,
+    ) -> HashSet<ElementReference> {
+        solutions
+            .values()
+            .filter_map(|solution| solution.solved_slots.get(&slot).and_then(Option::as_ref))
+            .map(|element| element.get_reference().clone())
+            .collect()
+    }
+
+    async fn resolve_required_anchors(
+        &self,
+        anchors: &HashSet<ElementReference>,
+        slot: usize,
+        excluded: Option<&ElementReference>,
+    ) -> Result<HashMap<u64, MatchPathSolution>, EvaluationError> {
+        let mut solutions = HashMap::new();
+        for reference in anchors {
+            if Some(reference) == excluded {
+                continue;
+            }
+            if let Some(element) = self
+                .element_index
+                .get_slot_element_by_ref(slot, reference)
+                .await?
+            {
+                solutions.extend(
+                    self.path_solver
+                        .solve_with_exclusion(
+                            self.match_path.clone(),
+                            element,
+                            slot,
+                            excluded.cloned(),
+                        )
+                        .boxed()
+                        .await?,
+                );
+            }
+        }
+        Ok(solutions)
     }
 
     async fn resolve_solutions(

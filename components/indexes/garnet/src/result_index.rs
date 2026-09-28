@@ -19,6 +19,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
@@ -26,7 +27,6 @@ use drasi_core::{
         ResultSequence, ResultSequenceCounter,
     },
 };
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use ordered_float::OrderedFloat;
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 

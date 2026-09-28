@@ -403,8 +403,7 @@ impl VariableValue {
     /// Elements compare by reference, not mutable properties. Numeric equality
     /// is exact: an integral float shares an integer's group only when conversion
     /// loses no information. Lists/objects apply these rules recursively.
-    /// Unlike ordinary query comparison, this never rounds a large integer to
-    /// `f64`. Grouping-equal values must hash equally in every index/output path.
+    /// Grouping-equal values must hash equally in every index/output path.
     pub(crate) fn eq_for_groupby(&self, other: &Self) -> bool {
         match (self, other) {
             (VariableValue::Element(left), VariableValue::Element(right)) => {

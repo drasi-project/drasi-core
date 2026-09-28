@@ -18,7 +18,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::{routing::get, Router};
 use handlebars::Handlebars;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +36,23 @@ pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
+
+fn subscriber_events(
+    receiver: broadcast::Receiver<String>,
+    path: String,
+) -> impl tokio_stream::Stream<
+    Item = Result<Event, tokio_stream::wrappers::errors::BroadcastStreamRecvError>,
+> {
+    tokio_stream::wrappers::BroadcastStream::new(receiver)
+        .take_while(move |result| match result {
+            Ok(_) => true,
+            Err(error) => {
+                warn!("Closing lagged SSE subscriber on {path}: {error}; reconnect and fetch a fresh snapshot");
+                false
+            }
+        })
+        .map(|result| result.map(|message| Event::default().data(message)))
+}
 
 /// Helper function to pre-create broadcasters for static paths in a template spec
 fn pre_create_broadcaster_for_template_spec(
@@ -547,11 +564,7 @@ impl Reaction for SseReaction {
 
                     if let Some(broadcaster) = broadcaster {
                         let rx = broadcaster.subscribe();
-                        let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
-                            .filter_map(|res| res.ok())
-                            .map(|msg| {
-                                Ok::<Event, std::convert::Infallible>(Event::default().data(msg))
-                            });
+                        let stream = subscriber_events(rx, path);
                         Sse::new(stream)
                             .keep_alive(
                                 KeepAlive::new()
@@ -693,5 +706,43 @@ impl Reaction for SseReaction {
 
     fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
         drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
+    }
+}
+
+#[cfg(test)]
+mod subscriber_stream_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lag_closes_the_subscriber_instead_of_sending_a_truncated_tail() {
+        let (sender, receiver) = broadcast::channel(2);
+        let mut stream = subscriber_events(receiver, "/events/test".into());
+        sender.send("first".into()).unwrap();
+        assert!(stream.next().await.unwrap().is_ok());
+        for event in ["second", "third", "fourth"] {
+            sender.send(event.into()).unwrap();
+        }
+        assert!(
+            stream.next().await.is_none(),
+            "a lagged subscriber must reconnect and resnapshot"
+        );
+        let _ = sender.send("later".into());
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn healthy_subscribers_receive_ordered_events_and_close_normally() {
+        let (sender, receiver) = broadcast::channel(2);
+        sender.send("first".into()).unwrap();
+        sender.send("second".into()).unwrap();
+        drop(sender);
+        let response = Sse::new(subscriber_events(receiver, "/events/test".into())).into_response();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            "data: first\n\ndata: second\n\n"
+        );
     }
 }

@@ -428,25 +428,53 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
         2
     );
 
-    let mut filtered = transformer
+    let filtered = transformer
         .transform(raw_source_input(78, true))
         .await
         .expect("filter");
     assert_eq!(filtered.len(), 1);
     assert!(filtered[0].envelope.changes().is_empty());
+    let filtered = &filtered[0].envelope;
     assert!(query
         .transform(InputEnvelope {
             port: PortId::try_new("in").expect("port"),
-            envelope: filtered.remove(0).envelope,
+            envelope: filtered.clone(),
         })
         .await
         .expect("progress")
         .is_empty());
+    let raw = raw_source_input(78, false);
+    let duplicate = GraphChangeCodec::derive_changes(
+        filtered,
+        &GraphChangeCodec::decode_changes(&raw.envelope).expect("raw change"),
+        filtered.system().stream().clone(),
+        filtered.system().sequence(),
+    )
+    .expect("payload-bearing duplicate of the filtered producer position");
+    assert!(query
+        .transform(InputEnvelope {
+            port: PortId::try_new("in").expect("port"),
+            envelope: duplicate,
+        })
+        .await
+        .expect("filtered producer position was checkpointed")
+        .is_empty());
+    let separate_raw_branch = query.transform(raw).await.expect("independent raw input");
+    assert_eq!(separate_raw_branch.len(), 1);
+    assert_eq!(
+        QueryChangeCodec::to_legacy_result(&separate_raw_branch[0].envelope)
+            .expect("raw branch result")
+            .results
+            .len(),
+        1,
+        "a derived filter must not suppress a distinct raw branch with the same causal sequence"
+    );
     assert!(query
         .transform(raw_source_input(78, false))
         .await
-        .expect("duplicate filtered source position")
+        .expect("duplicate raw source position")
         .is_empty());
+    assert_eq!(query.results().snapshot().expect("snapshot").rows.len(), 3);
     transformer.stop().await.expect("stop transformer");
     query.stop().await.expect("stop query");
 }

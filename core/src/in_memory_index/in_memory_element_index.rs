@@ -20,9 +20,9 @@ use std::{
     sync::Arc,
 };
 
+use crate::hashing::SpookyHasher;
 use async_stream::stream;
 use async_trait::async_trait;
-use hashers::jenkins::spooky_hash::SpookyHasher;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -457,6 +457,23 @@ impl InMemoryElementIndex {
 
 #[async_trait]
 impl ElementIndex for InMemoryElementIndex {
+    async fn get_slot_elements(&self, slot: usize) -> Result<ElementStream, IndexError> {
+        let references: Vec<_> = self
+            .slot_affinity
+            .read()
+            .await
+            .iter()
+            .filter(|(_, slots)| slots.contains(&slot))
+            .map(|(reference, _)| reference.clone())
+            .collect();
+        let elements = self.elements.read().await;
+        let result: Vec<_> = references
+            .iter()
+            .filter_map(|reference| elements.get(reference).cloned())
+            .collect();
+        Ok(Box::pin(futures::stream::iter(result.into_iter().map(Ok))))
+    }
+
     async fn get_slot_element_by_ref(
         &self,
         slot: usize,

@@ -44,6 +44,11 @@ pub trait ElementIndex: Send + Sync {
         slot: usize,
         element_ref: &ElementReference,
     ) -> Result<Option<Arc<Element>>, IndexError>;
+    /// Enumerate the current elements matching a slot, including this session's writes.
+    /// Disconnected MATCH components require this capability.
+    async fn get_slot_elements(&self, _slot: usize) -> Result<ElementStream, IndexError> {
+        Err(IndexError::NotSupported)
+    }
     async fn get_slot_elements_by_inbound(
         &self,
         slot: usize,

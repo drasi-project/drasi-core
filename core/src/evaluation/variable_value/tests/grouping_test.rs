@@ -99,8 +99,8 @@ fn grouping_numeric_exact_equivalence_classes() {
             assert_contract(a, b, a_class == b_class);
         }
     }
-    // Do not alter general comparison/arithmetic as a side effect of grouping.
-    assert_eq!(
+    // General numeric equality must not equate an integer with its rounded float.
+    assert_ne!(
         VariableValue::from(json!(9_007_199_254_740_993_i64)),
         VariableValue::from(json!(9_007_199_254_740_992.0))
     );

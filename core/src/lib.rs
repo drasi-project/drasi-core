@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod evaluation;
+pub mod hashing;
 pub mod in_memory_index;
 pub mod index_cache;
 pub mod interface;
