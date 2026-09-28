@@ -142,6 +142,55 @@ The [application reaction guide](../../components/reactions/application/README.m
 shows the exact result shape and the receive APIs. Take its receiver only once;
 create separate reactions if you need separate consumers.
 
+Queries assembled with `computation_pipeline()` or the built-in continuous-query
+factory are listed by `list_queries()` and expose configuration, status, results,
+retained output, metrics, logs and events through the ordinary query APIs. These
+readers use the graph-owned query's existing state; reading does not construct a
+second evaluator. A stopped query remains discoverable, but result reads report
+that it is not running.
+
+Live subscriptions, ordinary reactions and Server's query attach stream require
+a connected query-results outlet. A result catalogue by itself provides lookup,
+not live delivery. Pipeline assembly supplies the outlet automatically.
+`start_query` and `stop_query` include the query's dedicated subscription readers,
+timer source and result outlet; they do not stop a shared application source or
+another query's work.
+Pipeline queries also support `update_query` and `remove_query`. Replacement
+rewires subscription readers and retains transport ordering without stopping
+shared sources or sibling queries. Replacing an ordinary source reconnects all
+of its pipeline queries together. Reactions can be updated to consume these
+queries through the normal reaction API.
+
+Removal rejects dependent consumers, stops the query's dedicated helpers,
+erases its owned processing state and removes unused resource declarations.
+Ordinary stop and instance shutdown retain processing state. Custom native
+components must implement `deprovision` to support permanent state removal;
+arbitrary factory/input rewiring still uses explicit computation operations.
+QueryConfig replacement applies to pipeline queries, not opaque external
+query implementations or custom graph input layouts.
+
+Replacement does not override consumer recovery policy. A strict reaction
+with a checkpoint from the previous query generation rejects a reset rather
+than silently abandoning its progress. Query configuration can be committed
+even when restarting such a consumer fails; inspect the affected nodes.
+
+Factory-created declarations retain their configuration when construction
+fails. Native wrappers can forward the optional `QueryApi` read capability from
+their query implementation; declaring a query role alone does not manufacture
+result access.
+Native Source/Reaction roles also participate in ordinary inventory, status,
+diagnostics, start/stop and removal APIs. Internal subscription readers and
+timer helpers are not extra public Sources. Available configuration is read
+from the graph's captured values or factory recipe; an opaque external binding
+remains visible and has diagnostics even when its full configuration is
+unavailable. Descriptive snapshots include these components, while complete
+reconstruction exports retain their native definitions exactly once.
+
+A native graph role does not manufacture the legacy Source/Reaction plugin
+interface. Operations requiring that interface, including replacement with
+an ordinary plugin object, report the limitation explicitly; custom native
+factory and connection changes use computation operations.
+
 ## Inspect a problem
 
 Start with the component's status and error, then look at the query's own graph:

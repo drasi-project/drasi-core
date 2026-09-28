@@ -810,6 +810,10 @@ impl TransactionTransformer {
 
 #[async_trait]
 impl ComputationComponent for TransactionTransformer {
+    fn query_api(&self) -> Option<Arc<super::QueryApi>> {
+        self.processor().query_api()
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         self.processor().descriptor()
     }
@@ -830,6 +834,9 @@ impl ComputationComponent for TransactionTransformer {
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.processor_mut().stop().await
+    }
+    async fn deprovision(&mut self) -> anyhow::Result<()> {
+        self.processor_mut().deprovision().await
     }
 }
 

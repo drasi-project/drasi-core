@@ -15,6 +15,7 @@
 mod component;
 mod events;
 mod inspection;
+mod native_query;
 mod query;
 mod reaction;
 mod snapshot;
@@ -344,6 +345,64 @@ impl Runtime {
         self.services.clone()
     }
 
+    pub(crate) async fn bind_batch_source_dependencies(
+        &self,
+        batch: &mut ComponentBatch,
+    ) -> anyhow::Result<()> {
+        let records = self.current_records().await?;
+        let mut sources = BTreeSet::new();
+        for resource in batch.bindings.resources.values().filter(|resource| {
+            resource.role() == ResourceRole::LegacySource && resource.is::<SourcePluginHost>()
+        }) {
+            let host = resource.get::<SourcePluginHost>()?;
+            let source = host.source()?;
+            if records.get(source.id()).is_some_and(|record| {
+                matches!(&record.value, Value::Source(current) if Arc::ptr_eq(&current.source, &source))
+            }) {
+                sources.insert(source.id().to_owned());
+            }
+        }
+        for node in &batch.definition.components {
+            let ComponentConstruction::Factory(spec) = &node.construction else {
+                continue;
+            };
+            if spec.implementation
+                != ContinuousQueryFactory::default()
+                    .descriptor()
+                    .implementation
+            {
+                continue;
+            }
+            let config = match spec.configuration.get("query_config") {
+                Some(ConfigurationValue::Literal(value)) => {
+                    match serde_json::from_value::<QueryConfig>(value.clone()) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            log::debug!(
+                                "Query '{}' configuration is pending component validation: {error}",
+                                node.descriptor.id()
+                            );
+                            continue;
+                        }
+                    }
+                }
+                _ => continue,
+            };
+            for source in config.sources {
+                if sources.contains(&source.source_id) {
+                    let link = (
+                        ComponentId::try_new(source.source_id)?,
+                        node.descriptor.id().clone(),
+                    );
+                    if !batch.definition.subscriptions.contains(&link) {
+                        batch.definition.subscriptions.push(link);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn infrastructure_resources(
         &self,
         publication: &GraphRegistrySnapshot,
@@ -461,21 +520,94 @@ impl Runtime {
     }
 
     async fn reaction_queries(&self, ids: &[String]) -> anyhow::Result<()> {
-        let records = self.current_records().await?;
+        let control = self.control()?;
+        let publication = control.registry_snapshot();
         let mut dependencies = Vec::new();
         for id in ids {
-            let record = records
-                .get(id)
+            let node = publication
+                .desired
+                .nodes
+                .iter()
+                .find(|node| node.descriptor.id().as_str() == id)
                 .ok_or_else(|| anyhow::anyhow!("Query '{id}' not found"))?;
-            if !matches!(&record.value, Value::Query(_)) {
-                anyhow::bail!("Component '{id}' is not a Query");
-            }
-            dependencies.push(self.handle_for(record)?);
+            anyhow::ensure!(Self::is_query_node(node), "Component '{id}' is not a Query");
+            dependencies.push(control.component_handle(&ComponentId::try_new(id.as_str())?)?);
         }
         for handle in dependencies {
             handle.wait_created().await?;
         }
         Ok(())
+    }
+
+    async fn query_subscription(&self, id: &str) -> anyhow::Result<CatalogSubscription> {
+        let publication = self.control()?.registry_snapshot();
+        if let Some(Value::Query(query)) = self
+            .records_at(&publication)
+            .await?
+            .get(id)
+            .map(|record| &record.value)
+        {
+            return query.subscribe_results();
+        }
+        self.query_observation_at(&publication, id)?;
+        let api = publication
+            .query_api(&ComponentId::try_new(id)?)
+            .ok_or_else(|| anyhow::anyhow!("query '{id}' has no result subscription capability"))?;
+        Self::native_result_catalog(&publication, id, &api)?.subscribe_query(id)
+    }
+
+    async fn link_query_output(&self, id: &str) -> anyhow::Result<()> {
+        let publication = self.control()?.registry_snapshot();
+        if self.records_at(&publication).await?.contains_key(id) {
+            return Ok(());
+        }
+        self.query_observation_at(&publication, id)?;
+        let api = publication
+            .query_api(&ComponentId::try_new(id)?)
+            .ok_or_else(|| anyhow::anyhow!("query '{id}' has no result access capability"))?;
+        Self::native_result_catalog(&publication, id, &api)?;
+        api.link_catalog(&self.catalog)
+    }
+
+    pub(super) fn native_result_catalog(
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+        api: &QueryApi,
+    ) -> anyhow::Result<QueryResultsCatalog> {
+        anyhow::ensure!(
+            api.config.id == id,
+            "query read capability belongs to another component"
+        );
+        let catalog = api
+            .catalog
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Query '{id}' has no configured result outlet"))?;
+        let outlet_factory = QueryResultsOutletFactory::default()
+            .descriptor()
+            .implementation
+            .clone();
+        let connected = publication
+            .desired
+            .edges
+            .iter()
+            .filter(|edge| edge.definition.from.component.as_str() == id)
+            .filter_map(|edge| {
+                publication
+                    .desired
+                    .specifications
+                    .get(&edge.definition.to.component)
+            })
+            .filter(|spec| spec.implementation == outlet_factory)
+            .flat_map(|spec| spec.dependencies.get("catalog").into_iter().flatten());
+        for resource in connected {
+            let supplied = publication
+                .resource(resource)?
+                .get::<QueryResultsCatalog>()?;
+            if supplied.same_registry(catalog) {
+                return Ok(catalog.clone());
+            }
+        }
+        anyhow::bail!("Query '{id}' has no configured result subscription outlet");
     }
 
     async fn register(
@@ -918,6 +1050,40 @@ impl Runtime {
         kind: &str,
         expected: Option<u64>,
     ) -> anyhow::Result<()> {
+        if !self.current_records().await?.contains_key(id) {
+            if expected.is_some() {
+                return Err(GraphError::StaleGeneration.into());
+            }
+            let control = self.control()?;
+            let publication = control.registry_snapshot();
+            let kind = match kind {
+                "source" => "source",
+                "query" => "query",
+                "reaction" => "reaction",
+                _ => anyhow::bail!("unsupported component kind {kind}"),
+            };
+            let observed = self.component_observation_at(&publication, id, kind)?;
+            if kind == "query" {
+                return native_query::start_query(&control, &ComponentId::try_new(id)?, None).await;
+            }
+            anyhow::ensure!(
+                !matches!(
+                    observed.lifecycle,
+                    ComponentLifecycle::Starting
+                        | ComponentLifecycle::Running
+                        | ComponentLifecycle::Stopping
+                ) || observed.failure.is_some()
+                    || observed.exhausted,
+                "Component '{id}' cannot start while it is {:?}",
+                observed.lifecycle
+            );
+            let handle = control.component_handle(&ComponentId::try_new(id)?)?;
+            anyhow::ensure!(
+                handle.generation() == observed.generation,
+                GraphError::StaleGeneration
+            );
+            return handle.start().await.map_err(Into::into);
+        }
         let mut record = self.record(id, kind).await?;
         if expected.is_some_and(|token| token != record.token) {
             return Err(GraphError::StaleGeneration.into());
@@ -985,6 +1151,43 @@ impl Runtime {
         kind: &str,
         expected: Option<u64>,
     ) -> anyhow::Result<()> {
+        if !self.current_records().await?.contains_key(id) {
+            if expected.is_some() {
+                return Err(GraphError::StaleGeneration.into());
+            }
+            let control = self.control()?;
+            let kind = match kind {
+                "source" => "source",
+                "query" => "query",
+                "reaction" => "reaction",
+                _ => anyhow::bail!("unsupported component kind {kind}"),
+            };
+            let publication = control.registry_snapshot();
+            let observed = self.component_observation_at(&publication, id, kind)?;
+            if kind == "query" {
+                return native_query::stop_query(&control, &ComponentId::try_new(id)?, None).await;
+            }
+            anyhow::ensure!(
+                matches!(
+                    observed.lifecycle,
+                    ComponentLifecycle::Running
+                        | ComponentLifecycle::Starting
+                        | ComponentLifecycle::Failed
+                ) || observed.failure.is_some()
+                    || matches!(
+                        observed.realization,
+                        RealizationState::Pending | RealizationState::Creating
+                    ),
+                "Component '{id}' cannot stop while it is {:?}",
+                observed.lifecycle
+            );
+            let handle = control.component_handle(&ComponentId::try_new(id)?)?;
+            anyhow::ensure!(
+                handle.generation() == observed.generation,
+                GraphError::StaleGeneration
+            );
+            return handle.stop().await.map_err(Into::into);
+        }
         let record = self.record(id, kind).await?;
         if expected.is_some_and(|token| token != record.token) {
             return Err(GraphError::StaleGeneration.into());
@@ -1013,6 +1216,11 @@ impl Runtime {
         cleanup: bool,
     ) -> anyhow::Result<()> {
         self.control()?.require_configuration_write()?;
+        if !self.current_records().await?.contains_key(id) {
+            return self
+                .remove_native_component(id, kind, cleanup || kind == "query")
+                .await;
+        }
         let record = self.record(id, kind).await?;
         let dependents: Vec<_> = self
             .control()?
@@ -1239,6 +1447,10 @@ impl Runtime {
         source: Box<dyn Source>,
     ) -> anyhow::Result<()> {
         self.control()?.require_configuration_write()?;
+        if !self.current_records().await?.contains_key(id) {
+            self.component_observation_at(&self.control()?.registry_snapshot(), id, "source")?;
+            anyhow::bail!("Source '{id}' is a native component; replace its declared factory or external binding through computation operations");
+        }
         let old = self.record(id, "source").await?;
         if source.id() != id {
             anyhow::bail!(
@@ -1247,35 +1459,60 @@ impl Runtime {
             );
         }
         let records = self.current_records().await?;
-        let affected: Vec<_> = self
-            .control()?
-            .desired_snapshot()
+        let publication = self.control()?.registry_snapshot();
+        let affected: Vec<_> = publication
+            .desired
             .data_dependents(&old.node)
             .into_iter()
             .filter(|id| {
-                records
-                    .get(id.as_str())
-                    .is_some_and(|record| matches!(&record.value, Value::Query(_)))
+                publication
+                    .desired
+                    .nodes
+                    .iter()
+                    .any(|node| node.descriptor.id() == id && Self::is_query_node(node))
             })
             .map(|id| id.to_string())
             .collect();
-        let mut resume = self.pause_consumers(&affected).await?;
-        if self.needs_resume(&old)? {
-            resume.push(old.clone());
+        let mut native = Vec::new();
+        for id in affected
+            .iter()
+            .filter(|id| !records.contains_key(id.as_str()))
+        {
+            let config = self.query_configuration(id).await?;
+            let node = &publication.observed.components[&ComponentId::try_new(id.as_str())?];
+            native.push((
+                id.clone(),
+                config,
+                matches!(
+                    node.lifecycle,
+                    ComponentLifecycle::Running | ComponentLifecycle::Starting
+                ),
+            ));
         }
+        let resume = self.pause_consumers(&affected).await?;
+        for (id, _, running) in &native {
+            if *running {
+                self.stop_component(id, "query").await?;
+            }
+        }
+        let restart_source = self.needs_resume(&old)?;
         let source = SourceInstance::new(
             source,
             self.services.clone(),
             self.changed.clone(),
             self.control()?,
         );
-        self.replace_record(
-            old,
-            Value::Source(source.clone()),
-            serde_json::json!({"auto_start":source.source.auto_start()}),
-        )
-        .await?;
-        for id in affected {
+        let replacement = self
+            .replace_record(
+                old,
+                Value::Source(source.clone()),
+                serde_json::json!({"auto_start":source.source.auto_start()}),
+            )
+            .await?;
+        for id in affected
+            .into_iter()
+            .filter(|id| records.contains_key(id.as_str()))
+        {
             let record = self.record(&id, "query").await?;
             let Value::Query(query) = &record.value else {
                 unreachable!()
@@ -1285,6 +1522,33 @@ impl Runtime {
             self.replace_record(record, Value::Query(query), serde_json::to_value(config)?)
                 .await?;
         }
+        let mut native_plan: Option<native_query::NativeQueryUpdate> = None;
+        for (id, config, _) in &native {
+            let plan = self.native_query_update_plan(id, config.clone()).await?;
+            if let Some(combined) = &mut native_plan {
+                combined.merge(plan)?;
+            } else {
+                native_plan = Some(plan);
+            }
+        }
+        if let Some(plan) = native_plan {
+            let report = self
+                .control()?
+                .mutate_members(plan.members, plan.changes, plan.bindings, BTreeSet::new())
+                .await?;
+            anyhow::ensure!(
+                report.committed && report.summary == OperationSummary::Completed,
+                "native source consumers were not replaced: {report:?}"
+            );
+        }
+        if restart_source {
+            self.start_record(&replacement).await?;
+        }
+        for (id, _, running) in &native {
+            if *running {
+                self.start_component(id, "query").await?;
+            }
+        }
         self.resume_records(resume).await
     }
     pub(crate) async fn update_query(
@@ -1293,6 +1557,9 @@ impl Runtime {
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         self.control()?.require_configuration_write()?;
+        if !self.current_records().await?.contains_key(id) {
+            return self.update_native_query(id, config).await;
+        }
         let old = self.record(id, "query").await?;
         if config.id != id {
             anyhow::bail!(
@@ -1312,6 +1579,10 @@ impl Runtime {
         reaction: Box<dyn Reaction>,
     ) -> anyhow::Result<()> {
         self.control()?.require_configuration_write()?;
+        if !self.current_records().await?.contains_key(id) {
+            self.component_observation_at(&self.control()?.registry_snapshot(), id, "reaction")?;
+            anyhow::bail!("Reaction '{id}' is a native component; replace its declared factory or external binding through computation operations");
+        }
         let old = self.record(id, "reaction").await?;
         if reaction.id() != id {
             anyhow::bail!(
@@ -1320,15 +1591,7 @@ impl Runtime {
             );
         }
         let ids = reaction.query_ids();
-        let records = self.current_records().await?;
-        for id in &ids {
-            if !matches!(
-                records.get(id).map(|record| &record.value),
-                Some(Value::Query(_))
-            ) {
-                anyhow::bail!("Query '{id}' not found");
-            }
-        }
+        self.reaction_queries(&ids).await?;
         let restart = self.needs_resume(&old)?;
         let reaction = ReactionInstance::new(reaction, self);
         let new = self
@@ -1578,6 +1841,10 @@ impl Runtime {
         Ok(())
     }
     pub(crate) async fn source(&self, id: &str) -> anyhow::Result<Arc<dyn Source>> {
+        if !self.current_records().await?.contains_key(id) {
+            self.component_observation_at(&self.control()?.registry_snapshot(), id, "source")?;
+            anyhow::bail!("Source '{id}' exists but does not expose the Source plugin interface");
+        }
         match self.record(id, "source").await?.value {
             Value::Source(source) => Ok(source.source.clone()),
             _ => unreachable!(),
@@ -1590,6 +1857,12 @@ impl Runtime {
         }
     }
     pub(crate) async fn reaction(&self, id: &str) -> anyhow::Result<Arc<dyn Reaction>> {
+        if !self.current_records().await?.contains_key(id) {
+            self.component_observation_at(&self.control()?.registry_snapshot(), id, "reaction")?;
+            anyhow::bail!(
+                "Reaction '{id}' exists but does not expose the Reaction plugin interface"
+            );
+        }
         match self.record(id, "reaction").await?.value {
             Value::Reaction(reaction) => Ok(reaction.reaction.clone()),
             _ => unreachable!(),
@@ -1600,6 +1873,29 @@ impl Runtime {
             Value::Query(query) => Ok(query),
             _ => unreachable!(),
         }
+    }
+    pub(crate) async fn query_instance(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> anyhow::Result<Arc<dyn QueryTrait>> {
+        let control = self.control()?;
+        let publication = control.registry_snapshot();
+        if let Some(record) = self.records_at(&publication).await?.get(id) {
+            if let Value::Query(query) = &record.value {
+                return Ok(query.clone());
+            }
+        }
+        let config = self.native_query_configuration_at(&publication, id)?;
+        let handle = control.component_handle(&ComponentId::try_new(id)?)?;
+        anyhow::ensure!(
+            publication.observed.components[handle.id()].generation == handle.generation(),
+            GraphError::StaleGeneration
+        );
+        Ok(Arc::new(native_query::NativeQuery {
+            config,
+            handle,
+            control,
+        }))
     }
     pub(crate) async fn reaction_metrics(
         &self,
@@ -1633,21 +1929,24 @@ impl Runtime {
                 }
             }
         }
-        for record in records {
-            if let Value::Query(query) = record.value {
-                let labels = crate::queries::LabelExtractor::extract_labels(
-                    &query.config.query,
-                    &query.config.query_language,
-                )?;
-                schema.mark_queried_nodes(
-                    labels.node_labels.iter().map(String::as_str),
-                    &query.config.id,
-                );
-                schema.mark_queried_relations(
-                    labels.relation_labels.iter().map(String::as_str),
-                    &query.config.id,
-                );
+        for (id, _) in self.list_components("source").await? {
+            if !records
+                .iter()
+                .any(|record| record.value.instance().id() == id)
+            {
+                schema.record_source_without_schema(&id);
             }
+        }
+        for query in self.query_configurations().await? {
+            let labels = crate::queries::LabelExtractor::extract_labels(
+                &query.query,
+                &query.query_language,
+            )?;
+            schema.mark_queried_nodes(labels.node_labels.iter().map(String::as_str), &query.id);
+            schema.mark_queried_relations(
+                labels.relation_labels.iter().map(String::as_str),
+                &query.id,
+            );
         }
         Ok(schema)
     }

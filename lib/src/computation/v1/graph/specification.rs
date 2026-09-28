@@ -272,6 +272,10 @@ impl ResourceHandle {
                 })
     }
 
+    pub(crate) fn is<T: Any + Send + Sync>(&self) -> bool {
+        self.value.is::<T>()
+    }
+
     pub fn get<T: Any + Send + Sync>(&self) -> GraphResult<Arc<T>> {
         self.value
             .clone()

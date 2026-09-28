@@ -416,6 +416,16 @@ enum Component {
 }
 
 impl Component {
+    fn query_api(&self) -> Option<Arc<super::QueryApi>> {
+        match self {
+            Self::Source(component) => component.query_api(),
+            Self::Transformer(component) | Self::Query(component) => component.query_api(),
+            Self::Sink(component) => component.query_api(),
+            Self::Service(component) => component.query_api(),
+            Self::Deferred { .. } | Self::Unresolved(_) => None,
+        }
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         match self {
             Self::Source(component) => component.descriptor(),
@@ -471,6 +481,18 @@ impl Component {
             Self::Service(component) => component.stop().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 Err(anyhow::anyhow!("component has not been constructed"))
+            }
+        }
+    }
+
+    async fn deprovision(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.deprovision().await,
+            Self::Transformer(component) | Self::Query(component) => component.deprovision().await,
+            Self::Sink(component) => component.deprovision().await,
+            Self::Service(component) => component.deprovision().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                anyhow::bail!("component has not been constructed")
             }
         }
     }
@@ -1024,6 +1046,11 @@ impl ComputationGraphBuilder {
             Arc::new(observed.clone()),
             &self.resource_handles,
             configurations,
+            ids.iter()
+                .filter_map(|(id, index)| {
+                    components[*index].query_api().map(|api| (id.clone(), api))
+                })
+                .collect(),
         )))
         .0;
         Ok(ComputationGraph {

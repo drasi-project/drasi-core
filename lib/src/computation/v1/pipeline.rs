@@ -128,6 +128,10 @@ impl ComputationPipelineBuilder {
     pub fn catalog(&self) -> QueryResultsCatalog {
         self.catalog.clone()
     }
+    pub(crate) fn with_catalog(mut self, catalog: QueryResultsCatalog) -> Self {
+        self.catalog = catalog;
+        self
+    }
     pub fn services(&self) -> LegacyPluginServices {
         self.services.clone()
     }
@@ -493,6 +497,7 @@ impl ComputationPipelineBuilder {
                     ),
                     (Arc::from("subscription"), vec![subscription_id]),
                     (Arc::from("progress"), vec![progress_id.clone()]),
+                    (Arc::from("catalog"), vec![catalog_id.clone()]),
                 ]
                 .into_iter()
                 .chain(host.services().dependencies())
@@ -594,10 +599,10 @@ impl ComputationPipelineBuilder {
                             Arc::from("stream"),
                             ConfigurationValue::Literal(scheduled_stream.as_str().into()),
                         )]),
-                        dependencies: BTreeMap::from([(
-                            Arc::from("scheduling"),
-                            vec![scheduling_id.clone()],
-                        )]),
+                        dependencies: BTreeMap::from([
+                            (Arc::from("scheduling"), vec![scheduling_id.clone()]),
+                            (Arc::from("catalog"), vec![catalog_id.clone()]),
+                        ]),
                     },
                     scheduled_factory,
                 )
@@ -779,6 +784,13 @@ impl ComputationPipelineBuilder {
                                 Arc::from("execution"),
                                 ConfigurationValue::Literal(
                                     serde_json::to_value(execution)
+                                        .map_err(|error| invalid(error.to_string()))?,
+                                ),
+                            ),
+                            (
+                                Arc::from("query_config"),
+                                ConfigurationValue::Literal(
+                                    serde_json::to_value(config)
                                         .map_err(|error| invalid(error.to_string()))?,
                                 ),
                             ),

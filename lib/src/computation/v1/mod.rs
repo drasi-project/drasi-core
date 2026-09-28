@@ -206,6 +206,8 @@ mod ports;
 mod producer_progress;
 pub use producer_progress::{GraphProducerIdentity, GraphProducerProgress};
 mod query;
+mod query_api;
+pub use query_api::QueryApi;
 mod query_identity;
 pub use query_identity::*;
 mod query_configuration;

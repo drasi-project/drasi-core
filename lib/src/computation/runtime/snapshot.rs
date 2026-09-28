@@ -140,7 +140,51 @@ impl Runtime {
             });
             snapshot.edges.extend(ownership_edges(&self.config.id, id));
         }
-        for (from, to) in publication.desired.subscriptions.iter() {
+        for node in publication
+            .desired
+            .nodes
+            .iter()
+            .filter(|node| Self::public_component_kind(&publication.desired, node).is_some())
+        {
+            let id = node.descriptor.id();
+            if snapshot.nodes.iter().any(|node| node.id == id.as_str()) {
+                continue;
+            }
+            let kind = Self::public_component_kind(&publication.desired, node)
+                .expect("filtered component kind");
+            let state = self.component_observation_at(&publication, id.as_str(), kind)?;
+            let mut metadata = HashMap::from([(
+                "autoStart".into(),
+                publication.desired.lifecycle_policies[id]
+                    .auto_start
+                    .to_string(),
+            )]);
+            if let Some(failure) = &state.failure {
+                metadata.insert("error".into(), format!("{:#}", failure.cause));
+            }
+            snapshot.nodes.push(ComponentNode {
+                id: id.to_string(),
+                kind: match kind {
+                    "source" => ComponentKind::Source,
+                    "query" => ComponentKind::Query,
+                    _ => ComponentKind::Reaction,
+                },
+                status: events::observed_status(state, ComponentStatus::Added),
+                metadata,
+            });
+            snapshot
+                .edges
+                .extend(ownership_edges(&self.config.id, id.as_str()));
+        }
+        let connections: BTreeSet<_> = publication
+            .desired
+            .data_connections()
+            .filter(|(from, to)| {
+                snapshot.nodes.iter().any(|node| node.id == from.as_str())
+                    && snapshot.nodes.iter().any(|node| node.id == to.as_str())
+            })
+            .collect();
+        for (from, to) in connections {
             snapshot.edges.extend([
                 GraphEdge {
                     from: from.to_string(),
@@ -175,7 +219,7 @@ impl Runtime {
     }
 }
 
-fn ownership_edges(instance: &str, id: &str) -> [GraphEdge; 2] {
+pub(super) fn ownership_edges(instance: &str, id: &str) -> [GraphEdge; 2] {
     [
         GraphEdge {
             from: instance.into(),

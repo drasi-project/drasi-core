@@ -46,6 +46,6 @@ A04	P1	partial	native-transaction-abi	host-sdk	drasi-host-sdk	native_computation
 A05	P2	unqualified	dynamic-plugins	-	-	-	-	Sustained per-instance DLL ownership/late-callback accounting remains; process-pinned libraries are intentional.
 H01	P1	unqualified	server	-	-	-	-	Expand Server startup/acceptance/readiness contracts through REST, including delayed and failed activation.
 H02	P1	blocked	server-managed	-	-	-	-	Server does not expose the complete integrated desired-state/receipt/snapshot workflow.
-H03	P1	blocked	server-graph-query	-	-	-	-	Ordinary query APIs do not expose the complete graph-scoped native query/result/diagnostic contract.
+H03	P1	partial	server-query-api	default	drasi-lib	component_api_parity	native_query_apis_match_ordinary_creation_and_runtime_behavior	Native query reads/lifecycle/SSE plus pipeline query update/removal, source and reaction upserts are covered; custom input/foreign-query capabilities and generic native Source/Reaction API parity remain.
 H04	P1	unqualified	test-infra-qos	-	-	-	-	Session-local golden-hash evidence exists; versioned test-infra QoS/query-host selection and provenance assertions are still required.
 H05	P2	unqualified	server-observers	-	-	-	-	Prolonged SSE/reconnect gaps need explicit resynchronization and stale-observer assertions.

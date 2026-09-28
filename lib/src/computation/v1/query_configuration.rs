@@ -37,6 +37,31 @@ pub struct QueryExecutionSettings {
 pub struct QueryMiddlewareResource(pub Arc<MiddlewareTypeRegistry>);
 
 impl QueryExecutionSettings {
+    pub(crate) fn query_configuration(
+        &self,
+        definition: &super::ContinuousQueryDefinition,
+        bootstrap: bool,
+        recovery: super::QueryRecoveryPolicy,
+    ) -> QueryConfig {
+        let mut config = crate::Query::cypher(definition.id.as_str())
+            .query(definition.query.clone())
+            .enable_bootstrap(bootstrap)
+            .with_outbox_capacity(definition.outbox_capacity.get())
+            .build();
+        config.query_language = match definition.language {
+            super::ComputationQueryLanguage::Cypher => crate::config::QueryLanguage::Cypher,
+            super::ComputationQueryLanguage::Gql => crate::config::QueryLanguage::GQL,
+        };
+        config.sources = self.sources.clone();
+        config.middleware = self.middleware.clone();
+        config.joins = (!self.joins.is_empty()).then(|| self.joins.clone());
+        config.recovery_policy = Some(match recovery {
+            super::QueryRecoveryPolicy::Strict => crate::RecoveryPolicy::Strict,
+            super::QueryRecoveryPolicy::AutoReset => crate::RecoveryPolicy::AutoReset,
+        });
+        config
+    }
+
     pub fn from_legacy_config(config: &QueryConfig) -> Self {
         Self {
             joins: config.joins.clone().unwrap_or_default(),

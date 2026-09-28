@@ -734,6 +734,67 @@ async fn factory_restart_replays_input_accepted_while_the_query_was_stopped() ->
 }
 
 #[tokio::test]
+async fn factory_query_apis_restore_committed_results_without_a_second_evaluator() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core, resources) = open(directory.path(), true).await?;
+    core.apply_desired_state(0, "configuration", desired(directory.path(), "left", true)?)
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    assert_eq!(
+        core.list_queries().await?,
+        vec![("query".into(), drasi_lib::ComponentStatus::Added)]
+    );
+    assert_eq!(
+        core.get_query_config("query").await?.query,
+        "MATCH (n:Item) RETURN sum(n.value) AS total"
+    );
+    core.start().await?;
+    resources.append("left", 1).await?;
+    wait_delivery(&resources, "left", 1).await?;
+    assert_eq!(
+        core.get_query_results("query").await?,
+        vec![json!({"total":1.0})]
+    );
+    let reader = core
+        .query_manager()
+        .get_query_instance("query")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let first = reader.fetch_snapshot().await?;
+    assert_eq!(first.as_of_sequence, 1);
+    assert!(!reader.is_volatile());
+    assert!(
+        reader.subscribe("not-wired".into()).await.is_err(),
+        "a result catalogue alone is not a subscription outlet"
+    );
+    core.shutdown().await?;
+    assert!(reader.fetch_snapshot().await.is_err());
+    drop((reader, core, resources));
+    let (core, resources) = open(directory.path(), true).await?;
+    core.start().await?;
+    let reader = core
+        .query_manager()
+        .get_query_instance("query")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let restored = reader.fetch_snapshot().await?;
+    assert_eq!(restored.as_of_sequence, first.as_of_sequence);
+    assert_eq!(restored.output_generation, first.output_generation);
+    assert_eq!(restored.config_hash, first.config_hash);
+    assert_eq!(restored.to_vec(), first.to_vec());
+    resources.append("left", 2).await?;
+    wait_delivery(&resources, "left", 2).await?;
+    assert_eq!(
+        core.get_query_results("query").await?,
+        vec![json!({"total":2.0})]
+    );
+    assert_eq!(reader.fetch_outbox(0).await?.latest_sequence, 2);
+    core.shutdown().await?;
+    assert_eq!(effect_sequences(directory.path(), "left")?, [1, 2]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn source_restart_with_pipe_ahead_preserves_transport_identity_on_later_reconstruction(
 ) -> Result<()> {
     let directory = tempfile::tempdir()?;

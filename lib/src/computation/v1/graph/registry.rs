@@ -23,6 +23,7 @@ pub(crate) struct GraphRegistrySnapshot {
     pub observed: Arc<ObservedGraph>,
     resources: BTreeMap<ResourceId, specification::WeakResourceHandle>,
     configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
+    query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
 }
 
 impl GraphRegistrySnapshot {
@@ -31,11 +32,13 @@ impl GraphRegistrySnapshot {
         observed: Arc<ObservedGraph>,
         resources: &BTreeMap<ResourceId, ResourceHandle>,
         configurations: BTreeMap<ComponentId, CapturedComponentConfiguration>,
+        query_apis: BTreeMap<ComponentId, std::sync::Weak<crate::computation::v1::QueryApi>>,
     ) -> Self {
         Self {
             desired: Arc::new(desired.clone()),
             observed,
             configurations,
+            query_apis,
             resources: resources
                 .iter()
                 .map(|(id, handle)| (id.clone(), handle.downgrade()))
@@ -61,6 +64,20 @@ impl GraphRegistrySnapshot {
             .upgrade()
             .ok_or(GraphError::StaleGeneration)
     }
+
+    pub(crate) fn component_configuration(
+        &self,
+        id: &ComponentId,
+    ) -> Option<&CapturedComponentConfiguration> {
+        self.configurations.get(id)
+    }
+
+    pub(crate) fn query_api(
+        &self,
+        id: &ComponentId,
+    ) -> Option<Arc<crate::computation::v1::QueryApi>> {
+        self.query_apis.get(id).and_then(std::sync::Weak::upgrade)
+    }
 }
 
 pub(super) fn publish(graph: &ComputationGraph) {
@@ -74,6 +91,15 @@ pub(super) fn publish(graph: &ComputationGraph) {
                 .ids
                 .iter()
                 .map(|(id, index)| (id.clone(), graph.components[*index].configuration()))
+                .collect(),
+            graph
+                .ids
+                .iter()
+                .filter_map(|(id, index)| {
+                    graph.components[*index]
+                        .query_api()
+                        .map(|api| (id.clone(), api))
+                })
                 .collect(),
         )));
 }

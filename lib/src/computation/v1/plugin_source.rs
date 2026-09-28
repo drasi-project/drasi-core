@@ -448,6 +448,9 @@ impl LegacySourceSubscription {
     pub fn host(&self) -> &Arc<SourcePluginHost> {
         &self.host
     }
+    pub(crate) fn options(&self) -> SourceSubscriptionOptions {
+        self.options.clone()
+    }
     pub fn stream(&self) -> &StreamId {
         &self.stream
     }
@@ -767,7 +770,7 @@ pub struct SourcePluginAdapter {
     descriptor: ComponentDescriptor,
     subscription: Arc<LegacySourceSubscription>,
     live: Option<Box<dyn ChangeReceiver<SourceEventWrapper>>>,
-    sequence: u64,
+    sequence: Arc<AtomicU64>,
     buffer_before_ready: bool,
 }
 impl SourcePluginAdapter {
@@ -785,7 +788,7 @@ impl SourcePluginAdapter {
             .expect("source descriptor"),
             subscription,
             live: None,
-            sequence: 0,
+            sequence: Arc::new(AtomicU64::new(0)),
             buffer_before_ready: false,
         }
     }
@@ -875,6 +878,7 @@ impl EnvelopeSource for SourcePluginAdapter {
             }
             let sequence = self
                 .sequence
+                .load(Ordering::Acquire)
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("source adapter sequence exhausted"))?;
             let envelope = GraphChangeCodec::encode_source_event(
@@ -884,7 +888,7 @@ impl EnvelopeSource for SourcePluginAdapter {
                 sequence,
                 self.subscription.host.source()?.describe_schema(),
             )?;
-            self.sequence = sequence;
+            self.sequence.store(sequence, Ordering::Release);
             return Ok(Some(OutputEnvelope {
                 port: PortId::try_new("out")?,
                 envelope,
@@ -1056,6 +1060,15 @@ impl Default for SourcePluginAdapterFactory {
                 },
                 dependencies: [
                     (
+                        Arc::from("catalog"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<QueryResultsCatalog>(
+                                ResourceRole::QueryCatalog,
+                            )
+                        },
+                    ),
+                    (
                         Arc::from("source"),
                         ResourceRequirement::exactly_one::<SourcePluginHost>(
                             ResourceRole::LegacySource,
@@ -1213,7 +1226,21 @@ impl ComponentFactory for SourcePluginAdapterFactory {
             .get("buffer_before_ready")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let mut adapter = SourcePluginAdapter::new(context.component_id, subscription);
+        let mut adapter = SourcePluginAdapter::new(context.component_id.clone(), subscription);
+        if context.specification.dependencies.contains_key("catalog") {
+            let catalog = context
+                .resources::<QueryResultsCatalog>("catalog")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+                .ok_or_else(|| {
+                    ComponentCreationError::terminal(anyhow::anyhow!(
+                        "missing source transport catalogue"
+                    ))
+                })?;
+            adapter.sequence = catalog
+                .transport_sequence(adapter.subscription.stream())
+                .map_err(ComponentCreationError::terminal)?;
+        }
         adapter.buffer_before_ready = buffer_before_ready;
         Ok(ConstructedComponent::source(Box::new(adapter)))
     }

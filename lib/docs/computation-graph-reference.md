@@ -24,6 +24,7 @@ feature opt-in.
 | `ScopedGraph` (internal) | Owns a query's QueryGraph task and cleanup |
 | `ComponentBatch` | Component declarations and supplied bindings added to the instance graph |
 | `ComputationInventory` | Combined view of the ComputationGraph and its owned QueryGraphs |
+| `QueryApi` | Optional read capability for a graph-owned query's configuration, output and metrics |
 
 An instance's source/query/reaction records are owned by its graph. Compatibility
 inspection responses are derived from those records, not used to recover

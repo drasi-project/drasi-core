@@ -167,9 +167,8 @@ impl DrasiLib {
     ) -> Result<super::v1::ComputationInspector> {
         self.state_guard.require_initialized()?;
         self.computation_runtime
-            .query(id)
+            .query_inspector(id)
             .await
-            .map(|query| query.inspector())
             .map_err(|error| {
                 DrasiError::operation_failed("query", id, "inspect_computation", error.to_string())
             })
@@ -351,6 +350,9 @@ impl DrasiLib {
                 return Err(DrasiError::invalid_state("instance has been shut down"));
             }
             let mut batch = pending.take().await?;
+            self.computation_runtime
+                .bind_batch_source_dependencies(&mut batch)
+                .await?;
             let current = control.registry_snapshot();
             let mut ids: std::collections::BTreeSet<_> = current
                 .desired

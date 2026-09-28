@@ -129,6 +129,9 @@ impl RuntimeComponent for ReactionInstance {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("native runtime was dropped"))?;
         owner.reaction_queries(&self.query_ids).await?;
+        for id in &self.query_ids {
+            owner.link_query_output(id).await?;
+        }
         if let Some(previous) = self.current_host()? {
             previous.shutdown().await?;
         }
@@ -169,11 +172,11 @@ impl RuntimeComponent for ReactionInstance {
         let mut subscriptions = Vec::new();
         let mut heads = BTreeMap::new();
         for id in &self.query_ids {
-            let query = owner.query(id).await?;
+            owner.link_query_output(id).await?;
             host.wait_query_ready(id).await?;
-            let subscription = query.subscribe_results()?;
-            heads.insert(query.config.id.clone(), subscription.head()?);
-            subscriptions.push((query.config.id.clone(), subscription));
+            let subscription = owner.query_subscription(id).await?;
+            heads.insert(id.clone(), subscription.head()?);
+            subscriptions.push((id.clone(), subscription));
         }
         *inputs = subscriptions;
         let result = host.start_component_with_heads(heads).await;

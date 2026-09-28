@@ -38,6 +38,182 @@ fn error_message(record: &Record, observed: &ObservedComponent) -> Option<String
 }
 
 impl Runtime {
+    pub(crate) async fn query_inspector(&self, id: &str) -> anyhow::Result<ComputationInspector> {
+        let publication = self.control()?.registry_snapshot();
+        self.query_observation_at(&publication, id)?;
+        match self
+            .records_at(&publication)
+            .await?
+            .get(id)
+            .map(|record| &record.value)
+        {
+            Some(Value::Query(query)) => Ok(query.inspector()),
+            _ => self.inspector(),
+        }
+    }
+
+    pub(super) fn is_query_node(node: &NodeSnapshot) -> bool {
+        node.descriptor
+            .semantic_kind()
+            .unwrap_or_else(|| node.role.into())
+            == ComponentSemanticKind::Query
+    }
+
+    pub(super) fn public_component_kind(
+        snapshot: &GraphSnapshot,
+        node: &NodeSnapshot,
+    ) -> Option<&'static str> {
+        let kind = node
+            .descriptor
+            .semantic_kind()
+            .unwrap_or_else(|| node.role.into());
+        if node.descriptor.semantic_kind().is_none() {
+            if let Some(spec) = snapshot.specifications.get(node.descriptor.id()) {
+                match spec.implementation.name.as_ref() {
+                    "drasi/source-plugin-subscription" | "drasi/query-scheduled-source" => {
+                        return None
+                    }
+                    "drasi/reaction-plugin" => return Some("reaction"),
+                    _ => {}
+                }
+            }
+        }
+        match kind {
+            ComponentSemanticKind::Source => Some("source"),
+            ComponentSemanticKind::Query => Some("query"),
+            ComponentSemanticKind::Reaction => Some("reaction"),
+            _ => None,
+        }
+    }
+
+    pub(super) fn component_observation_at<'a>(
+        &self,
+        publication: &'a GraphRegistrySnapshot,
+        id: &str,
+        kind: &'static str,
+    ) -> anyhow::Result<&'a ObservedComponent> {
+        let node = publication
+            .desired
+            .nodes
+            .iter()
+            .find(|node| {
+                node.descriptor.id().as_str() == id
+                    && Self::public_component_kind(&publication.desired, node) == Some(kind)
+            })
+            .ok_or_else(|| crate::managers::ComponentNotFoundError::new(kind, id))?;
+        publication
+            .observed
+            .components
+            .get(node.descriptor.id())
+            .ok_or_else(|| anyhow::anyhow!("{kind} '{id}' has no graph observation"))
+    }
+
+    fn native_component_properties(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+        kind: &'static str,
+    ) -> anyhow::Result<(String, HashMap<String, serde_json::Value>)> {
+        self.component_observation_at(publication, id, kind)?;
+        let component = ComponentId::try_new(id)?;
+        let configuration = publication
+            .component_configuration(&component)
+            .ok_or_else(|| anyhow::anyhow!("{kind} '{id}' has no published configuration"))?;
+        let declared = |values: &BTreeMap<Arc<str>, ConfigurationValue>| {
+            values.iter().map(|(name, value)| match value {
+                ConfigurationValue::Literal(value) => Ok((name.to_string(), value.clone())),
+                ConfigurationValue::Reference { .. } => anyhow::bail!("{kind} '{id}' configuration references have not been resolved; use the computation configuration export"),
+            }).collect::<anyhow::Result<HashMap<_, _>>>()
+        };
+        let properties = match configuration {
+            CapturedComponentConfiguration::Available { values } => {
+                serde_json::from_value(values.clone())?
+            }
+            CapturedComponentConfiguration::Declared { values } => declared(values)?,
+            CapturedComponentConfiguration::Unavailable { reason } => {
+                let specification = publication
+                    .desired
+                    .specifications
+                    .get(&component)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{kind} '{id}' exists, but its configuration is unavailable: {reason}"
+                        )
+                    })?;
+                declared(&specification.configuration)?
+            }
+        };
+        let implementation = publication
+            .desired
+            .specifications
+            .get(&component)
+            .map(|spec| spec.implementation.name.to_string())
+            .or_else(|| {
+                publication
+                    .desired
+                    .nodes
+                    .iter()
+                    .find(|node| node.descriptor.id() == &component)
+                    .and_then(|node| node.descriptor.plugin_identity())
+                    .map(|plugin| plugin.id.to_string())
+            })
+            .unwrap_or_else(|| "native".into());
+        Ok((implementation, properties))
+    }
+
+    pub(super) fn native_query_configuration_at(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+    ) -> anyhow::Result<QueryConfig> {
+        let node = publication
+            .desired
+            .nodes
+            .iter()
+            .find(|node| node.descriptor.id().as_str() == id && Self::is_query_node(node))
+            .ok_or_else(|| crate::managers::ComponentNotFoundError::new("query", id))?;
+        let component = node.descriptor.id();
+        let mut config = if let Some(api) = publication.query_api(component) {
+            api.config.clone()
+        } else if let Some(ConfigurationValue::Literal(value)) = publication
+            .desired
+            .specifications
+            .get(component)
+            .and_then(|spec| spec.configuration.get("query_config"))
+        {
+            serde_json::from_value(value.clone())?
+        } else if let Some(spec) =
+            publication
+                .desired
+                .specifications
+                .get(component)
+                .filter(|spec| {
+                    spec.implementation
+                        == ContinuousQueryFactory::default()
+                            .descriptor()
+                            .implementation
+                })
+        {
+            ContinuousQueryFactory::query_configuration(spec, &publication.desired.id)?
+        } else {
+            anyhow::bail!("Query '{id}' exists but does not expose ordinary query configuration in its current construction state");
+        };
+        anyhow::ensure!(
+            config.id == id,
+            "query configuration identity does not match its graph node"
+        );
+        config.auto_start = publication.desired.lifecycle_policies[component].auto_start;
+        Ok(config)
+    }
+
+    pub(super) fn query_observation_at<'a>(
+        &self,
+        publication: &'a GraphRegistrySnapshot,
+        id: &str,
+    ) -> anyhow::Result<&'a ObservedComponent> {
+        self.component_observation_at(publication, id, "query")
+    }
+
     pub(crate) async fn component_events(&self, id: &str) -> Vec<ComponentEvent> {
         self.events.component(id)
     }
@@ -154,19 +330,30 @@ impl Runtime {
         kind: &str,
     ) -> anyhow::Result<Vec<(String, ComponentStatus)>> {
         let publication = self.control()?.registry_snapshot();
-        self.records_at(&publication)
-            .await?
-            .into_iter()
-            .filter(|(_, record)| record.value.instance().kind() == kind)
-            .map(|(id, record)| {
-                let observed = publication
+        let records = self.records_at(&publication).await?;
+        let mut components: Vec<_> = publication
+            .desired
+            .nodes
+            .iter()
+            .filter(|node| Self::public_component_kind(&publication.desired, node) == Some(kind))
+            .map(|node| {
+                let id = node.descriptor.id().as_str();
+                let state = publication
                     .observed
                     .components
-                    .get(&record.node)
-                    .ok_or_else(|| anyhow::anyhow!("graph component {id} has no observation"))?;
-                Ok((id, status(&record, observed)))
+                    .get(node.descriptor.id())
+                    .ok_or_else(|| anyhow::anyhow!("{kind} '{id}' has no graph observation"))?;
+                Ok((
+                    id.to_owned(),
+                    records.get(id).filter(|_| kind != "query").map_or_else(
+                        || events::observed_status(state, ComponentStatus::Added),
+                        |record| status(record, state),
+                    ),
+                ))
             })
-            .collect()
+            .collect::<anyhow::Result<_>>()?;
+        components.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(components)
     }
 
     pub(crate) async fn component_status(
@@ -174,11 +361,31 @@ impl Runtime {
         id: &str,
         kind: &'static str,
     ) -> anyhow::Result<ComponentStatus> {
-        let (record, observed) = self.inspect_record(id, kind).await?;
-        Ok(status(&record, &observed))
+        let publication = self.control()?.registry_snapshot();
+        if kind != "query" {
+            if let Some(record) = self
+                .records_at(&publication)
+                .await?
+                .get(id)
+                .filter(|record| record.value.instance().kind() == kind)
+            {
+                return Ok(status(
+                    record,
+                    self.component_observation_at(&publication, id, kind)?,
+                ));
+            }
+        }
+        Ok(events::observed_status(
+            self.component_observation_at(&publication, id, kind)?,
+            ComponentStatus::Added,
+        ))
     }
 
     pub(crate) async fn source_info(&self, id: &str) -> anyhow::Result<SourceRuntime> {
+        let publication = self.control()?.registry_snapshot();
+        if !self.records_at(&publication).await?.contains_key(id) {
+            return self.native_source_info_at(&publication, id);
+        }
         let (record, observed) = self.inspect_record(id, "source").await?;
         let Value::Source(source) = &record.value else {
             unreachable!("source record");
@@ -193,21 +400,31 @@ impl Runtime {
     }
 
     pub(crate) async fn query_info(&self, id: &str) -> anyhow::Result<QueryRuntime> {
-        let (record, observed) = self.inspect_record(id, "query").await?;
-        let Value::Query(query) = &record.value else {
-            unreachable!("query record");
+        let publication = self.control()?.registry_snapshot();
+        let records = self.records_at(&publication).await?;
+        let config = match records.get(id).map(|record| &record.value) {
+            Some(Value::Query(query)) => query.config.clone(),
+            _ => self.native_query_configuration_at(&publication, id)?,
         };
+        let observed = self.query_observation_at(&publication, id)?;
         Ok(QueryRuntime {
             id: id.to_owned(),
-            query: query.config.query.clone(),
-            status: status(&record, &observed),
-            error_message: error_message(&record, &observed),
-            source_subscriptions: query.config.sources.clone(),
-            joins: query.config.joins.clone(),
+            query: config.query,
+            status: events::observed_status(observed, ComponentStatus::Added),
+            error_message: observed
+                .failure
+                .as_ref()
+                .map(|failure| format!("{:#}", failure.cause)),
+            source_subscriptions: config.sources,
+            joins: config.joins,
         })
     }
 
     pub(crate) async fn reaction_info(&self, id: &str) -> anyhow::Result<ReactionRuntime> {
+        let publication = self.control()?.registry_snapshot();
+        if !self.records_at(&publication).await?.contains_key(id) {
+            return self.native_reaction_info_at(&publication, id);
+        }
         let (record, observed) = self.inspect_record(id, "reaction").await?;
         let Value::Reaction(reaction) = &record.value else {
             unreachable!("reaction record");
@@ -222,9 +439,82 @@ impl Runtime {
         })
     }
 
+    fn native_source_info_at(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+    ) -> anyhow::Result<SourceRuntime> {
+        let state = self.component_observation_at(publication, id, "source")?;
+        let (source_type, properties) =
+            self.native_component_properties(publication, id, "source")?;
+        Ok(SourceRuntime {
+            id: id.into(),
+            source_type,
+            properties,
+            status: events::observed_status(state, ComponentStatus::Added),
+            error_message: state
+                .failure
+                .as_ref()
+                .map(|failure| format!("{:#}", failure.cause)),
+        })
+    }
+
+    fn native_reaction_info_at(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+    ) -> anyhow::Result<ReactionRuntime> {
+        let state = self.component_observation_at(publication, id, "reaction")?;
+        let (reaction_type, properties) =
+            self.native_component_properties(publication, id, "reaction")?;
+        let queries = publication
+            .desired
+            .data_dependencies(&ComponentId::try_new(id)?)
+            .into_iter()
+            .filter(|id| {
+                publication
+                    .desired
+                    .nodes
+                    .iter()
+                    .any(|node| node.descriptor.id() == id && Self::is_query_node(node))
+            })
+            .map(|id| id.to_string())
+            .collect();
+        Ok(ReactionRuntime {
+            id: id.into(),
+            reaction_type,
+            properties,
+            queries,
+            status: events::observed_status(state, ComponentStatus::Added),
+            error_message: state
+                .failure
+                .as_ref()
+                .map(|failure| format!("{:#}", failure.cause)),
+        })
+    }
+
+    pub(crate) async fn source_schema(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::schema::SourceSchema>> {
+        let publication = self.control()?.registry_snapshot();
+        self.component_observation_at(&publication, id, "source")?;
+        Ok(self
+            .records_at(&publication)
+            .await?
+            .get(id)
+            .and_then(|record| {
+                if let Value::Source(source) = &record.value {
+                    source.source.describe_schema()
+                } else {
+                    None
+                }
+            }))
+    }
+
     pub(crate) async fn query_configurations(&self) -> anyhow::Result<Vec<QueryConfig>> {
         let publication = self.control()?.registry_snapshot();
-        Ok(self
+        let mut configs: Vec<_> = self
             .records_at(&publication)
             .await?
             .into_values()
@@ -237,15 +527,39 @@ impl Runtime {
                 }
                 _ => None,
             })
-            .collect())
+            .collect();
+        for node in publication
+            .desired
+            .nodes
+            .iter()
+            .filter(|node| Self::is_query_node(node))
+        {
+            if !configs
+                .iter()
+                .any(|config| config.id == node.descriptor.id().as_str())
+            {
+                configs.push(
+                    self.native_query_configuration_at(
+                        &publication,
+                        node.descriptor.id().as_str(),
+                    )?,
+                );
+            }
+        }
+        configs.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(configs)
     }
 
     pub(crate) async fn query_configuration(&self, id: &str) -> anyhow::Result<QueryConfig> {
-        self.query_configurations()
-            .await?
-            .into_iter()
-            .find(|config| config.id == id)
-            .ok_or_else(|| crate::managers::ComponentNotFoundError::new("query", id).into())
+        let publication = self.control()?.registry_snapshot();
+        if let Some(record) = self.records_at(&publication).await?.get(id) {
+            if let Value::Query(query) = &record.value {
+                let mut config = query.config.clone();
+                config.auto_start = publication.desired.lifecycle_policies[&record.node].auto_start;
+                return Ok(config);
+            }
+        }
+        self.native_query_configuration_at(&publication, id)
     }
 
     pub(crate) async fn subscribe_logs(
@@ -256,7 +570,16 @@ impl Runtime {
         Vec<LogMessage>,
         tokio::sync::broadcast::Receiver<LogMessage>,
     )> {
-        self.record(id, kind).await?;
+        self.component_status(
+            id,
+            match kind {
+                "query" => "query",
+                "source" => "source",
+                "reaction" => "reaction",
+                _ => anyhow::bail!("unsupported component kind {kind}"),
+            },
+        )
+        .await?;
         let component_type = match kind {
             "source" => ComponentType::Source,
             "query" => ComponentType::Query,
@@ -277,7 +600,16 @@ impl Runtime {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.record(id, kind).await?;
+        self.component_status(
+            id,
+            match kind {
+                "query" => "query",
+                "source" => "source",
+                "reaction" => "reaction",
+                _ => anyhow::bail!("unsupported component kind {kind}"),
+            },
+        )
+        .await?;
         Ok(self.events.subscribe(id))
     }
 
@@ -285,7 +617,67 @@ impl Runtime {
         &self,
     ) -> anyhow::Result<crate::config::snapshot::ConfigurationSnapshot> {
         let publication = self.control()?.registry_snapshot();
-        self.configuration_snapshot_at(&publication).await
+        let mut snapshot = self.configuration_snapshot_at(&publication).await?;
+        for node in publication.desired.nodes.iter() {
+            let id = node.descriptor.id().as_str();
+            match Self::public_component_kind(&publication.desired, node) {
+                Some("source") if !snapshot.sources.iter().any(|source| source.id == id) => {
+                    let info = self.native_source_info_at(&publication, id)?;
+                    snapshot.sources.push(crate::config::SourceSnapshot {
+                        id: id.into(),
+                        source_type: info.source_type,
+                        status: info.status,
+                        auto_start: publication.desired.lifecycle_policies[node.descriptor.id()]
+                            .auto_start,
+                        properties: info.properties,
+                        bootstrap_provider: None,
+                    });
+                    snapshot
+                        .edges
+                        .extend(super::snapshot::ownership_edges(&self.config.id, id));
+                }
+                Some("reaction")
+                    if !snapshot.reactions.iter().any(|reaction| reaction.id == id) =>
+                {
+                    let info = self.native_reaction_info_at(&publication, id)?;
+                    snapshot.reactions.push(crate::config::ReactionSnapshot {
+                        id: id.into(),
+                        reaction_type: info.reaction_type,
+                        status: info.status,
+                        auto_start: publication.desired.lifecycle_policies[node.descriptor.id()]
+                            .auto_start,
+                        properties: info.properties,
+                        queries: info.queries,
+                    });
+                    snapshot
+                        .edges
+                        .extend(super::snapshot::ownership_edges(&self.config.id, id));
+                }
+                _ => {}
+            }
+        }
+        for node in publication
+            .desired
+            .nodes
+            .iter()
+            .filter(|node| Self::is_query_node(node))
+        {
+            let id = node.descriptor.id().as_str();
+            if !snapshot.queries.iter().any(|query| query.id == id) {
+                snapshot.queries.push(crate::config::QuerySnapshot {
+                    id: id.to_owned(),
+                    config: self.native_query_configuration_at(&publication, id)?,
+                    status: events::observed_status(
+                        self.query_observation_at(&publication, id)?,
+                        ComponentStatus::Added,
+                    ),
+                });
+                snapshot
+                    .edges
+                    .extend(super::snapshot::ownership_edges(&self.config.id, id));
+            }
+        }
+        Ok(snapshot)
     }
 
     pub(crate) async fn configuration_snapshot_at(

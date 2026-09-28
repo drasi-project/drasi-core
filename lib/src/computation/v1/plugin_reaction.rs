@@ -1240,6 +1240,13 @@ impl ComputationComponent for ReactionPluginAdapter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
+    async fn deprovision(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.host.owned,
+            "borrowed reaction state must be removed by its owner"
+        );
+        self.host.reaction()?.deprovision().await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.host.start_component().await
     }

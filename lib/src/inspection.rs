@@ -138,9 +138,8 @@ impl InspectionAPI {
     ) -> crate::error::Result<Option<crate::schema::SourceSchema>> {
         self.state_guard.require_initialized()?;
         self.computation
-            .source(id)
+            .source_schema(id)
             .await
-            .map(|source| source.describe_schema())
             .map_err(|e| classify_component_error(e, "source", id, "get_schema"))
     }
 
@@ -249,7 +248,7 @@ impl InspectionAPI {
 
         let query = self
             .computation
-            .query(id)
+            .query_instance(id)
             .await
             .map_err(|error| classify_component_error(error, "query", id, "get_results"))?;
         crate::queries::Query::fetch_snapshot(query.as_ref())
@@ -728,9 +727,16 @@ impl InspectionAPI {
     ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
         self.state_guard.require_initialized()?;
         self.computation
-            .query(query_id)
+            .query_instance(query_id)
             .await
-            .map(|query| query.metrics.snapshot())
+            .and_then(|query| {
+                query
+                    .output_metrics()
+                    .map(|metrics| metrics.snapshot())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Query '{query_id}' does not expose output metrics")
+                    })
+            })
             .map_err(|error| classify_component_error(error, "query", query_id, "get_metrics"))
     }
 

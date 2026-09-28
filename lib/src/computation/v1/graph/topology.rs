@@ -110,6 +110,21 @@ pub struct FactoryRegistry {
 }
 
 impl FactoryRegistry {
+    pub(crate) fn merge(&mut self, other: Self) -> GraphResult<()> {
+        for (identity, factory) in other.factories {
+            if let Some(existing) = self.factories.get(&identity) {
+                if !Arc::ptr_eq(existing, &factory) {
+                    return Err(topology(
+                        "component factory identity has conflicting bindings",
+                    ));
+                }
+            } else {
+                self.factories.insert(identity, factory);
+            }
+        }
+        Ok(())
+    }
+
     pub fn get(
         &self,
         implementation: &ImplementationIdentity,
@@ -181,6 +196,49 @@ pub struct TopologyBindings {
     /// factories and invalid component configuration as node creation outcomes.
     #[doc(hidden)]
     pub deferred_management_validation: bool,
+}
+
+impl TopologyBindings {
+    pub(crate) fn merge(&mut self, other: Self) -> GraphResult<()> {
+        self.factories.merge(other.factories)?;
+        for (id, component) in other.components {
+            if self.components.insert(id, component).is_some() {
+                return Err(topology("duplicate external component binding"));
+            }
+        }
+        for (id, pipe) in other.pipes {
+            if self.pipes.insert(id, pipe).is_some() {
+                return Err(topology("duplicate external pipe binding"));
+            }
+        }
+        for (id, resource) in other.resources {
+            if let Some(existing) = self.resources.get(&id) {
+                if !existing.same_shared_instance(&resource) {
+                    return Err(topology(format!("resource {id} has conflicting bindings")));
+                }
+            } else {
+                self.resources.insert(id, resource);
+            }
+        }
+        for (id, constructor) in other.resource_constructors {
+            if self.resource_constructors.insert(id, constructor).is_some() {
+                return Err(topology("duplicate resource constructor"));
+            }
+        }
+        self.readiness_required.extend(other.readiness_required);
+        self.defer_activation |= other.defer_activation;
+        self.subscriptions.extend(other.subscriptions);
+        self.subscriptions.sort();
+        self.subscriptions.dedup();
+        if self.validation_error.is_some() && other.validation_error.is_some() {
+            return Err(topology(
+                "cannot combine multiple invalid component batches",
+            ));
+        }
+        self.validation_error = self.validation_error.take().or(other.validation_error);
+        self.deferred_management_validation |= other.deferred_management_validation;
+        Ok(())
+    }
 }
 
 impl DesiredPipe {
@@ -256,6 +314,17 @@ impl DesiredPipe {
 }
 
 impl DesiredTopology {
+    pub(crate) fn component_resource_users(&self, resource: &ResourceId) -> BTreeSet<ComponentId> {
+        self.components.iter().filter_map(|node| {
+            let ComponentConstruction::Factory(spec) = &node.construction else { return None; };
+            (spec.dependencies.values().flatten().any(|id| id == resource)
+                || spec.configuration.values().any(|value| matches!(value, ConfigurationValue::Reference { resource: id, .. } if id == resource)))
+                .then(|| node.descriptor.id().clone())
+        }).chain(self.component_resources.iter()
+            .filter(|(_, resources)| resources.contains(resource))
+            .map(|(id, _)| id.clone())).collect()
+    }
+
     pub fn build_components(
         &self,
         bindings: TopologyBindings,

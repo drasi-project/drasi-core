@@ -68,9 +68,8 @@ impl QueryManager {
 
     pub async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>, String> {
         self.runtime
-            .query(id)
+            .query_instance(id)
             .await
-            .map(|query| query as Arc<dyn Query>)
             .map_err(|error| format!("{error:#}"))
     }
 
@@ -113,7 +112,7 @@ impl QueryManager {
 
     pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
         Ok(
-            Query::fetch_snapshot(self.runtime.query(id).await?.as_ref())
+            Query::fetch_snapshot(self.runtime.query_instance(id).await?.as_ref())
                 .await?
                 .to_vec(),
         )
@@ -159,7 +158,7 @@ impl QueryManager {
 #[async_trait]
 impl crate::reactions::QueryProvider for QueryManager {
     async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>> {
-        Ok(self.runtime.query(id).await?)
+        Ok(self.runtime.query_instance(id).await?)
     }
 }
 

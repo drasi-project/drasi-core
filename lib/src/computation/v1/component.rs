@@ -63,6 +63,11 @@ pub struct OutputEnvelope {
 #[async_trait]
 pub trait ComputationComponent: Send + Sync {
     fn descriptor(&self) -> &ComponentDescriptor;
+    /// Publish read-only query capabilities at construction/reconfiguration
+    /// boundaries. Non-query components do not expose a query API.
+    fn query_api(&self) -> Option<std::sync::Arc<super::QueryApi>> {
+        None
+    }
     /// Configuration values, not live processing state. Identity, lifecycle
     /// policy and external resource bindings are recorded by the graph.
     /// Values may change only through construction or reconfiguration, not
@@ -91,6 +96,11 @@ pub trait ComputationComponent: Send + Sync {
     }
     async fn start(&mut self) -> anyhow::Result<()>;
     async fn stop(&mut self) -> anyhow::Result<()>;
+    /// Erase owned state for explicit permanent removal, after stopping work.
+    /// Ordinary stop, replacement and instance shutdown do not call this hook.
+    async fn deprovision(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("this component does not support permanent state removal")
+    }
     /// Called only at a processing boundary when the registered factory explicitly
     /// supports in-place configuration changes. The descriptor cannot change.
     async fn reconfigure(&mut self, _context: super::ConstructionContext) -> anyhow::Result<()> {

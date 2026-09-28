@@ -50,6 +50,7 @@ pub(super) struct InstanceSlot {
     generation: ComponentGeneration,
     value: Mutex<Option<Instance>>,
     configuration: Mutex<super::CapturedComponentConfiguration>,
+    query_api: Mutex<Option<Arc<crate::computation::v1::QueryApi>>>,
 }
 
 struct Instance {
@@ -79,10 +80,12 @@ impl InstanceSlot {
         generation: ComponentGeneration,
     ) -> Arc<Self> {
         let configuration = component.capture_configuration();
+        let query_api = component.query_api();
         Arc::new(Self {
             id,
             generation,
             configuration: Mutex::new(configuration),
+            query_api: Mutex::new(query_api),
             value: Mutex::new(Some(Instance {
                 component,
                 sequences: BTreeMap::new(),
@@ -111,6 +114,17 @@ impl InstanceSlot {
         }
     }
 
+    pub(super) fn query_api(&self) -> Option<std::sync::Weak<crate::computation::v1::QueryApi>> {
+        self.query_api
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!("Query API publication is poisoned: {}", self.id);
+                error.into_inner()
+            })
+            .as_ref()
+            .map(Arc::downgrade)
+    }
+
     fn take(self: &Arc<Self>) -> GraphResult<InstanceLease> {
         let value = self
             .value
@@ -132,6 +146,10 @@ struct InstanceLease {
 
 impl InstanceLease {
     fn refresh_configuration(&self) {
+        *self.slot.query_api.lock().unwrap_or_else(|error| {
+            log::error!("Query API publication is poisoned: {}", self.slot.id);
+            error.into_inner()
+        }) = self.component.query_api();
         let captured = self.component.capture_configuration();
         match self.slot.configuration.lock() {
             Ok(mut configuration) => *configuration = captured,
@@ -168,6 +186,16 @@ impl DerefMut for InstanceLease {
 
 impl Drop for InstanceLease {
     fn drop(&mut self) {
+        if self.value.is_none() {
+            self.slot
+                .query_api
+                .lock()
+                .unwrap_or_else(|error| {
+                    log::error!("Retiring poisoned query API: {}", self.slot.id);
+                    error.into_inner()
+                })
+                .take();
+        }
         let mut slot = match self.slot.value.lock() {
             Ok(slot) => slot,
             Err(error) => {
@@ -224,6 +252,22 @@ pub(super) enum Command {
         component: ComponentId,
         generation: ComponentGeneration,
         reply: oneshot::Sender<GraphResult<StopReport>>,
+    },
+    StartMembers {
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+        reply: oneshot::Sender<GraphResult<StartReport>>,
+    },
+    StopMembers {
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+        reply: oneshot::Sender<GraphResult<StopReport>>,
+    },
+    MutateMembers {
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+        changes: Vec<reconcile::DesiredMutation>,
+        bindings: super::TopologyBindings,
+        deprovision: BTreeSet<ComponentId>,
+        management_access: bool,
+        reply: oneshot::Sender<GraphResult<reconcile::ReconciliationReport>>,
     },
     ReadinessPolicy {
         component: ComponentId,
@@ -326,6 +370,53 @@ fn addition_id(pending: &Option<super::ComponentAddition>) -> &ComponentId {
 }
 
 impl GraphControl {
+    pub(crate) async fn start_members(
+        &self,
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+    ) -> GraphResult<StartReport> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::StartMembers { members, reply })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        receive.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
+    pub(crate) async fn stop_members(
+        &self,
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+    ) -> GraphResult<StopReport> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::StopMembers { members, reply })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        receive.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
+    pub(crate) async fn mutate_members(
+        &self,
+        members: BTreeMap<ComponentId, ComponentGeneration>,
+        changes: Vec<reconcile::DesiredMutation>,
+        bindings: super::TopologyBindings,
+        deprovision: BTreeSet<ComponentId>,
+    ) -> GraphResult<reconcile::ReconciliationReport> {
+        self.require_configuration_write()?;
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::MutateMembers {
+                members,
+                changes,
+                bindings,
+                deprovision,
+                management_access: self.management_access,
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        receive.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
     pub(crate) async fn reconcile_components(
         &self,
         previous: super::DesiredTopology,
@@ -2371,6 +2462,51 @@ fn stop_handle(
     Ok(())
 }
 
+async fn settle_pending_stop(
+    graph: &ComputationGraph,
+    operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+) -> GraphResult<()> {
+    let deadline = tokio::time::sleep(graph.cleanup_timeout);
+    tokio::pin!(deadline);
+    loop {
+        operations.advance_start(graph)?;
+        operations.advance_stop(graph)?;
+        if operations.stopping.is_none() {
+            return Ok(());
+        }
+        tokio::select! {
+            biased;
+            _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            _ = &mut deadline => return Err(GraphError::ReconciliationTimeout),
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_control(graph, completion); }
+            }
+            completion = operations.futures.next(), if !operations.futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+            }
+        }
+    }
+}
+
+fn member_indices(
+    graph: &ComputationGraph,
+    members: &BTreeMap<ComponentId, ComponentGeneration>,
+) -> GraphResult<BTreeSet<usize>> {
+    members
+        .iter()
+        .map(|(id, generation)| {
+            graph
+                .ids
+                .get(id)
+                .filter(|index| graph.components[**index].generation == *generation)
+                .copied()
+                .ok_or(GraphError::StaleGeneration)
+        })
+        .collect()
+}
+
 pub(super) async fn run(
     graph: &mut ComputationGraph,
     cancel: &mut watch::Receiver<bool>,
@@ -2683,8 +2819,61 @@ pub(super) async fn run(
                         Err(error) => { let _ = reply.send(Err(error)); }
                     }
                 }
+                Some(Command::StartMembers { members, reply }) => {
+                    let selected = member_indices(graph, &members).and_then(|selected| {
+                        if operations.starting.is_some() || operations.stopping.is_some() { Err(GraphError::OperationInProgress) }
+                        else { Ok(selected) }
+                    });
+                    match selected {
+                        Ok(selected) => {
+                            for id in members.keys() { graph.deferred_activation.remove(id); }
+                            operations.begin_start(graph, selected, Some(reply), true);
+                        }
+                        Err(error) => { let _ = reply.send(Err(error)); }
+                    }
+                }
+                Some(Command::StopMembers { members, reply }) => {
+                    let result = async {
+                        settle_pending_stop(graph, &mut operations, &controls, cancel).await?;
+                        let selected = member_indices(graph, &members)?;
+                        let quiesced = if operations.starting.is_none() {
+                            reconcile::quiesce(graph, &mut operations, &controls, cancel, selected.clone()).await
+                        } else {
+                            // Stopping must cancel unfinished starts; quiescence requires completed startup.
+                            Ok(Vec::new())
+                        };
+                        let (stopped, receive) = oneshot::channel();
+                        operations.begin_stop(graph, selected, stopped)?;
+                        let report = reconcile::drive(graph, &mut operations, &controls, cancel, async {
+                            receive.await.map_err(|_| GraphError::ControllerClosed)?
+                        }).await?;
+                        quiesced?;
+                        Ok(report)
+                    }.await;
+                    let cancelled = matches!(&result, Err(GraphError::Cancelled));
+                    let _ = reply.send(result);
+                    if cancelled { return Err(GraphError::Cancelled); }
+                }
                 Some(Command::HandleStop { component, generation, reply }) => {
                     stop_handle(graph, &mut operations, component, generation, false, reply)?;
+                }
+                Some(Command::MutateMembers { members, changes, bindings, deprovision, management_access, reply }) => {
+                    let result = async {
+                        configuration_access(graph, management_access)?;
+                        member_indices(graph, &members)?;
+                        let mut preview = reconcile::preview(graph, changes)?;
+                        if !management_access {
+                            reconcile::check_protected(graph, &preview)?;
+                        }
+                        if deprovision.iter().any(|id| !members.contains_key(id) || !preview.removed().contains(id)) {
+                            return Err(topology("state removal requires an explicitly removed member"));
+                        }
+                        preview.deprovision = deprovision;
+                        reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands, &mut deferred_commands).await
+                    }.await;
+                    let cancelled = matches!(&result, Err(GraphError::Cancelled));
+                    let _ = reply.send(result);
+                    if cancelled { return Err(GraphError::Cancelled); }
                 }
                 Some(Command::Preview { revision, changes, reply }) => {
                     let result = check_revision(graph, revision).and_then(|_| reconcile::preview(graph, changes));

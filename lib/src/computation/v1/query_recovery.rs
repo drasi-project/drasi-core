@@ -26,6 +26,47 @@ pub(super) struct ResetMarker {
 }
 
 impl ContinuousQueryTransformer {
+    pub(super) async fn deprovision_state(&mut self) -> anyhow::Result<()> {
+        if self.query.is_none() {
+            self.build().await?;
+        }
+        let query = self.query()?;
+        if !self.provider.is_volatile() {
+            let resources = query.resources();
+            query
+                .resource_transaction(|| async {
+                    resources.indexes().element_index.clear().await?;
+                    resources.indexes().archive_index.clear().await?;
+                    resources.indexes().result_index.clear().await?;
+                    query.future_queue().clear().await?;
+                    if let Some(store) = resources.checkpoint_store() {
+                        store.clear_checkpoints().await?;
+                        store
+                            .stage_result_sequence(self.definition.id.as_str(), 0)
+                            .await?;
+                    }
+                    if let Some(outbox) = resources.outbox_writer() {
+                        outbox.clear(self.definition.id.as_str()).await?;
+                        outbox.clear(&self.reset_key()).await?;
+                    }
+                    if let Some(live) = resources.live_results_writer() {
+                        live.clear(self.definition.id.as_str()).await?;
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
+        query.shutdown().await?;
+        self.query = None;
+        self.pending_output.clear();
+        self.results
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
+            .reset_to_sequence(0, 0);
+        Ok(())
+    }
+
     fn reset_key(&self) -> String {
         super::query_reset_key(self.definition.id.as_str())
     }

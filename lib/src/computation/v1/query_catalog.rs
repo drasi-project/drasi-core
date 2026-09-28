@@ -60,13 +60,14 @@ struct CatalogState {
     delivery: BTreeMap<ComponentId, DeliveryConfiguration>,
     subscribers: BTreeMap<(ComponentId, u64), Subscriber>,
     next_subscriber: u64,
+    transport: BTreeMap<StreamId, Arc<std::sync::atomic::AtomicU64>>,
 }
 struct DeliveryConfiguration {
     mode: crate::DispatchMode,
     capacity: usize,
     hash: u64,
     metrics: Arc<crate::metrics::QueryOutputMetrics>,
-    status: watch::Receiver<crate::ComponentStatus>,
+    status: Option<watch::Receiver<crate::ComponentStatus>>,
 }
 #[derive(Clone)]
 enum Subscriber {
@@ -182,6 +183,7 @@ impl QueryResultsCatalog {
                 delivery: BTreeMap::new(),
                 subscribers: BTreeMap::new(),
                 next_subscriber: 1,
+                transport: BTreeMap::new(),
             }),
             changed: watch::channel(0).0,
             events: tokio::sync::broadcast::channel(256).0,
@@ -234,7 +236,7 @@ impl QueryResultsCatalog {
         }
         Ok(())
     }
-    pub(super) fn same_registry(&self, other: &Self) -> bool {
+    pub(crate) fn same_registry(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
     pub(crate) fn configure_delivery(
@@ -249,22 +251,70 @@ impl QueryResultsCatalog {
         if capacity == 0 {
             anyhow::bail!("query delivery capacity must be nonzero");
         }
-        self.0
+        let mut state = self
+            .0
             .state
             .lock()
-            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
+        let id = ComponentId::try_new(id)?;
+        state.delivery.insert(
+            id,
+            DeliveryConfiguration {
+                mode,
+                capacity,
+                hash,
+                metrics,
+                status: Some(status),
+            },
+        );
+        Ok(())
+    }
+
+    pub(super) fn configure_native_delivery(
+        &self,
+        config: &crate::config::QueryConfig,
+        hash: u64,
+        metrics: Arc<crate::metrics::QueryOutputMetrics>,
+    ) -> anyhow::Result<()> {
+        let capacity = config.dispatch_buffer_capacity.unwrap_or(1_000);
+        anyhow::ensure!(capacity > 0, "query delivery capacity must be nonzero");
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
+        let id = ComponentId::try_new(config.id.as_str())?;
+        if state
             .delivery
-            .insert(
-                ComponentId::try_new(id)?,
+            .get(&id)
+            .map_or(true, |existing| existing.status.is_none())
+        {
+            state.delivery.insert(
+                id,
                 DeliveryConfiguration {
-                    mode,
+                    mode: config.dispatch_mode.unwrap_or_default(),
                     capacity,
                     hash,
                     metrics,
-                    status,
+                    status: None,
                 },
             );
+        }
         Ok(())
+    }
+    pub(super) fn transport_sequence(
+        &self,
+        stream: &StreamId,
+    ) -> anyhow::Result<Arc<std::sync::atomic::AtomicU64>> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?
+            .transport
+            .entry(stream.clone())
+            .or_default()
+            .clone())
     }
     pub(crate) fn subscribe_query(&self, id: &str) -> anyhow::Result<CatalogSubscription> {
         self.subscribe_query_at_head(id)
@@ -603,7 +653,10 @@ impl QueryResultsCatalog {
             .delivery
             .get(&id)
             .map_or(config_hash, |config| config.hash);
-        let status = state.delivery.get(&id).map(|config| config.status.clone());
+        let status = state
+            .delivery
+            .get(&id)
+            .and_then(|config| config.status.clone());
         state.entries.insert(
             id.clone(),
             CatalogQuery {
@@ -753,6 +806,55 @@ impl QueryResultsCatalog {
 mod tests {
     use super::*;
     use std::num::NonZeroUsize;
+
+    #[test]
+    fn native_delivery_replacement_refreshes_its_hash_without_overriding_runtime_configuration() {
+        let catalog = QueryResultsCatalog::new("delivery").unwrap();
+        let config = crate::Query::cypher("query").query("RETURN 1").build();
+        let id = ComponentId::try_new("query").unwrap();
+        let first = Arc::new(crate::metrics::QueryOutputMetrics::new());
+        let replacement = Arc::new(crate::metrics::QueryOutputMetrics::new());
+        catalog
+            .configure_native_delivery(&config, 10, first)
+            .unwrap();
+        let stream = StreamId::try_new("query/out").unwrap();
+        let sequence = catalog.transport_sequence(&stream).unwrap();
+        sequence.store(41, std::sync::atomic::Ordering::Release);
+        catalog
+            .configure_native_delivery(&config, 20, replacement.clone())
+            .unwrap();
+        assert_eq!(
+            catalog
+                .transport_sequence(&stream)
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Acquire),
+            41
+        );
+        assert_eq!(catalog.configured_hash(&id).unwrap(), Some(20));
+        assert!(Arc::ptr_eq(
+            &catalog.configured_metrics(&id).unwrap().unwrap(),
+            &replacement
+        ));
+        let runtime_metrics = Arc::new(crate::metrics::QueryOutputMetrics::new());
+        catalog
+            .configure_delivery(
+                "query",
+                crate::DispatchMode::Channel,
+                8,
+                30,
+                runtime_metrics.clone(),
+                watch::channel(crate::ComponentStatus::Added).1,
+            )
+            .unwrap();
+        catalog
+            .configure_native_delivery(&config, 40, replacement)
+            .unwrap();
+        assert_eq!(catalog.configured_hash(&id).unwrap(), Some(30));
+        assert!(Arc::ptr_eq(
+            &catalog.configured_metrics(&id).unwrap().unwrap(),
+            &runtime_metrics
+        ));
+    }
 
     #[tokio::test]
     async fn output_persistence_requires_an_explicit_observation_and_is_shared_by_links() {

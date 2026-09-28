@@ -313,6 +313,9 @@ pub struct ContinuousQueryTransformer {
     execution: QueryExecutionSettings,
     middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     registration: Option<super::query_catalog::QueryRegistration>,
+    catalog: Option<super::QueryResultsCatalog>,
+    api_configuration: Option<crate::config::QueryConfig>,
+    api_view: std::sync::OnceLock<Arc<super::QueryApi>>,
     metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
     reset_configuration: bool,
     runtime_compatibility: bool,
@@ -328,7 +331,7 @@ pub struct ContinuousQueryTransformer {
     pending_output: VecDeque<super::ChangeEnvelope>,
     replay_pending: Arc<AtomicBool>,
     delivery_changed: Arc<tokio::sync::Notify>,
-    delivery_sequence: AtomicU64,
+    delivery_sequence: Arc<AtomicU64>,
     delivered_output: AtomicU64,
 }
 
@@ -404,7 +407,10 @@ impl ContinuousQueryTransformer {
             execution,
             middleware,
             registration: None,
-            metrics: None,
+            catalog: None,
+            api_configuration: None,
+            api_view: std::sync::OnceLock::new(),
+            metrics: Some(Arc::new(crate::metrics::QueryOutputMetrics::new())),
             reset_configuration: false,
             runtime_compatibility: false,
             output_persistent: false,
@@ -418,7 +424,7 @@ impl ContinuousQueryTransformer {
             pending_output: VecDeque::new(),
             replay_pending: Arc::new(AtomicBool::new(false)),
             delivery_changed: Arc::new(tokio::sync::Notify::new()),
-            delivery_sequence: AtomicU64::new(0),
+            delivery_sequence: Arc::new(AtomicU64::new(0)),
             delivered_output: AtomicU64::new(0),
         };
         if !defer_build {
@@ -491,10 +497,19 @@ impl ContinuousQueryTransformer {
         mut self,
         catalog: &super::QueryResultsCatalog,
     ) -> anyhow::Result<Self> {
+        self.api_view.take();
         if catalog.graph_id() != self.definition.graph_id {
             anyhow::bail!("query catalogue belongs to another graph");
         }
-        self.metrics = catalog.configured_metrics(&self.definition.id)?;
+        catalog.configure_native_delivery(
+            &self.api_configuration(),
+            self.definition.configuration_hash(&self.execution)?,
+            self.metrics.clone().expect("query metrics"),
+        )?;
+        self.delivery_sequence = catalog.transport_sequence(&self.definition.output_stream)?;
+        if let Some(metrics) = catalog.configured_metrics(&self.definition.id)? {
+            self.metrics = Some(metrics);
+        }
         self.legacy_hash = catalog.configured_hash(&self.definition.id)?;
         self.registration = Some(catalog.register(
             self.definition.id.clone(),
@@ -505,10 +520,51 @@ impl ContinuousQueryTransformer {
             self.checkpoint_view.clone(),
             self.output_persistence_view.clone(),
         )?);
+        self.catalog = Some(catalog.clone());
         Ok(self)
     }
 
+    pub fn with_query_configuration(
+        mut self,
+        configuration: crate::config::QueryConfig,
+    ) -> anyhow::Result<Self> {
+        self.api_view.take();
+        anyhow::ensure!(
+            configuration.id == self.definition.id.as_str()
+                && configuration.query == self.definition.query
+                && configuration.outbox_capacity.clamp(1, 1_000_000)
+                    == self.definition.outbox_capacity.get()
+                && matches!(
+                    (&configuration.query_language, self.definition.language),
+                    (
+                        crate::config::QueryLanguage::Cypher,
+                        ComputationQueryLanguage::Cypher
+                    ) | (
+                        crate::config::QueryLanguage::GQL,
+                        ComputationQueryLanguage::Gql
+                    )
+                )
+                && serde_json::to_value(QueryExecutionSettings::from_legacy_config(
+                    &configuration
+                ))? == serde_json::to_value(&self.execution)?,
+            "query API configuration does not describe the executing query"
+        );
+        self.api_configuration = Some(configuration);
+        Ok(self)
+    }
+
+    fn api_configuration(&self) -> crate::config::QueryConfig {
+        self.api_configuration.clone().unwrap_or_else(|| {
+            self.execution.query_configuration(
+                &self.definition,
+                self.bootstrap.is_some(),
+                self.options.recovery,
+            )
+        })
+    }
+
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
+        self.api_view.take();
         self.bootstrap = Some(provider);
         self
     }
@@ -534,6 +590,7 @@ impl ContinuousQueryTransformer {
         mut self,
         progress: Arc<QuerySourceProgress>,
     ) -> anyhow::Result<Self> {
+        self.api_view.take();
         anyhow::ensure!(
             !progress.replay_only(),
             "query cannot own middleware's replay-only source progress"
@@ -1266,8 +1323,37 @@ impl ComputationComponent for ContinuousQueryTransformer {
         &self.descriptor
     }
 
+    fn query_api(&self) -> Option<Arc<super::QueryApi>> {
+        Some(
+            self.api_view
+                .get_or_init(|| {
+                    Arc::new(super::QueryApi {
+                        config: self.api_configuration(),
+                        catalog: self.catalog.clone(),
+                        metrics: self.metrics.clone().expect("query metrics"),
+                        links: Mutex::new(Vec::new()),
+                        output: super::query_catalog::CatalogQuery {
+                            generation: 0,
+                            config_hash: self.legacy_hash.unwrap_or_else(|| {
+                                self.definition
+                                    .configuration_hash(&self.execution)
+                                    .expect("query configuration encoding")
+                            }),
+                            results: self.results.clone(),
+                            progress: self.source_progress.clone(),
+                            incarnation: self.publication_identity.clone(),
+                            status: None,
+                            checkpoint: self.checkpoint_view.clone(),
+                            output_persistence: self.output_persistence_view.clone(),
+                        },
+                    })
+                })
+                .clone(),
+        )
+    }
+
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
-        Ok(serde_json::json!({
+        let mut configuration = serde_json::json!({
             "query": self.definition.query,
             "language": match self.definition.language {
                 ComputationQueryLanguage::Cypher => "cypher",
@@ -1284,7 +1370,11 @@ impl ComputationComponent for ContinuousQueryTransformer {
                 QueryPublicationMode::Atomic => "atomic",
                 QueryPublicationMode::NonAtomic => "non_atomic",
             },
-        }))
+        });
+        if let Some(config) = &self.api_configuration {
+            configuration["query_config"] = serde_json::to_value(config)?;
+        }
+        Ok(configuration)
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
@@ -1337,6 +1427,10 @@ impl ComputationComponent for ContinuousQueryTransformer {
             scheduling.ready(self.query()?.scheduling_queue());
         }
         Ok(())
+    }
+
+    async fn deprovision(&mut self) -> anyhow::Result<()> {
+        self.deprovision_state().await
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
@@ -1596,6 +1690,7 @@ impl Default for ContinuousQueryFactory {
             ("recovery", ConfigurationType::String, false),
             ("publication", ConfigurationType::String, false),
             ("execution", ConfigurationType::Object, false),
+            ("query_config", ConfigurationType::Object, false),
             ("defer_build", ConfigurationType::Boolean, false),
             ("reset_configuration", ConfigurationType::Boolean, false),
             ("runtime_compatibility", ConfigurationType::Boolean, false),
@@ -1714,6 +1809,60 @@ fn options(config: &BTreeMap<Arc<str>, serde_json::Value>) -> anyhow::Result<Que
         recovery,
         publication,
     })
+}
+
+impl ContinuousQueryFactory {
+    pub(crate) fn query_configuration(
+        spec: &ComponentSpecification,
+        graph_id: &str,
+    ) -> anyhow::Result<crate::config::QueryConfig> {
+        let mut values = BTreeMap::new();
+        for (name, value) in &spec.configuration {
+            if let ConfigurationValue::Literal(value) = value {
+                values.insert(name.clone(), value.clone());
+            }
+        }
+        let text = values
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("query text is unavailable before configuration resolution")
+            })?;
+        let stream = values
+            .get("stream")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "query output stream is unavailable before configuration resolution"
+                )
+            })?;
+        let outbox = match values.get("outbox_capacity") {
+            Some(value) => value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .and_then(NonZeroUsize::new)
+                .ok_or_else(|| anyhow::anyhow!("invalid query output retention capacity"))?,
+            None => NonZeroUsize::new(1000).expect("default capacity"),
+        };
+        let execution: QueryExecutionSettings = values
+            .get("execution")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?
+            .unwrap_or_default();
+        let definition = ContinuousQueryDefinition {
+            graph_id: graph_id.into(),
+            id: spec.descriptor.id().clone(),
+            query: text.into(),
+            language: language(values.get("language"))?,
+            output_stream: StreamId::try_new(stream)?,
+            outbox_capacity: outbox,
+        };
+        Ok(execution.query_configuration(
+            &definition,
+            spec.dependencies.contains_key("bootstrap"),
+            options(&values)?.recovery,
+        ))
+    }
 }
 
 #[async_trait]
@@ -1952,6 +2101,14 @@ impl ComponentFactory for ContinuousQueryFactory {
                     .with_source_progress(progress.0.clone())
                     .map_err(ComponentCreationError::terminal)?;
             }
+        }
+        if let Some(config) = config.get("query_config") {
+            query = query
+                .with_query_configuration(
+                    serde_json::from_value(config.clone())
+                        .map_err(ComponentCreationError::terminal)?,
+                )
+                .map_err(ComponentCreationError::terminal)?;
         }
         if context.specification.dependencies.contains_key("catalog") {
             if let Some(catalog) = context

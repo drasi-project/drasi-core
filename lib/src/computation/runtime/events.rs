@@ -71,17 +71,14 @@ impl Events {
 }
 
 fn component_type(snapshot: &GraphSnapshot, id: &ComponentId) -> Option<ComponentType> {
-    let specification = snapshot.specifications.get(id)?;
-    if specification.implementation.name.as_ref() != "drasi/lib-runtime-component" {
-        return None;
-    }
-    match specification.configuration.get("kind")? {
-        ConfigurationValue::Literal(serde_json::Value::String(kind)) => match kind.as_str() {
-            "source" => Some(ComponentType::Source),
-            "query" => Some(ComponentType::Query),
-            "reaction" => Some(ComponentType::Reaction),
-            _ => None,
-        },
+    let node = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.descriptor.id() == id)?;
+    match Runtime::public_component_kind(snapshot, node) {
+        Some("source") => Some(ComponentType::Source),
+        Some("query") => Some(ComponentType::Query),
+        Some("reaction") => Some(ComponentType::Reaction),
         _ => None,
     }
 }
@@ -112,8 +109,9 @@ impl PublicationObserver for Events {
                 continue;
             };
             let old = previous.observed.components.get(id);
-            let replaced = old.is_some()
-                && record_token(&previous.desired, id) != record_token(&current.desired, id);
+            let replaced = old.is_some_and(|old| old.generation != observed.generation)
+                || old.is_some()
+                    && record_token(&previous.desired, id) != record_token(&current.desired, id);
             let status = observed_status(observed, ComponentStatus::Added);
             let emit = |status, message| {
                 self.record(ComponentEvent {

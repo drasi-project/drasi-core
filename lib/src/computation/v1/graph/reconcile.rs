@@ -81,6 +81,7 @@ pub struct ReconciliationPreview {
     remove_resources: BTreeSet<ResourceId>,
     drain: BTreeSet<ComponentId>,
     epochs: BTreeMap<ComponentId, (ComponentGeneration, OperationEpoch)>,
+    pub(super) deprovision: BTreeSet<ComponentId>,
 }
 
 impl ReconciliationPreview {
@@ -273,14 +274,7 @@ fn dependent_closure(desired: &DesiredTopology, selected: &mut BTreeSet<Componen
 }
 
 fn resource_users(desired: &DesiredTopology, resource: &ResourceId) -> BTreeSet<ComponentId> {
-    desired.components.iter().filter_map(|node| {
-        let ComponentConstruction::Factory(spec) = &node.construction else { return None; };
-        (spec.dependencies.values().flatten().any(|id| id == resource)
-            || spec.configuration.values().any(|value| matches!(value, ConfigurationValue::Reference { resource: id, .. } if id == resource)))
-            .then(|| node.descriptor.id().clone())
-    }).chain(desired.component_resources.iter()
-        .filter(|(_, resources)| resources.contains(resource))
-        .map(|(id, _)| id.clone())).collect()
+    desired.component_resource_users(resource)
 }
 
 fn remove_components(
@@ -835,6 +829,7 @@ pub(super) fn preview(
         remove_resources,
         drain,
         epochs,
+        deprovision: BTreeSet::new(),
     })
 }
 
@@ -1330,7 +1325,7 @@ fn prepare(
     })
 }
 
-async fn drive<T>(
+pub(super) async fn drive<T>(
     graph: &ComputationGraph,
     operations: &mut Operations,
     controls: &PipeGuard,
@@ -1517,12 +1512,13 @@ async fn stop_instance(
     controls: &PipeGuard,
     cancel: &mut watch::Receiver<bool>,
     index: usize,
+    deprovision: bool,
 ) -> GraphResult<()> {
     let slot = graph.components[index].clone();
     graph.peers.reset_ready(&slot.id, slot.generation)?;
     let node = graph.nodes[index].clone();
     let mut lease = slot.take()?;
-    if !lease.attempted {
+    if !lease.attempted && !deprovision {
         return Ok(());
     }
     update(graph, |state| {
@@ -1532,11 +1528,27 @@ async fn stop_instance(
         observed.transition_time = Utc::now();
     });
     let result = drive(graph, operations, controls, cancel, async {
-        lease
-            .component
-            .stop()
-            .await
-            .map_err(|source| component_error(&node, "stop", source))
+        if lease.attempted {
+            lease
+                .component
+                .stop()
+                .await
+                .map_err(|source| component_error(&node, "stop", source))?;
+            lease.attempted = false;
+        }
+        if deprovision
+            && !matches!(
+                lease.component,
+                Component::Deferred { .. } | Component::Unresolved(_)
+            )
+        {
+            lease
+                .component
+                .deprovision()
+                .await
+                .map_err(|source| component_error(&node, "deprovision", source))?;
+        }
+        Ok(())
     })
     .await;
     if result.is_ok() {
@@ -1584,7 +1596,13 @@ pub(super) async fn execute(
             return Err(GraphError::StaleGeneration);
         }
     }
-    let plan = preview(graph, supplied.changes)?;
+    let mut plan = preview(graph, supplied.changes)?;
+    if !supplied.deprovision.is_subset(&plan.remove) {
+        return Err(topology(
+            "state cleanup must only target removed components",
+        ));
+    }
+    plan.deprovision = supplied.deprovision;
     let defer_activation = bindings.defer_activation;
     let mut prepared = prepare(graph, &plan, bindings)?;
     for id in plan.remove.iter().chain(&plan.replace) {
@@ -1693,7 +1711,16 @@ pub(super) async fn execute(
     for index in graph.order.clone() {
         let id = graph.nodes[index].descriptor.id().clone();
         if stop.contains(&id) {
-            if let Err(error) = stop_instance(graph, operations, controls, cancel, index).await {
+            if let Err(error) = stop_instance(
+                graph,
+                operations,
+                controls,
+                cancel,
+                index,
+                plan.deprovision.contains(&id),
+            )
+            .await
+            {
                 if matches!(error, GraphError::Cancelled) {
                     return Err(error);
                 }

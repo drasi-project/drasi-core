@@ -18,7 +18,7 @@ use drasi_core::interface::FutureQueue;
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Weak,
     },
     time::Duration,
@@ -66,7 +66,7 @@ pub struct QueryScheduledSource {
     descriptor: ComponentDescriptor,
     stream: StreamId,
     scheduling: Arc<QuerySchedulingResource>,
-    sequence: u64,
+    sequence: Arc<AtomicU64>,
     not_before: Option<tokio::time::Instant>,
 }
 
@@ -92,7 +92,7 @@ impl QueryScheduledSource {
             descriptor: source_descriptor(id)?,
             stream,
             scheduling,
-            sequence: 0,
+            sequence: Arc::new(AtomicU64::new(0)),
             not_before: None,
         })
     }
@@ -153,17 +153,19 @@ impl EnvelopeSource for QueryScheduledSource {
                 }
                 continue;
             }
-            self.sequence = self
+            let sequence = self
                 .sequence
+                .load(Ordering::Acquire)
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("scheduled source sequence exhausted"))?;
+            self.sequence.store(sequence, Ordering::Release);
             self.not_before = Some(tokio::time::Instant::now() + Duration::from_millis(50));
             return Ok(Some(OutputEnvelope {
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_futures_due(
                     self.descriptor.id(),
                     self.stream.clone(),
-                    self.sequence,
+                    sequence,
                     timestamp,
                 )?,
             }));
@@ -196,12 +198,23 @@ impl Default for QueryScheduledSourceFactory {
                     )]),
                     allow_additional: false,
                 },
-                dependencies: BTreeMap::from([(
-                    Arc::from("scheduling"),
-                    ResourceRequirement::exactly_one::<QuerySchedulingResource>(
-                        ResourceRole::FutureQueue,
+                dependencies: BTreeMap::from([
+                    (
+                        Arc::from("scheduling"),
+                        ResourceRequirement::exactly_one::<QuerySchedulingResource>(
+                            ResourceRole::FutureQueue,
+                        ),
                     ),
-                )]),
+                    (
+                        Arc::from("catalog"),
+                        ResourceRequirement {
+                            minimum: 0,
+                            ..ResourceRequirement::exactly_one::<QueryResultsCatalog>(
+                                ResourceRole::QueryCatalog,
+                            )
+                        },
+                    ),
+                ]),
             },
         }
     }
@@ -238,10 +251,24 @@ impl ComponentFactory for QueryScheduledSourceFactory {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing scheduled stream"))
             })?;
         let stream = StreamId::try_new(stream).map_err(ComponentCreationError::terminal)?;
-        Ok(ConstructedComponent::source(Box::new(
+        let mut source =
             QueryScheduledSource::new(context.component_id.clone(), stream, scheduling)
-                .map_err(ComponentCreationError::terminal)?,
-        )))
+                .map_err(ComponentCreationError::terminal)?;
+        if context.specification.dependencies.contains_key("catalog") {
+            let catalog = context
+                .resources::<QueryResultsCatalog>("catalog")
+                .map_err(ComponentCreationError::terminal)?
+                .pop()
+                .ok_or_else(|| {
+                    ComponentCreationError::terminal(anyhow::anyhow!(
+                        "missing scheduled transport catalogue"
+                    ))
+                })?;
+            source.sequence = catalog
+                .transport_sequence(&source.stream)
+                .map_err(ComponentCreationError::terminal)?;
+        }
+        Ok(ConstructedComponent::source(Box::new(source)))
     }
 }
 
@@ -286,7 +313,7 @@ mod tests {
             .unwrap(),
             stream: StreamId::try_new("scheduled/out").unwrap(),
             scheduling: scheduling.clone(),
-            sequence: 0,
+            sequence: Arc::new(AtomicU64::new(0)),
             not_before: None,
         };
         let first = source.next().await.unwrap().unwrap().envelope;
