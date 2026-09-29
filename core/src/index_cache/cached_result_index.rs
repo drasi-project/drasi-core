@@ -74,20 +74,19 @@ impl AccumulatorIndex for CachedResultIndex {
     ) -> Result<Option<ValueAccumulator>, IndexError> {
         let cache_key = get_hash_key(owner, key);
 
-        let mut cache = self.value_cache.write().await;
-        match cache.get(&cache_key) {
-            None => {
-                let value = self.inner.get(key, owner).await?;
-                match value {
-                    None => Ok(None),
-                    Some(v) => {
-                        _ = cache.put(cache_key, v.clone());
-                        Ok(Some(v))
-                    }
-                }
+        {
+            let mut cache = self.value_cache.write().await;
+            if let Some(v) = cache.get(&cache_key) {
+                return Ok(Some(v.clone()));
             }
-            Some(v) => Ok(Some(v.clone())),
         }
+
+        let value = self.inner.get(key, owner).await?;
+        if let Some(v) = &value {
+            let mut cache = self.value_cache.write().await;
+            _ = cache.put(cache_key, v.clone());
+        }
+        Ok(value)
     }
 
     async fn set(
@@ -127,15 +126,17 @@ impl LazySortedSetStore for CachedResultIndex {
     ) -> Result<isize, IndexError> {
         let cache_key = (set_id, value);
 
-        let mut cache = self.set_count_cache.write().await;
-        match cache.get(&cache_key) {
-            None => {
-                let value = self.inner.get_value_count(set_id, value).await?;
-                _ = cache.put(cache_key, value);
-                Ok(value)
+        {
+            let mut cache = self.set_count_cache.write().await;
+            if let Some(v) = cache.get(&cache_key) {
+                return Ok(*v);
             }
-            Some(v) => Ok(*v),
         }
+
+        let count = self.inner.get_value_count(set_id, value).await?;
+        let mut cache = self.set_count_cache.write().await;
+        _ = cache.put(cache_key, count);
+        Ok(count)
     }
 
     async fn increment_value_count(

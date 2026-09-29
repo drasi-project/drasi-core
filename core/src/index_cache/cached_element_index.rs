@@ -124,44 +124,36 @@ impl ElementIndex for CachedElementIndex {
         slot: usize,
         element_ref: &ElementReference,
     ) -> Result<Option<Arc<Element>>, IndexError> {
-        let mut slot_cache = self.slot_cache.write().await;
-        let slot_elements = slot_cache.get_mut(element_ref);
+        // `caches` LRU nodes are raw pointers. Never hold a reference into the
+        // cache (or its write lock) across an `.await` — eviction can free the
+        // node and SIGSEGV.
+        let cached = {
+            let mut slot_cache = self.slot_cache.write().await;
+            slot_cache
+                .get(element_ref)
+                .and_then(|slot_elements| slot_elements.get(&slot).copied())
+        };
 
-        match slot_elements {
-            Some(slot_elements) => {
-                let slot_element = slot_elements.get(&slot);
-                match slot_element {
-                    Some(slot_element) => {
-                        if *slot_element {
-                            self.get_element(element_ref).await
-                        } else {
-                            Ok(None)
-                        }
-                    }
-                    None => {
-                        let result = self
-                            .element_index
-                            .get_slot_element_by_ref(slot, element_ref)
-                            .await?;
-                        slot_elements.insert(slot, result.is_some());
-
-                        Ok(result)
-                    }
-                }
-            }
+        match cached {
+            Some(true) => self.get_element(element_ref).await,
+            Some(false) => Ok(None),
             None => {
-                drop(slot_cache);
                 let result = self
                     .element_index
                     .get_slot_element_by_ref(slot, element_ref)
                     .await?;
 
-                let mut slot_set = HashMap::new();
-                slot_set.insert(slot, result.is_some());
-
                 let mut slot_cache = self.slot_cache.write().await;
-                slot_cache.put(element_ref.clone(), slot_set);
-                drop(slot_cache);
+                match slot_cache.get_mut(element_ref) {
+                    Some(slot_elements) => {
+                        slot_elements.insert(slot, result.is_some());
+                    }
+                    None => {
+                        let mut slot_set = HashMap::new();
+                        slot_set.insert(slot, result.is_some());
+                        slot_cache.put(element_ref.clone(), slot_set);
+                    }
+                }
 
                 Ok(result)
             }
