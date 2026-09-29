@@ -18,10 +18,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use caches::{lru::CacheError, Cache, DefaultHashBuilder, LRUCache};
 use hashers::builtin::DefaultHasher;
 use ordered_float::OrderedFloat;
 use tokio::sync::RwLock;
+
+use super::lru::SafeLru;
 
 use crate::{
     evaluation::functions::aggregation::ValueAccumulator,
@@ -34,22 +35,19 @@ use crate::{
 pub struct CachedResultIndex {
     inner: Arc<dyn ResultIndex>,
 
-    value_cache: Arc<RwLock<LRUCache<u64, ValueAccumulator, DefaultHashBuilder>>>,
-    set_count_cache: Arc<RwLock<LRUCache<(u64, OrderedFloat<f64>), isize, DefaultHashBuilder>>>,
+    value_cache: Arc<RwLock<SafeLru<u64, ValueAccumulator>>>,
+    set_count_cache: Arc<RwLock<SafeLru<(u64, OrderedFloat<f64>), isize>>>,
 }
 
 impl CachedResultIndex {
-    pub fn new(inner: Arc<dyn ResultIndex>, cache_size: usize) -> Result<Self, CacheError> {
+    pub fn new(inner: Arc<dyn ResultIndex>, cache_size: usize) -> Self {
         log::info!("using cached result index with cache size {cache_size}");
 
-        let value_cache = LRUCache::new(cache_size)?;
-        let set_count_cache = LRUCache::new(cache_size)?;
-
-        Ok(CachedResultIndex {
+        CachedResultIndex {
             inner,
-            value_cache: Arc::new(RwLock::new(value_cache)),
-            set_count_cache: Arc::new(RwLock::new(set_count_cache)),
-        })
+            value_cache: Arc::new(RwLock::new(SafeLru::new(cache_size))),
+            set_count_cache: Arc::new(RwLock::new(SafeLru::new(cache_size))),
+        }
     }
 }
 
@@ -84,7 +82,7 @@ impl AccumulatorIndex for CachedResultIndex {
         let value = self.inner.get(key, owner).await?;
         if let Some(v) = &value {
             let mut cache = self.value_cache.write().await;
-            _ = cache.put(cache_key, v.clone());
+            cache.put(cache_key, v.clone());
         }
         Ok(value)
     }
@@ -101,8 +99,10 @@ impl AccumulatorIndex for CachedResultIndex {
 
         let mut cache = self.value_cache.write().await;
         match value {
-            None => _ = cache.remove(&cache_key),
-            Some(v) => _ = cache.put(cache_key, v),
+            None => {
+                cache.remove(&cache_key);
+            }
+            Some(v) => cache.put(cache_key, v),
         };
 
         Ok(())
@@ -135,7 +135,7 @@ impl LazySortedSetStore for CachedResultIndex {
 
         let count = self.inner.get_value_count(set_id, value).await?;
         let mut cache = self.set_count_cache.write().await;
-        _ = cache.put(cache_key, count);
+        cache.put(cache_key, count);
         Ok(count)
     }
 
@@ -153,7 +153,7 @@ impl LazySortedSetStore for CachedResultIndex {
         let mut cache = self.set_count_cache.write().await;
 
         match cache.get_mut(&cache_key) {
-            None => _ = cache.put(cache_key, delta),
+            None => cache.put(cache_key, delta),
             Some(v) => *v += delta,
         }
 
