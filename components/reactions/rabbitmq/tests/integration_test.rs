@@ -15,6 +15,7 @@
 //! Integration test for RabbitMQ reaction using testcontainers.
 
 use anyhow::{anyhow, Result};
+use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 use drasi_lib::{DrasiLib, Query};
@@ -230,8 +231,11 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
 
     let reaction = RabbitMQReaction::new("test-reaction", vec!["test-query".to_string()], config)?;
 
+    let tmp_dir = tempfile::TempDir::new()?;
+    let rocks = Arc::new(RocksDbIndexProvider::new(tmp_dir.path(), false, false));
     let core = DrasiLib::builder()
         .with_id("rabbitmq-test-core")
+        .with_default_index_provider("rocks", rocks)
         .with_state_store_provider(Arc::new(DurableMemoryStateStore::new()))
         .with_source(source)
         .with_query(query)
@@ -387,8 +391,11 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
 
     let reaction = RabbitMQReaction::new("agg-reaction", vec!["agg-query".to_string()], config)?;
 
+    let tmp_dir = tempfile::TempDir::new()?;
+    let rocks = Arc::new(RocksDbIndexProvider::new(tmp_dir.path(), false, false));
     let core = DrasiLib::builder()
         .with_id("rabbitmq-agg-test-core")
+        .with_default_index_provider("rocks", rocks)
         .with_state_store_provider(Arc::new(DurableMemoryStateStore::new()))
         .with_source(source)
         .with_query(query)
