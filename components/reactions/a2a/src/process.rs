@@ -90,10 +90,11 @@ pub(crate) async fn run_loop(
         }
 
         let mut delivery_failed = false;
-        for diff in &query_result.results {
+        for (diff_index, diff) in query_result.results.iter().enumerate() {
             if matches!(diff, ResultDiff::Noop) {
                 continue;
             }
+            let diff_index = u32::try_from(diff_index).unwrap_or(u32::MAX);
             let delivery = process_diff(
                 &reaction_name,
                 &base,
@@ -102,6 +103,7 @@ pub(crate) async fn run_loop(
                 &handlebars,
                 query_result,
                 diff,
+                diff_index,
                 &mut activation_cache,
             )
             .await;
@@ -190,6 +192,7 @@ async fn process_diff(
     handlebars: &Handlebars<'static>,
     query_result: &QueryResult,
     diff: &ResultDiff,
+    diff_index: u32,
     activation_cache: &mut HashMap<String, ActivationState>,
 ) -> anyhow::Result<()> {
     let Some(diff_payload) = DiffPayload::from_result_diff(diff) else {
@@ -219,10 +222,11 @@ async fn process_diff(
         &query_result.query_id,
         &result_key,
         query_result.sequence,
+        diff_index,
     );
     let already_applied = matches!(
         &activation,
-        ActivationState::Present(existing) if existing.sequence() >= query_result.sequence
+        ActivationState::Present(existing) if existing.already_applied(query_result.sequence, diff_index)
     );
     if !already_applied
         && matches!(
@@ -246,6 +250,7 @@ async fn process_diff(
         &activation,
         config.terminal_update_policy,
         query_result.sequence,
+        diff_index,
     );
     let activation_id = activation_id(&query_result.query_id, &result_key);
     let parts = build_parts(
@@ -272,8 +277,12 @@ async fn process_diff(
                     .context("SendMessage create RPC failed")?;
                 match outcome {
                     DeliveryResult::Delivered(response) => {
-                        let next_state =
-                            response_to_activation(response, message_id.clone(), query_result);
+                        let next_state = response_to_activation(
+                            response,
+                            message_id.clone(),
+                            query_result.sequence,
+                            diff_index,
+                        );
                         save_activation_state(base, activation_cache, &state_key, &next_state)
                             .await
                             .with_context(|| {
@@ -305,25 +314,29 @@ async fn process_diff(
                     Ok(outcome) => {
                         match outcome {
                             DeliveryResult::Delivered(response) => {
-                                let next_state = match response {
-                                    SendMessageResult::Message => match activation {
-                                        ActivationState::Present(existing) => {
-                                            ActivationState::Present(
-                                                existing.with_sequence(query_result.sequence),
-                                            )
-                                        }
-                                        ActivationState::Absent => response_to_activation(
-                                            SendMessageResult::Message,
+                                let next_state =
+                                    match response {
+                                        SendMessageResult::Message => match activation {
+                                            ActivationState::Present(existing) => {
+                                                ActivationState::Present(existing.with_applied(
+                                                    query_result.sequence,
+                                                    diff_index,
+                                                ))
+                                            }
+                                            ActivationState::Absent => response_to_activation(
+                                                SendMessageResult::Message,
+                                                message_id.clone(),
+                                                query_result.sequence,
+                                                diff_index,
+                                            ),
+                                        },
+                                        response => response_to_activation(
+                                            response,
                                             message_id.clone(),
-                                            query_result,
+                                            query_result.sequence,
+                                            diff_index,
                                         ),
-                                    },
-                                    response => response_to_activation(
-                                        response,
-                                        message_id.clone(),
-                                        query_result,
-                                    ),
-                                };
+                                    };
                                 save_activation_state(
                                     base,
                                     activation_cache,
@@ -368,6 +381,37 @@ async fn process_diff(
                             &activation,
                             config.terminal_update_policy,
                             query_result.sequence,
+                            diff_index,
+                        );
+                        retried_after_terminal = true;
+                    }
+                    Err(error)
+                        if !retried_after_terminal
+                            && json_rpc_failure(&error)
+                                .is_some_and(JsonRpcFailure::is_task_not_cancelable) =>
+                    {
+                        activation = refresh_active_task(
+                            reaction_name,
+                            base,
+                            client,
+                            activation_cache,
+                            &state_key,
+                            activation,
+                            &message_id,
+                        )
+                        .await?;
+                        if matches!(
+                            &activation,
+                            ActivationState::Present(Activation::ActiveTask { .. })
+                        ) {
+                            return Err(error).context("SendMessage follow-up RPC failed");
+                        }
+                        action = next_action(
+                            diff_payload.operation,
+                            &activation,
+                            config.terminal_update_policy,
+                            query_result.sequence,
+                            diff_index,
                         );
                         retried_after_terminal = true;
                     }
@@ -412,6 +456,34 @@ async fn process_diff(
                                 )
                             })?;
                     }
+                    Err(error)
+                        if json_rpc_failure(&error)
+                            .is_some_and(JsonRpcFailure::is_task_not_cancelable) =>
+                    {
+                        activation = refresh_active_task(
+                            reaction_name,
+                            base,
+                            client,
+                            activation_cache,
+                            &state_key,
+                            activation,
+                            &message_id,
+                        )
+                        .await?;
+                        if matches!(
+                            &activation,
+                            ActivationState::Present(Activation::ActiveTask { .. })
+                        ) {
+                            return Err(error).context("CancelTask RPC failed");
+                        }
+                        clear_activation_state(base, activation_cache, &state_key)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed clearing activation state key '{state_key}' after uncancelable task"
+                                )
+                            })?;
+                    }
                     Err(error) => return Err(error).context("CancelTask RPC failed"),
                 }
                 break;
@@ -452,7 +524,10 @@ async fn refresh_active_task(
     message_id: &MessageId,
 ) -> anyhow::Result<ActivationState> {
     let ActivationState::Present(Activation::ActiveTask {
-        task_id, sequence, ..
+        task_id,
+        sequence,
+        diff_index,
+        ..
     }) = &activation
     else {
         return Ok(activation);
@@ -492,6 +567,7 @@ async fn refresh_active_task(
                     context_id,
                     state,
                     sequence: *sequence,
+                    diff_index: *diff_index,
                 })
             } else {
                 ActivationState::Present(Activation::ActiveTask {
@@ -499,6 +575,7 @@ async fn refresh_active_task(
                     context_id,
                     state,
                     sequence: *sequence,
+                    diff_index: *diff_index,
                 })
             };
             if next != activation {
@@ -520,11 +597,13 @@ fn mark_terminal(activation: ActivationState) -> ActivationState {
             context_id,
             state,
             sequence,
+            diff_index,
         }) => ActivationState::Present(Activation::TerminalTask {
             task_id,
             context_id,
             state,
             sequence,
+            diff_index,
         }),
         other => other,
     }
@@ -533,7 +612,8 @@ fn mark_terminal(activation: ActivationState) -> ActivationState {
 fn response_to_activation(
     response: SendMessageResult,
     message_id: MessageId,
-    query_result: &QueryResult,
+    sequence: u64,
+    diff_index: u32,
 ) -> ActivationState {
     match response {
         SendMessageResult::Task {
@@ -547,20 +627,23 @@ fn response_to_activation(
                     task_id,
                     context_id,
                     state,
-                    sequence: query_result.sequence,
+                    sequence,
+                    diff_index,
                 })
             } else {
                 ActivationState::Present(Activation::ActiveTask {
                     task_id,
                     context_id,
                     state,
-                    sequence: query_result.sequence,
+                    sequence,
+                    diff_index,
                 })
             }
         }
         SendMessageResult::Message => ActivationState::Present(Activation::OneShot {
             message_id,
-            sequence: query_result.sequence,
+            sequence,
+            diff_index,
         }),
     }
 }
@@ -742,9 +825,10 @@ fn message_id(
     query_id: &str,
     result_key: &ResultKey,
     sequence: u64,
+    diff_index: u32,
 ) -> MessageId {
     MessageId(format!(
-        "{}:{sequence}",
+        "{}:{sequence}:{diff_index}",
         length_prefixed(&[reaction_id, query_id, result_key.as_str()])
     ))
 }

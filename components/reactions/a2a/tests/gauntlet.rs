@@ -244,18 +244,21 @@ fn activation_for(kind: Kind, seq: u64) -> ActivationState {
         Kind::OneShot => ActivationState::Present(Activation::OneShot {
             message_id: MessageId("msg".into()),
             sequence: seq,
+            diff_index: 0,
         }),
         Kind::Active => ActivationState::Present(Activation::ActiveTask {
             task_id: "task-1".into(),
             context_id: "ctx".into(),
             state: "WORKING".into(),
             sequence: seq,
+            diff_index: 0,
         }),
         Kind::Terminal => ActivationState::Present(Activation::TerminalTask {
             task_id: "task-9".into(),
             context_id: "ctx".into(),
             state: "COMPLETED".into(),
             sequence: seq,
+            diff_index: 0,
         }),
     }
 }
@@ -276,7 +279,7 @@ fn run_state_machine(report: &mut Report) {
                     };
                     let expected = spec_action(op, kind, policy, stored_seq, incoming);
                     let state = activation_for(kind, stored);
-                    let actual = classify(&next_action(op, &state, policy, incoming));
+                    let actual = classify(&next_action(op, &state, policy, incoming, 0));
                     let id = format!("SM{i:03}");
                     let name = format!(
                         "{:?} {:?} {:?} stored={stored} seq={incoming}",

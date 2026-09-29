@@ -79,6 +79,36 @@ pub fn aggregation_result(
     )
 }
 
+pub fn two_updates(
+    query_id: &str,
+    sequence: u64,
+    first: (Value, Value),
+    second: (Value, Value),
+) -> QueryResult {
+    QueryResult::new(
+        query_id.to_string(),
+        sequence,
+        Utc::now(),
+        vec![
+            ResultDiff::Update {
+                data: serde_json::json!({}),
+                before: first.0,
+                after: first.1,
+                grouping_keys: None,
+                row_signature: 0,
+            },
+            ResultDiff::Update {
+                data: serde_json::json!({}),
+                before: second.0,
+                after: second.1,
+                grouping_keys: None,
+                row_signature: 0,
+            },
+        ],
+        HashMap::new(),
+    )
+}
+
 pub fn noop_then_add(query_id: &str, sequence: u64, after: Value) -> QueryResult {
     QueryResult::new(
         query_id.to_string(),

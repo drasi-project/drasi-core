@@ -17,7 +17,7 @@ The reaction has one transport mode: HTTP POST to `endpoint`.
   - Active: `WORKING`, `SUBMITTED`, `INPUT_REQUIRED`, `AUTH_REQUIRED`
   - Terminal: `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`
   - `TASK_STATE_` prefixes are stripped without regard to case. `CANCELLED` maps to `CANCELED`. Hyphens become underscores.
-- Before acting on a cached active task, the reaction calls `GetTask`. If the task is terminal, `terminalUpdatePolicy` applies (`replace` starts a new task). `GetTask` or `CancelTask` `Task not found` (`-32001`) clears the cached activation. An HTTP-level cancel drop keeps the cached activation. Agents that do not implement `GetTask` keep the cached activation.
+- Before acting on a cached active task, the reaction calls `GetTask`. If the task is terminal, `terminalUpdatePolicy` applies (`replace` starts a new task). `GetTask` or `CancelTask` `Task not found` (`-32001`) clears the cached activation. `TaskNotCancelableError` (`-32002`) calls `GetTask` and then applies the terminal-task policy only if the task is actually terminal or gone. An HTTP-level cancel drop keeps the cached activation. Agents that do not implement `GetTask` keep the cached activation.
 
 ## Configuration
 
@@ -74,7 +74,7 @@ Each `SendMessage` includes a data part:
 
 ## Idempotency note
 
-`messageId` is `{length_prefixed(reactionId, queryId, resultKey)}:{sequence}`, where each part is encoded as `len:part` so values that contain `:` cannot collide.  
+`messageId` is `{length_prefixed(reactionId, queryId, resultKey)}:{sequence}:{diffIndex}`, where each identity part is encoded as `len:part` so values that contain `:` cannot collide. `diffIndex` is the index of the diff inside `QueryResult.results`, so two updates for the same key in one emission are distinct messages.  
 Endpoints that deduplicate by message id converge on replay.  
 If a crash happens after `SendMessage` succeeds but before activation state persistence, a duplicate task can still occur.
 

@@ -37,16 +37,19 @@ fn next_action_table_cells_are_covered() {
         context_id: "ctx-1".to_string(),
         state: "WORKING".to_string(),
         sequence: 1,
+        diff_index: 0,
     });
     let one_shot = ActivationState::Present(Activation::OneShot {
         message_id: MessageId("msg-1".to_string()),
         sequence: 1,
+        diff_index: 0,
     });
     let terminal = ActivationState::Present(Activation::TerminalTask {
         task_id: "task-9".to_string(),
         context_id: "ctx-9".to_string(),
         state: "COMPLETED".to_string(),
         sequence: 1,
+        diff_index: 0,
     });
 
     assert!(matches!(
@@ -54,24 +57,43 @@ fn next_action_table_cells_are_covered() {
             Operation::Add,
             &ActivationState::Absent,
             TerminalUpdatePolicy::Replace,
-            1
+            1,
+            0
         ),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 2),
+        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 2, 0),
         Action::Drop { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Add, &one_shot, TerminalUpdatePolicy::Replace, 2),
+        next_action(
+            Operation::Add,
+            &one_shot,
+            TerminalUpdatePolicy::Replace,
+            2,
+            0
+        ),
         Action::Drop { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Replace, 2),
+        next_action(
+            Operation::Add,
+            &terminal,
+            TerminalUpdatePolicy::Replace,
+            2,
+            0
+        ),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Add, &terminal, TerminalUpdatePolicy::Ignore, 2),
+        next_action(
+            Operation::Add,
+            &terminal,
+            TerminalUpdatePolicy::Ignore,
+            2,
+            0
+        ),
         Action::Drop { .. }
     ));
 
@@ -80,12 +102,19 @@ fn next_action_table_cells_are_covered() {
             Operation::Update,
             &ActivationState::Absent,
             TerminalUpdatePolicy::Replace,
-            1
+            1,
+            0
         ),
         Action::SendCreate
     ));
     assert!(matches!(
-        next_action(Operation::Update, &active, TerminalUpdatePolicy::Replace, 2),
+        next_action(
+            Operation::Update,
+            &active,
+            TerminalUpdatePolicy::Replace,
+            2,
+            0
+        ),
         Action::SendFollowUp { .. }
     ));
     assert!(matches!(
@@ -93,7 +122,8 @@ fn next_action_table_cells_are_covered() {
             Operation::Update,
             &one_shot,
             TerminalUpdatePolicy::Replace,
-            2
+            2,
+            0
         ),
         Action::Drop { .. }
     ));
@@ -102,7 +132,8 @@ fn next_action_table_cells_are_covered() {
             Operation::Update,
             &terminal,
             TerminalUpdatePolicy::Replace,
-            2
+            2,
+            0
         ),
         Action::SendCreate
     ));
@@ -111,13 +142,20 @@ fn next_action_table_cells_are_covered() {
             Operation::Update,
             &terminal,
             TerminalUpdatePolicy::Ignore,
-            2
+            2,
+            0
         ),
         Action::Drop { .. }
     ));
 
     assert!(matches!(
-        next_action(Operation::Delete, &active, TerminalUpdatePolicy::Replace, 2),
+        next_action(
+            Operation::Delete,
+            &active,
+            TerminalUpdatePolicy::Replace,
+            2,
+            0
+        ),
         Action::Cancel { .. }
     ));
     assert!(matches!(
@@ -125,7 +163,8 @@ fn next_action_table_cells_are_covered() {
             Operation::Delete,
             &ActivationState::Absent,
             TerminalUpdatePolicy::Replace,
-            1
+            1,
+            0
         ),
         Action::Drop { .. }
     ));
@@ -134,7 +173,8 @@ fn next_action_table_cells_are_covered() {
             Operation::Delete,
             &one_shot,
             TerminalUpdatePolicy::Replace,
-            2
+            2,
+            0
         ),
         Action::Drop { .. }
     ));
@@ -143,7 +183,8 @@ fn next_action_table_cells_are_covered() {
             Operation::Delete,
             &terminal,
             TerminalUpdatePolicy::Replace,
-            2
+            2,
+            0
         ),
         Action::Drop { .. }
     ));
@@ -348,6 +389,7 @@ fn terminal_policy_replace_vs_ignore() {
         context_id: "ctx-9".to_string(),
         state: "COMPLETED".to_string(),
         sequence: 1,
+        diff_index: 0,
     });
 
     assert!(matches!(
@@ -355,7 +397,8 @@ fn terminal_policy_replace_vs_ignore() {
             Operation::Update,
             &terminal,
             TerminalUpdatePolicy::Replace,
-            2
+            2,
+            0
         ),
         Action::SendCreate
     ));
@@ -364,7 +407,8 @@ fn terminal_policy_replace_vs_ignore() {
             Operation::Update,
             &terminal,
             TerminalUpdatePolicy::Ignore,
-            2
+            2,
+            0
         ),
         Action::Drop { .. }
     ));
@@ -377,14 +421,31 @@ fn replayed_sequence_is_dropped() {
         context_id: "ctx-1".to_string(),
         state: "WORKING".to_string(),
         sequence: 4,
+        diff_index: 0,
     });
     assert!(matches!(
-        next_action(Operation::Update, &active, TerminalUpdatePolicy::Replace, 4),
+        next_action(
+            Operation::Update,
+            &active,
+            TerminalUpdatePolicy::Replace,
+            4,
+            0
+        ),
         Action::Drop { .. }
     ));
     assert!(matches!(
-        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 3),
+        next_action(Operation::Add, &active, TerminalUpdatePolicy::Replace, 3, 0),
         Action::Drop { .. }
+    ));
+    assert!(matches!(
+        next_action(
+            Operation::Update,
+            &active,
+            TerminalUpdatePolicy::Replace,
+            4,
+            1
+        ),
+        Action::SendFollowUp { .. }
     ));
 }
 
@@ -468,6 +529,37 @@ fn json_rpc_failure_classifies_stale_and_gone_tasks() {
     assert!(terminal.is_terminal_task());
     assert!(terminal.is_stale_task());
     assert!(!terminal.is_task_gone());
+    assert!(!terminal.is_task_not_cancelable());
+
+    let not_cancelable = JsonRpcFailure {
+        method: "CancelTask".into(),
+        code: -32002,
+        message: "Task cannot be canceled".into(),
+    };
+    assert!(not_cancelable.is_task_not_cancelable());
+    assert!(!not_cancelable.is_stale_task());
+
+    let unsupported = JsonRpcFailure {
+        method: "SendMessage".into(),
+        code: -32004,
+        message: "Unsupported operation".into(),
+    };
+    assert!(!unsupported.is_task_not_cancelable());
+    assert!(!unsupported.is_stale_task());
+}
+
+#[test]
+fn activation_deserializes_missing_diff_index_as_zero() {
+    let activation: Activation = serde_json::from_value(json!({
+        "kind": "active_task",
+        "task_id": "task-1",
+        "context_id": "ctx-1",
+        "state": "WORKING",
+        "sequence": 4
+    }))
+    .expect("legacy activation");
+    assert_eq!(activation.diff_index(), 0);
+    assert!(!activation.already_applied(4, 1));
 }
 
 #[test]

@@ -445,6 +445,10 @@ impl JsonRpcFailure {
         self.code == -32001 || self.message.to_ascii_lowercase().contains("task not found")
     }
 
+    pub fn is_task_not_cancelable(&self) -> bool {
+        self.code == -32002
+    }
+
     pub fn is_stale_task(&self) -> bool {
         self.is_terminal_task() || self.is_task_gone()
     }

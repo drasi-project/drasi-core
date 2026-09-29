@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
+
 use serde::{Deserialize, Serialize};
 
 /// Resolved `resultKeyFields` value used to correlate diffs with an A2A task.
@@ -30,7 +32,7 @@ impl std::fmt::Display for ResultKey {
     }
 }
 
-/// Deterministic A2A `messageId`: length-prefixed identity plus `sequence`.
+/// Deterministic A2A `messageId`: length-prefixed identity plus `sequence` and batch index.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MessageId(pub String);
 
@@ -80,18 +82,24 @@ pub enum Activation {
     OneShot {
         message_id: MessageId,
         sequence: u64,
+        #[serde(default)]
+        diff_index: u32,
     },
     ActiveTask {
         task_id: String,
         context_id: String,
         state: String,
         sequence: u64,
+        #[serde(default)]
+        diff_index: u32,
     },
     TerminalTask {
         task_id: String,
         context_id: String,
         state: String,
         sequence: u64,
+        #[serde(default)]
+        diff_index: u32,
     },
 }
 
@@ -104,11 +112,28 @@ impl Activation {
         }
     }
 
-    pub fn with_sequence(self, sequence: u64) -> Self {
+    pub fn diff_index(&self) -> u32 {
+        match self {
+            Activation::OneShot { diff_index, .. }
+            | Activation::ActiveTask { diff_index, .. }
+            | Activation::TerminalTask { diff_index, .. } => *diff_index,
+        }
+    }
+
+    pub fn already_applied(&self, sequence: u64, diff_index: u32) -> bool {
+        match self.sequence().cmp(&sequence) {
+            Ordering::Greater => true,
+            Ordering::Equal => self.diff_index() >= diff_index,
+            Ordering::Less => false,
+        }
+    }
+
+    pub fn with_applied(self, sequence: u64, diff_index: u32) -> Self {
         match self {
             Activation::OneShot { message_id, .. } => Activation::OneShot {
                 message_id,
                 sequence,
+                diff_index,
             },
             Activation::ActiveTask {
                 task_id,
@@ -120,6 +145,7 @@ impl Activation {
                 context_id,
                 state,
                 sequence,
+                diff_index,
             },
             Activation::TerminalTask {
                 task_id,
@@ -131,6 +157,7 @@ impl Activation {
                 context_id,
                 state,
                 sequence,
+                diff_index,
             },
         }
     }
@@ -173,9 +200,10 @@ pub fn next_action(
     activation: &ActivationState,
     policy: TerminalUpdatePolicy,
     sequence: u64,
+    diff_index: u32,
 ) -> Action {
     if let ActivationState::Present(existing) = activation {
-        if existing.sequence() >= sequence {
+        if existing.already_applied(sequence, diff_index) {
             return Action::Drop {
                 reason: "diff sequence already applied",
             };
