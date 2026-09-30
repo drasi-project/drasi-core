@@ -457,6 +457,7 @@ class RepairTests(unittest.TestCase):
             ("registry", "attacker.example/repo"), ("tag", "latest"),
             ("pre_release", "dev"), ("sign", False), ("dry_run", True),
             ("skip_visibility", True), ("sign", "true"),
+            ("plugin", "source/otel"), ("plugin", "$(publish)"),
             ("digest", "sha256:" + "1" * 64),
         ):
             with self.subTest(field=field):
@@ -489,6 +490,7 @@ class RepairTests(unittest.TestCase):
             repair.PUBLISH_DEFAULTS,
             {**repair.PUBLISH_DEFAULTS, "ref": "topic", "sign": False, "dry_run": True},
             {**repair.PUBLISH_DEFAULTS, "tag": "nightly", "skip_visibility": True},
+            {**repair.PUBLISH_DEFAULTS, "plugin": "source/otel", "pre_release": "dev.1", "ref": "topic"},
         ):
             with self.subTest(inputs=inputs):
                 self.fixture.inputs = inputs

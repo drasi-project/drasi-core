@@ -262,10 +262,24 @@ jobs:
 
       - name: List plugin packages
         id: list
+        shell: bash
+        env:
+          INPUT_PLUGIN: ${{ inputs.plugin }}
         run: |
+          set -euo pipefail
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2
+            exit 1
+          fi
+          # Empty plugin keeps the publish-all list. A selector limits
+          # verification to that package; the directory package is always checked.
+          ARGS=(list-plugins)
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
+          fi
           {
             echo "drasi-plugin-directory"
-            cargo run -p xtask -- list-plugins \
+            cargo run -p xtask -- "${ARGS[@]}" \
               | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
               | awk '{print $1}'
           } | sort -u > "$RUNNER_TEMP/plugin-packages"
