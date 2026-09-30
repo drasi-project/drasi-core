@@ -220,6 +220,13 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
 - **Purpose**: Runs the mocked package-visibility and release-retry shell regressions before the Rust dependency-cycle check and unit/integration tests. The visibility mock rejects non-GET requests; no real credentials or API writes are used.
 - **Trigger**: Automatically triggered on pull requests to `main`, `feature/*`, `feature-lib`, or `release/*`, and by manual dispatch.
 
+### [test-integration.yml](test-integration.yml)
+- **Purpose**: Runs `#[ignore]`d plugin integration and end-to-end tests that start containers. The package list is discovered from the workspace (`cargo run -p xtask -- list-integration-test-matrix`), so new crates are included automatically. Live-network tests that need credentials are not included.
+- **Trigger**:
+  - Pull requests to `main`, `feature/*`, `feature-lib`, or `release/*` (non-draft).
+  - Manual `workflow_dispatch`.
+- **Notes**: Default `cargo test` in [test.yml](test.yml) skips these tests. Run locally with `cargo test -p <crate> -- --ignored`.
+
 
 ## Viewing Workflow Status
 
