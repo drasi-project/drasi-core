@@ -38,6 +38,23 @@ Default excluded annotations:
 - `kubectl.kubernetes.io/last-applied-configuration`
 - `control-plane.alpha.kubernetes.io/leader`
 
+## Lifecycle and access
+
+`start()` loads the client configuration and checks both list and watch access for
+every configured resource/namespace before reporting `Running`. Initialization
+has a 10-second deadline. Invalid configuration and fatal API responses (400,
+401, 403, 404, or 422) fail startup with `Error`; transient failures are retried
+within that deadline. The running watcher also reports fatal API errors as
+`Error`, while continuing to retry transient failures and expired resource
+versions.
+
+For Pod-only access in a single namespace, use `authMode: "incluster"`, explicitly
+set `namespaces`, and grant the mounted ServiceAccount `list` and `watch` on
+`pods` in that namespace. Omitting `namespaces` requests cluster-wide access.
+
+`stop()` cancels and joins the source task, including its abort fallback, before
+returning. It also cleans up failed sources and is safe to repeat.
+
 ## Query examples
 
 ```cypher
