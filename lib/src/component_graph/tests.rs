@@ -885,22 +885,28 @@ fn test_validate_and_transition_nonexistent_component() {
 }
 
 #[test]
-fn test_validate_and_transition_cannot_stop_error_state() {
+fn test_validate_and_transition_can_stop_error_query() {
     let mut graph = create_test_graph();
-    graph.add_component(source_node("s1")).unwrap();
+    graph.register_query("q1", HashMap::new(), &[]).unwrap();
     graph
-        .validate_and_transition("s1", ComponentStatus::Starting, None)
+        .validate_and_transition("q1", ComponentStatus::Starting, None)
         .unwrap();
     graph
-        .validate_and_transition("s1", ComponentStatus::Error, None)
+        .validate_and_transition("q1", ComponentStatus::Error, None)
         .unwrap();
-
-    let result = graph.validate_and_transition("s1", ComponentStatus::Stopping, None);
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("error state"),
-        "Expected 'error state' in: {err_msg}"
+    graph
+        .validate_and_transition("q1", ComponentStatus::Stopping, None)
+        .unwrap();
+    assert_eq!(
+        graph.get_component("q1").unwrap().status,
+        ComponentStatus::Stopping
+    );
+    graph
+        .validate_and_transition("q1", ComponentStatus::Stopped, None)
+        .unwrap();
+    assert_eq!(
+        graph.get_component("q1").unwrap().status,
+        ComponentStatus::Stopped
     );
 }
 
