@@ -1,0 +1,210 @@
+diff --git a/components/reactions/copilot-agent-task/src/reaction.rs b/components/reactions/copilot-agent-task/src/reaction.rs
+index cc36101b3256e20feb52b5b55600e8214baaf596..6f97f8c65d03146367f94b79b26f6098cbd109e6 100644
+--- a/components/reactions/copilot-agent-task/src/reaction.rs
++++ b/components/reactions/copilot-agent-task/src/reaction.rs
+@@ -379,20 +379,6 @@ async fn process_add_row(
+         }
+     };
+ 
+-    if let Err(e) = validate_row(
+-        &row,
+-        &config.allowed_repositories,
+-        &config.allowed_profiles,
+-        &config.allowed_models,
+-    ) {
+-        warn!(
+-            "[{reaction_name}] Rejecting row for {} issue #{} (route={}, responsibility={}): {e}",
+-            row.repository, row.issue_number, row.route_id, row.responsibility_id
+-        );
+-        record_permanent_failure(store, store_id, &row, e.to_string()).await;
+-        return Ok(());
+-    }
+-
+     let exec_id = execution_id(store_id, &row.route_id, &row.responsibility_id, ATTEMPT);
+ 
+     let reservation = reserve_or_resume(
+@@ -438,6 +424,29 @@ async fn process_add_row(
+         }
+     };
+ 
++    // Current configuration is relevant only to a new or merely Reserved
++    // attempt. An authoritative prior state must be resumed or skipped before
++    // mutable allowlists are consulted, otherwise config narrowing could
++    // corrupt a completed execution on duplicate delivery.
++    if let Err(e) = validate_row(
++        &row,
++        &config.allowed_repositories,
++        &config.allowed_profiles,
++        &config.allowed_models,
++    ) {
++        warn!(
++            "[{reaction_name}] Rejecting new/reserved row for {} issue #{} (route={}, responsibility={}): {e}",
++            row.repository, row.issue_number, row.route_id, row.responsibility_id
++        );
++        record.status = ExecutionStatus::Failed;
++        record.last_error = Some(e.to_string());
++        record.touch();
++        save(store, store_id, &record)
++            .await
++            .map_err(|error| format!("failed to persist validation failure: {error:#}"))?;
++        return Ok(());
++    }
++
+     // ---- Preflight ----
+     match crate::github::run_preflight(client, &row).await {
+         Ok(()) => {}
+@@ -467,40 +476,6 @@ async fn process_add_row(
+     launch_and_comment(reaction_name, config, client, store, store_id, &row, record).await
+ }
+ 
+-/// Record a permanent (fail-closed) validation rejection, best-effort. If we
+-/// cannot even parse `route_id`/`responsibility_id` this silently no-ops —
+-/// there is no reservation key to record against, and the row was already
+-/// logged by the caller.
+-async fn record_permanent_failure(
+-    store: &dyn StateStoreProvider,
+-    store_id: &str,
+-    row: &LaunchRow,
+-    reason: String,
+-) {
+-    let exec_id = execution_id(store_id, &row.route_id, &row.responsibility_id, ATTEMPT);
+-    let mut record = ExecutionRecord::new_reserved(
+-        &row.route_id,
+-        &row.responsibility_id,
+-        ATTEMPT,
+-        &exec_id,
+-        &row.expected_event_id,
+-        &row.required_event_type,
+-        &row.repository,
+-        row.issue_number,
+-        &row.requested_model,
+-        row.fallback_model.as_deref(),
+-    );
+-    record.status = ExecutionStatus::Failed;
+-    record.last_error = Some(reason);
+-    record.touch();
+-    if let Err(e) = save(store, store_id, &record).await {
+-        warn!(
+-            "failed to persist permanent-failure record for route={} responsibility={}: {e:#}",
+-            row.route_id, row.responsibility_id
+-        );
+-    }
+-}
+-
+ /// Resume a launch attempt that crashed (or was ambiguous) between
+ /// reservation and confirmed task creation: run reconciliation before doing
+ /// anything else. Never blindly retries creation.
+diff --git a/components/reactions/copilot-agent-task/tests/integration_test.rs b/components/reactions/copilot-agent-task/tests/integration_test.rs
+index a3fe34b625ad1cbeac79783bfcea8738be80d10b..0ad22d007142c648e7db7f77f67c1de8fbb3ce35 100644
+--- a/components/reactions/copilot-agent-task/tests/integration_test.rs
++++ b/components/reactions/copilot-agent-task/tests/integration_test.rs
+@@ -624,6 +624,109 @@ async fn duplicate_delivery_launches_only_once() {
+     core.stop().await.expect("stop core");
+ }
+ 
++#[tokio::test]
++#[ignore]
++async fn completed_duplicate_survives_all_allowlist_narrowing() {
++    let server = MockServer::start().await;
++    let (source, handle) = make_source();
++    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
++
++    let exec_id = execution_id(REACTION, "route-narrowed", "resp-narrowed", 1);
++    let mut completed = ExecutionRecord::new_reserved(
++        "route-narrowed",
++        "resp-narrowed",
++        1,
++        &exec_id,
++        "evt-narrowed",
++        "CompletedIssueValidation",
++        REPOSITORY,
++        55,
++        "gpt-5",
++        None,
++    );
++    completed.status = ExecutionStatus::Started;
++    completed.model_used = Some("gpt-5".to_string());
++    completed.task_id = Some("task-preserved".to_string());
++    completed.task_url = Some("https://github.com/tasks/preserved".to_string());
++    completed.request_time = Some(chrono::Utc::now());
++    completed.comment_posted = true;
++    save(store.as_ref(), REACTION, &completed)
++        .await
++        .expect("seed completed execution");
++
++    let reaction = CopilotAgentTaskReaction::builder(REACTION)
++        .with_query(QUERY)
++        .with_github_api_base_url(server.uri())
++        .with_github_graphql_url(format!("{}/graphql", server.uri()))
++        .with_token("test-token-not-a-secret")
++        .with_allowed_repositories(vec!["other-org/other-repo".to_string()])
++        .with_allowed_profiles(vec!["other-profile".to_string()])
++        .with_allowed_models(vec!["other-model".to_string()])
++        .build()
++        .expect("narrowed reaction builds");
++
++    let core = Arc::new(
++        DrasiLib::builder()
++            .with_id("narrowed-duplicate-core")
++            .with_source(source)
++            .with_query(
++                Query::cypher(QUERY)
++                    .query(launch_query_str())
++                    .from_source(SOURCE)
++                    .with_outbox_capacity(100)
++                    .auto_start(true)
++                    .build(),
++            )
++            .with_reaction(reaction)
++            .with_state_store_provider(store.clone())
++            .build()
++            .await
++            .expect("build core"),
++    );
++    core.start().await.expect("start core");
++    tokio::time::sleep(WARMUP).await;
++
++    insert_row(
++        &handle,
++        "issue-narrowed",
++        "route-narrowed",
++        "resp-narrowed",
++        55,
++        "gpt-5",
++        None,
++        REPOSITORY,
++        CONTENT_VERSION,
++        "In Progress",
++    )
++    .await;
++    tokio::time::sleep(Duration::from_millis(500)).await;
++
++    let preserved = load(
++        store.as_ref(),
++        REACTION,
++        "route-narrowed",
++        "resp-narrowed",
++        1,
++    )
++    .await
++    .unwrap()
++    .unwrap();
++    assert_eq!(preserved.status, ExecutionStatus::Started);
++    assert!(preserved.comment_posted);
++    assert_eq!(preserved.task_id.as_deref(), Some("task-preserved"));
++    assert_eq!(
++        preserved.task_url.as_deref(),
++        Some("https://github.com/tasks/preserved")
++    );
++    assert_eq!(
++        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
++        0
++    );
++    assert_eq!(mock_github::count_add_comment_requests(&server).await, 0);
++
++    core.stop().await.expect("stop core");
++}
++
+ // ---------------------------------------------------------------------
+ // 6. Crash/recovery boundary: a record left in `Starting` (simulating a
+ //    crash between reservation and confirmed task creation) is reconciled

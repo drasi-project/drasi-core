@@ -1,0 +1,454 @@
+{
+  "schemaVersion": 1,
+  "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+  "remoteBaseUrl": "https://github.com/drasi-project/drasi-core/commit/43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+  "format": "git diff --binary --full-index <remoteBase> <tip>",
+  "entries": [
+    {
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "tip": "25bda3bb2ef6eebef60dd6babdf69138466babae",
+      "tipSubject": "Fix router candidate binding and checkpoint seeding races",
+      "commitCount": 8,
+      "patch": "43e7d25034bc8fababf3021b3c6e17d476d42e4a--25bda3bb2ef6eebef60dd6babdf69138466babae.patch",
+      "sha256": "44acf525d3113eb23a0d8cf288b6a66290d3e8985e1ba0c4aa308aaec270e676",
+      "bytes": 416277,
+      "changedFiles": [
+        "Cargo.toml",
+        "Makefile",
+        "components/ffi-primitives/src/lib.rs",
+        "components/ffi-primitives/src/types.rs",
+        "components/host-sdk/Cargo.toml",
+        "components/host-sdk/src/loader.rs",
+        "components/host-sdk/src/proxies/reaction.rs",
+        "components/host-sdk/src/state_store_bridge.rs",
+        "components/host-sdk/tests/integration_test.rs",
+        "components/plugin-sdk/src/ffi/metadata.rs",
+        "components/plugin-sdk/src/ffi/mod.rs",
+        "components/plugin-sdk/src/ffi/state_store_proxy.rs",
+        "components/plugin-sdk/src/ffi/types.rs",
+        "components/plugin-sdk/src/ffi/vtable_gen.rs",
+        "components/plugin-sdk/src/ffi/vtables.rs",
+        "components/reactions/workgraph-router/Cargo.toml",
+        "components/reactions/workgraph-router/Makefile",
+        "components/reactions/workgraph-router/README.md",
+        "components/reactions/workgraph-router/src/candidate.rs",
+        "components/reactions/workgraph-router/src/config.rs",
+        "components/reactions/workgraph-router/src/decision.rs",
+        "components/reactions/workgraph-router/src/descriptor.rs",
+        "components/reactions/workgraph-router/src/github_client.rs",
+        "components/reactions/workgraph-router/src/lib.rs",
+        "components/reactions/workgraph-router/src/reaction.rs",
+        "components/reactions/workgraph-router/src/reconciliation.rs",
+        "components/reactions/workgraph-router/src/rules.rs",
+        "components/reactions/workgraph-router/src/state.rs",
+        "components/reactions/workgraph-router/src/tests.rs",
+        "components/reactions/workgraph-router/src/validation.rs",
+        "components/reactions/workgraph-router/tests/integration_test.rs",
+        "components/state_stores/redb/src/provider.rs",
+        "lib/README.md",
+        "lib/src/lib.rs",
+        "lib/src/queries/config_hash.rs",
+        "lib/src/reactions/common/checkpoint_state.rs",
+        "lib/src/reactions/manager.rs",
+        "lib/src/reactions/mod.rs",
+        "lib/src/reactions/traits.rs",
+        "lib/src/state_store/mod.rs"
+      ],
+      "sanitizedCredentialShapedFixtureOccurrences": 0,
+      "applicationVerification": {
+        "status": "passed",
+        "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+        "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+        "command": "git apply --check <patch> && git apply <patch>"
+      }
+    },
+    {
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "tip": "4a1d058eb9fcea305d4436e7947451db595d717d",
+      "tipSubject": "Make prune throttling cancellation-safe",
+      "commitCount": 12,
+      "patch": "43e7d25034bc8fababf3021b3c6e17d476d42e4a--4a1d058eb9fcea305d4436e7947451db595d717d.patch",
+      "sha256": "2cba70c9bf7ce0a989fb355469d051b73794614632d48e5e9fa5547f0937442e",
+      "bytes": 194536,
+      "changedFiles": [
+        "Cargo.toml",
+        "components/reactions/github-project-item-refresh/CHANGELOG.md",
+        "components/reactions/github-project-item-refresh/Cargo.toml",
+        "components/reactions/github-project-item-refresh/Makefile",
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/config.rs",
+        "components/reactions/github-project-item-refresh/src/descriptor.rs",
+        "components/reactions/github-project-item-refresh/src/destination.rs",
+        "components/reactions/github-project-item-refresh/src/graphql.rs",
+        "components/reactions/github-project-item-refresh/src/lib.rs",
+        "components/reactions/github-project-item-refresh/src/models.rs",
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/reaction.rs",
+        "components/reactions/github-project-item-refresh/src/state_store.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs",
+        "components/reactions/github-project-item-refresh/tests/integration_test.rs",
+        "lib/README.md"
+      ],
+      "sanitizedCredentialShapedFixtureOccurrences": 10,
+      "applicationVerification": {
+        "status": "passed",
+        "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+        "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+        "command": "git apply --check <patch> && git apply <patch>"
+      }
+    },
+    {
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "tip": "650533bd45531d3388c7a9ba6e81c35252ae0121",
+      "tipSubject": "Enforce status field on every retry",
+      "commitCount": 9,
+      "patch": "43e7d25034bc8fababf3021b3c6e17d476d42e4a--650533bd45531d3388c7a9ba6e81c35252ae0121.patch",
+      "sha256": "426fe55361168faf39514c50346f8970c4ac7dca71b51d65cff94cde91fbf76c",
+      "bytes": 182723,
+      "changedFiles": [
+        "Cargo.toml",
+        "components/reactions/github-project-item-refresh/CHANGELOG.md",
+        "components/reactions/github-project-item-refresh/Cargo.toml",
+        "components/reactions/github-project-item-refresh/Makefile",
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/config.rs",
+        "components/reactions/github-project-item-refresh/src/descriptor.rs",
+        "components/reactions/github-project-item-refresh/src/destination.rs",
+        "components/reactions/github-project-item-refresh/src/graphql.rs",
+        "components/reactions/github-project-item-refresh/src/lib.rs",
+        "components/reactions/github-project-item-refresh/src/models.rs",
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/reaction.rs",
+        "components/reactions/github-project-item-refresh/src/state_store.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs",
+        "components/reactions/github-project-item-refresh/tests/integration_test.rs",
+        "lib/README.md"
+      ],
+      "sanitizedCredentialShapedFixtureOccurrences": 10,
+      "applicationVerification": {
+        "status": "passed",
+        "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+        "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+        "command": "git apply --check <patch> && git apply <patch>"
+      }
+    },
+    {
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "tip": "926919b41ba2509904d911e7b6841c3143dd11d8",
+      "tipSubject": "fix(reactions): preserve completed execution state",
+      "commitCount": 6,
+      "patch": "43e7d25034bc8fababf3021b3c6e17d476d42e4a--926919b41ba2509904d911e7b6841c3143dd11d8.patch",
+      "sha256": "fcbf86ca6b1d3eaec03f26567983ecdbf38edb5c40ca1fa81d60c9fd17b3d518",
+      "bytes": 233648,
+      "changedFiles": [
+        "Cargo.toml",
+        "components/reactions/copilot-agent-task/Cargo.toml",
+        "components/reactions/copilot-agent-task/Makefile",
+        "components/reactions/copilot-agent-task/README.md",
+        "components/reactions/copilot-agent-task/schema/workgraph-event-v1.schema.json",
+        "components/reactions/copilot-agent-task/schema/workgraph-execution-state-v1.schema.json",
+        "components/reactions/copilot-agent-task/schema/workgraph-execution-v1.schema.json",
+        "components/reactions/copilot-agent-task/src/config.rs",
+        "components/reactions/copilot-agent-task/src/descriptor.rs",
+        "components/reactions/copilot-agent-task/src/github.rs",
+        "components/reactions/copilot-agent-task/src/ids.rs",
+        "components/reactions/copilot-agent-task/src/lib.rs",
+        "components/reactions/copilot-agent-task/src/prompt.rs",
+        "components/reactions/copilot-agent-task/src/reaction.rs",
+        "components/reactions/copilot-agent-task/src/redact.rs",
+        "components/reactions/copilot-agent-task/src/row.rs",
+        "components/reactions/copilot-agent-task/src/state.rs",
+        "components/reactions/copilot-agent-task/tests/durable_memory_store.rs",
+        "components/reactions/copilot-agent-task/tests/integration_test.rs",
+        "components/reactions/copilot-agent-task/tests/mock_github.rs",
+        "components/reactions/copilot-agent-task/tests/output_schema.rs"
+      ],
+      "sanitizedCredentialShapedFixtureOccurrences": 6,
+      "applicationVerification": {
+        "status": "passed",
+        "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+        "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+        "command": "git apply --check <patch> && git apply <patch>"
+      }
+    },
+    {
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "tip": "a373d4662042ec1853145f2533be741c49429c78",
+      "tipSubject": "fix(reactions): align validator reporter prompt",
+      "commitCount": 10,
+      "patch": "43e7d25034bc8fababf3021b3c6e17d476d42e4a--a373d4662042ec1853145f2533be741c49429c78.patch",
+      "sha256": "f3a3923b67da566fd17ad22ffe2dd7830b3968297e7ff8240f349025f6d7406e",
+      "bytes": 265979,
+      "changedFiles": [
+        "Cargo.toml",
+        "components/reactions/copilot-agent-task/Cargo.toml",
+        "components/reactions/copilot-agent-task/Makefile",
+        "components/reactions/copilot-agent-task/README.md",
+        "components/reactions/copilot-agent-task/schema/workgraph-event-v1.schema.json",
+        "components/reactions/copilot-agent-task/schema/workgraph-execution-state-v1.schema.json",
+        "components/reactions/copilot-agent-task/schema/workgraph-execution-v1.schema.json",
+        "components/reactions/copilot-agent-task/src/config.rs",
+        "components/reactions/copilot-agent-task/src/descriptor.rs",
+        "components/reactions/copilot-agent-task/src/github.rs",
+        "components/reactions/copilot-agent-task/src/ids.rs",
+        "components/reactions/copilot-agent-task/src/lib.rs",
+        "components/reactions/copilot-agent-task/src/prompt.rs",
+        "components/reactions/copilot-agent-task/src/reaction.rs",
+        "components/reactions/copilot-agent-task/src/redact.rs",
+        "components/reactions/copilot-agent-task/src/row.rs",
+        "components/reactions/copilot-agent-task/src/state.rs",
+        "components/reactions/copilot-agent-task/tests/durable_memory_store.rs",
+        "components/reactions/copilot-agent-task/tests/fixtures/workgraph-event-completed.json",
+        "components/reactions/copilot-agent-task/tests/fixtures/workgraph-execution-started.json",
+        "components/reactions/copilot-agent-task/tests/integration_test.rs",
+        "components/reactions/copilot-agent-task/tests/mock_github.rs",
+        "components/reactions/copilot-agent-task/tests/output_schema.rs"
+      ],
+      "sanitizedCredentialShapedFixtureOccurrences": 8,
+      "applicationVerification": {
+        "status": "passed",
+        "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+        "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+        "command": "git apply --check <patch> && git apply <patch>"
+      }
+    },
+    {
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "tip": "a50fff734f09cf9ae3b040d1cfeed90c3212bff3",
+      "tipSubject": "docs: fix jq update mapping example",
+      "commitCount": 2,
+      "patch": "43e7d25034bc8fababf3021b3c6e17d476d42e4a--a50fff734f09cf9ae3b040d1cfeed90c3212bff3.patch",
+      "sha256": "16dd8cc6eb228bdd6428caf6ae558e4332c771081d63baece0a3d4ff8d76bb74",
+      "bytes": 96088,
+      "changedFiles": [
+        "lib/Cargo.toml",
+        "lib/README.md",
+        "lib/src/lib_core.rs",
+        "middleware/Cargo.toml",
+        "middleware/README.md",
+        "middleware/src/jq/mod.rs",
+        "middleware/src/jq/tests.rs",
+        "middleware/src/lib.rs",
+        "middleware/src/parse_json/README.md",
+        "middleware/src/parse_json/mod.rs",
+        "middleware/src/parse_json/tests.rs",
+        "middleware/src/pipeline_tests.rs",
+        "middleware/src/regex_extract/README.md",
+        "middleware/src/regex_extract/mod.rs",
+        "middleware/src/regex_extract/tests.rs"
+      ],
+      "sanitizedCredentialShapedFixtureOccurrences": 0,
+      "applicationVerification": {
+        "status": "passed",
+        "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+        "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+        "command": "git apply --check <patch> && git apply <patch>"
+      }
+    },
+    {
+      "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+      "tip": "e56e54938c367b53d813f88f06067a591bfd47bd",
+      "tipSubject": "Align refresh reaction dogfood entry",
+      "commitCount": 15,
+      "patch": "43e7d25034bc8fababf3021b3c6e17d476d42e4a--e56e54938c367b53d813f88f06067a591bfd47bd.patch",
+      "sha256": "e974dcf251b138ee5094c5a185713a65d1a6c9210daff23b6912427005198b3f",
+      "bytes": 199180,
+      "changedFiles": [
+        "Cargo.toml",
+        "components/reactions/github-project-item-refresh/CHANGELOG.md",
+        "components/reactions/github-project-item-refresh/Cargo.toml",
+        "components/reactions/github-project-item-refresh/Makefile",
+        "components/reactions/github-project-item-refresh/README.md",
+        "components/reactions/github-project-item-refresh/src/config.rs",
+        "components/reactions/github-project-item-refresh/src/descriptor.rs",
+        "components/reactions/github-project-item-refresh/src/destination.rs",
+        "components/reactions/github-project-item-refresh/src/graphql.rs",
+        "components/reactions/github-project-item-refresh/src/lib.rs",
+        "components/reactions/github-project-item-refresh/src/models.rs",
+        "components/reactions/github-project-item-refresh/src/processing.rs",
+        "components/reactions/github-project-item-refresh/src/reaction.rs",
+        "components/reactions/github-project-item-refresh/src/state_store.rs",
+        "components/reactions/github-project-item-refresh/src/tests.rs",
+        "components/reactions/github-project-item-refresh/tests/integration_test.rs",
+        "lib/README.md"
+      ],
+      "sanitizedCredentialShapedFixtureOccurrences": 10,
+      "applicationVerification": {
+        "status": "passed",
+        "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+        "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+        "command": "git apply --check <patch> && git apply <patch>"
+      }
+    }
+  ],
+  "applicationVerification": {
+    "status": "passed",
+    "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+    "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+    "command": "git apply --check <patch> && git apply <patch>",
+    "verifiedSeries": 7,
+    "warnings": "The 926919b4 and a373d466 series each retain one historical blank-line whitespace warning; both apply successfully."
+  },
+  "localOnlyCommitCoverage": {
+    "status": "complete",
+    "covered": 20,
+    "expected": 20,
+    "entries": [
+      {
+        "commit": "23a06f98943d649ba1f418170a2781e05aa612ac",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "25bda3bb2ef6eebef60dd6babdf69138466babae",
+        "coveredBySeriesTips": [
+          "25bda3bb2ef6eebef60dd6babdf69138466babae"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "266f187f98ddde712f24d40b7b9c667d088e74e0",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "650533bd45531d3388c7a9ba6e81c35252ae0121",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "26d48cde88d7a49684846d46d8f3df407930804b",
+        "coveredBySeriesTips": [
+          "25bda3bb2ef6eebef60dd6babdf69138466babae"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "37d0fe354792036cfcc7ba18531806c1918b8f5f",
+        "coveredBySeriesTips": [
+          "25bda3bb2ef6eebef60dd6babdf69138466babae"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "403be11d37b8d669c658aa4ad1f81948ae4e648f",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "650533bd45531d3388c7a9ba6e81c35252ae0121",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "41c2297dd0b087f08d935fc4a7b995923f406a25",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "650533bd45531d3388c7a9ba6e81c35252ae0121",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "44342b390c501032a24519c087cb4df4cd1e539f",
+        "coveredBySeriesTips": [
+          "25bda3bb2ef6eebef60dd6babdf69138466babae"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "4a1d058eb9fcea305d4436e7947451db595d717d",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "650533bd45531d3388c7a9ba6e81c35252ae0121",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "650533bd45531d3388c7a9ba6e81c35252ae0121",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "6602e16e2a766ada509fe313687f72842aba56e1",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "650533bd45531d3388c7a9ba6e81c35252ae0121",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "904031763e04a8a32759bd0a0af634e75b90bddf",
+        "coveredBySeriesTips": [
+          "25bda3bb2ef6eebef60dd6babdf69138466babae"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "924d01c33158220898a3f2bb6f86686949ad4205",
+        "coveredBySeriesTips": [
+          "a50fff734f09cf9ae3b040d1cfeed90c3212bff3"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "926919b41ba2509904d911e7b6841c3143dd11d8",
+        "coveredBySeriesTips": [
+          "926919b41ba2509904d911e7b6841c3143dd11d8",
+          "a373d4662042ec1853145f2533be741c49429c78"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "a373d4662042ec1853145f2533be741c49429c78",
+        "coveredBySeriesTips": [
+          "a373d4662042ec1853145f2533be741c49429c78"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "a50fff734f09cf9ae3b040d1cfeed90c3212bff3",
+        "coveredBySeriesTips": [
+          "a50fff734f09cf9ae3b040d1cfeed90c3212bff3"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "e56e54938c367b53d813f88f06067a591bfd47bd",
+        "coveredBySeriesTips": [
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "e63c14e9c8e8cf7f9953cad3b6b543ec210b2c2d",
+        "coveredBySeriesTips": [
+          "4a1d058eb9fcea305d4436e7947451db595d717d",
+          "650533bd45531d3388c7a9ba6e81c35252ae0121",
+          "e56e54938c367b53d813f88f06067a591bfd47bd"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "e7190b1d566fb76c1e0c3035b27f8a474a097f53",
+        "coveredBySeriesTips": [
+          "25bda3bb2ef6eebef60dd6babdf69138466babae"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      },
+      {
+        "commit": "ff0dce92c8e9b859a825ae373449399c1a745236",
+        "coveredBySeriesTips": [
+          "25bda3bb2ef6eebef60dd6babdf69138466babae"
+        ],
+        "preimageRoute": "Fetch remote base 43e7d25034bc8fababf3021b3c6e17d476d42e4a, apply any listed cumulative series patch, then inspect the commit-specific patch metadata."
+      }
+    ]
+  }
+}
