@@ -17,6 +17,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_lib::sources::PositionComparator;
+use std::cmp::Ordering;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReplicationState {
@@ -24,6 +25,13 @@ pub struct ReplicationState {
     pub binlog_position: u32,
     pub gtid_set: Option<String>,
     pub last_processed_timestamp: u64,
+    /// Native cursor before this transaction's GTID/BEGIN/TableMap event.
+    /// Both row fields are absent on bootstrap and completed-transaction tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_start_position: Option<u32>,
+    /// Zero-based ordinal of the emitted change within the committed transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_offset: Option<u64>,
 }
 
 impl ReplicationState {
@@ -38,7 +46,47 @@ impl ReplicationState {
             binlog_position,
             gtid_set: gtid_set.filter(|gtid| !gtid.trim().is_empty()),
             last_processed_timestamp,
+            transaction_start_position: None,
+            row_offset: None,
         }
+    }
+
+    pub fn with_transaction_row(mut self, start_position: u32, row_offset: u64) -> Result<Self> {
+        self.transaction_start_position = Some(start_position);
+        self.row_offset = Some(row_offset);
+        self.validate()?;
+        Ok(self)
+    }
+
+    fn validate(&self) -> Result<()> {
+        match (self.transaction_start_position, self.row_offset) {
+            (None, None) => Ok(()),
+            (Some(start), Some(_)) => {
+                anyhow::ensure!(
+                    !self.binlog_file.is_empty() && start >= 4 && start < self.binlog_position,
+                    "Invalid MySQL row position: expected a binlog file and transaction start \
+                     between byte 4 and commit position {}",
+                    self.binlog_position
+                );
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "Incomplete MySQL row position: transaction_start_position and row_offset \
+                 must both be present"
+            ),
+        }
+    }
+
+    pub fn compare_cursor(&self, other: &Self) -> Ordering {
+        self.binlog_file
+            .cmp(&other.binlog_file)
+            .then_with(|| self.binlog_position.cmp(&other.binlog_position))
+            .then_with(|| match (self.row_offset, other.row_offset) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            })
     }
 
     /// Serialize this state to bytes for use as a source position token.
@@ -61,14 +109,17 @@ pub fn encode_position(state: &ReplicationState) -> Result<Bytes> {
 
 /// Decode a MySQL source position token shared by bootstrap handover and CDC checkpoints.
 pub fn decode_position(bytes: &[u8]) -> Result<ReplicationState> {
-    serde_json::from_slice(bytes).context("Failed to decode MySQL replication position")
+    let state: ReplicationState =
+        serde_json::from_slice(bytes).context("Failed to decode MySQL replication position")?;
+    state.validate()?;
+    Ok(state)
 }
 
 /// Position comparator for MySQL binlog positions.
 ///
-/// Compares two `ReplicationState` JSON-encoded positions. Uses GTID-based
-/// comparison when both positions have GTID sets; falls back to binlog
-/// file + position comparison otherwise.
+/// Orders positions by binlog file, commit position, and transaction row ordinal.
+/// A token without row fields marks a completed cursor, after every row at that
+/// position. Timestamps and GTIDs are metadata, not per-row ordering keys.
 #[derive(Debug, Clone, Default)]
 pub struct MySqlPositionComparator;
 
@@ -82,18 +133,6 @@ impl PositionComparator for MySqlPositionComparator {
             return true;
         };
 
-        // Compare using timestamp as the primary ordering metric.
-        // MySQL binlog positions are not globally comparable across file rotations,
-        // but timestamps provide a reliable monotonic ordering.
-        if event_state.last_processed_timestamp != resume_state.last_processed_timestamp {
-            return event_state.last_processed_timestamp > resume_state.last_processed_timestamp;
-        }
-
-        // Same timestamp — compare binlog file and position for finer granularity
-        match event_state.binlog_file.cmp(&resume_state.binlog_file) {
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => event_state.binlog_position > resume_state.binlog_position,
-        }
+        event_state.compare_cursor(&resume_state).is_gt()
     }
 }

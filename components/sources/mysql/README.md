@@ -70,6 +70,27 @@ protect against passive eavesdropping but not an active man-in-the-middle. Use
 
 - Packets > 16 MB are not supported.
 
+## Checkpoint positions
+
+CDC position tokens retain the real binlog filename and commit byte position and
+include `transaction_start_position` and `row_offset` for each emitted row. The
+start is a native GTID/BEGIN/TableMap event cursor; the offset is a zero-based
+ordinal across all emitted changes in the transaction, including multiple row
+events or statements. Ordering uses file, commit position, and row ordinal, not
+wall-clock timestamps. Commit timestamps remain binlog-header metadata.
+
+Resuming a row checkpoint replays the containing transaction from its native
+file cursor, even when a GTID is present, and suppresses only rows already
+processed by each subscriber. Existing bootstrap and completed-transaction tokens
+omit both row fields and represent a position after all rows at that cursor.
+Incomplete or invalid row tokens fail explicitly instead of falling back to the
+commit end. These are internal opaque position fields, not source configuration.
+
+Resume assumes the same binlog history and source table/key configuration.
+Changing those requires a fresh bootstrap/checkpoint. Rows lost with an older
+source are not reconstructed automatically, and older source binaries cannot
+safely resume the new partial-row tokens.
+
 ## Testing
 
 Integration test uses testcontainers:
