@@ -927,7 +927,7 @@ impl Source for PostgresReplicationSource {
     }
 
     async fn stop(&self) -> Result<()> {
-        if self.base.get_status().await != ComponentStatus::Running {
+        if self.base.get_status().await == ComponentStatus::Stopped {
             return Ok(());
         }
 
@@ -936,6 +936,7 @@ impl Source for PostgresReplicationSource {
         self.base.set_status(ComponentStatus::Stopping, None).await;
 
         self.abort_replication_task().await;
+        self.base.clear_dispatchers().await;
 
         // Clear cached schema so a subsequent start() re-introspects
         if let Ok(mut cached) = self.cached_schema.write() {
@@ -1284,6 +1285,87 @@ impl PostgresSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod error_lifecycle {
+        use super::*;
+        use drasi_lib::bootstrap::{
+            BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+        };
+        use drasi_lib::channels::BootstrapEventSender;
+        use drasi_lib::config::SourceSubscriptionSettings;
+        use std::time::Duration;
+
+        struct InvalidBoundaryBootstrap;
+
+        #[async_trait]
+        impl BootstrapProvider for InvalidBoundaryBootstrap {
+            async fn bootstrap(
+                &self,
+                _request: BootstrapRequest,
+                _context: &BootstrapContext,
+                _event_tx: BootstrapEventSender,
+                _settings: Option<&SourceSubscriptionSettings>,
+            ) -> Result<BootstrapResult> {
+                Ok(BootstrapResult {
+                    event_count: 0,
+                    source_position: Some(bytes::Bytes::from_static(b"invalid boundary")),
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn stop_cleans_up_after_replication_failure() {
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = reserved.local_addr().unwrap().port();
+            drop(reserved);
+            let source = PostgresSourceBuilder::new("failed-source")
+                .with_host("127.0.0.1")
+                .with_port(port)
+                .with_ssl_mode(SslMode::Disable)
+                .with_database("test")
+                .with_user("test")
+                .with_bootstrap_provider(InvalidBoundaryBootstrap)
+                .build()
+                .unwrap();
+
+            for _ in 0..2 {
+                source.start().await.unwrap();
+                let mut subscription = source
+                    .subscribe(SourceSubscriptionSettings {
+                        source_id: source.id().to_string(),
+                        query_id: "test-query".to_string(),
+                        enable_bootstrap: true,
+                        nodes: Default::default(),
+                        relations: Default::default(),
+                        resume_from: None,
+                        resume_sequence: None,
+                        request_position_handle: false,
+                    })
+                    .await
+                    .unwrap();
+                let mut status = source.base.status_handle().subscribe_status();
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    status.wait_for(|status| *status == ComponentStatus::Error),
+                )
+                .await
+                .expect("invalid bootstrap boundary must fail the replication task")
+                .unwrap();
+                assert!(source.base.task_handle.read().await.is_some());
+
+                source.stop().await.unwrap();
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                assert!(source.base.task_handle.read().await.is_none());
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
+                        .await
+                        .expect("stop must close the subscription")
+                        .is_err()
+                );
+                source.stop().await.unwrap();
+            }
+        }
+    }
 
     mod primary_key_map {
         use super::*;

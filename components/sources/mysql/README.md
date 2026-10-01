@@ -70,6 +70,13 @@ protect against passive eavesdropping but not an active man-in-the-middle. Use
 
 - Packets > 16 MB are not supported.
 
+## Lifecycle
+
+`stop()` cleans up running, starting, and failed sources. It aborts and joins the
+replication task, closes stale streaming subscriptions, and clears their resume
+positions before reporting `Stopped`. Repeated stops are safe; a subsequent start
+waits for fresh subscriptions. Unexpected task failures are reported after cleanup.
+
 ## Testing
 
 Integration test uses testcontainers:

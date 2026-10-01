@@ -99,6 +99,12 @@ The PostgreSQL database must be configured for logical replication:
    ALTER TABLE your_table REPLICA IDENTITY DEFAULT;
    ```
 
+## Lifecycle
+
+`stop()` cleans up running, starting, and failed sources. It aborts and joins the
+replication task and closes stale streaming subscriptions before reporting
+`Stopped`. Repeated stops are safe; new subscriptions are required after a restart.
+
 ## Configuration
 
 ### Builder Pattern (Recommended)
