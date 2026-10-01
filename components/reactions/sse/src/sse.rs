@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::Context;
 use async_trait::async_trait;
 use axum::http::Method;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -247,6 +248,13 @@ impl Reaction for SseReaction {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
+        let mut task_handles = self.task_handles.lock().await;
+        anyhow::ensure!(
+            task_handles.is_empty(),
+            "SSE reaction '{}' is already started; stop it before starting again",
+            self.base.id
+        );
+
         log_component_start("SSE Reaction", &self.base.id);
 
         // Transition to Starting
@@ -257,13 +265,21 @@ impl Reaction for SseReaction {
             )
             .await;
 
-        // Transition to Running
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("SSE reaction started".to_string()),
-            )
-            .await;
+        let host = self.config.host.clone();
+        let port = self.config.port;
+        let listener = match tokio::net::TcpListener::bind((host.as_str(), port))
+            .await
+            .with_context(|| format!("Failed to bind SSE server on {host}:{port}"))
+        {
+            Ok(listener) => listener,
+            Err(error) => {
+                error!("[{}] {error:#}", self.base.id);
+                self.base
+                    .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                    .await;
+                return Err(error);
+            }
+        };
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -285,7 +301,10 @@ impl Reaction for SseReaction {
             super::register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
+                if !matches!(
+                    status_handle.get_status().await,
+                    ComponentStatus::Starting | ComponentStatus::Running
+                ) {
                     info!("[{reaction_id}] SSE reaction not running, breaking loop");
                     break;
                 }
@@ -511,11 +530,9 @@ impl Reaction for SseReaction {
                 }
             }
         });
-        self.task_handles.lock().await.push(hb_handle);
+        task_handles.push(hb_handle);
 
         // HTTP server task - dynamically creates routes for all paths
-        let host = self.config.host.clone();
-        let port = self.config.port;
         let broadcasters_server = self.broadcasters.clone();
 
         // Get snapshot_fetcher from the runtime context for the /snapshot/:query_id endpoint
@@ -635,30 +652,49 @@ impl Reaction for SseReaction {
                 .layer(cors);
 
             info!("Starting SSE server on {host}:{port} with CORS enabled");
-            let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
-                Ok(l) => l,
-                Err(e) => {
-                    error!("Failed to bind SSE server: {e}");
-                    return;
-                }
-            };
             if let Err(e) = axum::serve(listener, app).await {
                 error!("SSE server error: {e}");
             }
         });
-        self.task_handles.lock().await.push(server_handle);
+        task_handles.push(server_handle);
+
+        // Transition to Running only after the listener and tasks are established.
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("SSE reaction started".to_string()),
+            )
+            .await;
 
         Ok(())
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        // Use ReactionBase common stop functionality
+        let mut handles = self.task_handles.lock().await;
+        for handle in handles.iter() {
+            handle.abort();
+        }
+
+        // Join every canceled task before publishing Stopped or returning an error.
+        let mut task_error = None;
+        for handle in handles.drain(..) {
+            if let Err(error) = handle.await {
+                if !error.is_cancelled() {
+                    error!("[{}] SSE background task failed: {error}", self.base.id);
+                    task_error.get_or_insert(error);
+                }
+            }
+        }
+
         self.base.stop_common().await?;
 
-        // Cancel all other tasks (heartbeat, HTTP server)
-        let mut handles = self.task_handles.lock().await;
-        for handle in handles.drain(..) {
-            handle.abort();
+        if let Some(error) = task_error {
+            let error = anyhow::Error::new(error)
+                .context(format!("Failed to stop SSE reaction '{}'", self.base.id));
+            self.base
+                .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                .await;
+            return Err(error);
         }
 
         // Transition to Stopped
@@ -693,5 +729,52 @@ impl Reaction for SseReaction {
 
     fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
         drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_sse_lifecycle_stop_reports_task_failure_after_releasing_listener() {
+        let reserved_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = reserved_listener.local_addr().unwrap();
+        let reaction = SseReaction::builder("failed-task")
+            .with_host("127.0.0.1")
+            .with_port(addr.port())
+            .build()
+            .unwrap();
+        drop(reserved_listener);
+        reaction.start().await.unwrap();
+
+        let failed_task = tokio::spawn(async {
+            panic!("simulated SSE background task failure");
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !failed_task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        reaction.task_handles.lock().await.insert(0, failed_task);
+
+        let error = reaction
+            .stop()
+            .await
+            .expect_err("unexpected task failures must be reported");
+        assert!(error
+            .downcast_ref::<tokio::task::JoinError>()
+            .unwrap()
+            .is_panic());
+        assert_eq!(reaction.status().await, ComponentStatus::Error);
+        assert!(reaction.task_handles.lock().await.is_empty());
+        assert!(reaction.base.processing_task.read().await.is_none());
+        let _probe = TcpListener::bind(addr)
+            .await
+            .expect("all listeners must be released even when a task failed");
+        reaction.stop().await.unwrap();
     }
 }
