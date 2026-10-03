@@ -40,19 +40,12 @@ Set a default template that applies to all queries:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
-use std::sync::Arc;
 
 // Define a default template that applies to all queries
 let default_template = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "[NEW] {{after.id}}".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "[CHG] {{after.id}}: {{before.value}} -> {{after.value}}".to_string(),
-    }),
-    deleted: Some(TemplateSpec {
-        template: "[DEL] {{before.id}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("[NEW] {{after.id}}")),
+    updated: Some(TemplateSpec::new("[CHG] {{after.id}}: {{before.value}} -> {{after.value}}")),
+    deleted: Some(TemplateSpec::new("[DEL] {{before.id}}")),
 };
 
 let reaction = LogReaction::builder("my-logger")
@@ -65,7 +58,7 @@ let reaction = LogReaction::builder("my-logger")
     .build()?; // Returns Result - validates templates
 
 // Add to DrasiLib (event channel is automatically injected)
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 **Validation**: The `build()` method validates all templates and ensures routes match subscribed queries. Returns `Err` if:
@@ -78,19 +71,12 @@ Override default template for specific queries:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
-use std::sync::Arc;
 
 // Define custom templates for different queries
 let sensor_config = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "[SENSOR] New: {{after.sensor_id}} - {{after.temperature}}°C".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "[SENSOR] {{after.sensor_id}}: {{before.temperature}}°C -> {{after.temperature}}°C".to_string(),
-    }),
-    deleted: Some(TemplateSpec {
-        template: "[SENSOR] Removed: {{before.sensor_id}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("[SENSOR] New: {{after.sensor_id}} - {{after.temperature}}°C")),
+    updated: Some(TemplateSpec::new("[SENSOR] {{after.sensor_id}}: {{before.temperature}}°C -> {{after.temperature}}°C")),
+    deleted: Some(TemplateSpec::new("[SENSOR] Removed: {{before.sensor_id}}")),
 };
 
 let reaction = LogReaction::builder("sensor-logger")
@@ -98,7 +84,7 @@ let reaction = LogReaction::builder("sensor-logger")
     .with_route("sensor-readings", sensor_config)
     .build()?; // Validates templates and routes
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 **Route Validation**: Routes must match subscribed queries (supports dotted notation: `source.query` matches route `query`).
@@ -116,18 +102,11 @@ For programmatic configuration or deserialization scenarios:
 
 ```rust
 use drasi_reaction_log::{LogReaction, LogReactionConfig, QueryConfig, TemplateSpec};
-use std::sync::Arc;
 
 let default_template = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "[ADD] {{after.name}}".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "[UPD] {{before.value}} -> {{after.value}}".to_string(),
-    }),
-    deleted: Some(TemplateSpec {
-        template: "[DEL] {{before.name}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("[ADD] {{after.name}}")),
+    updated: Some(TemplateSpec::new("[UPD] {{before.value}} -> {{after.value}}")),
+    deleted: Some(TemplateSpec::new("[DEL] {{before.name}}")),
 };
 
 let config = LogReactionConfig {
@@ -141,7 +120,7 @@ let reaction = LogReaction::new(
     config
 )?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 #### With Per-Query Routes
@@ -149,27 +128,18 @@ drasi.add_reaction(Arc::new(reaction)).await?;
 ```rust
 use drasi_reaction_log::{LogReaction, LogReactionConfig, QueryConfig, TemplateSpec};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 let mut routes = HashMap::new();
 routes.insert("sensor-query".to_string(), QueryConfig {
-    added: Some(TemplateSpec {
-        template: "[SENSOR] {{after.id}}: {{after.temperature}}°C".to_string(),
-    }),
+    added: Some(TemplateSpec::new("[SENSOR] {{after.id}}: {{after.temperature}}°C")),
     updated: None,  // Falls back to default
     deleted: None,  // Falls back to default
 });
 
 let default_template = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "[DEFAULT] {{after.id}}".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "[DEFAULT-UPD] {{after.id}}".to_string(),
-    }),
-    deleted: Some(TemplateSpec {
-        template: "[DEFAULT-DEL] {{before.id}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("[DEFAULT] {{after.id}}")),
+    updated: Some(TemplateSpec::new("[DEFAULT-UPD] {{after.id}}")),
+    deleted: Some(TemplateSpec::new("[DEFAULT-DEL] {{before.id}}")),
 };
 
 let config = LogReactionConfig {
@@ -183,7 +153,7 @@ let reaction = LogReaction::new(
     config
 )?; // Returns Result - validates templates and routes
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 ## Validation
@@ -206,9 +176,7 @@ Both `new()` constructor and `build()` builder method validate configuration at 
 let result = LogReaction::builder("test")
     .with_query("q1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec {
-            template: "{{unclosed".to_string(), // Missing }}
-        }),
+        added: Some(TemplateSpec::new("{{unclosed")), // Missing }}
         updated: None,
         deleted: None,
     })
@@ -256,24 +224,42 @@ Templates can be configured at two levels:
 
 ### Template Variables
 
-Templates have access to the following context variables:
+Every template render is given the following standard context keys (the
+`before`/`after`/`data` keys are populated only where applicable to the
+operation):
+
+**Always available:**
+- `query_id` - Id of the query producing this result
+- `query_name` - Alias of `query_id`
+- `operation` - Operation type (`"ADD"`, `"UPDATE"`, or `"DELETE"`)
+- `timestamp` - RFC 3339 timestamp of the emission
+- `sequence_id` - Monotonic per-query sequence number of the emission
+- `metadata` - The query result metadata object
 
 **ADD Events:**
 - `after` - The new data being added
-- `query_name` - Name of the query producing this result
-- `operation` - Operation type (always "ADD")
 
-**UPDATE Events:**
-- `before` - Data before the change
+**UPDATE Events (and aggregations):**
+- `before` - Data before the change (may be absent for an aggregation)
 - `after` - Data after the change
 - `data` - Raw data field from the result
-- `query_name` - Name of the query producing this result
-- `operation` - Operation type (always "UPDATE")
 
 **DELETE Events:**
 - `before` - Data being removed
-- `query_name` - Name of the query producing this result
-- `operation` - Operation type (always "DELETE")
+
+### Route Resolution
+
+For a given query id and operation, a template is resolved in this order:
+
+1. an exact `routes` entry for the query id,
+2. a `routes` entry matching the last dotted segment of the query id
+   (e.g. route `sensors` matches query `source.sensors`),
+3. the `default_template`,
+4. the built-in human-readable default line.
+
+If a template render fails, the reaction logs a warning and falls back to the
+built-in default line for that operation; it never silently substitutes
+unrelated output.
 
 ### Template Helpers
 
@@ -320,15 +306,9 @@ With templates configured:
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
 
 let default_template = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "[NEW] Sensor {{after.id}}: {{after.temperature}}°C".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "[CHG] {{after.id}}: {{before.temperature}}°C -> {{after.temperature}}°C".to_string(),
-    }),
-    deleted: Some(TemplateSpec {
-        template: "[DEL] Sensor {{before.id}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("[NEW] Sensor {{after.id}}: {{after.temperature}}°C")),
+    updated: Some(TemplateSpec::new("[CHG] {{after.id}}: {{before.temperature}}°C -> {{after.temperature}}°C")),
+    deleted: Some(TemplateSpec::new("[DEL] Sensor {{before.id}}")),
 };
 
 let reaction = LogReaction::builder("sensor-logger")
@@ -365,13 +345,12 @@ Simple logging with default JSON output:
 
 ```rust
 use drasi_reaction_log::LogReaction;
-use std::sync::Arc;
 
 let reaction = LogReaction::builder("basic-logger")
     .with_query("my-query")
     .build()?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 ### Multi-Query Monitoring
@@ -380,7 +359,6 @@ Subscribe to multiple queries:
 
 ```rust
 use drasi_reaction_log::LogReaction;
-use std::sync::Arc;
 
 let reaction = LogReaction::builder("multi-logger")
     .with_queries(vec![
@@ -390,7 +368,7 @@ let reaction = LogReaction::builder("multi-logger")
     ])
     .build()?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 ### Custom Formatting
@@ -399,18 +377,11 @@ Use templates for readable output:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
-use std::sync::Arc;
 
 let inventory_template = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "✓ Added: {{after.product_name}} ({{after.quantity}} units)".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "↻ Updated: {{after.product_name}} stock: {{before.quantity}} → {{after.quantity}}".to_string(),
-    }),
-    deleted: Some(TemplateSpec {
-        template: "✗ Removed: {{before.product_name}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("✓ Added: {{after.product_name}} ({{after.quantity}} units)")),
+    updated: Some(TemplateSpec::new("↻ Updated: {{after.product_name}} stock: {{before.quantity}} → {{after.quantity}}")),
+    deleted: Some(TemplateSpec::new("✗ Removed: {{before.product_name}}")),
 };
 
 let reaction = LogReaction::builder("formatted-logger")
@@ -418,7 +389,7 @@ let reaction = LogReaction::builder("formatted-logger")
     .with_default_template(inventory_template)
     .build()?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 ### Performance Tuning
@@ -427,14 +398,13 @@ Adjust queue capacity for high-volume scenarios:
 
 ```rust
 use drasi_reaction_log::LogReaction;
-use std::sync::Arc;
 
 let reaction = LogReaction::builder("high-volume-logger")
     .with_query("events")
     .with_priority_queue_capacity(50000)  // Increased buffer
     .build()?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 ### Conditional Auto-Start
@@ -443,14 +413,13 @@ Create but don't start immediately:
 
 ```rust
 use drasi_reaction_log::LogReaction;
-use std::sync::Arc;
 
 let reaction = LogReaction::builder("manual-logger")
     .with_query("debug-query")
     .with_auto_start(false)  // Don't start automatically
     .build()?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 
 // Start manually when needed
 drasi.start_reaction("manual-logger").await?;
@@ -460,18 +429,13 @@ drasi.start_reaction("manual-logger").await?;
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
-use std::sync::Arc;
 
 let user_template = QueryConfig {
-    added: Some(TemplateSpec {
-        template: r#"New User: {{after.name}} ({{after.email}})
-  Full data: {{json after}}"#.to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: r#"User {{after.id}} changed:
+    added: Some(TemplateSpec::new(r#"New User: {{after.name}} ({{after.email}})
+  Full data: {{json after}}"#)),
+    updated: Some(TemplateSpec::new(r#"User {{after.id}} changed:
   Before: {{json before}}
-  After:  {{json after}}"#.to_string(),
-    }),
+  After:  {{json after}}"#)),
     deleted: None,
 };
 
@@ -480,7 +444,7 @@ let reaction = LogReaction::builder("complex-logger")
     .with_default_template(user_template)
     .build()?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 ### Per-Query Templates
@@ -489,48 +453,31 @@ Different formatting for different queries:
 
 ```rust
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
-use std::sync::Arc;
 
 // Default template for all queries
 let default_template = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "[DEFAULT] {{after.id}}".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "[DEFAULT] {{after.id}} updated".to_string(),
-    }),
+    added: Some(TemplateSpec::new("[DEFAULT] {{after.id}}")),
+    updated: Some(TemplateSpec::new("[DEFAULT] {{after.id}} updated")),
     deleted: None,
 };
 
 // Sensor-specific template
 let sensor_config = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "🌡️  Sensor {{after.id}}: {{after.temperature}}°C, {{after.humidity}}%".to_string(),
-    }),
-    updated: Some(TemplateSpec {
-        template: "🌡️  Sensor {{after.id}}: {{before.temperature}}°C → {{after.temperature}}°C".to_string(),
-    }),
-    deleted: Some(TemplateSpec {
-        template: "🌡️  Sensor {{before.id}} offline".to_string(),
-    }),
+    added: Some(TemplateSpec::new("🌡️  Sensor {{after.id}}: {{after.temperature}}°C, {{after.humidity}}%")),
+    updated: Some(TemplateSpec::new("🌡️  Sensor {{after.id}}: {{before.temperature}}°C → {{after.temperature}}°C")),
+    deleted: Some(TemplateSpec::new("🌡️  Sensor {{before.id}} offline")),
 };
 
 // User activity template
 let user_config = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "👤 New login: {{after.username}} from {{after.ip_address}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("👤 New login: {{after.username}} from {{after.ip_address}}")),
     updated: None,
-    deleted: Some(TemplateSpec {
-        template: "👤 Logout: {{before.username}}".to_string(),
-    }),
+    deleted: Some(TemplateSpec::new("👤 Logout: {{before.username}}")),
 };
 
 // System alerts template
 let alert_config = QueryConfig {
-    added: Some(TemplateSpec {
-        template: "⚠️  ALERT: {{after.severity}} - {{after.message}}".to_string(),
-    }),
+    added: Some(TemplateSpec::new("⚠️  ALERT: {{after.severity}} - {{after.message}}")),
     updated: None,
     deleted: None,
 };
@@ -547,7 +494,7 @@ let reaction = LogReaction::builder("multi-source-logger")
     .with_route("system-alerts", alert_config)
     .build()?;
 
-drasi.add_reaction(Arc::new(reaction)).await?;
+drasi.add_reaction(reaction).await?;
 ```
 
 **Output:**
@@ -653,7 +600,7 @@ RUST_LOG=debug cargo run
 1. Verify query ID spelling - route lookups are case-sensitive
 2. Check that per-query routes are being set for the correct query ID
 3. Use `RUST_LOG=debug` to see which templates are being applied
-4. Remember the template priority: Query-specific routes > Default template > JSON
+4. Remember the resolution order: query-specific route > last dotted segment route > default template > built-in default line
 
 **Example**:
 ```rust
