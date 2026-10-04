@@ -569,6 +569,7 @@ mod durable {
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
     };
+    use std::result::Result;
 
     async fn open(path: &std::path::Path) -> Arc<IndexedEnvelopeStore> {
         open_capacity(path, 2).await
@@ -899,6 +900,529 @@ mod durable {
             1
         );
         drop(pipe);
+        store.shutdown().await.expect("cleanup");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Fault {
+        ReadCheckpoint = 1,
+        ReadSequence,
+        ReadOutbox,
+        Begin,
+        Append,
+        StageSequence,
+        StageCheckpoint,
+        BeforeCommit,
+        AfterCommit,
+    }
+
+    struct FaultBackend {
+        original: ComputationIndexes,
+        fault: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        persistent: bool,
+    }
+
+    impl FaultBackend {
+        fn take(&self, fault: Fault) -> bool {
+            self.fault
+                .compare_exchange(
+                    fault as usize,
+                    0,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        fn fail(&self, fault: Fault) -> Result<(), IndexError> {
+            if self.take(fault) {
+                Err(IndexError::IOError)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn arm(&self, fault: Fault) {
+            self.fault
+                .store(fault as usize, std::sync::atomic::Ordering::Release);
+        }
+
+        fn checkpoints(&self) -> &Arc<dyn drasi_core::interface::CheckpointStore> {
+            self.original.checkpoint_store().expect("checkpoint")
+        }
+
+        fn outbox(&self) -> &Arc<dyn drasi_core::interface::OutboxWriter> {
+            self.original.outbox_writer().expect("outbox")
+        }
+
+        fn bundle(self: &Arc<Self>, cleanup: bool) -> ComputationIndexes {
+            let original = self.original.indexes();
+            let control: Arc<dyn SessionControl> = self.clone();
+            let domain = TransactionDomain::new(control.clone());
+            let indexes = ComputationIndexes::try_new(
+                IndexSet {
+                    element_index: original.element_index.clone(),
+                    archive_index: original.archive_index.clone(),
+                    result_index: original.result_index.clone(),
+                    future_queue: original.future_queue.clone(),
+                    session_control: control,
+                },
+                Some(domain.clone()),
+                Some(ComputationResource::participating(
+                    self.clone() as Arc<dyn drasi_core::interface::CheckpointStore>,
+                    &domain,
+                )),
+                Some(ComputationResource::participating(
+                    self.clone() as Arc<dyn drasi_core::interface::OutboxWriter>,
+                    &domain,
+                )),
+                Some(ComputationResource::participating(
+                    self.original.live_results_writer().expect("live").clone(),
+                    &domain,
+                )),
+            )
+            .expect("one explicit transaction domain");
+            if cleanup {
+                indexes.with_cleanup(self.original.cleanup().expect("cleanup").clone())
+            } else {
+                indexes
+            }
+        }
+    }
+
+    async fn fault_backend(path: &std::path::Path, persistent: bool) -> Arc<FaultBackend> {
+        Arc::new(FaultBackend {
+            original: resources(path).await,
+            fault: std::sync::atomic::AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            persistent,
+        })
+    }
+
+    #[async_trait::async_trait]
+    impl SessionControl for FaultBackend {
+        async fn begin(&self) -> Result<(), IndexError> {
+            self.fail(Fault::Begin)?;
+            self.original.indexes().session_control.begin().await
+        }
+        async fn commit(&self) -> Result<(), IndexError> {
+            if self.take(Fault::BeforeCommit) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            self.original.indexes().session_control.commit().await?;
+            if self.take(Fault::AfterCommit) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), IndexError> {
+            self.original.indexes().session_control.rollback()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl drasi_core::interface::CheckpointStore for FaultBackend {
+        fn is_persistent(&self) -> bool {
+            self.persistent && self.checkpoints().is_persistent()
+        }
+        async fn stage_checkpoint(
+            &self,
+            key: &str,
+            sequence: u64,
+            position: Option<&bytes::Bytes>,
+        ) -> Result<(), IndexError> {
+            self.fail(Fault::StageCheckpoint)?;
+            self.checkpoints()
+                .stage_checkpoint(key, sequence, position)
+                .await
+        }
+        async fn read_checkpoint(
+            &self,
+            key: &str,
+        ) -> Result<Option<drasi_core::interface::SourceCheckpoint>, IndexError> {
+            self.fail(Fault::ReadCheckpoint)?;
+            self.checkpoints().read_checkpoint(key).await
+        }
+        async fn read_all_checkpoints(
+            &self,
+        ) -> Result<
+            std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
+            IndexError,
+        > {
+            self.checkpoints().read_all_checkpoints().await
+        }
+        async fn clear_checkpoints(&self) -> Result<(), IndexError> {
+            self.checkpoints().clear_checkpoints().await
+        }
+        async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
+            self.checkpoints().write_config_hash(hash).await
+        }
+        async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
+            self.checkpoints().read_config_hash().await
+        }
+        async fn stage_result_sequence(&self, key: &str, sequence: u64) -> Result<(), IndexError> {
+            self.fail(Fault::StageSequence)?;
+            self.checkpoints()
+                .stage_result_sequence(key, sequence)
+                .await
+        }
+        async fn read_result_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+            self.fail(Fault::ReadSequence)?;
+            self.checkpoints().read_result_sequence(key).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl drasi_core::interface::OutboxWriter for FaultBackend {
+        async fn append(&self, key: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+            self.outbox().append(key, sequence, data).await
+        }
+        async fn read_from(
+            &self,
+            key: &str,
+            after: u64,
+        ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+            self.fail(Fault::ReadOutbox)?;
+            self.outbox().read_from(key, after).await
+        }
+        async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+            self.outbox().read_latest_sequence(key).await
+        }
+        async fn clear(&self, key: &str) -> Result<(), IndexError> {
+            self.outbox().clear(key).await
+        }
+        async fn append_and_trim(
+            &self,
+            key: &str,
+            sequence: u64,
+            data: &[u8],
+            retain_from: u64,
+        ) -> Result<usize, IndexError> {
+            self.fail(Fault::Append)?;
+            self.outbox()
+                .append_and_trim(key, sequence, data, retain_from)
+                .await
+        }
+        async fn trim_before(&self, key: &str, retain_from: u64) -> Result<usize, IndexError> {
+            self.outbox().trim_before(key, retain_from).await
+        }
+        async fn trim_to_capacity(&self, key: &str, capacity: usize) -> Result<usize, IndexError> {
+            self.outbox().trim_to_capacity(key, capacity).await
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_storage_failures_preserve_committed_data_and_fence_interrupted_writes() {
+        for (operation, fault, fenced) in [
+            ("append", Fault::ReadOutbox, false),
+            ("append", Fault::ReadSequence, false),
+            ("append", Fault::Begin, true),
+            ("append", Fault::Append, true),
+            ("append", Fault::StageSequence, true),
+            ("receive", Fault::ReadOutbox, false),
+            ("acknowledge", Fault::ReadCheckpoint, false),
+            ("acknowledge", Fault::ReadSequence, false),
+            ("acknowledge", Fault::Begin, true),
+            ("acknowledge", Fault::StageCheckpoint, true),
+        ] {
+            let directory = tempfile::tempdir().expect("directory");
+            let backend = fault_backend(directory.path(), true).await;
+            let store = IndexedEnvelopeStore::try_new(
+                backend.bundle(true),
+                codec(),
+                "edge",
+                NonZeroUsize::new(2).expect("capacity"),
+                RetentionPolicy::Backpressure,
+            )
+            .expect("store");
+            let generation = store.acquire_generation().expect("generation");
+            store
+                .append(generation, &root("source", 1, &[7]))
+                .await
+                .expect("committed seed");
+            backend.arm(fault);
+            let result = match operation {
+                "append" => store
+                    .append(generation, &root("source", 2, &[8]))
+                    .await
+                    .map(|_| ()),
+                "receive" => store.next(generation, 0).await.map(|_| ()),
+                "acknowledge" => store.acknowledge(generation, 1).await,
+                _ => unreachable!("declared operations"),
+            };
+            assert!(
+                matches!(result, Err(PipeError::Backend(_))),
+                "{operation}/{fault:?}: {result:?}"
+            );
+            assert_eq!(
+                backend.fault.load(std::sync::atomic::Ordering::Acquire),
+                0,
+                "fault was exercised"
+            );
+            if fenced {
+                assert!(store
+                    .progress(generation)
+                    .await
+                    .expect_err("fenced owner")
+                    .to_string()
+                    .contains("cleanup and recovery"));
+            } else {
+                assert_eq!(
+                    store
+                        .progress(generation)
+                        .await
+                        .expect("read failure did not mutate"),
+                    0
+                );
+            }
+            store.shutdown().await.expect("rollback and cleanup");
+            drop((store, backend));
+            let reopened = open(directory.path()).await;
+            let generation = reopened.acquire_generation().expect("new generation");
+            assert_eq!(
+                reopened.progress(generation).await.expect("unhandled seed"),
+                0
+            );
+            let first = reopened
+                .next(generation, 0)
+                .await
+                .expect("read")
+                .expect("seed");
+            assert_eq!(first.position, 1);
+            assert_eq!(values(&first.envelope), [7]);
+            assert!(reopened
+                .next(generation, 1)
+                .await
+                .expect("no uncommitted output")
+                .is_none());
+            reopened
+                .acknowledge(generation, 1)
+                .await
+                .expect("retry handling");
+            reopened
+                .append(generation, &root("source", 2, &[8]))
+                .await
+                .expect("retry publish");
+            reopened.shutdown().await.expect("cleanup");
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_generation_revocation_during_commit_never_reports_definite_success() {
+        for acknowledgement in [false, true] {
+            for fault in [Fault::BeforeCommit, Fault::AfterCommit] {
+                let directory = tempfile::tempdir().expect("directory");
+                let backend = fault_backend(directory.path(), true).await;
+                let store = IndexedEnvelopeStore::try_new(
+                    backend.bundle(true),
+                    codec(),
+                    "edge",
+                    NonZeroUsize::new(2).expect("capacity"),
+                    RetentionPolicy::Backpressure,
+                )
+                .expect("store");
+                let generation = store.acquire_generation().expect("generation");
+                let first = root("source", 1, &[7]);
+                if acknowledgement {
+                    store.append(generation, &first).await.expect("seed");
+                }
+                backend.arm(fault);
+                let mut operation = Box::pin(async {
+                    if acknowledgement {
+                        store.acknowledge(generation, 1).await
+                    } else {
+                        store.append(generation, &first).await.map(|_| ())
+                    }
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::select! {
+                        _ = backend.entered.notified() => {}
+                        result = &mut operation => panic!("commit barrier not reached: {result:?}"),
+                    }
+                })
+                .await
+                .expect("commit entered");
+                assert!(store
+                    .acquire_generation()
+                    .expect_err("exclusive operation")
+                    .to_string()
+                    .contains("in use"));
+                assert!(store
+                    .shutdown()
+                    .await
+                    .expect_err("must not race cleanup")
+                    .to_string()
+                    .contains("before shutdown"));
+                store.revoke_generation(generation);
+                backend.resume.notify_one();
+                let error = tokio::time::timeout(std::time::Duration::from_secs(5), operation)
+                    .await
+                    .expect("commit returned")
+                    .expect_err("revoked owner");
+                if acknowledgement {
+                    assert!(matches!(error, PipeError::AcknowledgementUnknown { .. }));
+                } else {
+                    assert!(matches!(error, PipeError::AcceptanceUnknown { .. }));
+                }
+                assert!(store
+                    .acquire_generation()
+                    .expect_err("fenced")
+                    .to_string()
+                    .contains("cleanup and recovery"));
+                store.shutdown().await.expect("cleanup");
+                drop((store, backend));
+                let reopened = open(directory.path()).await;
+                let generation = reopened.acquire_generation().expect("recovered generation");
+                assert_eq!(
+                    reopened
+                        .progress(generation)
+                        .await
+                        .expect("durable progress"),
+                    u64::from(acknowledgement)
+                );
+                assert_eq!(
+                    values(
+                        &reopened
+                            .next(generation, 0)
+                            .await
+                            .expect("read")
+                            .expect("committed")
+                            .envelope
+                    ),
+                    [7]
+                );
+                assert!(reopened
+                    .next(generation, 1)
+                    .await
+                    .expect("one committed record")
+                    .is_none());
+                reopened.shutdown().await.expect("cleanup");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_store_rejects_invalid_providers_payloads_positions_and_exhausted_sequences() {
+        for (cleanup, persistent, expected) in
+            [(false, true, "cleanup owner"), (true, false, "persistent storage")]
+        {
+            let directory = tempfile::tempdir().expect("directory");
+            let backend = fault_backend(directory.path(), persistent).await;
+            let result = IndexedEnvelopeStore::try_new(
+                backend.bundle(cleanup),
+                codec(),
+                "edge",
+                NonZeroUsize::new(2).expect("capacity"),
+                RetentionPolicy::Backpressure,
+            );
+            assert!(matches!(result, Err(error) if error.to_string().contains(expected)));
+            backend
+                .original
+                .cleanup()
+                .expect("owner")
+                .shutdown()
+                .await
+                .expect("cleanup rejected bundle");
+        }
+        let directory = tempfile::tempdir().expect("directory");
+        let backend = fault_backend(directory.path(), true).await;
+        let store = IndexedEnvelopeStore::try_new(
+            backend.bundle(true),
+            codec(),
+            "edge",
+            NonZeroUsize::new(2).expect("capacity"),
+            RetentionPolicy::Backpressure,
+        )
+        .expect("store");
+        let generation = store.acquire_generation().expect("generation");
+        store
+            .append(generation, &root("source", 1, &[7]))
+            .await
+            .expect("seed");
+        assert!(store
+            .acknowledge(generation, 2)
+            .await
+            .expect_err("future progress")
+            .to_string()
+            .contains("acknowledgement position"));
+        store.acknowledge(generation, 1).await.expect("handled");
+        assert!(store
+            .acknowledge(generation, 0)
+            .await
+            .expect_err("regression")
+            .to_string()
+            .contains("acknowledgement position"));
+        backend
+            .original
+            .indexes()
+            .session_control
+            .begin()
+            .await
+            .expect("inject persisted boundary");
+        backend
+            .checkpoints()
+            .stage_result_sequence("edge", u64::MAX)
+            .await
+            .expect("max sequence");
+        backend
+            .outbox()
+            .append_and_trim("edge", 1, b"invalid-envelope", 1)
+            .await
+            .expect("corrupt bytes");
+        backend
+            .original
+            .indexes()
+            .session_control
+            .commit()
+            .await
+            .expect("commit corruption");
+        assert!(matches!(
+            store.next(generation, 0).await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(store
+            .append(generation, &root("source", 2, &[8]))
+            .await
+            .expect_err("no wrap")
+            .to_string()
+            .contains("position exhausted"));
+        assert_eq!(
+            store
+                .progress(generation)
+                .await
+                .expect("unchanged progress"),
+            1
+        );
+        store.shutdown().await.expect("cleanup");
+
+        let directory = tempfile::tempdir().expect("directory");
+        let mut tiny_codec = EnvelopeCodec::new(NonZeroUsize::new(1).expect("one byte"));
+        tiny_codec
+            .register_schema(Arc::new(Schema::new(
+                schema_descriptor(),
+                Arc::new(ReadingValidator(schema_descriptor())),
+            )))
+            .expect("schema");
+        let store = IndexedEnvelopeStore::try_new(
+            resources(directory.path()).await,
+            Arc::new(tiny_codec),
+            "edge",
+            NonZeroUsize::new(2).expect("capacity"),
+            RetentionPolicy::Backpressure,
+        )
+        .expect("store");
+        let generation = store.acquire_generation().expect("generation");
+        assert!(matches!(
+            store.append(generation, &root("source", 1, &[7])).await,
+            Err(PipeError::Backend(_))
+        ));
+        assert_eq!(store.progress(generation).await.expect("not accepted"), 0);
+        assert!(store.next(generation, 0).await.expect("empty").is_none());
         store.shutdown().await.expect("cleanup");
     }
 }

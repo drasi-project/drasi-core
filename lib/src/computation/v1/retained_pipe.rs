@@ -447,3 +447,57 @@ impl Pipe for RetainedPipe {
             .ok_or(PipeError::ReceiverTaken)
     }
 }
+
+#[cfg(test)]
+mod foundation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn poisoned_binding_preserves_errors_and_releases_inflight_bookkeeping() {
+        let store = Arc::new(super::super::MemoryEnvelopeStore::new(
+            NonZeroUsize::new(1).expect("capacity"),
+            RetentionPolicy::Backpressure,
+        ));
+        let mut pipe = RetainedPipe::new(store, ReplayGapPolicy::Strict).expect("pipe");
+        let mut receiver = pipe.take_receiver().expect("receiver");
+        let shared = pipe.sender.0.clone();
+        shared.lock().expect("lock").sends = 1;
+        let admission = SendAdmission(shared.clone());
+        let ack = Box::new(Ack {
+            shared: shared.clone(),
+            position: 1,
+        });
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = shared.state.lock().expect("lock");
+            panic!("injected owner failure");
+        }))
+        .is_err());
+        let failure = pipe
+            .sender()
+            .send(super::super::pipe::test_envelope(1))
+            .await
+            .expect_err("poisoned send");
+        assert!(matches!(failure.error, PipeError::Backend(_)));
+        assert!(matches!(
+            receiver.receive().await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(matches!(shared.is_idle().await, Err(PipeError::Backend(_))));
+        assert!(matches!(
+            ack.complete(HandlingOutcome::Handled).await,
+            Err(PipeError::Backend(_))
+        ));
+        drop(admission);
+        shared.close(false);
+        shared.close(true);
+        let state = shared
+            .state
+            .lock()
+            .err()
+            .expect("poison retained")
+            .into_inner();
+        assert_eq!(state.sends, 0);
+        assert!(!state.delivery_pending);
+        assert!(state.cancelled);
+    }
+}

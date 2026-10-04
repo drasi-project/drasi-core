@@ -524,6 +524,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranked_inputs_reject_missing_metadata_and_time_without_acceptance() {
+        let queue = RankedInputQueue::new(1).expect("queue");
+        let mut config = config(&ResourceId::try_new("queue").expect("id"), 0, "source", 1);
+        // Type validation may defer unresolved resources; creation still rejects them.
+        assert!(config.validate_resources(&BTreeMap::new()).is_ok());
+        assert!(config.create_with_resources(&BTreeMap::new()).is_err());
+        config.capacity = 0;
+        assert!(matches!(
+            config.capabilities(),
+            Err(PipeError::InvalidCapacity)
+        ));
+        config.capacity = 1;
+        let pipe = queue.bind(&config).expect("binding");
+        let failure = pipe
+            .sender()
+            .send(super::super::pipe::test_envelope(1))
+            .await
+            .expect_err("missing source metadata");
+        assert!(failure
+            .error
+            .to_string()
+            .contains("omitted source metadata"));
+        assert_eq!(failure.acceptance(), AcceptanceState::NotAccepted);
+        assert!(pipe.control.is_idle().await.expect("no acceptance"));
+        config.source_id = None;
+        let native = RankedInputQueue::new(1)
+            .expect("native queue")
+            .bind(&config)
+            .expect("native binding");
+        let original = super::super::pipe::test_envelope(1);
+        let untimed = original.derive(
+            original.id().clone(),
+            original.changes().clone(),
+            super::super::SystemMetadata::new(original.system().stream().clone(), 1),
+        );
+        let failure = native
+            .sender()
+            .send(untimed)
+            .await
+            .expect_err("missing native event time");
+        assert!(failure.error.to_string().contains("omitted event time"));
+        assert_eq!(failure.acceptance(), AcceptanceState::NotAccepted);
+        assert!(native
+            .control
+            .is_idle()
+            .await
+            .expect("no native acceptance"));
+    }
+
+    #[tokio::test]
+    async fn draining_a_rank_waits_for_its_accepted_head_behind_another_rank() {
+        let queue = RankedInputQueue::new(2).expect("queue");
+        let mut config = config(&ResourceId::try_new("queue").expect("id"), 0, "source", 2);
+        config.source_id = None;
+        let mut first = queue.bind(&config).expect("first rank");
+        config.source_rank = 1;
+        let mut second = queue.bind(&config).expect("second rank");
+        first
+            .sender()
+            .send(super::super::pipe::test_envelope(1))
+            .await
+            .expect("first");
+        second
+            .sender()
+            .send(super::super::pipe::test_envelope(2))
+            .await
+            .expect("second");
+        let mut first_rx = first.take_receiver().expect("first receiver");
+        let mut second_rx = second.take_receiver().expect("second receiver");
+        second.control.close();
+        let mut pending = Box::pin(second_rx.receive());
+        assert!(
+            futures::poll!(&mut pending).is_pending(),
+            "closed does not mean drained"
+        );
+        assert_eq!(
+            first_rx
+                .receive()
+                .await
+                .expect("receive")
+                .expect("head")
+                .envelope()
+                .system()
+                .sequence(),
+            1
+        );
+        assert_eq!(
+            pending
+                .await
+                .expect("receive")
+                .expect("drained head")
+                .envelope()
+                .system()
+                .sequence(),
+            2
+        );
+        assert!(second_rx.receive().await.expect("end").is_none());
+    }
+
+    #[tokio::test]
+    async fn exhausted_generations_and_admissions_never_wrap_or_accept_work() {
+        let queue = RankedInputQueue::new(1).expect("queue");
+        let mut config = config(&ResourceId::try_new("queue").expect("id"), 0, "source", 1);
+        config.source_id = None;
+        queue.state.lock().expect("state").next_generation = u64::MAX;
+        assert!(matches!(queue.bind(&config), Err(PipeError::Backend(_))));
+        assert!(queue.state.lock().expect("state").bindings.is_empty());
+        queue.state.lock().expect("state").next_generation = 0;
+        let pipe = queue.bind(&config).expect("binding");
+        queue.state.lock().expect("state").next_admission = u64::MAX;
+        let failure = pipe
+            .sender()
+            .send(super::super::pipe::test_envelope(1))
+            .await
+            .expect_err("admission exhausted");
+        assert!(matches!(failure.error, PipeError::Backend(_)));
+        assert!(pipe.control.is_idle().await.expect("no acceptance"));
+        let control = pipe.control.clone();
+        drop(pipe);
+        queue.shutdown().await.expect("shutdown");
+        assert!(matches!(queue.bind(&config), Err(PipeError::Closed)));
+        drop(queue);
+        control.close();
+        control.cancel();
+        assert!(matches!(control.is_idle().await, Err(PipeError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn poisoned_ranked_owner_fails_closed_and_can_release_a_binding() {
+        let queue = RankedInputQueue::new(1).expect("queue");
+        let mut config = config(&ResourceId::try_new("queue").expect("id"), 0, "source", 1);
+        config.source_id = None;
+        let mut pipe = queue.bind(&config).expect("binding");
+        let mut receiver = pipe.take_receiver().expect("receiver");
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = queue.state.lock().expect("lock");
+            panic!("injected owner failure");
+        }))
+        .is_err());
+        assert!(matches!(
+            pipe.sender()
+                .send(super::super::pipe::test_envelope(1))
+                .await
+                .expect_err("poisoned")
+                .error,
+            PipeError::Backend(_)
+        ));
+        assert!(matches!(
+            receiver.receive().await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(matches!(
+            pipe.control.is_idle().await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(queue.shutdown().await.is_err());
+        pipe.control.close();
+        pipe.control.cancel();
+    }
+
+    #[tokio::test]
     async fn ranked_queues_match_time_declaration_rank_and_raw_sequence_with_all_metadata() {
         let future = crate::sources::future_queue_source::FUTURE_QUEUE_SOURCE_ID;
         for sources in [["z-source", "a-source", "earlier"], ["a-source", "z-source", "earlier"]] {

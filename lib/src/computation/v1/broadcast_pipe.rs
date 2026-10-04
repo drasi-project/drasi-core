@@ -253,3 +253,43 @@ impl Pipe for BroadcastPipe {
             .ok_or(PipeError::ReceiverTaken)
     }
 }
+
+#[cfg(test)]
+mod foundation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn poisoned_queue_fails_send_receive_and_observation_but_can_be_closed() {
+        let mut pipe = BroadcastPipe::new(BroadcastPipeConfig {
+            capacity: 1,
+            lag_policy: BroadcastLagPolicy::Report,
+        })
+        .expect("pipe");
+        let mut receiver = pipe.take_receiver().expect("receiver");
+        let shared = pipe.sender.0.clone();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = shared.queue.lock().expect("lock");
+            panic!("injected owner failure");
+        }))
+        .is_err());
+        let original = super::super::pipe::test_envelope(1);
+        let failure = pipe
+            .sender()
+            .send(original.clone())
+            .await
+            .expect_err("poisoned send");
+        assert_eq!(
+            failure.acceptance(),
+            super::super::AcceptanceState::NotAccepted
+        );
+        assert!(Arc::ptr_eq(failure.envelope.event(), original.event()));
+        assert!(matches!(failure.error, PipeError::Backend(_)));
+        assert!(matches!(
+            receiver.receive().await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(matches!(shared.is_idle().await, Err(PipeError::Backend(_))));
+        shared.close(false);
+        shared.close(true);
+    }
+}

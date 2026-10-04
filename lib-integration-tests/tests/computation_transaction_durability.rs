@@ -173,13 +173,22 @@ fn storage(root: &Path) -> Arc<dyn ComputationIndexProvider> {
 }
 
 async fn transaction(root: &Path, crash_before_commit: bool) -> Result<TransactionTransformer> {
+    let mut subject = transaction_unstarted(root, crash_before_commit).await?;
+    subject.start().await?;
+    Ok(subject)
+}
+
+async fn transaction_unstarted(
+    root: &Path,
+    crash_before_commit: bool,
+) -> Result<TransactionTransformer> {
     let factory = Arc::new(ArithmeticFactory {
         trace: root.join("steps.log"),
         crash_before_commit,
     });
     let mut registry = TransactionalTransformerRegistry::default();
     registry.register(factory.clone())?;
-    let mut subject = TransactionTransformer::new(
+    let subject = TransactionTransformer::new(
         TransactionTransformerDefinition {
             graph_id: "transaction-crash".into(),
             id: ComponentId::try_new("sequence")?,
@@ -201,7 +210,6 @@ async fn transaction(root: &Path, crash_before_commit: bool) -> Result<Transacti
         storage(&root.join("transaction")),
     )
     .await?;
-    subject.start().await?;
     Ok(subject)
 }
 
@@ -227,7 +235,13 @@ fn input(sequence: u64, value: i64) -> Result<InputEnvelope> {
 }
 
 async fn query(root: &Path, name: &str) -> Result<ContinuousQueryTransformer> {
-    let mut subject = ContinuousQueryTransformer::new(
+    let mut subject = query_unstarted(root, name).await?;
+    subject.start().await?;
+    Ok(subject)
+}
+
+async fn query_unstarted(root: &Path, name: &str) -> Result<ContinuousQueryTransformer> {
+    let subject = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "transaction-crash".into(),
             id: ComponentId::try_new(name)?,
@@ -239,8 +253,277 @@ async fn query(root: &Path, name: &str) -> Result<ContinuousQueryTransformer> {
         storage(&root.join(name)),
     )
     .await?;
-    subject.start().await?;
     Ok(subject)
+}
+
+struct ReplaySource {
+    descriptor: ComponentDescriptor,
+    sequence: u64,
+}
+
+#[async_trait]
+impl ComputationComponent for ReplaySource {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for ReplaySource {
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        self.sequence += 1;
+        if self.sequence > 3 {
+            return Ok(None);
+        }
+        Ok(Some(OutputEnvelope {
+            port: PortId::try_new("out")?,
+            envelope: input(self.sequence, self.sequence as i64 + 2)?.envelope,
+        }))
+    }
+}
+
+struct CrashSink {
+    descriptor: ComponentDescriptor,
+    root: PathBuf,
+    crash: bool,
+}
+
+#[async_trait]
+impl ComputationComponent for CrashSink {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSink for CrashSink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
+        let mut external = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(self.root.join("external.log"))?;
+        assert_eq!(input.envelope.changes().operations().len(), 1);
+        let ChangeOperation::Added { after, .. } = &input.envelope.changes().operations()[0] else {
+            anyhow::bail!("expected a new query row");
+        };
+        let row = QueryChangeCodec::decode_row(after)?;
+        let Some(VariableValue::Integer(value)) = row.values.get("value") else {
+            anyhow::bail!("missing computed value");
+        };
+        writeln!(
+            external,
+            "{:?}|{}",
+            input.envelope.changes().id(),
+            value.as_i64().context("value range")?
+        )?;
+        external.sync_all()?;
+        if self.crash {
+            // The external effect happened, but the graph has not acknowledged handling.
+            std::process::exit(CRASH_EXIT);
+        }
+        Ok(())
+    }
+}
+
+async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<()> {
+    let profiles: Vec<_> = boundary.split('-').skip(1).collect();
+    anyhow::ensure!(profiles.len() == 2, "expected two downstream pipe profiles");
+    let mut builder = ComputationGraph::builder("transaction-crash")
+        .transformer(Box::new(transaction_unstarted(root, false).await?))
+        .query(Box::new(query_unstarted(root, "connected-query").await?))
+        .sink(Box::new(CrashSink {
+            descriptor: ComponentDescriptor::try_new(
+                ComponentId::try_new("sink")?,
+                vec![PortDescriptor::new(
+                    PortId::try_new("in")?,
+                    PortDirection::Input,
+                    QueryChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::new([
+                        PipeCapability::DurableAcceptance,
+                        PipeCapability::ExplicitAcknowledgement,
+                    ]),
+                )],
+            )?,
+            root: root.to_owned(),
+            crash,
+        }));
+    let mut accepted_source = 0;
+    for (from, to, schema, profile) in [
+        ("source", "sequence", GraphChangeCodec::schema(), "qos"),
+        (
+            "sequence",
+            "connected-query",
+            GraphChangeCodec::schema(),
+            profiles[0],
+        ),
+        (
+            "connected-query",
+            "sink",
+            QueryChangeCodec::schema(),
+            profiles[1],
+        ),
+    ] {
+        let indexes = storage(&root.join("pipes"))
+            .create_indexes("connected", from)
+            .await?;
+        let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).expect("codec limit"));
+        codec.register_schema(schema)?;
+        let id = ResourceId::try_new(from)?;
+        let capacity = NonZeroUsize::new(1).expect("single-event capacity");
+        let stream = StreamId::try_new(format!("{from}/out"))?;
+        let (provider, resource): (Box<dyn PipeProvider>, ResourceHandle) = match profile {
+            "qos" => {
+                let definition = QosChannelDefinition {
+                    stream: stream.clone(),
+                    capacity,
+                    durable: true,
+                    retention: RetentionPolicy::Backpressure,
+                    subscribers: std::collections::BTreeMap::from([(
+                        "consumer".into(),
+                        SubscriptionStart::Earliest,
+                    )]),
+                };
+                let channel =
+                    QosChannel::persistent(definition.clone(), indexes, codec, "journal").await?;
+                if from == "source" {
+                    // Resume at durable acceptance: unhandled accepted input remains in this journal.
+                    accepted_source = channel.progress().await?.producer_sequence.unwrap_or(0);
+                }
+                (
+                    Box::new(definition.pipe(id.clone(), "consumer")),
+                    channel.resource(),
+                )
+            }
+            "retained" => {
+                let store = Arc::new(RetainedStoreResource(Arc::new(
+                    IndexedEnvelopeStore::try_new(
+                        indexes,
+                        Arc::new(codec),
+                        "journal",
+                        capacity,
+                        RetentionPolicy::Backpressure,
+                    )?,
+                )));
+                (
+                    Box::new(RetainedPipeConfig {
+                        resource: id.clone(),
+                        capacity,
+                        durable: true,
+                        retention: RetentionPolicy::Backpressure,
+                        gap_policy: ReplayGapPolicy::Strict,
+                    }),
+                    ResourceHandle::new(ResourceRole::StateStore, store.clone())
+                        .with_cleanup(store),
+                )
+            }
+            _ => anyhow::bail!("unknown profile {profile}"),
+        };
+        builder = builder
+            .declare_resource(ResourceSpecification {
+                id: id.clone(),
+                role: ResourceRole::StateStore,
+                ownership: ResourceOwnership::Graph,
+                binding: Arc::from(from),
+            })?
+            .provide_resource(id, resource)?
+            .bind_stream(
+                Endpoint::new(ComponentId::try_new(from)?, PortId::try_new("out")?),
+                stream,
+            )
+            .connect(
+                EdgeDefinition::new(
+                    Endpoint::new(ComponentId::try_new(from)?, PortId::try_new("out")?),
+                    Endpoint::new(ComponentId::try_new(to)?, PortId::try_new("in")?),
+                ),
+                provider,
+            );
+    }
+    let mut graph = builder
+        .source(Box::new(ReplaySource {
+            descriptor: ComponentDescriptor::try_new(
+                ComponentId::try_new("source")?,
+                vec![PortDescriptor::new(
+                    PortId::try_new("out")?,
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::new([PipeCapability::DurableAcceptance]),
+                )],
+            )?,
+            sequence: accepted_source,
+        }))
+        .build()?;
+    tokio::time::timeout(Duration::from_secs(20), graph.start()?).await??;
+    anyhow::ensure!(
+        !crash,
+        "seed must terminate inside the sink, before acknowledgement"
+    );
+    assert_eq!(graph.state(), GraphState::Completed);
+    graph.dispose().await?;
+    drop(graph);
+
+    let mut restored = query(root, "connected-query").await?;
+    assert_eq!(rows(&restored)?, [(20, 1, 1), (24, 2, 2), (28, 3, 3)]);
+    assert!(!restored.has_pending_emissions());
+    restored.stop().await?;
+    let trace = std::fs::read_to_string(root.join("steps.log"))?;
+    for committed in ["first:1", "second:1"] {
+        assert_eq!(
+            trace.lines().filter(|line| *line == committed).count(),
+            1,
+            "the first transaction demonstrably committed before the sink crashed"
+        );
+    }
+    // Trace writes are outside the transaction: a later, interrupted transaction
+    // can leave staged trace entries and legitimately execute again after rollback.
+    let mut restored_transaction = transaction(root, false).await?;
+    let duplicate = restored_transaction.transform(input(3, 5)?).await?;
+    restored_transaction.delivery_completed(&duplicate).await?;
+    restored_transaction.stop().await?;
+    assert_eq!(
+        std::fs::read_to_string(root.join("steps.log"))?,
+        trace,
+        "replaying an already committed input must not execute participants again"
+    );
+    let external = std::fs::read_to_string(root.join("external.log"))?;
+    let lines: Vec<_> = external.lines().collect();
+    assert!(
+        lines.len() >= 4,
+        "three rows and at least one unacknowledged effect retry"
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "replay preserves the logical result identity"
+    );
+    let mut identities = std::collections::BTreeMap::new();
+    for line in &lines {
+        let (identity, value) = line.rsplit_once('|').context("effect record")?;
+        if let Some(previous) = identities.insert(value, identity) {
+            assert_eq!(
+                previous, identity,
+                "retry must preserve logical result identity"
+            );
+        }
+    }
+    assert_eq!(
+        identities.keys().copied().collect::<Vec<_>>(),
+        ["20", "24", "28"]
+    );
+    Ok(())
 }
 
 async fn deliver(
@@ -285,6 +568,13 @@ async fn transaction_crash_worker() -> Result<()> {
         root.join(format!("{phase}.pid")),
         std::process::id().to_string(),
     )?;
+    if boundary.starts_with("connected-") {
+        anyhow::ensure!(
+            matches!(phase.as_str(), "seed" | "recover"),
+            "unknown phase"
+        );
+        return connected_pipeline(&root, &boundary, phase == "seed").await;
+    }
     let precommit = boundary == "before-commit";
     let mut subject = transaction(&root, precommit && phase == "seed").await?;
     let mut first = query(&root, "first-query").await?;
@@ -398,6 +688,10 @@ async fn process_crashes_preserve_transaction_atomicity_and_partial_fanout_recov
         "partial-fanout",
         "after-delivery",
         "after-confirmation",
+        "connected-retained-retained",
+        "connected-retained-qos",
+        "connected-qos-retained",
+        "connected-qos-qos",
     ] {
         let directory = tempfile::tempdir()?;
         for phase in ["seed", "recover"] {

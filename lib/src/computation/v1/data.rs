@@ -618,3 +618,43 @@ fn require_image(ordinal: u64, record: &Record, expected: RecordImage) -> Result
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod foundation_tests {
+    use super::*;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+
+    #[test]
+    fn image_requirement_reports_the_requested_role_without_changing_the_record() {
+        let envelope = super::super::GraphChangeCodec::encode_change(
+            SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("source", "one"),
+                        labels: Arc::from([]),
+                        effective_from: 1,
+                    },
+                    properties: ElementPropertyMap::default(),
+                },
+            },
+            super::super::StreamId::try_new("source/out").expect("stream"),
+            1,
+            None,
+        )
+        .expect("validated graph record");
+        let ChangeOperation::Added { after, .. } = &envelope.changes().operations()[0] else {
+            panic!("expected full record");
+        };
+        assert!(require_image(1, after, RecordImage::Full).is_ok());
+        for (expected, description) in [
+            (RecordImage::Patch, "patch after-image"),
+            (RecordImage::Partial, "partial image"),
+        ] {
+            assert!(matches!(require_image(1, after, expected),
+                Err(ContractError::InvalidImage { ordinal: 1, expected, actual: RecordImage::Full }) if expected == description));
+        }
+        assert_eq!(after.image(), RecordImage::Full);
+    }
+}

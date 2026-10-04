@@ -129,6 +129,71 @@ fn record(id: u8, image: RecordImage) -> Record {
     record_for(&schema(), id, image)
 }
 
+#[test]
+fn operation_image_matrix_rejects_invalid_combinations_without_repair() {
+    let images = [RecordImage::Full, RecordImage::Patch, RecordImage::Partial];
+    for image in images {
+        let result = ChangeSet::try_new(
+            change_set_id(),
+            descriptor(),
+            vec![ChangeOperation::Added {
+                ordinal: u64::MAX,
+                after: record(1, image),
+            }],
+        );
+        assert_eq!(result.is_ok(), image == RecordImage::Full, "add {image:?}");
+        for before in [
+            None,
+            Some(RecordImage::Full),
+            Some(RecordImage::Patch),
+            Some(RecordImage::Partial),
+        ] {
+            for identity in [1, 2] {
+                for semantics in [UpdateSemantics::Patch, UpdateSemantics::Replace] {
+                    let expected_image = if semantics == UpdateSemantics::Patch {
+                        RecordImage::Patch
+                    } else {
+                        RecordImage::Full
+                    };
+                    let operation = ChangeOperation::Updated {
+                        ordinal: 42,
+                        before: before.map(|image| record(identity, image)),
+                        after: record(1, image),
+                        semantics,
+                    };
+                    let valid_before =
+                        before.is_none() || (before != Some(RecordImage::Patch) && identity == 1);
+                    let result =
+                        ChangeSet::try_new(change_set_id(), descriptor(), vec![operation.clone()]);
+                    assert_eq!(
+                        result.is_ok(),
+                        image == expected_image && valid_before,
+                        "{operation:?}"
+                    );
+                    if let Ok(changes) = result {
+                        assert_eq!(changes.operations(), &[operation]);
+                        assert!(!changes.is_append_only());
+                    }
+                }
+                let operation = ChangeOperation::Deleted {
+                    ordinal: 0,
+                    identity: reference(1),
+                    before: before.map(|image| record(identity, image)),
+                };
+                let valid =
+                    before.is_none() || (before != Some(RecordImage::Patch) && identity == 1);
+                let result =
+                    ChangeSet::try_new(change_set_id(), descriptor(), vec![operation.clone()]);
+                assert_eq!(result.is_ok(), valid, "{operation:?}");
+                if let Ok(changes) = result {
+                    assert_eq!(changes.operations(), &[operation]);
+                    assert!(!changes.is_append_only());
+                }
+            }
+        }
+    }
+}
+
 fn change_set_id() -> ChangeSetId {
     ChangeSetId::try_new("test.batch", Bytes::from_static(b"batch-1"))
         .expect("valid fixture change-set ID")

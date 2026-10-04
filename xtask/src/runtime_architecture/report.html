@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Drasi runtime architecture atlas</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif;--bg:#f8fafc;--fg:#142337;--panel:#fff;--line:#cbd5e1;--accent:#075985}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--fg:#e2e8f0;--panel:#1e293b;--line:#475569;--accent:#7dd3fc}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg)}header,main{padding:20px 28px}header{border-bottom:1px solid var(--line)}h1{margin:0 0 8px}h2{margin-top:8px}a{color:var(--accent)}button,input,select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--fg)}button{cursor:pointer}button[aria-pressed=true]{outline:2px solid var(--accent)}nav,.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0}label{display:inline-flex;gap:8px;align-items:center}input[type=search]{width:380px;max-width:100%}input[type=number]{width:80px}code,.name{font:12px ui-monospace,monospace;overflow-wrap:anywhere}.muted{opacity:.8}.panel{background:var(--panel);border:1px solid var(--line);padding:18px;margin:16px 0;border-radius:6px}table{border-collapse:collapse;font-size:12px}td,th{padding:6px;border:1px solid var(--line);text-align:left;vertical-align:top}th{background:var(--panel)}.scroll{overflow:auto;max-height:70vh}.matrix th:first-child{position:sticky;left:0;z-index:1;min-width:360px;max-width:460px}.matrix td{min-width:72px;text-align:center;cursor:pointer}.matrix td[data-active]{background:#0369a133}.matrix thead th{position:sticky;top:0;z-index:2}.matrix thead th:first-child{z-index:3}.heat{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px}.tile{padding:12px;min-height:90px;color:#fff;border-radius:4px}.tile .number{font-size:26px;font-weight:700}.inventory{line-height:1.8;padding-left:24px}.inventory button{border:0;background:transparent;color:var(--accent);text-align:left;padding:0;font:12px ui-monospace,monospace}.legend{columns:2;column-width:420px;line-height:1.5}pre{white-space:pre-wrap;overflow-wrap:anywhere}section[hidden]{display:none}.badge{font-size:12px;border:1px solid var(--line);padding:2px 5px;border-radius:3px}
+</style>
+<header>
+<h1>Drasi runtime architecture atlas</h1>
+<div id="summary"></div>
+<p><a href="runtime-architecture.md">Runtime diagrams and review guide</a> · <a href="runtime-dependencies.csv">Full rectangular matrix (CSV)</a> · <a href="runtime-architecture.json">Machine-readable baseline</a></p>
+<p class="muted">Offline, source-derived potential relationships, not a live heap census. Public and private production declarations; conditional union of features/platforms. No network requests or third-party scripts.</p>
+<nav aria-label="Report sections">
+<button data-tab="inventory" aria-pressed="true">Alphabetical inventory</button>
+<button data-tab="matrix" aria-pressed="false">Dependency matrix</button>
+<button data-tab="heatmap" aria-pressed="false">Namespace LOC heatmap</button>
+<button data-tab="diagnostics" aria-pressed="false">Analysis diagnostics</button>
+</nav>
+</header>
+<main>
+<section id="inventory">
+<h2>Alphabetical type inventory</h2>
+<p>Definition-site fully qualified names; re-exports do not create additional types. Select a type for its exact fields and incoming/outgoing relationships. <code>&lt;local@line&gt;</code> is a lexical ID, not an importable Rust path.</p>
+<label>Filter <input type="search" id="type-filter" placeholder="Fully qualified name or kind"></label>
+<div id="type-count" class="muted"></div><ul class="inventory" id="type-list"></ul>
+</section>
+<section id="matrix" hidden>
+<h2>Runtime dependency cardinalities</h2>
+<p><strong>Rows depend on columns.</strong> Every scoped type has a row; columns also include encountered boundary types. Empty = no inferred direct stored relationship, <strong>not proof of independence</strong>. Traits and aliases have no standalone object storage.</p>
+<p><code>1</code> one slot; <code>0..1</code> optional/live weak target; <code>0..*</code> collection/payload range; <code>N</code> fixed array slots. <code>+</code> separates field contributions, not a claim about unique objects. <code>OR</code> separates mutually exclusive <code>[Variant]</code> alternatives. Click a populated cell for field names, ownership modes and conditions. Futures show handles, not fabricated links to their output types.</p>
+<div class="controls">
+<label>Rows <input type="search" id="row-filter" placeholder="e.g. drasi_lib::computation"></label>
+<label>Columns <input type="search" id="column-filter" placeholder="e.g. ComputationGraph"></label>
+<label><input type="checkbox" id="boundary" checked>Include boundary columns</label>
+<label>Row page <input type="number" id="row-page" min="1" value="1"></label>
+<label>Column page <input type="number" id="column-page" min="1" value="1"></label>
+</div>
+<p id="matrix-count"></p>
+<div class="scroll"><table class="matrix" id="matrix-table"></table></div>
+<h3>Column key for this page</h3><ol class="legend" id="column-key"></ol>
+</section>
+<section id="heatmap" hidden>
+<h2>Exclusive namespace code lines</h2>
+<p>Physical lines carrying Rust tokens, excluding blank/comment-only/doc-comment and test-only item lines. Attribute and brace lines count; multiline literals count by physical span. Inline modules own their own lines. Conditional production branches are a union. Macro definitions count where written, not per expansion. <strong>Color is logarithmic; tile area is constant.</strong> LOC is size, not complexity or runtime cost.</p>
+<div class="controls"><label>Namespace <input type="search" id="namespace-filter"></label><label>Order <select id="heat-sort"><option value="size">Largest first</option><option value="name">Alphabetical</option></select></label></div>
+<p id="heat-count"></p><div class="heat" id="heat-tiles"></div>
+</section>
+<section id="diagnostics" hidden>
+<h2>Explicit analysis limits</h2>
+<p>Unresolved/generic targets are not guessed. Use the source declaration and diagrams for erased captures, dynamic concrete implementations, construction-time wiring, generic instantiations, and ownership transfers. A newly unsupported item macro or duplicate conditional definition fails generation rather than silently omitting types.</p>
+<label>Filter <input type="search" id="warning-filter"></label><ul id="warning-list"></ul>
+</section>
+<aside class="panel" id="details" hidden aria-live="polite"></aside>
+</main>
+<script id="report-data" type="application/json">__REPORT_DATA__</script>
+<script>
+"use strict";
+const data=JSON.parse(document.getElementById("report-data").textContent);
+const $=id=>document.getElementById(id);
+const scoped=new Set(data.types.map(t=>t.name));
+const types=new Map(data.types.map(t=>[t.name,t]));
+const columns=[...new Set([...scoped,...data.edges.map(e=>e.to)])].sort();
+const cells=new Map(),outgoing=new Map(),incoming=new Map();
+for(const e of data.edges){
+  for(const [map,key] of [[cells,e.from+"\n"+e.to],[outgoing,e.from],[incoming,e.to]]){
+    if(!map.has(key))map.set(key,[]);map.get(key).push(e);
+  }
+}
+function node(tag,text,className){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;}
+function source(file,line){const a=node("a",file+":"+line);a.href="../../"+file+"#L"+line;return a;}
+function match(text,query){return text.toLowerCase().includes(query.trim().toLowerCase());}
+function cellLabel(edges){
+ const variants=new Map();
+ for(const e of edges){if(!variants.has(e.variant))variants.set(e.variant,[]);variants.get(e.variant).push(e.cardinality);}
+ return [...variants].map(([variant,counts])=>counts.join(" + ")+(variant?" ["+variant+"]":"")).join(" OR ");
+}
+function edgeTable(edges){
+ const table=node("table"),head=node("tr");
+ for(const title of ["Dependent → dependency","Field / variant","Cardinality","Relationship","Condition","Source"])head.append(node("th",title));
+ table.append(head);
+ for(const e of edges){const tr=node("tr");tr.append(node("td",e.from+" → "+e.to,"name"),node("td",e.field+(e.variant?" ["+e.variant+"]":""),"name"),node("td",e.cardinality),node("td",e.relationship),node("td",e.condition||"unconditional","name"));
+ const td=node("td"),t=types.get(e.from);if(t)td.append(source(t.file,e.line));tr.append(td);table.append(tr);}
+ return table;
+}
+function showEdges(title,edges){
+ const box=$("details");box.hidden=false;box.replaceChildren(node("h2",title));
+ const scroll=node("div",undefined,"scroll");scroll.append(edgeTable(edges));box.append(scroll);box.scrollIntoView({block:"nearest"});
+}
+function showType(name){
+ const t=types.get(name),box=$("details");box.hidden=false;
+ box.replaceChildren(node("h2",name),node("p",t.kind+(t.condition?" · "+t.condition:"")));box.append(source(t.file,t.line));
+ if(t.fields.length){box.append(node("h3","Declared stored fields"));const list=node("ul");
+ for(const field of t.fields)list.append(node("li",(field.variant?field.variant+"::":"")+field.name+": "+field.declaration+(field.condition?" ["+field.condition+"]":""),"name"));
+ box.append(list);}else{box.append(node("p","No declared stored fields. A trait/alias is not a separate runtime instance."));}
+ for(const [label,map] of [["Outgoing dependencies",outgoing],["Incoming dependents",incoming]]){
+  box.append(node("h3",label));const edges=map.get(name)||[];const div=node("div",undefined,"scroll");div.append(edgeTable(edges));box.append(div);
+ }
+ box.scrollIntoView({block:"start"});
+}
+function renderInventory(){
+ const selected=data.types.filter(t=>match(t.name+" "+t.kind,$("type-filter").value));$("type-count").textContent=selected.length+" / "+data.types.length+" types";
+ const fragment=document.createDocumentFragment();
+ for(const t of selected){const li=node("li"),button=node("button",t.name);button.onclick=()=>showType(t.name);li.append(button,node("span"," — "+t.kind,"muted"));fragment.append(li);}
+ $("type-list").replaceChildren(fragment);
+}
+function renderMatrix(){
+ const rows=data.types.map(t=>t.name).filter(n=>match(n,$("row-filter").value));
+ const cols=columns.filter(n=>($("boundary").checked||scoped.has(n))&&match(n,$("column-filter").value));
+ const size=30,rmax=Math.max(1,Math.ceil(rows.length/size)),cmax=Math.max(1,Math.ceil(cols.length/size));
+ const page=(id,max)=>{const element=$(id);element.max=max;const parsed=Number.parseInt(element.value,10);const value=Math.max(1,Math.min(max,Number.isFinite(parsed)?parsed:1));element.value=value;return value;};
+ const rp=page("row-page",rmax),cp=page("column-page",cmax),r=rows.slice((rp-1)*size,rp*size),c=cols.slice((cp-1)*size,cp*size);
+ $("matrix-count").textContent=rows.length+" rows × "+cols.length+" columns; row page "+rp+"/"+rmax+", column page "+cp+"/"+cmax+". Rendering 30 × 30 at a time; CSV contains every cell.";
+ const head=node("thead"),hr=node("tr");hr.append(node("th","Dependent ↓ / dependency →"));
+ c.forEach((name,index)=>{const th=node("th","C"+((cp-1)*size+index+1));th.title=name;hr.append(th);});head.append(hr);
+ const body=node("tbody");
+ for(const from of r){const tr=node("tr");tr.append(node("th",from,"name"));for(const to of c){const edges=cells.get(from+"\n"+to)||[];const td=node("td",cellLabel(edges));
+ if(edges.length){td.dataset.active="true";td.tabIndex=0;td.title=from+" → "+to;td.onclick=()=>showEdges(from+" → "+to,edges);td.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();td.click();}};}tr.append(td);}body.append(tr);}
+ $("matrix-table").replaceChildren(head,body);
+ const key=$("column-key");key.start=(cp-1)*size+1;key.replaceChildren(...c.map(n=>node("li",n+(scoped.has(n)?"":" [boundary: definition outside scope]"),"name")));
+}
+function renderHeat(){
+ const selected=data.namespaces.filter(n=>match(n.name,$("namespace-filter").value));
+ selected.sort($("heat-sort").value==="size"?(a,b)=>b.code_lines-a.code_lines||a.name.localeCompare(b.name):(a,b)=>a.name.localeCompare(b.name));
+ const max=Math.max(1,...data.namespaces.map(n=>n.code_lines)),total=selected.reduce((sum,n)=>sum+n.code_lines,0);
+ $("heat-count").textContent=selected.length+" namespaces · "+total.toLocaleString()+" exclusive code lines · blue = smaller, orange/red = larger (global maximum "+max.toLocaleString()+")";
+ $("heat-tiles").replaceChildren(...selected.map(n=>{const tile=node("div",undefined,"tile");const scale=Math.log1p(n.code_lines)/Math.log1p(max);tile.style.backgroundColor="hsl("+(220-210*scale)+" 65% 32%)";tile.append(node("div",n.name,"name"),node("div",n.code_lines.toLocaleString(),"number"),node("div",n.types+" named types · "+n.files.length+" source files"));return tile;}));
+}
+function renderWarnings(){$("warning-list").replaceChildren(...data.warnings.filter(w=>match(w,$("warning-filter").value)).map(w=>node("li",w,"name")));}
+for(const button of document.querySelectorAll("[data-tab]"))button.onclick=()=>{
+ for(const b of document.querySelectorAll("[data-tab]"))b.setAttribute("aria-pressed",String(b===button));
+ for(const section of document.querySelectorAll("main>section"))section.hidden=section.id!==button.dataset.tab;
+ $("details").hidden=true;
+ if(button.dataset.tab==="matrix")renderMatrix();if(button.dataset.tab==="heatmap")renderHeat();if(button.dataset.tab==="diagnostics")renderWarnings();
+};
+$("summary").textContent=data.types.length+" types · "+data.edges.length+" field relationships · "+data.namespaces.length+" namespaces · "+data.warnings.length+" diagnostics · "+data.source_fingerprint;
+$("type-filter").oninput=renderInventory;
+for(const id of ["row-filter","column-filter","boundary"])$(id).oninput=()=>{$("row-page").value=1;$("column-page").value=1;renderMatrix();};
+for(const id of ["row-page","column-page"])$(id).onchange=renderMatrix;
+$("namespace-filter").oninput=renderHeat;$("heat-sort").onchange=renderHeat;$("warning-filter").oninput=renderWarnings;
+renderInventory();
+</script>
+</html>

@@ -572,3 +572,97 @@ impl ResourceCleanup for IndexedEnvelopeStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod foundation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn memory_journal_counters_and_progress_cannot_wrap_or_regress() {
+        let store = MemoryEnvelopeStore::new(
+            NonZeroUsize::new(1).expect("capacity"),
+            RetentionPolicy::Backpressure,
+        );
+        store.epoch.store(u64::MAX, Ordering::Release);
+        assert!(matches!(
+            store.acquire_generation(),
+            Err(PipeError::Backend(_))
+        ));
+        store.epoch.store(0, Ordering::Release);
+        let generation = store.acquire_generation().expect("generation");
+        assert!(matches!(store.progress(0).await, Err(PipeError::Closed)));
+        store.state.lock().expect("state").head = u64::MAX;
+        assert!(matches!(
+            store
+                .append(generation, &super::super::pipe::test_envelope(1))
+                .await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(store
+            .next(generation, u64::MAX)
+            .await
+            .expect("end")
+            .is_none());
+        {
+            let mut state = store.state.lock().expect("state");
+            state.head = 5;
+            state.progress = 3;
+        }
+        for invalid in [0, 2, 6, u64::MAX] {
+            assert!(matches!(
+                store.acknowledge(generation, invalid).await,
+                Err(PipeError::Backend(_))
+            ));
+            assert_eq!(store.progress(generation).await.expect("unchanged"), 3);
+        }
+        store
+            .acknowledge(generation, 3)
+            .await
+            .expect("idempotent completion");
+        store.shutdown().await.expect("shutdown");
+        store.shutdown().await.expect("idempotent shutdown");
+        assert!(matches!(store.acquire_generation(), Err(PipeError::Closed)));
+        assert!(matches!(
+            store.progress(generation).await,
+            Err(PipeError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn poisoned_journal_does_not_turn_failed_storage_into_empty_history() {
+        let store = MemoryEnvelopeStore::new(
+            NonZeroUsize::new(1).expect("capacity"),
+            RetentionPolicy::Backpressure,
+        );
+        let generation = store.acquire_generation().expect("generation");
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.state.lock().expect("lock");
+            panic!("injected owner failure");
+        }))
+        .is_err());
+        assert!(matches!(
+            store.acquire_generation(),
+            Err(PipeError::Backend(_))
+        ));
+        assert!(matches!(
+            store.progress(generation).await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(matches!(
+            store.next(generation, 0).await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(matches!(
+            store
+                .append(generation, &super::super::pipe::test_envelope(1))
+                .await,
+            Err(PipeError::Backend(_))
+        ));
+        assert!(matches!(
+            store.acknowledge(generation, 1).await,
+            Err(PipeError::Backend(_))
+        ));
+        store.revoke_generation(generation);
+        assert!(store.shutdown().await.is_err());
+    }
+}

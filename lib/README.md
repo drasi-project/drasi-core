@@ -53,6 +53,8 @@ Start with the guide for your task:
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
+| [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
+| [Issues, gaps and next-phase work](docs/computation-graph-backlog.md) | Plain-English explanations of unfinished work, suggested priorities, complexity and disruption risk |
 | [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
 
 From the drasi-core repository root, run a complete in-process example:

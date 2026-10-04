@@ -233,3 +233,66 @@ pub trait Pipe: Send + Sync {
     /// Transfer the single receiver to its owning task; subsequent calls fail.
     fn take_receiver(&mut self) -> std::result::Result<Box<dyn EnvelopeReceiver>, PipeError>;
 }
+
+#[cfg(test)]
+pub(super) fn test_envelope(sequence: u64) -> ChangeEnvelope {
+    let schema = super::GraphChangeCodec::schema();
+    ChangeEnvelope::new(
+        super::EnvelopeId::try_new(
+            "test",
+            bytes::Bytes::copy_from_slice(&sequence.to_be_bytes()),
+        )
+        .expect("envelope ID"),
+        super::ChangeSet::try_new(
+            super::ChangeSetId::try_new(
+                "test",
+                bytes::Bytes::copy_from_slice(&sequence.to_be_bytes()),
+            )
+            .expect("change-set ID"),
+            schema.descriptor().clone(),
+            vec![],
+        )
+        .expect("empty change set"),
+        super::SystemMetadata::new(
+            super::StreamId::try_new("test/out").expect("stream"),
+            sequence,
+        )
+        .with_timestamp(chrono::DateTime::from_timestamp(1, 0).expect("timestamp")),
+    )
+}
+
+#[cfg(test)]
+mod foundation_tests {
+    use super::*;
+
+    struct Defaults(super::super::BoundedPipe);
+    impl Pipe for Defaults {
+        fn capabilities(&self) -> &PipeCapabilities {
+            self.0.capabilities()
+        }
+        fn sender(&self) -> Arc<dyn EnvelopeSender> {
+            self.0.sender()
+        }
+        fn take_receiver(&mut self) -> Result<Box<dyn EnvelopeReceiver>, PipeError> {
+            self.0.take_receiver()
+        }
+    }
+    #[async_trait]
+    impl super::super::PipeControl for Defaults {
+        fn close(&self) {
+            self.0.control().close();
+        }
+        fn cancel(&self) {
+            self.0.control().cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn default_observation_never_claims_metrics_or_a_proven_drain() {
+        use super::super::PipeControl;
+        let pipe = Defaults(super::super::BoundedPipe::new(1).expect("pipe"));
+        assert!(Pipe::metrics(&pipe).is_none());
+        assert!(PipeControl::metrics(&pipe).is_none());
+        assert!(matches!(pipe.is_idle().await, Err(PipeError::Backend(_))));
+    }
+}

@@ -87,6 +87,310 @@ async fn persistent(root: &Path, definition: QosChannelDefinition) -> Result<Arc
 }
 
 #[tokio::test]
+async fn persisted_qos_corruption_is_rejected_before_delivery_or_new_acceptance() -> Result<()> {
+    for fault in [
+        "version",
+        "stream",
+        "durability",
+        "head",
+        "missing-cursor",
+        "unknown-cursor",
+        "future-cursor",
+        "capacity",
+        "producer-sequence",
+        "missing-metadata",
+        "record-gap",
+        "foreign-record",
+        "pruned-required-record",
+        "orphan-records",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let desired = definition(true, RetentionPolicy::Backpressure, 2);
+        let channel = persistent(directory.path(), desired.clone()).await?;
+        channel.publish(&event(1)?).await?;
+        channel.publish(&event(2)?).await?;
+        channel.shutdown().await?;
+        drop(channel);
+
+        let provider = LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+            directory.path(),
+            false,
+            false,
+        )));
+        let indexes = provider.create_indexes("qos", "channel").await?;
+        let checkpoint = indexes
+            .checkpoint_store()
+            .expect("checkpoint store")
+            .clone();
+        let outbox = indexes.outbox_writer().expect("outbox").clone();
+        let saved = checkpoint
+            .read_checkpoint("journal")
+            .await?
+            .expect("committed journal");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(saved.source_position.as_ref().expect("metadata"))?;
+        match fault {
+            "version" => metadata["version"] = serde_json::json!(2),
+            "stream" => metadata["definition"]["stream"] = serde_json::json!("other/out"),
+            "durability" => metadata["definition"]["durable"] = serde_json::json!(false),
+            "head" => metadata["head"] = serde_json::json!(3),
+            "missing-cursor" => {
+                metadata["cursors"]
+                    .as_object_mut()
+                    .expect("cursors")
+                    .remove("fast");
+            }
+            "unknown-cursor" => {
+                metadata["cursors"]["unknown"] =
+                    serde_json::json!({"position": 0, "retired": false})
+            }
+            "future-cursor" => metadata["cursors"]["fast"]["position"] = serde_json::json!(3),
+            "capacity" => metadata["definition"]["capacity"] = serde_json::json!(1),
+            "producer-sequence" => metadata["producer_sequence"] = serde_json::json!(1),
+            "missing-metadata" => {}
+            "record-gap" => {
+                metadata["head"] = serde_json::json!(4);
+                metadata["producer_sequence"] = serde_json::json!(4);
+            }
+            "foreign-record" | "pruned-required-record" | "orphan-records" => {}
+            _ => unreachable!("declared corruption cases"),
+        }
+        let bytes = (fault != "missing-metadata")
+            .then(|| serde_json::to_vec(&metadata).map(Bytes::from))
+            .transpose()?;
+        let invalid_record = if matches!(fault, "record-gap" | "foreign-record") {
+            let codec = FactoryRegistry::standard()
+                .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("limit"))?;
+            let envelope = if fault == "record-gap" {
+                event(4)?
+            } else {
+                let original = event(2)?;
+                original.derive(
+                    original.id().clone(),
+                    original.changes().clone(),
+                    SystemMetadata::new(StreamId::try_new("other/out")?, 2),
+                )
+            };
+            Some((
+                if fault == "record-gap" { 4 } else { 2 },
+                codec.encode(&envelope)?,
+            ))
+        } else {
+            None
+        };
+        let transaction = drasi_core::computation::ComputationTransaction::try_new(indexes)?;
+        transaction
+            .run(async {
+                if let Some((position, record)) = &invalid_record {
+                    outbox
+                        .append_and_trim("journal", *position, record, 1)
+                        .await?;
+                }
+                if fault == "pruned-required-record" {
+                    outbox.trim_before("journal", 2).await?;
+                }
+                checkpoint
+                    .stage_checkpoint(
+                        "journal",
+                        if fault == "record-gap" {
+                            4
+                        } else {
+                            saved.sequence
+                        },
+                        bytes.as_ref(),
+                    )
+                    .await?;
+                Ok(())
+            })
+            .await?;
+        if fault == "orphan-records" {
+            checkpoint.clear_checkpoints().await?;
+        }
+        drop(checkpoint);
+        drop(outbox);
+        transaction.shutdown().await?;
+        drop(transaction);
+        drop(provider);
+        let failure = match persistent(directory.path(), desired).await {
+            Ok(channel) => {
+                channel.shutdown().await?;
+                anyhow::bail!("{fault}: corrupted journal was accepted");
+            }
+            Err(error) => error,
+        };
+        let expected = match fault {
+            "capacity" | "producer-sequence" => "head and retained data disagree",
+            "missing-metadata" => "metadata is missing",
+            "record-gap" => "sequence gap",
+            "foreign-record" => "another producer stream",
+            "pruned-required-record" => "pruned required history",
+            "orphan-records" => "no committed metadata",
+            _ => "configuration or progress is inconsistent",
+        };
+        assert!(
+            failure.to_string().contains(expected),
+            "{fault}: {failure:#}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_qos_reconfiguration_preserves_every_existing_subscriber_obligation() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let desired = definition(true, RetentionPolicy::Backpressure, 2);
+    let channel = persistent(directory.path(), desired.clone()).await?;
+    channel.publish(&event(1)?).await?;
+    channel.publish(&event(2)?).await?;
+    channel.shutdown().await?;
+    drop(channel);
+    for unavailable_start in [None, Some(SubscriptionStart::After(3))] {
+        let mut changed = desired.clone();
+        if let Some(start) = unavailable_start {
+            changed.subscribers.insert("new".into(), start);
+        } else {
+            changed.capacity = NonZeroUsize::new(1).expect("capacity");
+        }
+        let error = persistent(directory.path(), changed)
+            .await
+            .err()
+            .expect("must not discard required or invent future history");
+        let expected = if unavailable_start.is_some() {
+            "unavailable history"
+        } else {
+            "discard required history"
+        };
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+    let restored = persistent(directory.path(), desired.clone()).await?;
+    for subscriber in ["fast", "slow"] {
+        let mut pipe = endpoint(&restored, &desired, subscriber, false)?;
+        let mut receiver = pipe.pipe.take_receiver()?;
+        for sequence in 1..=2 {
+            received(receiver.as_mut(), sequence)
+                .await?
+                .complete(HandlingOutcome::Handled)
+                .await?;
+        }
+    }
+    assert_eq!(
+        restored.progress().await?.processed,
+        BTreeMap::from([("fast".into(), 2), ("slow".into(), 2)])
+    );
+    restored.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_qos_rejects_volatile_declarations_and_retired_identity_reuse() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let error = persistent(
+        directory.path(),
+        definition(false, RetentionPolicy::Backpressure, 2),
+    )
+    .await
+    .err()
+    .expect("volatile declaration cannot provide durability");
+    assert!(error
+        .to_string()
+        .contains("durable checkpoints and a durable declaration"));
+    let original = definition(true, RetentionPolicy::Backpressure, 2);
+    let channel = persistent(directory.path(), original.clone()).await?;
+    channel.publish(&event(1)?).await?;
+    channel.shutdown().await?;
+    drop(channel);
+    let mut reduced = original.clone();
+    reduced.subscribers.remove("fast");
+    let channel = persistent(directory.path(), reduced.clone()).await?;
+    channel.shutdown().await?;
+    drop(channel);
+    let error = persistent(directory.path(), original)
+        .await
+        .err()
+        .expect("retired identity stays retired");
+    assert!(
+        error.to_string().contains("requires a new identity"),
+        "{error:#}"
+    );
+
+    reduced
+        .subscribers
+        .insert("new-fast".into(), SubscriptionStart::Earliest);
+    reduced
+        .subscribers
+        .insert("latest".into(), SubscriptionStart::Latest);
+    let channel = persistent(directory.path(), reduced.clone()).await?;
+    let progress = channel.progress().await?;
+    assert_eq!(progress.processed["new-fast"], 0);
+    assert_eq!(progress.processed["latest"], 1);
+    assert_eq!(progress.processed["slow"], 0);
+    let mut pipe = endpoint(&channel, &reduced, "new-fast", false)?;
+    received(pipe.pipe.take_receiver()?.as_mut(), 1)
+        .await?
+        .complete(HandlingOutcome::Handled)
+        .await?;
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_pruning_preserves_strict_gaps_until_the_subscriber_explicitly_allows_loss(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let desired = definition(true, RetentionPolicy::PruneOldest, 2);
+    let channel = persistent(directory.path(), desired.clone()).await?;
+    let mut fast = endpoint(&channel, &desired, "fast", false)?;
+    let mut receiver = fast.pipe.take_receiver()?;
+    for sequence in 1..=4 {
+        channel.publish(&event(sequence)?).await?;
+        received(receiver.as_mut(), sequence)
+            .await?
+            .complete(HandlingOutcome::Handled)
+            .await?;
+    }
+    channel.shutdown().await?;
+    drop((receiver, fast, channel));
+    let channel = persistent(directory.path(), desired.clone()).await?;
+    assert_eq!(channel.progress().await?.processed["fast"], 4);
+    assert_eq!(channel.progress().await?.processed["slow"], 0);
+    let mut strict = endpoint(&channel, &desired, "slow", false)?;
+    let mut receiver = strict.pipe.take_receiver()?;
+    assert!(matches!(
+        receiver.receive().await,
+        Err(PipeError::PositionUnavailable {
+            requested: 0,
+            oldest: 3
+        })
+    ));
+    assert_eq!(
+        channel.progress().await?.processed["slow"],
+        0,
+        "strict gaps do not silently skip"
+    );
+    drop((receiver, strict));
+    let mut skip = endpoint(&channel, &desired, "slow", true)?;
+    let mut receiver = skip.pipe.take_receiver()?;
+    for sequence in 3..=4 {
+        received(receiver.as_mut(), sequence)
+            .await?
+            .complete(HandlingOutcome::Handled)
+            .await?;
+    }
+    channel.shutdown().await?;
+    drop((receiver, skip, channel));
+    let channel = persistent(directory.path(), desired).await?;
+    let progress = channel.progress().await?;
+    assert_eq!(progress.accepted, 4);
+    assert_eq!(
+        progress.processed,
+        BTreeMap::from([("fast".into(), 4), ("slow".into(), 4)])
+    );
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn blocking_multicast_retires_only_after_every_subscriber_handles() -> Result<()> {
     let definition = definition(false, RetentionPolicy::Backpressure, 1);
     let channel = QosChannel::volatile(definition.clone())?;
@@ -631,6 +935,7 @@ async fn seeded_qos_schedules_match_an_independent_acceptance_and_completion_led
 struct CommitGate {
     before_commit: bool,
     entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 #[tokio::test]
@@ -645,6 +950,7 @@ async fn cancelled_append_and_completion_resolve_exactly_before_and_after_real_c
             let gate = Arc::new(CommitGate {
                 before_commit,
                 entered: tokio::sync::Notify::new(),
+                resume: tokio::sync::Notify::new(),
             });
             let channel = uncertain_channel(
                 directory.path(),
@@ -721,21 +1027,98 @@ impl drasi_core::interface::SessionControl for LoseCommitResponse {
         let fail = self.fail.swap(false, std::sync::atomic::Ordering::AcqRel);
         if let Some(gate) = self.gate.as_ref().filter(|gate| fail && gate.before_commit) {
             gate.entered.notify_one();
-            std::future::pending::<()>().await;
+            gate.resume.notified().await;
         }
         self.inner.commit().await?;
         if fail {
-            if let Some(gate) = &self.gate {
+            if let Some(gate) = self.gate.as_ref().filter(|gate| !gate.before_commit) {
                 gate.entered.notify_one();
-                std::future::pending::<()>().await;
+                gate.resume.notified().await;
             }
-            return Err(drasi_core::interface::IndexError::IOError);
+            if self.gate.is_none() {
+                return Err(drasi_core::interface::IndexError::IOError);
+            }
         }
         Ok(())
     }
     fn rollback(&self) -> std::result::Result<(), drasi_core::interface::IndexError> {
         self.inner.rollback()
     }
+}
+
+#[tokio::test]
+async fn endpoint_revocation_during_commit_reports_unknown_and_recovers_exact_durable_progress(
+) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for acknowledgement in [false, true] {
+        for before_commit in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let definition = definition(true, RetentionPolicy::Backpressure, 2);
+            let fail = Arc::new(AtomicBool::new(false));
+            let gate = Arc::new(CommitGate {
+                before_commit,
+                entered: tokio::sync::Notify::new(),
+                resume: tokio::sync::Notify::new(),
+            });
+            let channel = uncertain_channel(
+                directory.path(),
+                definition.clone(),
+                fail.clone(),
+                Some(gate.clone()),
+            )
+            .await?;
+            let mut pipe = endpoint(&channel, &definition, "fast", false)?;
+            let sender = pipe.pipe.sender();
+            let mut receiver = pipe.pipe.take_receiver()?;
+            let first = event(1)?;
+            let ack = if acknowledgement {
+                channel.publish(&first).await?;
+                Some(received(receiver.as_mut(), 1).await?)
+            } else {
+                None
+            };
+            fail.store(true, Ordering::Release);
+            let mut operation = Box::pin(async {
+                if let Some(ack) = ack {
+                    ack.complete(HandlingOutcome::Handled).await
+                } else {
+                    sender
+                        .send(first.clone())
+                        .await
+                        .map(|_| ())
+                        .map_err(|failure| failure.error)
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    _ = gate.entered.notified() => {}
+                    result = &mut operation => panic!("commit barrier was not reached: {result:?}"),
+                }
+            })
+            .await?;
+            pipe.control.cancel();
+            gate.resume.notify_one();
+            let failure = tokio::time::timeout(Duration::from_secs(3), operation)
+                .await?
+                .expect_err("revoked owner cannot return success");
+            if acknowledgement {
+                assert!(matches!(failure, PipeError::AcknowledgementUnknown { .. }));
+            } else {
+                assert!(matches!(failure, PipeError::AcceptanceUnknown { .. }));
+            }
+            channel.shutdown().await?;
+            drop((receiver, sender, pipe, channel));
+            let reopened = persistent(directory.path(), definition).await?;
+            let progress = reopened.progress().await?;
+            assert_eq!(progress.accepted, 1);
+            assert_eq!(progress.producer_sequence, Some(1));
+            assert_eq!(progress.processed["fast"], u64::from(acknowledgement));
+            assert_eq!(progress.processed["slow"], 0);
+            assert_eq!(reopened.publish(&first).await?.position(), Some(1));
+            reopened.shutdown().await?;
+        }
+    }
+    Ok(())
 }
 
 async fn uncertain_channel(

@@ -1,5 +1,6 @@
 [package]
 name = "xtask"
+default-run = "xtask"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -14,3 +15,6 @@ oci-client = "0.16"
 oci-spec = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 bytes = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+syn = { version = "2", features = ["full", "visit", "visit-mut"] }

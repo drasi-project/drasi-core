@@ -974,3 +974,171 @@ impl Pipe for QosPipe {
             .ok_or(PipeError::ReceiverTaken)
     }
 }
+
+#[cfg(test)]
+mod foundation_tests {
+    use super::*;
+
+    fn definition() -> QosChannelDefinition {
+        QosChannelDefinition {
+            stream: StreamId::try_new("test/out").expect("stream"),
+            capacity: NonZeroUsize::new(2).expect("capacity"),
+            durable: false,
+            retention: RetentionPolicy::Backpressure,
+            subscribers: BTreeMap::from([("consumer".into(), SubscriptionStart::Earliest)]),
+        }
+    }
+
+    #[test]
+    fn invalid_qos_definitions_never_construct_a_channel_or_claim_a_supported_profile() {
+        let mut invalid = definition();
+        invalid.subscribers.clear();
+        assert!(QosChannel::volatile(invalid).is_err());
+        for id in ["", "a b", "a\nb"] {
+            let mut invalid = definition();
+            invalid.subscribers = BTreeMap::from([(id.into(), SubscriptionStart::Earliest)]);
+            assert!(QosChannel::volatile(invalid).is_err());
+        }
+        let mut invalid = definition();
+        invalid.capacity = NonZeroUsize::new(usize::MAX).expect("capacity");
+        assert!(matches!(
+            QosChannel::volatile(invalid),
+            Err(PipeError::InvalidCapacity)
+        ));
+        let mut invalid = definition();
+        invalid.durable = true;
+        assert!(QosChannel::volatile(invalid).is_err());
+        let mut invalid = definition();
+        invalid
+            .subscribers
+            .insert("consumer".into(), SubscriptionStart::After(1));
+        assert!(QosChannel::volatile(invalid).is_err());
+        let mut config = definition().pipe(ResourceId::try_new("queue").expect("id"), "unknown");
+        assert!(config.capabilities().is_err());
+        config.subscriber = "consumer".into();
+        config.gap_policy = ReplayGapPolicy::SkipWithNotification;
+        assert!(config.capabilities().is_err());
+        for start in [
+            SubscriptionStart::Earliest,
+            SubscriptionStart::Latest,
+            SubscriptionStart::After(0),
+        ] {
+            let mut valid = definition();
+            valid.subscribers.insert("consumer".into(), start);
+            assert!(QosChannel::volatile(valid).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn qos_rejects_reused_producer_identity_invalid_progress_and_counter_exhaustion() {
+        let channel = QosChannel::volatile(definition()).expect("channel");
+        let mut pipe = channel
+            .bind("consumer", ReplayGapPolicy::Strict)
+            .expect("binding");
+        assert!(channel.bind("unknown", ReplayGapPolicy::Strict).is_err());
+        assert!(channel.bind("consumer", ReplayGapPolicy::Strict).is_err());
+        assert!(channel.retire("consumer").await.is_err());
+        assert!(channel.retire("unknown").await.is_err());
+        let event = super::super::pipe::test_envelope(1);
+        assert_eq!(
+            channel.publish(&event).await.expect("append").position(),
+            Some(1)
+        );
+        assert_eq!(
+            channel.publish(&event).await.expect("retry").position(),
+            Some(1)
+        );
+        assert!(
+            channel
+                .publish(&super::super::pipe::test_envelope(1))
+                .await
+                .is_err(),
+            "an independently constructed volatile event is not the same immutable retry"
+        );
+        let wrong_stream = event.derive(
+            event.id().clone(),
+            event.changes().clone(),
+            SystemMetadata::new(StreamId::try_new("another/out").expect("stream"), 2),
+        );
+        assert!(channel.publish(&wrong_stream).await.is_err());
+        let endpoint = Endpoint {
+            channel: channel.clone(),
+            subscriber: "consumer".into(),
+            binding: channel.bindings.lock().expect("bindings").consumers["consumer"].clone(),
+        };
+        assert!(endpoint.complete(2, false).await.is_err());
+        assert!(endpoint.complete(0, false).await.is_err());
+        assert_eq!(
+            channel.progress().await.expect("progress").processed["consumer"],
+            0
+        );
+        let mut receiver = pipe.pipe.take_receiver().expect("receiver");
+        receiver
+            .receive()
+            .await
+            .expect("receive")
+            .expect("event")
+            .into_parts()
+            .1
+            .expect("ack")
+            .complete(HandlingOutcome::Handled)
+            .await
+            .expect("handled");
+        assert!(endpoint.complete(0, false).await.is_err());
+        pipe.control.cancel();
+        channel.retire("consumer").await.expect("retired");
+        assert_eq!(
+            channel.progress().await.expect("progress").retired,
+            ["consumer"]
+        );
+        channel.bindings.lock().expect("bindings").generation = u64::MAX;
+        assert!(channel.bind("consumer", ReplayGapPolicy::Strict).is_err());
+        channel.state.lock().await.metadata.head = u64::MAX;
+        assert!(channel
+            .publish(&super::super::pipe::test_envelope(2))
+            .await
+            .is_err());
+        channel.shutdown().await.expect("shutdown");
+        assert!(matches!(channel.progress().await, Err(PipeError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn poisoned_qos_ownership_is_an_error_not_an_empty_journal() {
+        for storage in [false, true] {
+            let channel = QosChannel::volatile(definition()).expect("channel");
+            let mut pipe = channel
+                .bind("consumer", ReplayGapPolicy::Strict)
+                .expect("binding");
+            let mut receiver = pipe.pipe.take_receiver().expect("receiver");
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if storage {
+                    let _guard = channel.persistent.lock().expect("storage");
+                    panic!("injected storage ownership failure");
+                } else {
+                    let _guard = channel.bindings.lock().expect("bindings");
+                    panic!("injected binding ownership failure");
+                }
+            }))
+            .is_err());
+            assert!(channel.bind("consumer", ReplayGapPolicy::Strict).is_err());
+            assert!(receiver.receive().await.is_err());
+            assert!(pipe
+                .pipe
+                .sender()
+                .send(super::super::pipe::test_envelope(1))
+                .await
+                .is_err());
+            assert!(pipe.control.is_idle().await.is_err());
+            assert!(channel.retire("consumer").await.is_err());
+            if storage {
+                assert!(channel.progress().await.is_err());
+                assert!(channel.shutdown().await.is_err());
+            } else {
+                channel
+                    .shutdown()
+                    .await
+                    .expect("storage still has a cleanup owner");
+            }
+        }
+    }
+}

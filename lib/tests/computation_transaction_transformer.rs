@@ -590,6 +590,65 @@ async fn invalid_intermediate_schema_rolls_back_before_the_next_step_can_run() {
 }
 
 #[tokio::test]
+async fn every_participant_position_rolls_back_failure_and_cancellation_in_variable_length_sequences(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            for length in [1, 3, 5] {
+                for failure_at in 0..length {
+                    for cancel in [false, true] {
+                        let directory = tempfile::tempdir().expect("temp");
+                        let provider = provider(directory.path());
+                        let probe = Arc::new(Probe::default());
+                        let registry = registry(probe.clone());
+                        let mut definition = definition();
+                        definition.steps = (0..length).map(|position| {
+                            step(&format!("stage-{position}"), json!({"add": 1, "second": position == failure_at}))
+                        }).collect();
+                        {
+                            let mut subject = open(definition.clone(), registry.clone(), provider.clone()).await;
+                            if cancel {
+                                probe.wait.store(true, Ordering::Release);
+                                let pending = subject.transform(input(1, 10));
+                                tokio::pin!(pending);
+                                tokio::select! {
+                                    result = &mut pending => panic!("completed before cancellation: {result:?}"),
+                                    _ = probe.entered.notified() => {}
+                                }
+                            } else {
+                                probe.fail.store(true, Ordering::Release);
+                                let failure = subject.transform(input(1, 10)).await.expect_err("injected failure");
+                                assert!(format!("{failure:#}").contains("injected second-step failure"));
+                            }
+                            assert_eq!(probe.trace.lock().expect("trace").len(), failure_at + 1,
+                                "no participant after the failed one may run");
+                            assert!(subject.transform(input(2, 20)).await.is_err(), "fenced until reconstruction");
+                            subject.stop().await.expect("rollback and release");
+                        }
+                        probe.wait.store(false, Ordering::Release);
+                        probe.fail.store(false, Ordering::Release);
+                        probe.trace.lock().expect("trace").clear();
+                        let mut subject = open(definition, registry, provider).await;
+                        assert!(!subject.has_pending_emissions(), "rollback must leave no committed output");
+                        for (sequence, value) in [(1, 10), (2, 20)] {
+                            let output = subject.transform(input(sequence, value)).await.expect("commit input");
+                            assert_eq!(output.len(), 1);
+                            assert_eq!(values(&output[0].envelope, "value"), [value + length as i64]);
+                            for position in 0..length {
+                                assert_eq!(values(&output[0].envelope, &format!("stage-{position}_count")), [sequence as i64],
+                                    "every participant must roll back, including writes before the fault");
+                            }
+                            subject.delivery_completed(&output).await.expect("confirm output");
+                        }
+                        assert_eq!(probe.standalone_calls.load(Ordering::Acquire), 0,
+                            "participants must use the shared transaction, not standalone execution");
+                        subject.stop().await.expect("stop");
+                    }
+                }
+            }
+        }).await.expect("all failure positions must terminate");
+}
+
+#[tokio::test]
 async fn equal_sequence_numbers_from_different_inputs_get_distinct_step_and_output_identities() {
     let directory = tempfile::tempdir().expect("temp");
     let mut subject = open(
