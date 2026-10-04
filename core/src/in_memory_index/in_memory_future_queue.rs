@@ -134,7 +134,18 @@ impl FutureQueue for InMemoryFutureQueue {
     }
 
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+        self.pop_due(ElementTimestamp::MAX).await
+    }
+
+    async fn pop_due(&self, now: ElementTimestamp) -> Result<Option<FutureElementRef>, IndexError> {
         let mut data = self.data.write().await;
+        if data
+            .queue
+            .peek()
+            .is_some_and(|((_, item), _)| item.due_time > now)
+        {
+            return Ok(None);
+        }
         match data.queue.pop() {
             Some((key, due_time)) => {
                 let due_time = -due_time as u64;

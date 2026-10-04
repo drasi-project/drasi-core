@@ -350,6 +350,13 @@ mod index {
     use std::sync::Arc;
 
     #[tokio::test]
+    async fn future_queue_pop_due() {
+        let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
+        index::future_queue::pop_due(&fqi, &sc).await;
+    }
+
+    #[tokio::test]
     async fn future_queue_push_always() {
         let fqi = InMemoryFutureQueue::new();
         let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);

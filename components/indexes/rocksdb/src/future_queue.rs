@@ -181,6 +181,10 @@ impl FutureQueue for RocksDbFutureQueue {
     }
 
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+        self.pop_due(ElementTimestamp::MAX).await
+    }
+
+    async fn pop_due(&self, now: ElementTimestamp) -> Result<Option<FutureElementRef>, IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
 
@@ -208,6 +212,10 @@ impl FutureQueue for RocksDbFutureQueue {
                                     Ok(v) => v,
                                     Err(_) => return Err(IndexError::CorruptedData),
                                 };
+
+                            if stored_future_ref.due_time > now {
+                                return Ok(None);
+                            }
 
                             txn.delete_cf(&queue_cf, &key).map_err(IndexError::other)?;
 

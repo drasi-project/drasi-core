@@ -280,6 +280,14 @@ mod index {
 
     #[tokio::test]
     #[serial]
+    async fn future_queue_pop_due() {
+        let config = RocksDbQueryConfig::new();
+        let (fqi, sc) = config.build_future_queue("due");
+        shared_tests::index::future_queue::pop_due(&fqi, &sc).await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn future_queue_push_always() {
         let test_config = RocksDbQueryConfig::new();
         let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());

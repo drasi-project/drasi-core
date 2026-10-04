@@ -54,6 +54,8 @@ mock! {
 
         async fn pop(&self) -> Result<Option<crate::interface::FutureElementRef>, IndexError>;
 
+        async fn pop_due(&self, now: crate::models::ElementTimestamp) -> Result<Option<crate::interface::FutureElementRef>, IndexError>;
+
         async fn peek_due_time(&self) -> Result<Option<crate::models::ElementTimestamp>, IndexError>;
 
         async fn clear(&self) -> Result<(), IndexError>;

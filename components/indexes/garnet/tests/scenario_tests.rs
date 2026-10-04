@@ -327,6 +327,15 @@ mod index {
     use uuid::Uuid;
 
     #[tokio::test]
+    async fn future_queue_pop_due() {
+        let config = GarnetQueryConfig::new(false).await;
+        let (fqi, sc) = config
+            .build_future_queue(&format!("test-{}", Uuid::new_v4()))
+            .await;
+        shared_tests::index::future_queue::pop_due(&fqi, &sc).await;
+    }
+
+    #[tokio::test]
     async fn future_queue_push_always() {
         let test_config = GarnetQueryConfig::new(false).await;
         let (fqi, sc) = test_config

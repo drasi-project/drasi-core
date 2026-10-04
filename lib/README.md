@@ -934,6 +934,11 @@ let query = Query::cypher("q1")
 
 If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap** — and the recovery policy activates.
 
+For timed queries, persistent queue storage alone does not guarantee notification
+delivery: timer consumption commits before outbox publication. See
+[Timed queries: deadlines, rescheduling, and recovery](timers.md) for the safe
+query patterns, backend API contract, and required startup reconciliation.
+
 ### Result Format
 
 Reactions receive `QueryResult` values containing `ResultDiff` items:

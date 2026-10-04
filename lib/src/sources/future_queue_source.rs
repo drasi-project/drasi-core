@@ -38,9 +38,11 @@ enum FutureQueueSourceStatus {
 }
 
 /// A peek-only signaler that polls the FutureQueue and dispatches `FuturesDue` control
-/// signals when items are due. It never pops — the processor calls `process_due_futures()`
-/// which pops atomically within a session transaction.
+/// signals when items are due. It never pops — the processor calls
+/// `process_due_futures_at(now)`, which checks and pops within a session transaction.
 pub struct FutureQueueSource {
+    #[cfg(test)]
+    pub(crate) now_override: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// The future queue to poll
     future_queue: Arc<dyn FutureQueue>,
     /// Current status of the source
@@ -54,9 +56,16 @@ pub struct FutureQueueSource {
 }
 
 impl FutureQueueSource {
+    #[cfg(test)]
+    pub(crate) fn future_queue_for_test(&self) -> Arc<dyn FutureQueue> {
+        self.future_queue.clone()
+    }
+
     /// Create a new FutureQueueSource
     pub fn new(future_queue: Arc<dyn FutureQueue>, query_id: String) -> Self {
         Self {
+            #[cfg(test)]
+            now_override: None,
             future_queue,
             status: Arc::new(RwLock::new(FutureQueueSourceStatus::Stopped)),
             task_handle: Arc::new(RwLock::new(None)),
@@ -99,6 +108,8 @@ impl FutureQueueSource {
         let status_clone = self.status.clone();
         let query_id = self.query_id.clone();
         let dispatcher_clone = self.dispatcher.clone();
+        #[cfg(test)]
+        let now_override = self.now_override.clone();
 
         let span = tracing::info_span!(
             "future_queue_polling",
@@ -138,6 +149,10 @@ impl FutureQueueSource {
 
                     // Calculate how long to wait
                     let now = Self::now();
+                    #[cfg(test)]
+                    let now = now_override.as_ref().map_or(now, |clock| {
+                        clock.load(std::sync::atomic::Ordering::Acquire)
+                    });
                     if next_due_time > now {
                         let wait_ms = (next_due_time - now).min(5000);
                         sleep(Duration::from_millis(wait_ms)).await;
@@ -226,7 +241,7 @@ impl FutureQueueSource {
     }
 
     /// Get current timestamp in milliseconds since epoch
-    fn now() -> u64 {
+    pub(crate) fn now() -> u64 {
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -266,6 +281,13 @@ mod tests {
         }
 
         async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+            Ok(None)
+        }
+
+        async fn pop_due(
+            &self,
+            _now: ElementTimestamp,
+        ) -> Result<Option<FutureElementRef>, IndexError> {
             Ok(None)
         }
 

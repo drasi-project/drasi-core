@@ -54,6 +54,14 @@ pub trait FutureQueue: Send + Sync {
 
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError>;
 
+    /// Remove the earliest item only if its scheduled time is at or before `now`.
+    ///
+    /// Selection, the time check, and removal must share the same backend lock or
+    /// session view. An external peek followed by `pop` is not sufficient.
+    /// Like other queue writes, callers must serialize access to the query's
+    /// session. Return `None` for both an empty queue and a not-yet-due head.
+    async fn pop_due(&self, now: ElementTimestamp) -> Result<Option<FutureElementRef>, IndexError>;
+
     async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError>;
 
     async fn clear(&self) -> Result<(), IndexError>;
@@ -62,8 +70,8 @@ pub trait FutureQueue: Send + Sync {
 #[async_trait]
 pub trait FutureQueueConsumer: Send + Sync {
     /// Called when the polling loop determines items are due.
-    /// The consumer is responsible for calling `ContinuousQuery::process_due_futures()`
-    /// internally, which atomically pops and processes within a session.
+    /// The consumer is responsible for calling `ContinuousQuery::process_due_futures_at(now)`
+    /// with its clock, which atomically selects and processes within a session.
     async fn on_items_due(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Called when `on_items_due` returns an error.

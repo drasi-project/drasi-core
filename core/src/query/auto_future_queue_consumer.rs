@@ -66,7 +66,7 @@ impl FutureQueueConsumer for AutoFutureQueueConsumer {
             .upgrade()
             .ok_or("ContinuousQuery has been dropped")?;
 
-        if let Some(due_result) = cq.process_due_futures().await? {
+        if let Some(due_result) = cq.process_due_futures_at(self.now()).await? {
             if !due_result.results.is_empty() {
                 self.channel_tx.send(due_result.results)?;
             }
@@ -86,7 +86,6 @@ impl FutureQueueConsumer for AutoFutureQueueConsumer {
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs()
-            * 1000
+            .as_millis() as u64
     }
 }

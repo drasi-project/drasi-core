@@ -18,7 +18,7 @@ use std::{
     future::Future,
     hash::{Hash, Hasher},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use drasi_query_ast::ast::Query;
@@ -150,20 +150,40 @@ impl ContinuousQuery {
         Ok(result)
     }
 
-    /// Atomically pop a due future from the queue and process it within a single session.
+    /// Process the next future due at the current system time (epoch milliseconds).
     ///
-    /// Returns `Ok(None)` when the queue is empty (stale peek).
-    /// Returns `Ok(Some(DueFutureResult))` with results and the original source_id.
-    ///
-    /// Pop happens inside the session → atomic with all downstream index writes.
-    /// If a crash occurs before commit, the pop rolls back and the item stays in the queue.
+    /// See [`Self::process_due_futures_at`] for clock control and recovery semantics.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.process_due_futures_at(now).await
+    }
+
+    /// Select and process one future whose scheduled time is at or before `now`.
+    ///
+    /// `now` is physical epoch milliseconds, not the timestamp from a wakeup.
+    /// Returns `Ok(None)` when empty or when the next future is not due. Wakeups
+    /// may be stale or duplicated; they do not authorize an unconditional pop.
+    /// Selection and removal occur under the change lock and backend session.
+    /// Evaluation still uses the selected future's logical `due_time`.
+    ///
+    /// Transactional backends roll back the pop and index writes on pre-commit
+    /// failure. In-memory indexes do not roll back. The returned results are NOT
+    /// durably published by this operation: a crash after commit but before the
+    /// caller persists them can lose the notification.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_due_futures_at(
+        &self,
+        now: u64,
+    ) -> Result<Option<DueFutureResult>, EvaluationError> {
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
         self.ensure_result_index_state().await?;
 
-        let future_ref = match self.future_queue.pop().await {
+        let future_ref = match self.future_queue.pop_due(now).await {
             Ok(Some(fr)) => fr,
             Ok(None) => {
                 guard.commit().await?;

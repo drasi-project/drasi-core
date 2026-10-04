@@ -105,6 +105,13 @@ impl FutureQueue for ShadowedFutureQueue {
         self.inner.pop().await
     }
 
+    async fn pop_due(&self, now: ElementTimestamp) -> Result<Option<FutureElementRef>, IndexError> {
+        let mut shadow = self.head_shadow.write().await;
+        *shadow = HeadItemShadow::Unknown;
+        // Cached peeks may predate an overwrite or transaction rollback.
+        self.inner.pop_due(now).await
+    }
+
     async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
         let mut shadow = self.head_shadow.write().await;
         match *shadow {

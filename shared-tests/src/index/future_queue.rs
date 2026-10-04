@@ -332,3 +332,81 @@ pub async fn push_overwrite(subject: &impl FutureQueue, session_control: &Arc<dy
 
     session_control.commit().await.expect("commit failed");
 }
+
+/// The time guard must use the same session view as removal, not a cached or
+/// committed-only peek. Run unchanged against all index backends.
+pub async fn pop_due(subject: &impl FutureQueue, sc: &Arc<dyn SessionControl>) {
+    let element = ElementReference::new("source", "request");
+    sc.begin().await.expect("begin");
+    assert_eq!(subject.pop_due(0).await.expect("empty pop"), None);
+    subject
+        .push(PushType::Overwrite, 1, 1, &element, 7, 10)
+        .await
+        .expect("push first");
+    subject
+        .push(PushType::Overwrite, 1, 2, &element, 8, 20)
+        .await
+        .expect("push second");
+    sc.commit().await.expect("commit");
+
+    sc.begin().await.expect("begin");
+    assert_eq!(subject.pop_due(9).await.expect("not due"), None);
+    let first = subject
+        .pop_due(10)
+        .await
+        .expect("pop first")
+        .expect("due first");
+    assert_eq!(first.due_time, 10);
+    assert_eq!(first.original_time, 7);
+    assert_eq!(subject.pop_due(10).await.expect("second not due"), None);
+    sc.commit().await.expect("commit");
+
+    // A peek predating an uncommitted overwrite cannot authorize a pop.
+    assert_eq!(subject.peek_due_time().await.expect("peek"), Some(20));
+    sc.begin().await.expect("begin");
+    subject
+        .push(PushType::Overwrite, 1, 2, &element, 9, 30)
+        .await
+        .expect("reschedule");
+    assert_eq!(subject.pop_due(20).await.expect("stale deadline"), None);
+    assert_eq!(subject.pop_due(29).await.expect("not due"), None);
+    let moved = subject
+        .pop_due(31)
+        .await
+        .expect("late pop")
+        .expect("due moved");
+    assert_eq!(
+        moved.due_time, 30,
+        "preserve logical deadline on a late wakeup"
+    );
+    assert_eq!(moved.original_time, 9);
+    assert_eq!(subject.pop_due(31).await.expect("empty"), None);
+    sc.commit().await.expect("commit");
+
+    sc.begin().await.expect("begin");
+    for group in [1, 2] {
+        subject
+            .push(PushType::Overwrite, 1, group, &element, 0, 40)
+            .await
+            .expect("push equal deadline");
+    }
+    let a = subject
+        .pop_due(40)
+        .await
+        .expect("first equal")
+        .expect("due");
+    let b = subject
+        .pop_due(40)
+        .await
+        .expect("second equal")
+        .expect("due");
+    assert_ne!(a.group_signature, b.group_signature);
+    assert_eq!(subject.pop_due(40).await.expect("empty"), None);
+    subject
+        .push(PushType::Overwrite, 1, 1, &element, 0, 50)
+        .await
+        .expect("push cancelled");
+    subject.remove(1, 1).await.expect("cancel");
+    assert_eq!(subject.pop_due(50).await.expect("cancelled"), None);
+    sc.commit().await.expect("commit");
+}

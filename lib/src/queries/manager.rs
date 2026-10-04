@@ -59,6 +59,10 @@ use crate::sources::Source;
 use crate::sources::SourceManager;
 use tracing::Instrument;
 
+#[cfg(test)]
+#[path = "future_queue_tests.rs"]
+mod future_queue_tests;
+
 /// Default query configuration
 struct DefaultQueryConfig;
 
@@ -677,6 +681,8 @@ async fn dispatch_query_results(
 }
 
 pub struct DrasiQuery {
+    #[cfg(test)]
+    future_now_override: Option<Arc<std::sync::atomic::AtomicU64>>,
     // DrasiLib instance ID for log routing isolation
     instance_id: String,
     // Use QueryBase for common functionality
@@ -745,6 +751,8 @@ impl DrasiQuery {
         let base = QueryBase::new(config).context("Failed to create QueryBase")?;
 
         Ok(Self {
+            #[cfg(test)]
+            future_now_override: None,
             instance_id: instance_id.into(),
             base,
             output_state: Arc::new(RwLock::new(QueryOutputState::new(outbox_capacity))),
@@ -1653,10 +1661,15 @@ impl Query for DrasiQuery {
             self.base.config.id
         );
 
-        let future_queue_source = Arc::new(FutureQueueSource::new(
-            continuous_query.future_queue(),
-            self.base.config.id.clone(),
-        ));
+        let future_queue_source =
+            FutureQueueSource::new(continuous_query.future_queue(), self.base.config.id.clone());
+        #[cfg(test)]
+        let future_queue_source = {
+            let mut source = future_queue_source;
+            source.now_override = self.future_now_override.clone();
+            source
+        };
+        let future_queue_source = Arc::new(future_queue_source);
 
         // Subscribe BEFORE starting so the dispatcher exists when the polling loop runs
         let fq_receiver = future_queue_source
@@ -2731,9 +2744,14 @@ impl Query for DrasiQuery {
 
                             match event {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
-                                    // Drain all due futures atomically within sessions
+                                    // Recheck physical time on every pop; signals may be stale.
                                     loop {
-                                        match continuous_query_for_processor.process_due_futures().await {
+                                        let now = FutureQueueSource::now();
+                                        #[cfg(test)]
+                                        let now = fq_source_for_processor.now_override.as_ref().map_or(now, |clock| {
+                                            clock.load(std::sync::atomic::Ordering::Acquire)
+                                        });
+                                        match continuous_query_for_processor.process_due_futures_at(now).await {
                                             Ok(Some(due_result)) => {
                                                 if !due_result.results.is_empty() {
                                                     let profiling = crate::profiling::ProfilingMetadata::new();

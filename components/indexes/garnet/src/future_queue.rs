@@ -274,6 +274,10 @@ impl FutureQueue for GarnetFutureQueue {
     }
 
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+        self.pop_due(ElementTimestamp::MAX).await
+    }
+
+    async fn pop_due(&self, now: ElementTimestamp) -> Result<Option<FutureElementRef>, IndexError> {
         // Two-phase pop: build candidate list, then sort + select head + buffer removal.
         let mut con = self.connection.clone();
         let queue_key = self.get_queue_key();
@@ -348,6 +352,9 @@ impl FutureQueue for GarnetFutureQueue {
             match entries.into_iter().next() {
                 None => None,
                 Some((head, _)) => {
+                    if head.future_ref.due_time > now {
+                        return Ok(None);
+                    }
                     let index_key =
                         self.get_index_key(head.position_in_query as usize, head.group_signature);
                     let ctx_bytes = head.to_redis_args();
