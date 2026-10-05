@@ -41,6 +41,10 @@ enum FutureQueueSourceStatus {
 /// signals when items are due. It never pops — the processor calls
 /// `process_due_futures_at(now)`, which checks and pops within a session transaction.
 pub struct FutureQueueSource {
+    #[cfg(feature = "test-support")]
+    pub(crate) test_control: Option<crate::test_support::QueryTestControl>,
+    #[cfg(feature = "test-support")]
+    test_requests: tokio::sync::Mutex<Option<crate::test_support::WakeReceiver>>,
     #[cfg(test)]
     pub(crate) now_override: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// The future queue to poll
@@ -64,6 +68,10 @@ impl FutureQueueSource {
     /// Create a new FutureQueueSource
     pub fn new(future_queue: Arc<dyn FutureQueue>, query_id: String) -> Self {
         Self {
+            #[cfg(feature = "test-support")]
+            test_control: None,
+            #[cfg(feature = "test-support")]
+            test_requests: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             now_override: None,
             future_queue,
@@ -72,6 +80,28 @@ impl FutureQueueSource {
             query_id,
             dispatcher: Arc::new(RwLock::new(None)),
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn with_test_control(
+        mut self,
+        control: crate::test_support::QueryTestControl,
+    ) -> crate::error::Result<Self> {
+        *self.test_requests.get_mut() = Some(control.connect()?);
+        self.test_control = Some(control);
+        Ok(self)
+    }
+
+    pub(crate) fn physical_now(&self) -> u64 {
+        #[cfg(feature = "test-support")]
+        if let Some(control) = &self.test_control {
+            return control.now();
+        }
+        #[cfg(test)]
+        if let Some(clock) = &self.now_override {
+            return clock.load(std::sync::atomic::Ordering::Acquire);
+        }
+        Self::now()
     }
 
     /// Subscribe to future queue signals.
@@ -108,6 +138,10 @@ impl FutureQueueSource {
         let status_clone = self.status.clone();
         let query_id = self.query_id.clone();
         let dispatcher_clone = self.dispatcher.clone();
+        #[cfg(feature = "test-support")]
+        let mut test_requests = self.test_requests.lock().await.take();
+        #[cfg(feature = "test-support")]
+        let test_control = self.test_control.clone();
         #[cfg(test)]
         let now_override = self.now_override.clone();
 
@@ -130,72 +164,99 @@ impl FutureQueueSource {
                         }
                     }
 
-                    // Peek at the next due time
-                    let next_due_time = match future_queue.peek_due_time().await {
-                        Ok(Some(due_time)) => due_time,
-                        Ok(None) => {
-                            // No items in queue, sleep and check again
-                            sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            error!(
-                                "FutureQueueSource failed to peek due time for query '{query_id}': {e}"
-                            );
-                            sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
+                    #[cfg(feature = "test-support")]
+                    let request_id = if let Some(requests) = test_requests.as_mut() {
+                        let Some(id) = requests.recv().await else { break };
+                        Some(id)
+                    } else {
+                        None
                     };
+                    #[cfg(feature = "test-support")]
+                    let explicit_wake = request_id.map(|request_id| (
+                        SourceControl::FuturesDueForTest { request_id }, chrono::Utc::now(),
+                    ));
+                    #[cfg(not(feature = "test-support"))]
+                    let explicit_wake: Option<(SourceControl, chrono::DateTime<chrono::Utc>)> = None;
 
-                    // Calculate how long to wait
-                    let now = Self::now();
-                    #[cfg(test)]
-                    let now = now_override.as_ref().map_or(now, |clock| {
-                        clock.load(std::sync::atomic::Ordering::Acquire)
-                    });
-                    if next_due_time > now {
-                        let wait_ms = (next_due_time - now).min(5000);
-                        sleep(Duration::from_millis(wait_ms)).await;
-                        continue;
-                    }
+                    let (control, timestamp) = if let Some(wake) = explicit_wake {
+                        wake
+                    } else {
+                        // Peek at the next due time
+                        let next_due_time = match future_queue.peek_due_time().await {
+                            Ok(Some(due_time)) => due_time,
+                            Ok(None) => {
+                                // No items in queue, sleep and check again
+                                sleep(Duration::from_millis(100)).await;
+                                continue;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "FutureQueueSource failed to peek due time for query '{query_id}': {e}"
+                                );
+                                sleep(Duration::from_secs(1)).await;
+                                continue;
+                            }
+                        };
 
-                    // Item is due — dispatch FuturesDue signal
-                    let timestamp = match i64::try_from(next_due_time) {
-                        Ok(millis) => match DateTime::from_timestamp_millis(millis) {
-                            Some(dt) => dt,
-                            None => {
+                        // Calculate how long to wait
+                        let now = Self::now();
+                        #[cfg(test)]
+                        let now = now_override.as_ref().map_or(now, |clock| {
+                            clock.load(std::sync::atomic::Ordering::Acquire)
+                        });
+                        if next_due_time > now {
+                            let wait_ms = (next_due_time - now).min(5000);
+                            sleep(Duration::from_millis(wait_ms)).await;
+                            continue;
+                        }
+
+                        // Item is due — dispatch FuturesDue signal
+                        let timestamp = match i64::try_from(next_due_time) {
+                            Ok(millis) => match DateTime::from_timestamp_millis(millis) {
+                                Some(dt) => dt,
+                                None => {
+                                    warn!(
+                                        "FutureQueueSource: Due time {next_due_time} is out of range, using current time"
+                                    );
+                                    chrono::Utc::now()
+                                }
+                            },
+                            Err(e) => {
                                 warn!(
-                                    "FutureQueueSource: Due time {next_due_time} is out of range, using current time"
+                                    "FutureQueueSource: Failed to convert due_time {next_due_time}: {e}, using current time"
                                 );
                                 chrono::Utc::now()
                             }
-                        },
-                        Err(e) => {
-                            warn!(
-                                "FutureQueueSource: Failed to convert due_time {next_due_time}: {e}, using current time"
-                            );
-                            chrono::Utc::now()
-                        }
+                        };
+                        (SourceControl::FuturesDue, timestamp)
                     };
 
                     let event_wrapper = SourceEventWrapper::new(
                         FUTURE_QUEUE_SOURCE_ID.to_string(),
-                        SourceEvent::Control(SourceControl::FuturesDue),
+                        SourceEvent::Control(control),
                         timestamp,
                     );
-
                     let dispatcher_guard = dispatcher_clone.read().await;
                     if let Some(dispatcher) = dispatcher_guard.as_ref() {
                         if let Err(e) = dispatcher.dispatch_change(Arc::new(event_wrapper)).await {
-                            debug!(
-                                "FutureQueueSource failed to dispatch event for query '{query_id}': {e}"
-                            );
+                            debug!("FutureQueueSource failed to dispatch event for query '{query_id}': {e}");
+                            #[cfg(feature = "test-support")]
+                            if let (Some(control), Some(id)) = (&test_control, request_id) {
+                                control.complete(id, Err(crate::error::DrasiError::operation_failed(
+                                    "query", &query_id, "dispatch test wake", e.to_string(),
+                                )));
+                            }
                         }
                     } else {
                         warn!("FutureQueueSource: No dispatcher available for query '{query_id}'");
                         break;
                     }
                     drop(dispatcher_guard);
+
+                    #[cfg(feature = "test-support")]
+                    if test_requests.is_some() {
+                        continue;
+                    }
 
                     // Post-dispatch throttle: The signaler only peeks, never pops.
                     // Without this sleep, the next peek returns the same due item
@@ -216,6 +277,8 @@ impl FutureQueueSource {
 
     /// Stop the future queue polling task
     pub async fn stop(&self) {
+        #[cfg(feature = "test-support")]
+        self.test_requests.lock().await.take();
         let mut status = self.status.write().await;
         if *status != FutureQueueSourceStatus::Running {
             return;

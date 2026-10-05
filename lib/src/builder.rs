@@ -125,6 +125,8 @@ pub struct DrasiLibBuilder {
     dispatch_buffer_capacity: Option<usize>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
+    #[cfg(feature = "test-support")]
+    query_test_controls: Vec<(String, crate::test_support::QueryTestControl)>,
     source_instances: Vec<(
         Box<dyn SourceTrait>,
         std::collections::HashMap<String, String>,
@@ -164,6 +166,8 @@ impl DrasiLibBuilder {
             dispatch_buffer_capacity: None,
             storage_backends: Vec::new(),
             query_configs: Vec::new(),
+            #[cfg(feature = "test-support")]
+            query_test_controls: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
             bootstrap_metadata: Vec::new(),
@@ -415,6 +419,21 @@ impl DrasiLibBuilder {
     /// Add a query configuration.
     pub fn with_query(mut self, config: QueryConfig) -> Self {
         self.query_configs.push(config);
+        self
+    }
+
+    /// Attach an explicit physical clock and manager drain fence to a query.
+    ///
+    /// Available only with `test-support`. The query must be supplied to this
+    /// builder, and a control cannot be shared by different queries/instances.
+    /// This does not change persisted query configuration or its hash.
+    #[cfg(feature = "test-support")]
+    pub fn with_query_test_control(
+        mut self,
+        query_id: impl Into<String>,
+        control: crate::test_support::QueryTestControl,
+    ) -> Self {
+        self.query_test_controls.push((query_id.into(), control));
         self
     }
 
@@ -720,6 +739,22 @@ impl DrasiLibBuilder {
 
         // Initialize the server (loads query configurations — sources must already be registered)
         core.initialize().await?;
+
+        #[cfg(feature = "test-support")]
+        for (id, control) in self.query_test_controls {
+            let query = core
+                .query_manager
+                .get_query_instance(&id)
+                .await
+                .map_err(|_| DrasiError::component_not_found("query", &id))?;
+            let query = query
+                .as_any()
+                .downcast_ref::<crate::queries::DrasiQuery>()
+                .ok_or_else(|| {
+                    DrasiError::invalid_state("test control requires a managed query")
+                })?;
+            query.set_test_control(control).await?;
+        }
 
         // Inject pre-built reaction instances
         for (reaction, extra_metadata) in self.reaction_instances {

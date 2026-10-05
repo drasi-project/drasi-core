@@ -458,6 +458,7 @@ enum BootstrapPhase {
 /// Shared between the regular event processing path and the future queue drain path.
 /// Uses `QueryOutputState` for O(1) result-set updates keyed by `row_signature`,
 /// increments the sequence counter, and pushes to the outbox ring buffer.
+/// Reports already-logged publication failures without changing dispatch/recovery behavior.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
@@ -472,7 +473,7 @@ async fn dispatch_query_results(
     outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
-) {
+) -> bool {
     // Convert Drasi results to our QueryResult format, filtering out Noops
     let converted_results: Vec<ResultDiff> = results
         .iter()
@@ -527,7 +528,7 @@ async fn dispatch_query_results(
 
     // If all results were Noops, skip outbox/sequence advancement and dispatch
     if converted_results.is_empty() {
-        return;
+        return true;
     }
 
     // Apply diffs to the output state, build QueryResult, increment sequence,
@@ -580,6 +581,7 @@ async fn dispatch_query_results(
     // not transactional, so the outbox is also the recovery log for any live-row
     // or result-sequence write that does not complete.
     let mut outbox_ok = true;
+    let mut publication_ok = true;
     if let Some(writer) = outbox_writer {
         // Named fields keep skipped optional fields safe across schema evolution.
         match rmp_serde::to_vec_named(arc_result.as_ref()) {
@@ -605,6 +607,7 @@ async fn dispatch_query_results(
         if outbox_ok {
             if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
                 warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
+                publication_ok = false;
             }
         }
     }
@@ -660,6 +663,7 @@ async fn dispatch_query_results(
                         arc_result.sequence
                     );
                     output_persistence_healthy.store(false, std::sync::atomic::Ordering::Release);
+                    publication_ok = false;
                 }
             }
         }
@@ -676,11 +680,15 @@ async fn dispatch_query_results(
     for dispatcher in dispatchers.iter() {
         if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
             debug!("Failed to dispatch result for query '{query_id}': {e}");
+            publication_ok = false;
         }
     }
+    publication_ok && outbox_ok && live_results_ok
 }
 
 pub struct DrasiQuery {
+    #[cfg(feature = "test-support")]
+    test_control: RwLock<Option<crate::test_support::QueryTestControl>>,
     #[cfg(test)]
     future_now_override: Option<Arc<std::sync::atomic::AtomicU64>>,
     // DrasiLib instance ID for log routing isolation
@@ -726,6 +734,22 @@ pub struct DrasiQuery {
 }
 
 impl DrasiQuery {
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn set_test_control(
+        &self,
+        control: crate::test_support::QueryTestControl,
+    ) -> crate::error::Result<()> {
+        let mut installed = self.test_control.write().await;
+        if installed.is_some() {
+            return Err(crate::error::DrasiError::invalid_config(
+                "query already has a test control",
+            ));
+        }
+        control.bind()?;
+        *installed = Some(control);
+        Ok(())
+    }
+
     pub fn new(
         instance_id: impl Into<String>,
         config: QueryConfig,
@@ -751,6 +775,8 @@ impl DrasiQuery {
         let base = QueryBase::new(config).context("Failed to create QueryBase")?;
 
         Ok(Self {
+            #[cfg(feature = "test-support")]
+            test_control: RwLock::new(None),
             #[cfg(test)]
             future_now_override: None,
             instance_id: instance_id.into(),
@@ -1668,6 +1694,11 @@ impl Query for DrasiQuery {
             let mut source = future_queue_source;
             source.now_override = self.future_now_override.clone();
             source
+        };
+        #[cfg(feature = "test-support")]
+        let future_queue_source = match self.test_control.read().await.clone() {
+            Some(control) => future_queue_source.with_test_control(control)?,
+            None => future_queue_source,
         };
         let future_queue_source = Arc::new(future_queue_source);
 
@@ -2726,6 +2757,13 @@ impl Query for DrasiQuery {
                                 };
                             let source_id = parts.source_id;
                             let event = parts.event;
+                            #[cfg(feature = "test-support")]
+                            let (event, test_request_id) = match event {
+                                SourceEvent::Control(SourceControl::FuturesDueForTest { request_id }) => (
+                                    SourceEvent::Control(SourceControl::FuturesDue), Some(request_id),
+                                ),
+                                event => (event, None),
+                            };
                             let profiling_opt = parts.profiling;
                             let sequence = parts.sequence;
                             let source_position = parts.source_position;
@@ -2744,18 +2782,16 @@ impl Query for DrasiQuery {
 
                             match event {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
+                                    #[cfg(feature = "test-support")]
+                                    let mut drain_error = None;
                                     // Recheck physical time on every pop; signals may be stale.
                                     loop {
-                                        let now = FutureQueueSource::now();
-                                        #[cfg(test)]
-                                        let now = fq_source_for_processor.now_override.as_ref().map_or(now, |clock| {
-                                            clock.load(std::sync::atomic::Ordering::Acquire)
-                                        });
+                                        let now = fq_source_for_processor.physical_now();
                                         match continuous_query_for_processor.process_due_futures_at(now).await {
                                             Ok(Some(due_result)) => {
                                                 if !due_result.results.is_empty() {
                                                     let profiling = crate::profiling::ProfilingMetadata::new();
-                                                    dispatch_query_results(
+                                                    let publication_ok = dispatch_query_results(
                                                         &due_result.results,
                                                         &due_result.source_id,
                                                         &query_id,
@@ -2770,14 +2806,38 @@ impl Query for DrasiQuery {
                                                         &output_metrics_for_processor,
                                                     )
                                                     .await;
+                                                    #[cfg(feature = "test-support")]
+                                                    if !publication_ok {
+                                                        drain_error = Some("output persistence or dispatch failed".to_string());
+                                                    }
+                                                    #[cfg(not(feature = "test-support"))]
+                                                    let _ = publication_ok;
                                                 }
                                             }
                                             Ok(None) => break,
                                             Err(e) => {
                                                 error!("Query '{query_id}' failed to process due futures: {e}");
+                                                #[cfg(feature = "test-support")]
+                                                { drain_error = Some(e.to_string()); }
                                                 break;
                                             }
                                         }
+                                    }
+                                    #[cfg(feature = "test-support")]
+                                    if let (Some(control), Some(id)) = (&fq_source_for_processor.test_control, test_request_id) {
+                                        if !output_persistence_healthy_for_processor.load(std::sync::atomic::Ordering::Acquire) {
+                                            drain_error = Some("output persistence is unhealthy; restart recovery is required".to_string());
+                                        }
+                                        let result = match drain_error {
+                                            Some(error) => Err(crate::error::DrasiError::operation_failed(
+                                                "query", &query_id, "drain futures", error,
+                                            )),
+                                            None => Ok(crate::test_support::DrainReport {
+                                                physical_time_ms: control.now(),
+                                                output_sequence: output_state.read().await.as_of_sequence(),
+                                            }),
+                                        };
+                                        control.complete(id, result);
                                     }
                                     continue;
                                 }

@@ -199,6 +199,10 @@ pub enum SourceControl {
     },
     /// Signal from FutureQueueSource that one or more future items are due.
     FuturesDue,
+    /// Internal correlation for the opt-in integration-test drain fence.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    FuturesDueForTest { request_id: u64 },
 }
 
 /// Control operation types

@@ -35,6 +35,111 @@ Physical time determines eligibility only. During evaluation,
 `datetime.transaction()` remains its original source-event time. A late wakeup
 does not rewrite either timestamp.
 
+## Deterministic external integration tests
+
+Enable the opt-in `test-support` Cargo feature in the **test dependency**, not in
+production configuration:
+
+```toml
+[dev-dependencies]
+drasi-lib = { path = "../drasi-core/lib", features = ["test-support"] }
+```
+
+`drasi_lib::test_support::QueryTestControl` works when DrasiLib is compiled as a
+normal dependency (without `cfg(test)`). Attach it before starting a library:
+
+```rust
+use drasi_lib::{DrasiLib, Query, test_support::QueryTestControl};
+use std::time::Duration;
+
+let clock = QueryTestControl::new(0); // absolute epoch milliseconds
+let core = DrasiLib::builder()
+    .with_source(test_source)       // implements the public Source trait
+    .with_reaction(test_reaction)   // implements the public Reaction trait
+    .with_query(Query::cypher("checks")
+        .query("MATCH (r:Request) WHERE drasi.trueLater(r.pending, r.nextCheckAt)
+                RETURN r.id AS id, r.generation AS generation")
+        .from_source("requests")
+        .enable_bootstrap(false)
+        .auto_start(true)
+        .build())
+    .with_query_test_control("checks", clock.clone())
+    .build().await?;
+core.start().await?;
+
+// Publish inputs and await the Source's confirmed-position handle first.
+let drained = clock.advance_to(100, Duration::from_secs(10)).await?;
+assert_eq!(drained.physical_time_ms, 100);
+// Await the test Reaction's own receipt/effect hook separately.
+let duplicate = clock.wake(Duration::from_secs(10)).await?;
+assert_eq!(duplicate.output_sequence, drained.output_sequence);
+core.shutdown().await?;
+```
+
+The public methods are `new(u64)`, `now() -> u64`,
+`advance_to(u64, Duration) -> Result<DrainReport>` and
+`wake(Duration) -> Result<DrainReport>` (the latter two are async and use
+`drasi_lib::error::Result`). `DrainReport` contains `physical_time_ms: u64` and
+`output_sequence: u64`.
+
+**Scope and ordering.** Each control binds to exactly one query in one library;
+clones share that query's control, while independent controls never share clocks.
+Duplicate bindings and unknown query IDs are builder errors. Controlled queries
+disable autonomous timer polling: only explicit commands wake their actual
+`FutureQueueSource`, dispatcher, forwarder, priority queue, and production
+manager drain. Uncontrolled queries, including those in a feature-enabled build,
+keep ordinary system time and polling. The feature does not alter serialized
+query configuration, its hash, timer identities, or storage formats.
+
+Commands serialize applied clock changes **through manager completion**, not
+merely through enqueue. Time advances monotonically; equal time is allowed,
+backward time is rejected. The report identifies the command's applied time.
+`wake` leaves time unchanged and deliberately sends a signal even with no due
+work, so empty queues and stale wakes finish deterministically. To exercise a
+stale signal, commit a source reschedule to a later deadline, then wake at the
+old physical time. Neither the signal nor its delivery timestamp authorizes a
+pop; the current queue entry and controlled physical clock decide eligibility.
+Timer evaluation still uses the scheduled **logical** due time.
+
+**Exact fence.** Success means the manager reached a successful no-more-due
+queue operation, all selected timer evaluations committed, and their output
+outbox/live-snapshot/sequence-marker writes and result-dispatch calls finished
+without reported errors. The returned output sequence is sampled afterward.
+Without configured persistent writers, this only promises in-memory output.
+It is not a source-ingress flush, a reaction callback/effect acknowledgement,
+an atomic timer/publication transaction, or an exactly-once guarantee. Failed
+publication is an error, not a successful empty report; a latched unhealthy
+persistence state also fails later fences. The recovery gap below remains.
+
+Before waking, use the Source's confirmed-position handle (advanced after
+successful Core commit), not checkpoint reads, which may expose staged writes.
+The manager finishes that source event's output work before processing the
+subsequent wake. After draining, await the test Reaction's own callback/effect
+receipt if needed. Concurrent unrelated ingress is not included in the fence.
+
+**Timeout and cleanup.** Each command's timeout includes serialization,
+backpressure, drain and publication. A timeout or dropped waiter does not
+rewind the clock or cancel work already queued. Its serialization guard remains
+owned by the manager request until completion or source shutdown, preventing
+later commands from changing an unfinished drain's clock. A subsequent bounded
+command may also time out, but cannot report unfinished work as successful.
+Stopping the query fails outstanding requests; commands before startup or after
+stop fail explicitly. Restarting that same query reconnects the same control.
+Always use bounded waits and shut down the library, especially after a failed
+test or blocked provider operation.
+
+The complete public Source/Reaction fixture and test-owned RocksDB outbox gate
+are in `tests/controlled_timing.rs`. The gate proves that wake delivery and timer
+commit cannot complete the fence before output publication, without introducing
+a library fault-injection API:
+
+```sh
+cargo test -p drasi-lib --features test-support --test controlled_timing
+cargo test -p drasi-lib --no-default-features --lib future_queue_tests
+cargo test -p drasi-lib --features test-support --lib future_queue_tests
+cargo check -p drasi-lib --no-default-features --all-targets
+```
+
 ## Use a fact to rearm a check
 
 For a pending request with a movable next-check deadline:

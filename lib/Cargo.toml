@@ -30,6 +30,9 @@ workspace = true
 [features]
 default = []
 
+# Explicit per-query clock and drain controls for downstream integration tests.
+test-support = []
+
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
 middleware-bundled-jq = ["drasi-middleware/bundled-jq"]
@@ -107,7 +110,7 @@ rmp-serde = "1"
 tempfile = "3.8"
 mockall = "0.12"
 tokio-test = "0.4"
-tokio = { version = "1.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "test-util"] }
 assert_matches = "1.5"
 serial_test = "3.0"
 pretty_assertions = "1.4"

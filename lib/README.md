@@ -1081,6 +1081,7 @@ match core.get_source_status("unknown").await {
 
 | Feature | Description |
 |---------|-------------|
+| `test-support` | Opt-in per-query physical clock and manager drain fence for [deterministic integration tests](timers.md#deterministic-external-integration-tests); disabled by default |
 | `middleware-jq` | JQ transformations (requires system jq build tools) |
 | `middleware-bundled-jq` | JQ transformations (bundles jq, no system dependency) |
 | `middleware-decoder` | Base64, hex, URL, JSON-escape decoding |

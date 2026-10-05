@@ -241,6 +241,9 @@ pub use builder::DrasiLibBuilder;
 /// Fluent builder for query configurations
 pub use builder::Query;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 /// Async helper to wait for a component to reach a target status without polling.
 pub use component_graph::wait_for_status;
 /// Component graph types for dependency tracking and configuration queries
