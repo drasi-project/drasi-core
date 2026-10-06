@@ -239,6 +239,17 @@ pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
 
+/// Stable artifact marker checked before plugins are published.
+#[doc(hidden)]
+#[used]
+pub static DRASI_RUSTLS_CRYPTO_PROVIDER: [u8; 27] = *b"drasi-rustls-provider=ring\0";
+
+/// Installs the Rustls provider required by dynamically loaded plugins.
+#[doc(hidden)]
+pub fn install_default_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Re-export tokio so the `export_plugin!` macro can reference it
 /// without requiring plugins to declare a direct tokio dependency.
 #[doc(hidden)]
@@ -756,6 +767,7 @@ macro_rules! export_plugin {
         #[no_mangle]
         pub extern "C" fn drasi_plugin_init() -> *mut $crate::ffi::FfiPluginRegistration {
             match ::std::panic::catch_unwind(|| {
+                $crate::install_default_rustls_crypto_provider();
                 let _ = __plugin_runtime();
                 let (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs, secret_store_descs) = $init_fn();
 
@@ -801,4 +813,15 @@ macro_rules! export_plugin {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_default_rustls_crypto_provider;
+
+    #[test]
+    fn installs_ring_as_default_rustls_provider() {
+        install_default_rustls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
 }
