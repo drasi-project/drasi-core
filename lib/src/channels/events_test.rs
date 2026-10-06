@@ -88,14 +88,12 @@ mod tests {
         };
 
         let change = SourceChange::Insert { element };
-        let wrapper = SourceEventWrapper {
-            source_id: "test-source".to_string(),
-            event: SourceEvent::Change(change),
-            timestamp: chrono::Utc::now(),
-            profiling: None,
-            sequence: None,
-            source_position: None,
-        };
+        let wrapper = SourceEventWrapper::new(
+            "test-source".to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+            1,
+        );
 
         assert_eq!(wrapper.source_id, "test-source");
         assert!(matches!(wrapper.event, SourceEvent::Change(_)));

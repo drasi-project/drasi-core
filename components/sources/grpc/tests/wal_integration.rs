@@ -251,13 +251,13 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event4.sequence.unwrap(), 4);
+    assert_eq!(event4.sequence, 4);
 
     let event5 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event5.sequence.unwrap(), 5);
+    assert_eq!(event5.sequence, 5);
 
     source.stop().await.unwrap();
 }
@@ -293,6 +293,96 @@ async fn test_grpc_deprovision_removes_wal() {
 
     let count = wal.event_count("grpc-deprov").await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_grpc_requests_preserve_sequence_order() {
+    for durable in [false, true] {
+        let port = reserve_port();
+        let source_id = "grpc-concurrent";
+        let source = GrpcSource::new(
+            source_id,
+            GrpcSourceConfig {
+                host: "127.0.0.1".to_string(),
+                port,
+                endpoint: None,
+                timeout_ms: 5000,
+                durability: durable
+                    .then(|| durability_config(true, 10_000, CapacityPolicy::RejectIncoming)),
+            },
+        )
+        .unwrap();
+        let directory = TempDir::new().unwrap();
+        let wal = Arc::new(RedbWalProvider::new(directory.path()));
+        init_source_with_wal(&source, wal.clone(), source_id).await;
+        source.start().await.unwrap();
+        let mut receiver = source
+            .subscribe(SourceSubscriptionSettings {
+                source_id: source_id.to_string(),
+                query_id: "q1".to_string(),
+                enable_bootstrap: false,
+                nodes: HashSet::new(),
+                relations: HashSet::new(),
+                resume_sequence: None,
+                request_position_handle: false,
+                resume_from: None,
+            })
+            .await
+            .unwrap()
+            .receiver;
+        let client = connect_with_retry(port).await;
+        let mut requests = tokio::task::JoinSet::new();
+        for index in 0..32 {
+            let mut client = client.clone();
+            requests.spawn(async move {
+                let response = client
+                    .submit_event(insert_node_request(source_id, &format!("unary-{index}")))
+                    .await
+                    .unwrap();
+                assert!(response.into_inner().success);
+            });
+        }
+        let mut streaming_client = client.clone();
+        requests.spawn(async move {
+            let events = (0..32)
+                .map(|index| {
+                    insert_node_request(source_id, &format!("stream-{index}"))
+                        .event
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let mut responses = streaming_client
+                .stream_events(tokio_stream::iter(events))
+                .await
+                .unwrap()
+                .into_inner();
+            while let Some(response) = responses.message().await.unwrap() {
+                assert!(response.success);
+            }
+        });
+        for expected_sequence in 1..=64u64 {
+            let event = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.sequence, expected_sequence, "durable={durable}");
+            if durable {
+                assert_eq!(
+                    event.source_position.as_deref(),
+                    Some(expected_sequence.to_be_bytes().as_slice())
+                );
+            } else {
+                assert!(event.source_position.is_none());
+            }
+        }
+        while let Some(result) = requests.join_next().await {
+            result.unwrap();
+        }
+        if durable {
+            assert_eq!(wal.event_count(source_id).await.unwrap(), 64);
+        }
+        source.stop().await.unwrap();
+    }
 }
 
 /// With durability **disabled**, the gRPC source must still stamp a
@@ -357,8 +447,7 @@ async fn test_grpc_sequence_stamped_without_durability() {
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
         assert_eq!(
-            event.sequence,
-            Some(expected_seq),
+            event.sequence, expected_seq,
             "event {expected_seq} should carry a framework sequence with durability off"
         );
     }

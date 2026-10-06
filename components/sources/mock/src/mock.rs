@@ -507,21 +507,7 @@ impl Source for MockSource {
                         }
                     };
 
-                    // Create profiling metadata with timestamps
-                    let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                    profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                    let wrapper = SourceEventWrapper::with_profiling(
-                        source_id.clone(),
-                        SourceEvent::Change(source_change),
-                        chrono::Utc::now(),
-                        profiling,
-                    );
-
-                    // Dispatch to all subscribers via helper
-                    if let Err(e) = base.dispatch_event(wrapper).await {
-                        debug!("Failed to dispatch change: {e}");
-                    }
+                    dispatch_generated_change(base.clone_shared(), &source_id, source_change).await;
 
                     if let DataType::SensorReading {
                         sensor_count,
@@ -975,17 +961,13 @@ fn connected_to_element(source_name: &str, edge: &MeshEdge, strength: f64) -> El
     }
 }
 
-async fn dispatch_generated_change(base: SourceBase, source_id: &str, source_change: SourceChange) {
-    let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-    profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-    let wrapper = SourceEventWrapper::with_profiling(
-        source_id.to_string(),
-        SourceEvent::Change(source_change),
-        chrono::Utc::now(),
-        profiling,
-    );
-    if let Err(e) = base.dispatch_event(wrapper).await {
-        debug!("Failed to dispatch mesh change: {e}");
+async fn dispatch_generated_change(
+    base: SourceBase,
+    _source_id: &str,
+    source_change: SourceChange,
+) {
+    if let Err(e) = base.dispatch_source_change(source_change).await {
+        debug!("Failed to dispatch generated change: {e}");
     }
 }
 
@@ -1091,6 +1073,67 @@ async fn emit_mesh_tick(
 #[cfg(test)]
 mod mesh_unit_tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_generated_and_injected_events_deliver_in_sequence_order() {
+        let source = Arc::new(
+            MockSource::new(
+                "concurrent-mock",
+                MockSourceConfig {
+                    data_type: DataType::Counter,
+                    interval_ms: 1,
+                },
+            )
+            .unwrap(),
+        );
+        let mut receiver = source.test_subscribe().await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut producers = tokio::task::JoinSet::new();
+        for generated in [true, false] {
+            let source = source.clone();
+            let barrier = barrier.clone();
+            producers.spawn(async move {
+                for index in 0..250 {
+                    let change = SourceChange::Insert {
+                        element: Element::Node {
+                            metadata: ElementMetadata {
+                                reference: ElementReference::new(
+                                    "concurrent-mock",
+                                    &format!("{generated}-{index}"),
+                                ),
+                                labels: Arc::from([Arc::from("Test")]),
+                                effective_from: 0,
+                            },
+                            properties: Default::default(),
+                        },
+                    };
+                    barrier.wait().await;
+                    if generated {
+                        dispatch_generated_change(
+                            source.base.clone_shared(),
+                            "concurrent-mock",
+                            change,
+                        )
+                        .await;
+                    } else {
+                        source.inject_event(change).await.unwrap();
+                    }
+                }
+            });
+        }
+        for expected in 1..=500 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.sequence, expected);
+            assert_eq!(event.source_id, "concurrent-mock");
+            assert!(event.profiling.as_ref().unwrap().source_send_ns.is_some());
+        }
+        while let Some(result) = producers.join_next().await {
+            result.unwrap();
+        }
+    }
 
     #[test]
     fn initial_mesh_edges_empty_for_tiny_counts() {

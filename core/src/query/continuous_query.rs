@@ -31,7 +31,9 @@ use tokio::{
 
 use crate::{
     evaluation::{
-        context::{ChangeContext, QueryPartEvaluationContext, QueryVariables},
+        context::{
+            query_variables_unchanged, ChangeContext, QueryPartEvaluationContext, QueryVariables,
+        },
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
@@ -119,9 +121,10 @@ impl ContinuousQuery {
     /// Process a source change with a pre-commit hook that runs inside the session.
     ///
     /// The hook executes after index updates but before the session commits,
-    /// allowing callers to stage additional writes (e.g. checkpoint data) into
-    /// the same atomic transaction. The change_lock is held for the entire
-    /// duration, preserving serialization.
+    /// allowing callers to stage additional writes (e.g. checkpoint data, outbox,
+    /// live results, result sequence) into the same atomic transaction. The hook
+    /// receives the evaluation results so output can be staged before commit.
+    /// The change_lock is held for the entire duration, preserving serialization.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change_with_hook<F, Fut>(
         &self,
@@ -129,7 +132,7 @@ impl ContinuousQuery {
         pre_commit_hook: F,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError>
     where
-        F: FnOnce() -> Fut + Send,
+        F: FnOnce(&[QueryPartEvaluationContext]) -> Fut + Send,
         Fut: Future<Output = Result<(), IndexError>> + Send,
     {
         let _lock = self.change_lock.lock().await;
@@ -138,7 +141,7 @@ impl ContinuousQuery {
         let changes = self.execute_source_middleware(change).await?;
         let result = self.process_changes_inner(changes).await?;
 
-        pre_commit_hook().await?;
+        pre_commit_hook(&result).await?;
         guard.commit().await?;
         Ok(result)
     }
@@ -152,6 +155,24 @@ impl ContinuousQuery {
     /// If a crash occurs before commit, the pop rolls back and the item stays in the queue.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
+        self.process_due_futures_with_hook(|_results, _source_id| async { Ok(()) })
+            .await
+    }
+
+    /// Process a due future with a pre-commit hook that runs inside the session.
+    ///
+    /// Same atomic pop-and-process semantics as [`process_due_futures`], but the
+    /// hook can stage output (result sequence, outbox, live results) before commit.
+    /// There is no source checkpoint — futures are not source events.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_due_futures_with_hook<F, Fut>(
+        &self,
+        pre_commit_hook: F,
+    ) -> Result<Option<DueFutureResult>, EvaluationError>
+    where
+        F: FnOnce(&[QueryPartEvaluationContext], &str) -> Fut + Send,
+        Fut: Future<Output = Result<(), IndexError>> + Send,
+    {
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
@@ -168,6 +189,7 @@ impl ContinuousQuery {
         let change = SourceChange::Future { future_ref };
         let changes = self.execute_source_middleware(change).await?;
         let results = self.process_changes_inner(changes).await?;
+        pre_commit_hook(&results, source_id.as_ref()).await?;
         guard.commit().await?;
         Ok(Some(DueFutureResult { results, source_id }))
     }
@@ -233,7 +255,9 @@ impl ContinuousQuery {
                             ..
                         } => {
                             if let Some(before) = before {
-                                if before == after && !default_before {
+                                // Default transitions have already reached downstream
+                                // parts; only value changes or creation notify consumers.
+                                if query_variables_unchanged(before, after) && !default_before {
                                     return;
                                 }
                             }
@@ -241,7 +265,7 @@ impl ContinuousQuery {
                             aggregation_results.insert(ctx);
                         }
                         QueryPartEvaluationContext::Updating { before, after, .. } => {
-                            if before == after {
+                            if query_variables_unchanged(before, after) {
                                 return;
                             }
                             result.push(ctx);
@@ -592,26 +616,28 @@ impl ContinuousQuery {
             contexts = result.clone();
         }
 
+        // Nonaggregates retain the MATCH identity; each aggregating part replaces
+        // the hashes with its own group domain, including through final projections.
         Ok(result
             .into_iter()
             .map(|(ctx, cc)| match ctx {
                 QueryPartEvaluationContext::Adding { after, .. } => {
                     QueryPartEvaluationContext::Adding {
                         after,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.after_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Updating { before, after, .. } => {
                     QueryPartEvaluationContext::Updating {
                         before,
                         after,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.after_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Removing { before, .. } => {
                     QueryPartEvaluationContext::Removing {
                         before,
-                        row_signature: cc.solution_signature,
+                        row_signature: cc.before_grouping_hash,
                     }
                 }
                 QueryPartEvaluationContext::Aggregation {
@@ -769,6 +795,8 @@ impl SolutionChangesResult {
     }
 }
 
+/// Collapse each group to its earliest before value/key/default marker and its
+/// latest after value/key/default marker. The final default flag is not sticky.
 struct CollapsedAggregationResults {
     // [hash of after change grouping keys] -> (context, hash of before change grouping keys)
     data: HashMap<u64, (QueryPartEvaluationContext, u64)>,
@@ -798,9 +826,10 @@ impl CollapsedAggregationResults {
             };
 
             match self.data.remove(&after_key) {
-                Some((existing, before_key)) => {
+                Some((existing, existing_before_key)) => {
                     if let QueryPartEvaluationContext::Aggregation {
                         before: existing_before,
+                        default_before: existing_default_before,
                         ..
                     } = existing
                     {
@@ -809,13 +838,13 @@ impl CollapsedAggregationResults {
                             (
                                 QueryPartEvaluationContext::Aggregation {
                                     before: existing_before,
-                                    default_before,
+                                    default_before: existing_default_before,
                                     default_after,
                                     after,
                                     grouping_keys,
                                     row_signature: after_key,
                                 },
-                                before_key,
+                                existing_before_key,
                             ),
                         );
                     }
@@ -890,4 +919,105 @@ fn extract_grouping_value_hash(grouping_keys: &Vec<String>, variables: &QueryVar
         };
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod collapsed_aggregation_tests {
+    use super::*;
+    use crate::evaluation::variable_value::VariableValue;
+
+    fn variables(group: &str, count: i64) -> QueryVariables {
+        QueryVariables::from([
+            ("group".into(), VariableValue::String(group.to_string())),
+            ("count".into(), VariableValue::Integer(count.into())),
+        ])
+    }
+
+    #[test]
+    fn collapse_preserves_first_before_and_last_after_defaults() {
+        let mut collapsed = CollapsedAggregationResults::new();
+        collapsed.insert(QueryPartEvaluationContext::Aggregation {
+            before: Some(variables("group-a", 0)),
+            after: variables("group-a", 0),
+            grouping_keys: vec!["group".to_string()],
+            default_before: true,
+            default_after: false,
+            row_signature: 0,
+        });
+        collapsed.insert(QueryPartEvaluationContext::Aggregation {
+            before: Some(variables("group-a", 0)),
+            after: variables("group-a", 1),
+            grouping_keys: vec!["group".to_string()],
+            default_before: false,
+            default_after: true,
+            row_signature: 0,
+        });
+
+        let results = collapsed.into_result_vec();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            &results[0],
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                default_before: true,
+                default_after: true,
+                ..
+            } if before == &variables("group-a", 0) && after == &variables("group-a", 1)
+        ));
+    }
+
+    #[test]
+    fn collapse_three_changes_keeps_earliest_before_key_and_latest_after_default() {
+        let mut collapsed = CollapsedAggregationResults::new();
+        for (before, after, default_before, default_after) in [
+            (variables("old", 4), variables("new", 5), true, false),
+            (variables("new", 5), variables("new", 6), false, true),
+            (variables("new", 6), variables("new", 7), false, false),
+        ] {
+            collapsed.insert(QueryPartEvaluationContext::Aggregation {
+                before: Some(before),
+                after,
+                default_before,
+                default_after,
+                grouping_keys: vec!["group".into()],
+                row_signature: 0,
+            });
+        }
+        let clock = Arc::new(InstantQueryClock::new(0, 0));
+        let input = ChangeContext {
+            solution_signature: 42,
+            before_anchor_element: None,
+            after_anchor_element: None,
+            before_clock: clock.clone(),
+            after_clock: clock,
+            is_future_reprocess: false,
+            before_grouping_hash: 42,
+            after_grouping_hash: 42,
+        };
+        let mut results = collapsed.into_vec_with_context(&input);
+        assert_eq!(results.len(), 1);
+        let (result, context) = results.pop().unwrap();
+        let keys = vec!["group".into()];
+        assert_eq!(context.solution_signature, 42);
+        assert_eq!(
+            context.before_grouping_hash,
+            extract_grouping_value_hash(&keys, &variables("old", 4))
+        );
+        assert_eq!(
+            context.after_grouping_hash,
+            extract_grouping_value_hash(&keys, &variables("new", 7))
+        );
+        assert_eq!(
+            result,
+            QueryPartEvaluationContext::Aggregation {
+                before: Some(variables("old", 4)),
+                after: variables("new", 7),
+                grouping_keys: keys,
+                default_before: true,
+                default_after: false,
+                row_signature: context.after_grouping_hash,
+            }
+        );
+    }
 }

@@ -137,6 +137,7 @@ impl MockSource {
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
                     profiling,
+                    base.next_sequence(),
                 );
 
                 let _ = base.dispatch_event(wrapper).await;

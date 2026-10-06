@@ -833,6 +833,7 @@ impl PlatformSource {
                                                                         SourceEvent::Control(control_event),
                                                                         chrono::Utc::now(),
                                                                         profiling,
+                                                                        base.next_sequence(),
                                                                     );
 
                                                                     // Dispatch via helper
@@ -888,6 +889,7 @@ impl PlatformSource {
                                                                         SourceEvent::Change(item.source_change),
                                                                         chrono::Utc::now(),
                                                                         profiling,
+                                                                        base.next_sequence(),
                                                                     );
 
                                                                     // Dispatch via helper

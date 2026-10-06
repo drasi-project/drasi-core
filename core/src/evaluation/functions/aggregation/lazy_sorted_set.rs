@@ -48,7 +48,7 @@ impl LazySortedSet {
         let mut hasher = FxHasher::default();
         position_in_query.hash(&mut hasher);
         for value in grouping_values {
-            value.to_string().hash(&mut hasher);
+            value.hash_for_groupby(&mut hasher);
         }
 
         LazySortedSet {

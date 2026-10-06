@@ -25,6 +25,16 @@ use crate::path_solver::solution::SolutionSignature;
 
 pub type QueryVariables = BTreeMap<Box<str>, VariableValue>;
 
+/// A no-op must preserve exact grouping identity as well as ordinary row values.
+/// Ordinary numeric comparison can round distinct large integers to one float.
+pub(crate) fn query_variables_unchanged(before: &QueryVariables, after: &QueryVariables) -> bool {
+    before == after
+        && before
+            .values()
+            .zip(after.values())
+            .all(|(a, b)| a.eq_for_groupby(b))
+}
+
 #[derive(Debug, Clone)]
 pub enum SideEffects {
     Apply,
@@ -33,6 +43,8 @@ pub enum SideEffects {
     Snapshot,
 }
 
+/// Projected changes carry MATCH identities until aggregation replaces them
+/// with grouping identities. Removes address before; additions/updates address after.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryPartEvaluationContext {
     Adding {
@@ -52,7 +64,14 @@ pub enum QueryPartEvaluationContext {
         before: Option<QueryVariables>,
         after: QueryVariables,
         grouping_keys: Vec<String>,
+        /// The before side is a snapshot/default candidate, not necessarily an
+        /// already-applied contribution. Downstream PartCurrent decides whether
+        /// to revert it; PartDefault remembers the baseline for later removal.
+        /// A group-crossing destination snapshot may already be populated.
         default_before: bool,
+        /// Reconcile the after side against downstream PartDefault before applying
+        /// it. This does not by itself prove that the group has no contributors.
+        /// Internal transitions survive even when terminal values are unchanged.
         default_after: bool,
         row_signature: u64,
     },
@@ -249,13 +268,18 @@ impl<'a> ExpressionEvaluationContext<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ChangeContext {
+    /// Original MATCH binding identity, unchanged by later query parts.
     pub solution_signature: SolutionSignature,
     pub before_anchor_element: Option<Arc<Element>>,
     pub after_anchor_element: Option<Arc<Element>>,
     pub before_clock: Arc<dyn QueryClock>,
     pub after_clock: Arc<dyn QueryClock>,
     pub is_future_reprocess: bool,
+    /// Starts as the MATCH identity; each aggregating part resets it to that
+    /// part's before-group hash. Final removals use this domain.
     pub before_grouping_hash: u64,
+    /// Starts as the MATCH identity; each aggregating part resets it to that
+    /// part's after-group hash. Final additions/updates use this domain.
     pub after_grouping_hash: u64,
 }
 

@@ -627,7 +627,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             &result,
             &QueryPartEvaluationContext::Aggregation {
                 default_before: false,
-                default_after: false,
+                default_after: true,
                 grouping_keys: vec![
                     "RegionName".into(),
                     "IncidentId".into(),
@@ -638,15 +638,15 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
                   "IncidentId" => VariableValue::from(json!("in1000")),
                   "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
                   "RegionName" => VariableValue::from(json!("SoCal")),
-                  "IncidentSeverity" => VariableValue::from(json!("critical")),
-                  "EmployeeCount" => VariableValue::from(json!(0))
+                  "IncidentSeverity" => VariableValue::from(json!("extreme")),
+                  "EmployeeCount" => VariableValue::from(json!(4))
                 )),
                 after: variablemap!(
                   "IncidentId" => VariableValue::from(json!("in1000")),
                   "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
                   "RegionName" => VariableValue::from(json!("SoCal")),
-                  "IncidentSeverity" => VariableValue::from(json!("critical")),
-                  "EmployeeCount" => VariableValue::from(json!(4))
+                  "IncidentSeverity" => VariableValue::from(json!("extreme")),
+                  "EmployeeCount" => VariableValue::from(json!(0))
                 ),
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
@@ -654,7 +654,7 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
         assert!(contains_data(
             &result,
             &QueryPartEvaluationContext::Aggregation {
-                default_before: false,
+                default_before: true,
                 default_after: false,
                 grouping_keys: vec![
                     "RegionName".into(),

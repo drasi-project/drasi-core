@@ -241,13 +241,13 @@ Each source should have tests for:
 5. **Config**: Test serialization, deserialization with defaults, validation
 6. **Event Transformation**: Test conversion from input format to SourceChange
 7. **Error Handling**: Test error cases and error messages
-8. **Sequence Stamping**: Add at least one test asserting that every event a
-   source emits carries a framework-assigned, strictly increasing `sequence`
-   (`1, 2, 3, ...`) — including when durability is **disabled**. Sources dispatch
-   through an owned `SourceBase` obtained via `clone_shared()` and call
-   [`dispatch_event`](#dispatching-from-a-background-task) so the framework stamps
-   the sequence; a regression that drops back to an unstamped dispatch path would
-   leave `sequence = None` and must be caught here. See
+8. **Event Sequences**: Add at least one test asserting that every live event a
+    source emits carries a strictly increasing `sequence`, including when
+    durability is **disabled**. Sources supply their own ordinal or allocate one
+    with `SourceBase::next_sequence()` before constructing a `SourceEventWrapper`.
+    Serialize allocation and dispatch across concurrent producers and test that
+    delivery order matches sequence order. The fallback allocator starts at one.
+    Also verify that dispatch preserves source-supplied sequences. See
    `components/sources/{http,grpc,application}/tests/wal_integration.rs`
    (`test_*_sequence_stamped_without_durability`) for durability-gated sources,
    and `components/sources/mock/src/tests.rs`
@@ -617,8 +617,8 @@ impl Source for MySource {
 
 Sources that emit events from a spawned task (poll loop, websocket reader, CDC
 stream, etc.) must dispatch through an owned `SourceBase` so the framework
-stamps a monotonic `sequence` on every event, validates the `source_position`
-size, and records the sequence→position mapping used for checkpointing.
+preserves the required `sequence`, checks the `source_position` size, and records
+the sequence-to-position mapping used for checkpointing.
 
 Obtain the owned base with [`clone_shared()`](../../lib/src/sources/base.rs) —
 it shares the underlying `Arc` state (dispatchers, sequence counter, position
@@ -637,10 +637,9 @@ async fn start(&self) -> Result<()> {
                 base.id().to_string(),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
+                base.next_sequence(),
             );
 
-            // The framework stamps a monotonic sequence here (even with
-            // durability disabled) and preserves any source_position you set.
             if let Err(e) = base.dispatch_event(wrapper).await {
                 debug!("dispatch failed (no subscribers): {e}");
             }

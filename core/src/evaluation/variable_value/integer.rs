@@ -59,6 +59,21 @@ impl Hash for N {
 }
 
 impl Integer {
+    /// Group identities encode sign and magnitude so negative integers cannot
+    /// alias large unsigned integers with the same two's-complement bit pattern.
+    pub(super) fn hash_for_groupby<H: Hasher>(&self, state: &mut H) {
+        match self.n {
+            N::PosInt(value) => {
+                false.hash(state);
+                value.hash(state);
+            }
+            N::NegInt(value) => {
+                true.hash(state);
+                value.unsigned_abs().hash(state);
+            }
+        }
+    }
+
     #[inline]
     pub fn is_i64(&self) -> bool {
         match self.n {

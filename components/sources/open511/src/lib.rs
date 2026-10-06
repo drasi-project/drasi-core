@@ -333,6 +333,7 @@ async fn dispatch_change(
         SourceEvent::Change(change),
         Utc::now(),
         profiling,
+        base.next_sequence(),
     );
 
     base.dispatch_event(wrapper).await
@@ -807,11 +808,7 @@ mod tests {
                 .await
                 .expect("timed out waiting for event")
                 .expect("event stream closed unexpectedly");
-            sequences.push(
-                event
-                    .sequence
-                    .expect("dispatched change must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         assert_eq!(

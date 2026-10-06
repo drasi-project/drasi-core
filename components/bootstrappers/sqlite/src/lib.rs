@@ -51,13 +51,6 @@ impl SqliteBootstrapProvider {
     pub fn builder() -> SqliteBootstrapBuilder {
         SqliteBootstrapBuilder::new()
     }
-
-    fn key_columns_for_table(&self, conn: &Connection, table: &str) -> Result<Vec<String>> {
-        if let Some(cfg) = self.table_keys.iter().find(|item| item.table == table) {
-            return Ok(cfg.key_columns.clone());
-        }
-        detect_primary_key(conn, table)
-    }
 }
 
 /// Builder for [`SqliteBootstrapProvider`].
@@ -116,69 +109,101 @@ impl BootstrapProvider for SqliteBootstrapProvider {
     ) -> Result<BootstrapResult> {
         info!("Starting SQLite bootstrap for query '{}'", request.query_id);
 
-        let changes = {
-            let Some(path) = &self.path else {
-                warn!("SQLite bootstrap skipped for in-memory database");
-                return Ok(BootstrapResult::default());
-            };
-
-            let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let tables = resolve_tables(&conn, self.tables.as_ref())?;
-            let mut changes = Vec::new();
-
-            for table in tables {
-                if !request.node_labels.is_empty() && !request.node_labels.contains(&table) {
-                    continue;
-                }
-
-                let key_columns = self.key_columns_for_table(&conn, &table)?;
-                let rows = read_table_rows(&conn, &table)?;
-
-                for (row, rowid) in rows {
-                    let element_id = generate_element_id(&table, &row, &key_columns, Some(rowid));
-                    let mut properties = ElementPropertyMap::new();
-                    for (name, value) in row {
-                        properties.insert(&name, value);
-                    }
-
-                    let labels: Arc<[Arc<str>]> = vec![Arc::<str>::from(table.as_str())].into();
-                    let element = Element::Node {
-                        metadata: ElementMetadata {
-                            reference: ElementReference::new(&context.source_id, &element_id),
-                            labels,
-                            effective_from: chrono::Utc::now().timestamp_millis() as u64,
-                        },
-                        properties,
-                    };
-
-                    changes.push(SourceChange::Insert { element });
-                }
-            }
-
-            changes
+        let Some(path) = self.path.clone() else {
+            warn!("SQLite bootstrap skipped for in-memory database");
+            return Ok(BootstrapResult::default());
         };
 
-        let mut count = 0usize;
-        for change in changes {
-            let event = drasi_lib::channels::BootstrapEvent {
-                source_id: context.source_id.clone(),
-                change,
-                timestamp: chrono::Utc::now(),
-                sequence: context.next_sequence(),
-            };
-            event_tx.send(event).await?;
-            count += 1;
-        }
+        let configured_tables = self.tables.clone();
+        let table_keys = self.table_keys.clone();
+        let context = context.clone();
+        let query_id = request.query_id.clone();
 
-        info!(
-            "SQLite bootstrap completed for query '{}': {} rows",
-            request.query_id, count
-        );
+        let count = tokio::task::spawn_blocking(move || {
+            stream_sqlite_tables(
+                &path,
+                configured_tables.as_ref(),
+                &table_keys,
+                &request,
+                &context,
+                &event_tx,
+            )
+        })
+        .await??;
+
+        info!("SQLite bootstrap completed for query '{query_id}': {count} rows");
         Ok(BootstrapResult {
             event_count: count,
             ..Default::default()
         })
     }
+}
+
+fn stream_sqlite_tables(
+    path: &str,
+    configured_tables: Option<&Vec<String>>,
+    table_keys: &[TableKeyConfig],
+    request: &BootstrapRequest,
+    context: &BootstrapContext,
+    event_tx: &BootstrapEventSender,
+) -> Result<usize> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tables = resolve_tables(&conn, configured_tables)?;
+    let mut count = 0usize;
+
+    for table in tables {
+        if !request.node_labels.is_empty() && !request.node_labels.contains(&table) {
+            continue;
+        }
+
+        let key_columns = key_columns_for_table(&conn, table_keys, &table)?;
+        let query = format!("SELECT rowid, * FROM {}", quote_ident(&table));
+        let mut stmt = conn.prepare(&query)?;
+        let column_names = user_column_names(&stmt);
+        let mut rows = stmt.query([])?;
+
+        while let Some(row) = rows.next()? {
+            let (values, rowid) = map_query_row(row, &column_names)?;
+            let element_id = generate_element_id(&table, &values, &key_columns, Some(rowid));
+            let mut properties = ElementPropertyMap::new();
+            for (name, value) in values {
+                properties.insert(&name, value);
+            }
+
+            let labels: Arc<[Arc<str>]> = vec![Arc::<str>::from(table.as_str())].into();
+            let element = Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(&context.source_id, &element_id),
+                    labels,
+                    effective_from: chrono::Utc::now().timestamp_millis() as u64,
+                },
+                properties,
+            };
+
+            event_tx
+                .blocking_send(drasi_lib::channels::BootstrapEvent {
+                    source_id: context.source_id.clone(),
+                    change: SourceChange::Insert { element },
+                    timestamp: chrono::Utc::now(),
+                    sequence: context.next_sequence(),
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to send SQLite bootstrap event: {e}"))?;
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+fn key_columns_for_table(
+    conn: &Connection,
+    table_keys: &[TableKeyConfig],
+    table: &str,
+) -> Result<Vec<String>> {
+    if let Some(cfg) = table_keys.iter().find(|item| item.table == table) {
+        return Ok(cfg.key_columns.clone());
+    }
+    detect_primary_key(conn, table)
 }
 
 fn resolve_tables(
@@ -198,28 +223,37 @@ fn resolve_tables(
     Ok(tables)
 }
 
+fn user_column_names(stmt: &rusqlite::Statement<'_>) -> Vec<String> {
+    // First column is rowid, remaining are user columns
+    (1..stmt.column_count())
+        .map(|index| stmt.column_name(index).unwrap_or("").to_string())
+        .collect()
+}
+
+fn map_query_row(
+    row: &rusqlite::Row<'_>,
+    column_names: &[String],
+) -> Result<(Vec<(String, ElementValue)>, i64)> {
+    let rowid: i64 = row.get(0)?;
+    let mut values = Vec::with_capacity(column_names.len());
+    for (i, name) in column_names.iter().enumerate() {
+        let value_ref = row.get_ref(i + 1)?;
+        values.push((name.clone(), value_ref_to_element_value(value_ref)));
+    }
+    Ok((values, rowid))
+}
+
 fn read_table_rows(
     conn: &Connection,
     table: &str,
 ) -> Result<Vec<(Vec<(String, ElementValue)>, i64)>> {
     let query = format!("SELECT rowid, * FROM {}", quote_ident(table));
     let mut stmt = conn.prepare(&query)?;
-    let column_count = stmt.column_count();
-    // First column is rowid, remaining are user columns
-    let column_names: Vec<String> = (1..column_count)
-        .map(|index| stmt.column_name(index).unwrap_or("").to_string())
-        .collect();
-
+    let column_names = user_column_names(&stmt);
     let mut rows = stmt.query([])?;
     let mut result = Vec::new();
     while let Some(row) = rows.next()? {
-        let rowid: i64 = row.get(0)?;
-        let mut values = Vec::with_capacity(column_names.len());
-        for (i, name) in column_names.iter().enumerate() {
-            let value_ref = row.get_ref(i + 1)?;
-            values.push((name.clone(), value_ref_to_element_value(value_ref)));
-        }
-        result.push((values, rowid));
+        result.push(map_query_row(row, &column_names)?);
     }
     Ok(result)
 }
@@ -355,6 +389,69 @@ mod tests {
             generate_element_id("data", &values, &keys, None),
             "data:unknown"
         );
+    }
+
+    #[test]
+    fn stream_sqlite_tables_filters_labels_and_assigns_sequences() {
+        let path = std::env::temp_dir().join(format!(
+            "drasi-sqlite-stream-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sensors (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO sensors VALUES (1, 'alpha');
+             INSERT INTO sensors VALUES (2, 'beta');
+             CREATE TABLE ignored (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO ignored VALUES (9, 'skip');",
+        )
+        .expect("setup");
+        drop(conn);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let context = BootstrapContext::new_minimal("server".to_string(), "src".to_string());
+        let request = BootstrapRequest {
+            query_id: "q1".to_string(),
+            node_labels: vec!["sensors".to_string()],
+            relation_labels: Vec::new(),
+            request_id: "req-1".to_string(),
+        };
+        let tables = vec!["sensors".to_string(), "ignored".to_string()];
+        let count = stream_sqlite_tables(&path_str, Some(&tables), &[], &request, &context, &tx)
+            .expect("stream");
+        drop(tx);
+
+        assert_eq!(count, 2, "only sensors rows should be streamed");
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].source_id, "src");
+        assert_eq!(events[0].sequence, 0);
+        assert_eq!(events[1].sequence, 1);
+
+        let names: Vec<String> = events
+            .iter()
+            .map(|event| match &event.change {
+                SourceChange::Insert { element } => match element {
+                    Element::Node { properties, .. } => match &properties["name"] {
+                        ElementValue::String(name) => name.to_string(),
+                        other => panic!("unexpected name value: {other:?}"),
+                    },
+                    other => panic!("expected node, got {other:?}"),
+                },
+                other => panic!("expected insert, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
     #[test]

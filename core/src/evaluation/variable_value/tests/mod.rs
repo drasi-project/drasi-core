@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod float_test;
+mod grouping_test;
 mod integer_test;
 mod object_test;
 mod ser_test;

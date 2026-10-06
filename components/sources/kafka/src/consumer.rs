@@ -208,8 +208,8 @@ impl KafkaConsumerTask {
                                         event: SourceEvent::Change(change),
                                         timestamp: chrono::Utc::now(),
                                         profiling: None,
-                                        sequence: None,
                                         source_position: Some(encode_position(partition, &offsets_for_event)),
+                                        sequence: self.base.next_sequence(),
                                     };
 
                                     if let Err(e) = self.base.dispatch_event(wrapper).await {

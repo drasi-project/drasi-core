@@ -375,6 +375,9 @@ mod tests {
             &[(ComponentStatus::Added, "added")],
         );
 
+        core.start_source("r-src").await.unwrap();
+        core.start_query("r-query").await.unwrap();
+
         // Start reaction
         core.start_reaction("test-rxn").await.unwrap();
         let events = collect_events_until(

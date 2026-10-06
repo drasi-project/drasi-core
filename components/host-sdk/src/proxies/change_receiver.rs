@@ -475,7 +475,7 @@ mod ownership_tests {
             source_id: "src-1".to_string(),
             event: SourceEvent::Change(SourceChange::Insert { element: node() }),
             timestamp_us: 1_771_000_000_000_000,
-            sequence: Some(99),
+            sequence: 99,
             source_position: Some(b"binlog:1".to_vec()),
         };
         let raw = make_source_event(&payload, counting_drop_src_valid);
@@ -483,7 +483,7 @@ mod ownership_tests {
 
         let wrapper = decode_source_event(ffi).expect("host-owned wrapper");
         assert_eq!(wrapper.source_id, "src-1");
-        assert_eq!(wrapper.sequence, Some(99));
+        assert_eq!(wrapper.sequence, 99);
         assert_eq!(wrapper.source_position.as_deref(), Some(&b"binlog:1"[..]));
         assert_eq!(wrapper.event, payload.event);
 
@@ -603,7 +603,7 @@ mod ownership_tests {
             source_id: "s".to_string(),
             event: SourceEvent::Change(SourceChange::Insert { element: node() }),
             timestamp_us: 0,
-            sequence: None,
+            sequence: 0,
             source_position: None,
         };
         let ev = make_source_event(&payload, free_only_drop);

@@ -154,16 +154,20 @@ impl DataverseBootstrapProvider {
         }
     }
 
-    /// Fetch all records from an entity set, with pagination.
+    /// Fetch records from an entity set page-by-page and send each record immediately.
     ///
-    /// Mirrors the platform's `BootstrapHandler` which iterates through all
-    /// pages using `PagingCookie` and returns all `NewOrUpdatedItem` records.
-    async fn fetch_entity_data(
+    /// Pages are requested via `@odata.nextLink` so only one OData page is held
+    /// at a time. Each record is converted and sent on `event_tx` before the
+    /// next record is processed, so the bounded bootstrap channel applies
+    /// backpressure. The full entity set is never accumulated.
+    async fn bootstrap_entity(
         &self,
         http_client: &reqwest::Client,
         token: &str,
         entity_name: &str,
-    ) -> Result<Vec<serde_json::Value>> {
+        context: &BootstrapContext,
+        event_tx: &BootstrapEventSender,
+    ) -> Result<usize> {
         let entity_set = self.config.entity_set_name(entity_name);
         let select = self.config.select_columns(entity_name);
 
@@ -183,7 +187,7 @@ impl DataverseBootstrapProvider {
             url = format!("{}?{}", url, query_params.join("&"));
         }
 
-        let mut all_records = Vec::new();
+        let mut total_sent = 0usize;
         let mut current_url = url;
         let mut page = 1;
 
@@ -202,16 +206,33 @@ impl DataverseBootstrapProvider {
 
             let body: serde_json::Value = resp.json().await?;
 
-            // Extract records from response
             if let Some(records) = body.get("value").and_then(|v| v.as_array()) {
                 debug!(
                     "Bootstrap: Got {} records on page {page} for entity {entity_name}",
                     records.len()
                 );
-                all_records.extend(records.clone());
+                for record in records {
+                    if let Some(source_change) =
+                        Self::record_to_source_change(&context.source_id, entity_name, record)
+                    {
+                        event_tx
+                            .send(BootstrapEvent {
+                                source_id: context.source_id.clone(),
+                                change: source_change,
+                                timestamp: chrono::Utc::now(),
+                                sequence: context.next_sequence(),
+                            })
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to send bootstrap event for entity {entity_name}: {e}"
+                                )
+                            })?;
+                        total_sent += 1;
+                    }
+                }
             }
 
-            // Check for next page
             if let Some(next_link) = body.get("@odata.nextLink").and_then(|v| v.as_str()) {
                 current_url = next_link.to_string();
                 page += 1;
@@ -220,11 +241,8 @@ impl DataverseBootstrapProvider {
             }
         }
 
-        info!(
-            "Bootstrap: Fetched {} total records for entity {entity_name}",
-            all_records.len()
-        );
-        Ok(all_records)
+        info!("Bootstrap: Sent {total_sent} records for entity {entity_name}");
+        Ok(total_sent)
     }
 
     /// Convert a record JSON value to a SourceChange::Insert.
@@ -333,36 +351,9 @@ impl BootstrapProvider for DataverseBootstrapProvider {
 
         for entity_name in entities_to_bootstrap {
             info!("Bootstrap: Loading data for entity '{entity_name}'");
-
-            let records = self
-                .fetch_entity_data(&http_client, &token, entity_name)
+            total_count += self
+                .bootstrap_entity(&http_client, &token, entity_name, context, &event_tx)
                 .await?;
-
-            let mut batch_count = 0;
-            for record in &records {
-                if let Some(source_change) =
-                    Self::record_to_source_change(&context.source_id, entity_name, record)
-                {
-                    let sequence = context.next_sequence();
-                    let event = BootstrapEvent {
-                        source_id: context.source_id.clone(),
-                        change: source_change,
-                        timestamp: chrono::Utc::now(),
-                        sequence,
-                    };
-
-                    event_tx.send(event).await.map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to send bootstrap event for entity {entity_name}: {e}"
-                        )
-                    })?;
-
-                    batch_count += 1;
-                }
-            }
-
-            info!("Bootstrap: Sent {batch_count} records for entity '{entity_name}'");
-            total_count += batch_count;
         }
 
         info!(
@@ -995,6 +986,41 @@ mod tests {
             let mut seqs: Vec<u64> = events.iter().map(|e| e.sequence).collect();
             seqs.sort();
             assert_eq!(seqs, vec![0, 1, 2, 3]);
+        }
+
+        #[tokio::test]
+        async fn aborts_when_event_channel_closes() {
+            let server = MockServer::start().await;
+
+            Mock::given(method("GET"))
+                .and(path("/api/data/v9.2/accounts"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": [
+                        { "accountid": "id-1", "name": "One" },
+                        { "accountid": "id-2", "name": "Two" }
+                    ]
+                })))
+                .mount(&server)
+                .await;
+
+            let provider = DataverseBootstrapProvider::builder()
+                .with_environment_url(server.uri())
+                .with_entities(vec!["account".to_string()])
+                .with_identity_provider(StaticToken)
+                .build()
+                .expect("provider should build");
+
+            let (tx, rx) = mpsc::channel(8);
+            drop(rx);
+            let ctx =
+                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
+            let request = make_request("q-1", Vec::new());
+
+            let result = provider.bootstrap(request, &ctx, tx, None).await;
+            assert!(
+                result.is_err(),
+                "closed bootstrap channel should fail the fetch instead of buffering remaining records"
+            );
         }
 
         #[tokio::test]

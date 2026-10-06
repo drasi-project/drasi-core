@@ -125,6 +125,97 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
     Ok(())
 }
 
+/// Bootstrap more ConfigMaps than one list page so `continue_` pagination runs.
+#[tokio::test]
+#[ignore]
+async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()> {
+    let k3s = K3sGuard::start().await?;
+    let client = k3s.client().await?;
+    let cms: Api<ConfigMap> = Api::namespaced(client, "default");
+
+    let names = [
+        "drasi-k8s-page-a",
+        "drasi-k8s-page-b",
+        "drasi-k8s-page-c",
+        "drasi-k8s-page-d",
+        "drasi-k8s-page-e",
+    ];
+    for name in names {
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": { "name": name },
+            "data": { "color": "green" }
+        }))?;
+        cms.create(&PostParams::default(), &cm).await?;
+    }
+
+    let config = KubernetesSourceConfig {
+        resources: vec![ResourceSpec {
+            api_version: "v1".to_string(),
+            kind: "ConfigMap".to_string(),
+        }],
+        namespaces: vec!["default".to_string()],
+        auth_mode: AuthMode::Kubeconfig,
+        kubeconfig_path: None,
+        kubeconfig_content: Some(k3s.kubeconfig().to_string()),
+        include_owner_relations: false,
+        start_from: StartFrom::Now,
+        ..Default::default()
+    };
+
+    let bootstrap_provider = KubernetesBootstrapProvider::builder()
+        .with_source_config(config.clone())
+        .with_list_page_size(2)
+        .build()?;
+
+    let source = KubernetesSource::builder("k8s-source")
+        .with_config(config)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()?;
+
+    let query = Query::cypher("q1")
+        .query("MATCH (c:ConfigMap) RETURN c.name AS name")
+        .from_source("k8s-source")
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .build();
+
+    let (reaction, _reaction_handle) = ApplicationReaction::builder("r1").with_query("q1").build();
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("k8s-bootstrap-page-it")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    wait_for_query_row(&core, "q1", |rows| {
+        names.iter().all(|name| row_has(rows, name, None))
+    })
+    .await?;
+
+    let rows = core.get_query_results("q1").await?;
+    let bootstrapped: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| row_has(&rows, name, None))
+        .collect();
+    assert_eq!(
+        bootstrapped.len(),
+        names.len(),
+        "bootstrap should emit every pre-existing ConfigMap across list pages, got {bootstrapped:?}"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
 async fn wait_for_query_row<F>(core: &Arc<DrasiLib>, query_id: &str, predicate: F) -> Result<()>
 where
     F: Fn(&[Value]) -> bool,

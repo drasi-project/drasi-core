@@ -62,8 +62,8 @@ pub mod recovery;
 // Internal Modules (crate-private, but visible to integration tests)
 // ============================================================================
 
-// These modules are internal but need to be accessible to integration tests
-// that test platform-specific components
+// These modules are doc(hidden) but public: plugin crates and the host SDK
+// import them directly in production, so treat their contents as external API.
 #[cfg_attr(not(test), doc(hidden))]
 pub mod bootstrap;
 #[cfg_attr(not(test), doc(hidden))]
