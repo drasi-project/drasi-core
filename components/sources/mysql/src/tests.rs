@@ -91,7 +91,9 @@ mod tests {
         use bytes::Bytes;
         use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
         use drasi_lib::channels::BootstrapEventSender;
+        use drasi_lib::component_graph::{wait_for_status, ComponentUpdate};
         use drasi_lib::config::SourceSubscriptionSettings;
+        use drasi_lib::DrasiLib;
         use std::time::Duration;
 
         struct InvalidBoundaryBootstrap;
@@ -110,6 +112,155 @@ mod tests {
                     source_position: Some(Bytes::from_static(b"invalid boundary")),
                 })
             }
+        }
+
+        #[tokio::test]
+        async fn managed_lifecycle_cleans_failed_source() {
+            for action in ["stop", "stop_all", "remove", "update"] {
+                let source = MySqlSourceBuilder::new("managed-source")
+                    .with_database("test")
+                    .with_user("test")
+                    .with_bootstrap_provider(InvalidBoundaryBootstrap)
+                    .build()
+                    .unwrap();
+                let core = DrasiLib::builder()
+                    .with_source(source)
+                    .build()
+                    .await
+                    .unwrap();
+                core.start().await.unwrap();
+                let graph = core.component_graph();
+                let runtime = graph
+                    .read()
+                    .await
+                    .get_runtime::<StdArc<dyn Source>>("managed-source")
+                    .cloned()
+                    .unwrap();
+                let source = runtime
+                    .as_any()
+                    .downcast_ref::<MySqlReplicationSource>()
+                    .unwrap();
+                let mut subscription = source
+                    .subscribe(SourceSubscriptionSettings {
+                        source_id: source.id().into(),
+                        query_id: "test-query".into(),
+                        enable_bootstrap: true,
+                        nodes: Default::default(),
+                        relations: Default::default(),
+                        resume_from: None,
+                        resume_sequence: None,
+                        request_position_handle: false,
+                    })
+                    .await
+                    .unwrap();
+                wait_for_status(
+                    &graph,
+                    source.id(),
+                    &[ComponentStatus::Error],
+                    Duration::from_secs(3),
+                )
+                .await
+                .unwrap();
+                let task = source
+                    .base
+                    .task_handle
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .abort_handle();
+
+                match action {
+                    "stop" => core.stop_source(source.id()).await.unwrap(),
+                    "stop_all" => core.stop().await.unwrap(),
+                    "remove" => core.remove_source(source.id(), false).await.unwrap(),
+                    "update" => {
+                        core.update_source(
+                            source.id(),
+                            MySqlSourceBuilder::new(source.id())
+                                .with_database("test")
+                                .with_user("test")
+                                .build()
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+
+                assert!(
+                    task.is_finished(),
+                    "{action} must join the replication task"
+                );
+                assert!(source.base.task_handle.read().await.is_none());
+                assert!(source.subscriber_resume_positions.read().await.is_empty());
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+                if action == "remove" {
+                    assert!(!graph.read().await.contains(source.id()));
+                } else {
+                    wait_for_status(
+                        &graph,
+                        source.id(),
+                        &[ComponentStatus::Stopped],
+                        Duration::from_secs(3),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        core.stop_source(source.id()).await.is_err(),
+                        "managed repeated stop is rejected"
+                    );
+                }
+                if action != "stop_all" {
+                    core.stop().await.unwrap();
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn stop_cleans_starting_source() {
+            let source = MySqlSourceBuilder::new("starting-source")
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+            source
+                .base
+                .set_status(ComponentStatus::Starting, None)
+                .await;
+            let task = tokio::spawn(std::future::pending::<()>());
+            let abort_handle = task.abort_handle();
+            source.base.set_task_handle(task).await;
+            let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+            source.subscriber_resume_positions.write().await.insert(
+                "old-query".into(),
+                ReplicationState {
+                    binlog_file: "binlog.000001".into(),
+                    binlog_position: 4,
+                    gtid_set: None,
+                    last_processed_timestamp: 0,
+                },
+            );
+
+            source.stop().await.unwrap();
+            assert!(abort_handle.is_finished());
+            assert!(source.base.task_handle.read().await.is_none());
+            assert!(source.subscriber_resume_positions.read().await.is_empty());
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            source.stop().await.unwrap();
         }
 
         #[tokio::test]
@@ -211,6 +362,8 @@ mod tests {
             previous.abort();
             assert!(previous.await.unwrap_err().is_cancelled());
             let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+            let (update_tx, mut updates) = tokio::sync::mpsc::channel(8);
+            source.base.status_handle().wire(update_tx).await;
 
             let error = source
                 .stop()
@@ -222,6 +375,19 @@ mod tests {
                 .is_panic());
             assert_eq!(source.status().await, ComponentStatus::Error);
             assert!(source.base.task_handle.read().await.is_none());
+            let mut error_message = None;
+            while let Ok(ComponentUpdate::Status {
+                status, message, ..
+            }) = updates.try_recv()
+            {
+                if status == ComponentStatus::Error {
+                    error_message = message;
+                }
+            }
+            assert_eq!(
+                error_message.as_deref(),
+                Some("MySQL replication task failed during shutdown; see logs for details")
+            );
             assert!(
                 tokio::time::timeout(Duration::from_secs(1), receiver.recv())
                     .await

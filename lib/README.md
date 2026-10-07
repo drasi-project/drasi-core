@@ -396,6 +396,14 @@ Updating or removing a failed query, and stopping the instance, also release its
 active lifecycle resources. Updating a failed query leaves its replacement stopped
 until explicitly started.
 
+`stop_source()` likewise invokes cleanup for sources in `Error`. Source plugins
+must release their resources and report `Stopped` before returning success; a
+legacy plugin that no-ops in `Error` is rejected instead of leaving the graph at
+`Stopping`. Updating/removing failed sources and instance shutdown also invoke
+cleanup. Updating a failed source leaves its replacement stopped. Managed
+`stop_source()` rejects an already stopped source, even if its direct `stop()`
+is idempotent.
+
 ### Inspecting Components
 
 ```rust

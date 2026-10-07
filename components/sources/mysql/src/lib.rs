@@ -181,6 +181,7 @@ impl Source for MySqlReplicationSource {
     }
 
     async fn stop(&self) -> Result<()> {
+        // Starting and Error can still own tasks and subscriptions.
         if self.base.get_status().await == ComponentStatus::Stopped {
             return Ok(());
         }
@@ -190,13 +191,7 @@ impl Source for MySqlReplicationSource {
         self.base.set_status(ComponentStatus::Stopping, None).await;
         self.shutdown.store(true, Ordering::Relaxed);
 
-        let task_result = match self.base.task_handle.write().await.take() {
-            Some(task) => {
-                task.abort();
-                task.await
-            }
-            None => Ok(()),
-        };
+        let task_result = self.base.abort_and_join_task().await;
 
         // Clear stale dispatchers so a subsequent start()+subscribe() cycle
         // does not dispatch events to dead receivers.
@@ -207,17 +202,17 @@ impl Source for MySqlReplicationSource {
         self.subscriber_resume_positions.write().await.clear();
 
         if let Err(error) = task_result {
-            if !error.is_cancelled() {
-                let error = anyhow::Error::new(error).context(format!(
-                    "MySQL source '{}' replication task failed during shutdown",
-                    self.base.id
-                ));
-                error!("{error:#}");
-                self.base
-                    .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
-                    .await;
-                return Err(error);
-            }
+            error!("{error:#}");
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(
+                        "MySQL replication task failed during shutdown; see logs for details"
+                            .into(),
+                    ),
+                )
+                .await;
+            return Err(error);
         }
 
         self.base
