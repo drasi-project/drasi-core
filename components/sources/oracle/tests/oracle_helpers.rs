@@ -96,6 +96,22 @@ pub async fn prepare_oracle_database(oracle: &OracleGuard) -> Result<()> {
         )?;
     }
 
+    // LogMiner start_position=beginning reads MIN(FIRST_CHANGE#) from
+    // V$ARCHIVED_LOG. A just-opened ARCHIVELOG database has no archived
+    // logs until the current redo is switched out.
+    exec_sqlplus_as_sysdba(
+        oracle.container_id(),
+        r#"
+BEGIN
+  EXECUTE IMMEDIATE 'ALTER SYSTEM ARCHIVE LOG CURRENT';
+EXCEPTION
+  WHEN OTHERS THEN NULL;
+END;
+/
+EXIT;
+"#,
+    )?;
+
     let database_sql = r#"
 WHENEVER SQLERROR EXIT FAILURE;
 BEGIN
