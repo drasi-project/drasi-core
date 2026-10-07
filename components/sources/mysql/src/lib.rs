@@ -31,9 +31,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc as StdArc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info};
+use log::{error, info, warn};
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
@@ -224,10 +224,15 @@ impl Source for MySqlReplicationSource {
         // keyed by query_id. The replication stream uses the minimum position
         // across all subscribers to determine where to start the binlog stream.
         if let Some(ref resume_bytes) = settings.resume_from {
-            let state = crate::types::decode_position(resume_bytes).with_context(|| {
-                format!(
-                    "Invalid MySQL resume position for subscriber '{}' on source '{}'",
+            let state = crate::types::decode_position(resume_bytes).map_err(|err| {
+                warn!(
+                    "Invalid MySQL resume position for subscriber '{}' on source '{}': {err:#}",
                     settings.query_id, self.base.id
+                );
+                anyhow::anyhow!(
+                    "Invalid MySQL resume position for subscriber '{}' on source '{}'",
+                    settings.query_id,
+                    self.base.id
                 )
             })?;
             info!(

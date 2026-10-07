@@ -70,26 +70,36 @@ protect against passive eavesdropping but not an active man-in-the-middle. Use
 
 - Packets > 16 MB are not supported.
 
-## Checkpoint positions
+## Checkpoint positions and resuming
 
-CDC position tokens retain the real binlog filename and commit byte position and
-include `transaction_start_position` and `row_offset` for each emitted row. The
-start is a native GTID/BEGIN/TableMap event cursor; the offset is a zero-based
-ordinal across all emitted changes in the transaction, including multiple row
-events or statements. Ordering uses file, commit position, and row ordinal, not
-wall-clock timestamps. Commit timestamps remain binlog-header metadata.
+Each emitted change carries an opaque position token used to resume replication
+after a restart. Rows in a transaction are checkpointed individually, including
+across multiple statements. Resuming replays that transaction and suppresses rows
+already processed by each subscriber, without skipping its remaining rows.
+Bootstrap boundaries instead represent a position after all rows at that cursor.
+The token's `transaction_start_position` and `row_offset` fields are internal,
+not source configuration options.
 
-Resuming a row checkpoint replays the containing transaction from its native
-file cursor, even when a GTID is present, and suppresses only rows already
-processed by each subscriber. Existing bootstrap and completed-transaction tokens
-omit both row fields and represent a position after all rows at that cursor.
-Incomplete or invalid row tokens fail explicitly instead of falling back to the
-commit end. These are internal opaque position fields, not source configuration.
+**Partial-row resume requires the same binlog history**, even with GTID enabled.
+The source logs a warning when a partial token includes a GTID and uses the
+transaction's file position: requesting its already-executed GTID would skip the
+remaining rows. Partial checkpoints are not portable across primary failover or
+binlog renaming. Those changes, or changing the source table/key configuration,
+require a fresh bootstrap/checkpoint. GTID-based whole-transaction start positions
+remain supported; they do not make partial-row checkpoints failover-safe.
 
-Resume assumes the same binlog history and source table/key configuration.
-Changing those requires a fresh bootstrap/checkpoint. Rows lost with an older
-source are not reconstructed automatically, and older source binaries cannot
-safely resume the new partial-row tokens.
+Incomplete, invalid, or oversized tokens fail explicitly. Encoded tokens must be
+smaller than 64 KiB; binlog filenames are limited to 255 bytes and GTID sets to
+60 KiB. Detailed decode errors are logged rather than returned to subscribers.
+Malformed transaction boundaries fail replication with bounded reconnect attempts
+and an Error status, rather than silently discarding rows or skipping ahead.
+
+Rolled-back transactional rows are not written to MySQL's row-format binlog.
+Nontransactional changes (such as MyISAM writes) cannot be rolled back and are
+still delivered if MySQL logs them in a transaction ending with `ROLLBACK`.
+
+Rows lost with an older source are not reconstructed automatically, and older
+source binaries cannot safely resume the new partial-row tokens.
 
 ## Testing
 

@@ -712,6 +712,13 @@ use drasi_reaction_application::subscription::SubscriptionOptions;
 /// Helper to start a MySQL container with replication and GTID enabled.
 #[allow(clippy::unwrap_used)]
 async fn setup_mysql_container() -> (testcontainers::ContainerAsync<Mysql>, u16) {
+    setup_mysql_container_with_gtid(true).await
+}
+
+#[allow(clippy::unwrap_used)]
+async fn setup_mysql_container_with_gtid(
+    gtid_enabled: bool,
+) -> (testcontainers::ContainerAsync<Mysql>, u16) {
     let mysql_image = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_USER", "test")
@@ -724,8 +731,16 @@ async fn setup_mysql_container() -> (testcontainers::ContainerAsync<Mysql>, u16)
             "--binlog-row-image=FULL",
             "--binlog-row-metadata=FULL",
             "--server-id=1",
-            "--gtid-mode=ON",
-            "--enforce-gtid-consistency=ON",
+            if gtid_enabled {
+                "--gtid-mode=ON"
+            } else {
+                "--gtid-mode=OFF"
+            },
+            if gtid_enabled {
+                "--enforce-gtid-consistency=ON"
+            } else {
+                "--enforce-gtid-consistency=OFF"
+            },
         ]);
 
     let container = mysql_image.start().await.unwrap();
@@ -1420,6 +1435,12 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
         assert_eq!(bootstrap_result.event_count, 0);
         assert!(bootstrap_result.source_position.is_some());
 
+        conn.query_drop("START TRANSACTION").await.unwrap();
+        conn.query_drop("INSERT INTO items (id, name, value) VALUES (99, 'rolled-back', 99)")
+            .await
+            .unwrap();
+        conn.query_drop("ROLLBACK").await.unwrap();
+
         conn.query_drop(
             "INSERT INTO items (id, name, value) VALUES \
              (1, 'one', 10), (2, 'two', 20), (3, 'three', 30), (4, 'four', 40)",
@@ -1552,4 +1573,128 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
     })
     .await
     .expect("MySQL bulk transaction/replay test timed out");
+}
+
+#[tokio::test]
+#[ignore = "requires an owned MySQL testcontainer"]
+async fn test_mysql_rollback_preserves_only_nontransactional_rows_and_partial_resume() {
+    timeout(Duration::from_secs(120), async {
+        let (_container, port) = setup_mysql_container_with_gtid(false).await;
+        prepare_mysql_database(port).await;
+        let mut admin = Conn::new(
+            mysql_async::OptsBuilder::default()
+                .ip_or_hostname("127.0.0.1")
+                .tcp_port(port)
+                .user(Some("root"))
+                .pass(Some("root"))
+                .db_name(Some("test")),
+        )
+        .await
+        .unwrap();
+        admin
+            .query_drop("ALTER TABLE items ENGINE=MyISAM")
+            .await
+            .unwrap();
+        admin
+            .query_drop("CREATE TABLE transactional_items (id INT PRIMARY KEY) ENGINE=InnoDB")
+            .await
+            .unwrap();
+        let status: mysql_async::Row = admin
+            .query_first("SHOW MASTER STATUS")
+            .await
+            .unwrap()
+            .unwrap();
+        let source = MySqlReplicationSource::builder("mysql-bulk")
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_ssl_mode(SslMode::Disabled)
+            .with_tables(vec!["items".to_string(), "transactional_items".to_string()])
+            .with_start_position(StartPosition::FromPosition {
+                file: status.get(0).unwrap(),
+                position: status.get(1).unwrap(),
+            })
+            .build()
+            .unwrap();
+        let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
+        source
+            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+                "mysql-rollback-test",
+                "mysql-bulk",
+                None,
+                updates,
+                None,
+            ))
+            .await;
+        let settings = |position, sequence| {
+            let mut settings = row_resume_settings(position, sequence);
+            settings.enable_bootstrap = false;
+            settings.nodes.insert("transactional_items".to_string());
+            settings
+        };
+        source.start().await.unwrap();
+        let mut subscription = source.subscribe(settings(None, None)).await.unwrap();
+        let mut conn = test_conn(port).await;
+        conn.query_drop("START TRANSACTION").await.unwrap();
+        conn.query_drop("INSERT INTO transactional_items VALUES (99)")
+            .await
+            .unwrap();
+        conn.query_drop(
+            "INSERT INTO items (id, name, value) VALUES (1, 'one', 10), (2, 'two', 20)",
+        )
+        .await
+        .unwrap();
+        conn.query_drop("ROLLBACK").await.unwrap();
+        assert_eq!(
+            conn.query_first::<u64, _>("SELECT COUNT(*) FROM transactional_items")
+                .await
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            conn.query_first::<u64, _>("SELECT COUNT(*) FROM items")
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        let events = receive_native_changes(&mut subscription, 2).await;
+        assert_eq!(native_changed_ids(&events), vec![1, 2]);
+        for (offset, event) in events.iter().enumerate() {
+            let token: serde_json::Value =
+                serde_json::from_slice(event.source_position.as_ref().unwrap()).unwrap();
+            assert_eq!(token["row_offset"], offset as u64);
+            assert!(token["gtid_set"].is_null());
+        }
+        assert!(
+            timeout(Duration::from_millis(100), subscription.receiver.recv())
+                .await
+                .is_err()
+        );
+
+        source.stop().await.unwrap();
+        source.start().await.unwrap();
+        subscription = source
+            .subscribe(settings(
+                events[0].source_position.clone(),
+                Some(events[0].sequence),
+            ))
+            .await
+            .unwrap();
+        let remaining = receive_native_changes(&mut subscription, 1).await;
+        assert_eq!(native_changed_ids(&remaining), vec![2]);
+        assert_eq!(remaining[0].source_position, events[1].source_position);
+        assert!(remaining[0].sequence > events[0].sequence);
+        assert!(
+            timeout(Duration::from_millis(100), subscription.receiver.recv())
+                .await
+                .is_err()
+        );
+        source.stop().await.unwrap();
+        conn.disconnect().await.unwrap();
+        admin.disconnect().await.unwrap();
+    })
+    .await
+    .expect("MySQL rollback/replay test timed out");
 }

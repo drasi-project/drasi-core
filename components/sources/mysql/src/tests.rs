@@ -115,7 +115,39 @@ mod tests {
         let error = result
             .err()
             .expect("incomplete row cursors must not fall back");
-        assert!(format!("{error:#}").contains("Incomplete MySQL row position"));
+        assert_eq!(
+            format!("{error:#}"),
+            "Invalid MySQL resume position for subscriber 'query' on source 'mysql-invalid-resume'"
+        );
+        assert!(source.subscriber_resume_positions.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_rejects_oversized_position_before_storing_it() {
+        let source = MySqlSourceBuilder::new("mysql-large-resume")
+            .with_database("test")
+            .with_user("test")
+            .build()
+            .unwrap();
+        let result = source
+            .subscribe(drasi_lib::config::SourceSubscriptionSettings {
+                source_id: source.id().to_string(),
+                query_id: "query".to_string(),
+                enable_bootstrap: false,
+                nodes: Default::default(),
+                relations: Default::default(),
+                resume_from: Some(bytes::Bytes::from(vec![b' '; 64 * 1024])),
+                resume_sequence: None,
+                request_position_handle: false,
+            })
+            .await;
+        assert_eq!(
+            result
+                .err()
+                .expect("oversized position must fail")
+                .to_string(),
+            "Invalid MySQL resume position for subscriber 'query' on source 'mysql-large-resume'"
+        );
         assert!(source.subscriber_resume_positions.read().await.is_empty());
     }
 
@@ -197,8 +229,8 @@ mod tests {
             assert!(json.get("row_offset").is_none());
             assert!(json.get("transaction_start_position").is_none());
             let state = crate::types::decode_position(&bytes).unwrap();
-            assert_eq!(state.row_offset, None);
-            assert_eq!(state.transaction_start_position, None);
+            assert_eq!(state.row_offset(), None);
+            assert_eq!(state.transaction_start_position(), None);
         }
 
         #[test]
