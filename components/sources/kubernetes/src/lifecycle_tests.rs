@@ -29,7 +29,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, Notify, Semaphore};
 
@@ -55,6 +55,14 @@ struct MockApi {
 
 impl MockApi {
     async fn new() -> Self {
+        // Workspace feature unification enables both Rustls providers. The test
+        // process must choose one before kube constructs even an HTTP client.
+        static CRYPTO_PROVIDER: Once = Once::new();
+        CRYPTO_PROVIDER.call_once(|| {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .expect("install test TLS provider before constructing clients");
+        });
         let state = Arc::new(MockApiState {
             list_status: AtomicU16::new(200),
             watch_status: AtomicU16::new(200),

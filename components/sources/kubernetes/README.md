@@ -87,3 +87,15 @@ make integration-test
 ```
 
 The integration test is ignored by default and requires Docker (k3s testcontainer).
+
+The local lifecycle test harness explicitly selects Rustls's `ring` provider.
+Workspace builds can enable both `ring` and `aws_lc_rs`; Rustls cannot select a
+default automatically in that case, even for the mock HTTP endpoint. Exercise
+that feature combination without building the entire workspace:
+
+```bash
+cargo test -p drasi-source-kubernetes --lib --features rustls/aws_lc_rs
+```
+
+This provider selection is test-only and does not change the host application's
+TLS provider configuration.
