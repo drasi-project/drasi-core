@@ -733,21 +733,26 @@ impl PostgresReplicationSource {
 
         *self.base.task_handle.write().await = Some(task);
 
-        match startup_rx.await {
-            Ok(Ok(())) => Ok(()),
+        let startup_error = match startup_rx.await {
+            Ok(Ok(())) => return Ok(()),
             Ok(Err(message)) => {
-                self.base.abort_and_join_task().await?;
-                Err(anyhow!(
-                    "Failed to establish PostgreSQL replication: {message}"
-                ))
+                anyhow!("Failed to establish PostgreSQL replication: {message}")
             }
-            Err(_) => {
-                self.base.abort_and_join_task().await?;
-                Err(anyhow!(
-                    "PostgreSQL replication task exited before confirming startup"
-                ))
-            }
-        }
+            Err(_) => anyhow!("PostgreSQL replication task exited before confirming startup"),
+        };
+        let error = match self.base.abort_and_join_task().await {
+            Ok(()) => startup_error,
+            Err(error) => error.context("PostgreSQL replication task failed during startup"),
+        };
+        error!("Replication startup failed for {}: {error:#}", self.base.id);
+        // Joining can cancel the task before it reports its own failure.
+        self.base
+            .set_status(
+                ComponentStatus::Error,
+                Some("PostgreSQL replication failed during startup; see logs for details".into()),
+            )
+            .await;
+        Err(error)
     }
 
     async fn pause_replication_for_restart(&self, start_lsn: u64) -> Result<()> {
@@ -1402,6 +1407,82 @@ mod tests {
                 );
                 source.stop().await.unwrap();
             }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn direct_start_failure_reports_error_and_can_stop() {
+            let (port, server) = rejecting_server().await;
+            let source = PostgresSourceBuilder::new("failed-start")
+                .with_host("127.0.0.1")
+                .with_port(port)
+                .with_ssl_mode(SslMode::Disable)
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+
+            for _ in 0..2 {
+                let error = tokio::time::timeout(Duration::from_secs(3), source.start())
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error
+                    .to_string()
+                    .contains("Failed to establish PostgreSQL replication"));
+                assert_eq!(source.status().await, ComponentStatus::Error);
+                assert!(source.base.task_handle.read().await.is_none());
+                source.stop().await.unwrap();
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+            }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn direct_start_reports_error_if_task_exits_before_confirmation() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (connected_tx, connected_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (_replication, _) = listener.accept().await.unwrap();
+                connected_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            let source = PostgresSourceBuilder::new("cancelled-start")
+                .with_host("127.0.0.1")
+                .with_port(port)
+                .with_ssl_mode(SslMode::Disable)
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(source.start(), async {
+                    connected_rx.await.unwrap();
+                    assert_eq!(source.status().await, ComponentStatus::Starting);
+                    source
+                        .base
+                        .task_handle
+                        .read()
+                        .await
+                        .as_ref()
+                        .unwrap()
+                        .abort();
+                })
+            })
+            .await
+            .unwrap();
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("exited before confirming startup"));
+            assert_eq!(source.status().await, ComponentStatus::Error);
+            assert!(source.base.task_handle.read().await.is_none());
+            source.stop().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
             server.abort();
             assert!(server.await.unwrap_err().is_cancelled());
         }
