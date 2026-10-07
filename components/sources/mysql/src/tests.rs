@@ -3,7 +3,7 @@ mod tests {
     use super::super::*;
 
     #[tokio::test]
-    async fn test_descriptor_preserves_auto_start() {
+    async fn test_descriptor_preserves_auto_start_without_starting() {
         use crate::descriptor::MySqlSourceDescriptor;
         use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 
@@ -20,6 +20,17 @@ mod tests {
             assert_eq!(source.auto_start(), auto_start);
             assert_eq!(source.status().await, ComponentStatus::Stopped);
         }
+    }
+
+    #[test]
+    fn test_builder_defaults_to_auto_start() {
+        let source = MySqlSourceBuilder::new("test-source")
+            .with_database("testdb")
+            .with_user("testuser")
+            .build()
+            .unwrap();
+
+        assert!(source.auto_start());
     }
 
     #[test]
