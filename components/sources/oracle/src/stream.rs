@@ -582,13 +582,14 @@ fn get_min_available_scn(conn: &Connection) -> Result<Scn> {
         &[],
     )?;
     let scn: i64 = row.get(0)?;
-    if scn <= 0 {
-        return Err(OracleError::RecoverableScn(
-            "Unable to determine the earliest available Oracle archived log SCN".to_string(),
-        )
-        .into());
+    if scn > 0 {
+        return Ok(Scn(scn as u64));
     }
-    Ok(Scn(scn as u64))
+
+    // A freshly enabled ARCHIVELOG database can have no archived logs yet.
+    // The earliest SCN we can actually mine is CURRENT_SCN.
+    log::warn!("V$ARCHIVED_LOG is empty; start_position=beginning falling back to CURRENT_SCN");
+    get_current_scn(conn)
 }
 
 fn check_archivelog_mode(conn: &Connection) -> Result<()> {
