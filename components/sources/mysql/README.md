@@ -26,6 +26,12 @@ let source = MySqlReplicationSource::builder("mysql-source")
     .build()?;
 ```
 
+The builder defaults to auto-start enabled. Use `.with_auto_start(false)` to
+require an explicit start through the runtime. When constructing a source through
+`MySqlSourceDescriptor`, the descriptor preserves its `auto_start` argument.
+Construction itself never starts replication: the source remains `Stopped` for
+either value until it is started.
+
 ## Configuration Options
 
 | Property | Type | Default | Description |
