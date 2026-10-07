@@ -247,6 +247,8 @@ pub static DRASI_RUSTLS_CRYPTO_PROVIDER: [u8; 27] = *b"drasi-rustls-provider=rin
 /// Installs the Rustls provider required by dynamically loaded plugins.
 #[doc(hidden)]
 pub fn install_default_rustls_crypto_provider() {
+    // Keep the provider marker in each cdylib for xtask's artifact check.
+    std::hint::black_box(&DRASI_RUSTLS_CRYPTO_PROVIDER);
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
