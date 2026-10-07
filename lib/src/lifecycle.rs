@@ -146,7 +146,7 @@ impl LifecycleManager {
         Ok(())
     }
 
-    /// Stop all running components
+    /// Stop all active components and clean up failed queries.
     ///
     /// Components are stopped in reverse dependency order using the graph's
     /// topological ordering: Reactions → Queries → Sources.
@@ -197,9 +197,10 @@ impl LifecycleManager {
                 Some(s) => s,
                 None => continue, // component removed concurrently
             };
-            if !matches!(
-                live_status,
-                ComponentStatus::Running | ComponentStatus::Starting
+            if !crate::component_graph::is_valid_transition(
+                &kind,
+                &live_status,
+                &ComponentStatus::Stopping,
             ) {
                 continue;
             }

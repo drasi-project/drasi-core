@@ -518,7 +518,7 @@ impl ComponentGraph {
             return Ok(None);
         }
 
-        if !is_valid_transition(&node.status, &status) {
+        if !is_valid_transition(&node.kind, &node.status, &status) {
             tracing::warn!(
                 "Invalid state transition for component '{}': {:?} → {:?}, ignoring update",
                 id,
@@ -766,7 +766,7 @@ impl ComponentGraph {
         }
 
         // Produce a descriptive error message for invalid transitions
-        if !is_valid_transition(&current, &target_status) {
+        if !is_valid_transition(&node.kind, &current, &target_status) {
             let reason = describe_invalid_transition(id, &current, &target_status);
             return Err(anyhow::anyhow!(reason));
         }
@@ -1224,13 +1224,21 @@ pub(super) fn is_valid_relationship(
 ///   ↓
 /// Reconfiguring ──→ Stopped | Starting | Error
 ///
-/// Error ──→ Starting (retry) | Stopping (cleanup) | Stopped (reset)
+/// Error ──→ Starting (retry) | Stopping (query cleanup only) | Stopped (reset)
 ///
 /// Note: Added and Removed are set by the graph on add/remove_component()
 /// and are NOT valid targets for validate_and_transition().
 /// ```
-pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) -> bool {
+pub(crate) fn is_valid_transition(
+    kind: &ComponentKind,
+    from: &ComponentStatus,
+    to: &ComponentStatus,
+) -> bool {
     use ComponentStatus::*;
+    // Other runtimes may still treat stop in Error as a no-op without cleanup.
+    if matches!((from, to), (Error, Stopping)) {
+        return *kind == ComponentKind::Query;
+    }
     matches!(
         (from, to),
         // Normal lifecycle
@@ -1248,7 +1256,6 @@ pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) 
             | (Stopping, Error)
             // Error recovery
             | (Error, Starting) // retry
-            | (Error, Stopping) // release resources retained after a failure
             | (Error, Stopped) // reset
             // Reconfiguration (from any stable state)
             | (Added, Reconfiguring)
@@ -1284,6 +1291,9 @@ fn describe_invalid_transition(id: &str, from: &ComponentStatus, to: &ComponentS
             format!("Cannot stop component '{id}': it is already stopped")
         }
         (Stopping, Stopping) => format!("Component '{id}' is already stopping"),
+        (Error, Stopping) => {
+            format!("Cannot stop component '{id}': it is in error state")
+        }
         // Trying to reconfigure during a transition
         (Starting, Reconfiguring) => {
             format!("Cannot reconfigure component '{id}' while it is starting")

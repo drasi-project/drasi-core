@@ -26,7 +26,7 @@ use std::future::Future;
 use tokio::sync::RwLock;
 
 use crate::channels::ComponentStatus;
-use crate::component_graph::{ComponentGraph, ComponentKind};
+use crate::component_graph::{is_valid_transition, ComponentGraph, ComponentKind};
 
 /// Trait for component runtime instances that can be started and stopped.
 ///
@@ -202,7 +202,7 @@ pub async fn stop_component<R: ComponentRuntime>(
     Ok(())
 }
 
-/// Teardown a component: claim teardown intent → stop if running → wait →
+/// Teardown a component: claim teardown intent → stop if active or failed query → wait →
 /// optionally deprovision → remove runtime → clean up logs.
 ///
 /// This is the shared pattern used by all three managers. The caller may
@@ -259,7 +259,7 @@ where
             ));
         }
 
-        if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
+        if is_valid_transition(&node.kind, &status, &ComponentStatus::Stopping) {
             g.validate_and_transition(
                 id,
                 ComponentStatus::Stopping,
@@ -313,7 +313,7 @@ where
     Ok(())
 }
 
-/// Reconfigure a component: transition to Reconfiguring → stop if running →
+/// Reconfigure a component: transition to Reconfiguring → stop if active or failed query →
 /// init/replace → restart or transition to Stopped.
 ///
 /// This is the shared reconfiguration state machine used by all three managers.
@@ -343,34 +343,31 @@ where
     Fut2: Future<Output = Result<()>>,
     Fut3: Future<Output = Result<()>>,
 {
-    // Read status from the graph (source of truth) and determine if running
-    let was_running = {
-        let g = graph.read().await;
+    // Capture cleanup/restart intent and claim reconfiguration under one lock.
+    let (was_running, needs_stop) = {
+        let mut g = graph.write().await;
         let node = g.get_component(id).ok_or_else(|| {
             anyhow::Error::new(crate::managers::ComponentNotFoundError::new(
                 component_type,
                 id,
             ))
         })?;
-        matches!(
+        let was_running = matches!(
             node.status,
             ComponentStatus::Running | ComponentStatus::Starting
-        )
-    };
-
-    // Validate and set Reconfiguring atomically through the graph
-    {
-        let mut g = graph.write().await;
+        );
+        let needs_stop = is_valid_transition(&node.kind, &node.status, &ComponentStatus::Stopping);
         g.validate_and_transition(
             id,
             ComponentStatus::Reconfiguring,
             Some(format!("Reconfiguring {component_type}")),
         )?;
-    }
+        (was_running, needs_stop)
+    };
 
-    // If running or starting, stop first.
+    // Failed queries also retain resources, but must not be automatically restarted.
     // Revert to Error on failure to prevent stuck Reconfiguring state.
-    if was_running {
+    if needs_stop {
         log::info!("Stopping {component_type} '{id}' for reconfiguration");
         pre_stop().await;
 
@@ -484,7 +481,7 @@ where
 
 /// Stop all active components of a given kind (best-effort).
 ///
-/// Components in Running or Starting state are stopped via the provided `stop_fn`.
+/// Components in Running or Starting state, and failed queries, are stopped via `stop_fn`.
 /// Errors are logged but do not prevent stopping other components.
 pub async fn stop_all_components<F, Fut>(
     graph: &Arc<RwLock<ComponentGraph>>,
@@ -508,12 +505,7 @@ where
         let is_active = {
             let g = graph.read().await;
             g.get_component(&id)
-                .map(|n| {
-                    matches!(
-                        n.status,
-                        ComponentStatus::Running | ComponentStatus::Starting
-                    )
-                })
+                .map(|n| is_valid_transition(&n.kind, &n.status, &ComponentStatus::Stopping))
                 .unwrap_or(false)
         };
 
@@ -661,6 +653,51 @@ mod tests {
         let g = graph.read().await;
         assert_eq!(
             g.get_component("s1").unwrap().status,
+            ComponentStatus::Error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconfigure_failed_query_does_not_replace_runtime_when_stop_fails() {
+        let (mut graph, _rx) = ComponentGraph::new("test");
+        graph
+            .register_query("q1", std::collections::HashMap::new(), &[])
+            .unwrap();
+        graph
+            .validate_and_transition("q1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("q1", ComponentStatus::Error, None)
+            .unwrap();
+        let graph = Arc::new(RwLock::new(graph));
+        let runtime = MockRuntime::new();
+        runtime.set_should_fail(true);
+        let replaced = AtomicBool::new(false);
+        let restarted = AtomicBool::new(false);
+
+        let error = reconfigure_component(
+            &graph,
+            "q1",
+            "query",
+            &runtime,
+            || async {},
+            || async {
+                replaced.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            || async {
+                restarted.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("stop failed"));
+        assert!(!replaced.load(Ordering::SeqCst));
+        assert!(!restarted.load(Ordering::SeqCst));
+        assert_eq!(
+            graph.read().await.get_component("q1").unwrap().status,
             ComponentStatus::Error
         );
     }

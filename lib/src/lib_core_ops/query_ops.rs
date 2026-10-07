@@ -156,7 +156,9 @@ impl DrasiLib {
     /// Queries in `Error` may still own subscriptions and processing tasks. This
     /// performs their normal cleanup before reporting `Stopped`; it does not
     /// remove the query or discard its persisted state. Stopping an already
-    /// stopped query returns an error.
+    /// stopped query returns an error through the component graph's command
+    /// validation, unlike calling the underlying query runtime's `stop()` directly,
+    /// which is idempotent.
     ///
     /// # Example
     /// ```no_run
@@ -184,7 +186,8 @@ impl DrasiLib {
     ///
     /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
     /// and event history. The old query is stopped, the runtime is swapped, and the
-    /// query is restarted if it was running.
+    /// query is restarted if it was running. Failed queries are also stopped to
+    /// release retained resources, but their replacement is not automatically started.
     ///
     /// # Errors
     ///

@@ -40,7 +40,9 @@ use drasi_query_cypher::CypherParser;
 use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
-use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
+use crate::component_graph::{
+    is_valid_transition, ComponentGraph, ComponentKind, ComponentUpdateSender,
+};
 use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
@@ -437,6 +439,36 @@ mod tests {
     fn single_source_is_rank_zero() {
         assert_eq!(compute_source_ranks(1), vec![0]);
     }
+
+    #[rstest::rstest]
+    #[case::added(ComponentStatus::Added)]
+    #[case::reconfiguring(ComponentStatus::Reconfiguring)]
+    #[tokio::test]
+    async fn stop_rejects_invalid_local_status(#[case] status: ComponentStatus) -> Result<()> {
+        let core = crate::DrasiLib::builder()
+            .with_query(
+                crate::Query::cypher("invalid-stop")
+                    .query("MATCH (n) RETURN n")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await?;
+        let query = core
+            .query_manager()
+            .get_query_instance("invalid-stop")
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let query = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        query.base.set_status(status, None).await;
+
+        let error = query.stop().await.unwrap_err();
+        assert!(error.to_string().contains("Cannot stop query"));
+        assert!(error.to_string().contains(&format!("{status:?}")));
+        assert_eq!(query.status().await, status);
+        assert_eq!(query.subscription_count().await, 0);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -446,7 +478,10 @@ pub trait Query: Send + Sync {
     /// Stop the query and release its active subscriptions and processing tasks.
     ///
     /// Failed starts and processing errors can leave resources behind, so this
-    /// must also clean up queries in `Error`. An already stopped query is a no-op.
+    /// must also clean up queries in `Error`. Calling this directly on an already
+    /// stopped query is a no-op. In contrast, [`QueryManager::stop_query`] and
+    /// [`crate::DrasiLib::stop_query`] reject an already stopped query through the
+    /// component graph's command validation.
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
@@ -3424,14 +3459,10 @@ impl Query for DrasiQuery {
         if status == ComponentStatus::Stopped {
             return Ok(());
         }
+        // Like the graph, allow same-state updates; otherwise use its transition rules.
         anyhow::ensure!(
-            matches!(
-                status,
-                ComponentStatus::Running
-                    | ComponentStatus::Starting
-                    | ComponentStatus::Stopping
-                    | ComponentStatus::Error
-            ),
+            status == ComponentStatus::Stopping
+                || is_valid_transition(&ComponentKind::Query, &status, &ComponentStatus::Stopping),
             "Cannot stop query '{}' while it is {status:?}",
             self.base.config.id
         );
@@ -3779,6 +3810,9 @@ impl QueryManager {
     /// Stop a running, starting, or failed query by ID, releasing its active
     /// subscriptions and processing tasks.
     ///
+    /// Unlike a direct [`Query::stop`] call, this managed command rejects an
+    /// already stopped query through the component graph's transition validation.
+    ///
     /// # Errors
     /// Returns an error if the query is not found or the stop transition fails.
     pub async fn stop_query(&self, id: String) -> Result<()> {
@@ -3849,7 +3883,7 @@ impl QueryManager {
     /// Update a query by replacing it with a new configuration.
     ///
     /// Flow: validate exists → validate status → set Reconfiguring via graph →
-    /// stop if running/starting → wait for stopped → provision new →
+    /// stop if running/starting/failed → wait for stopped → provision new →
     /// replace runtime (if still exists) → restart if was running.
     /// Graph node, edges, and event history are preserved.
     pub async fn update_query(&self, id: String, new_config: QueryConfig) -> Result<()> {
@@ -4144,7 +4178,7 @@ impl QueryManager {
         .await
     }
 
-    /// Stop all currently running or starting queries.
+    /// Stop all running, starting, or failed queries.
     ///
     /// # Errors
     /// Returns an error listing any queries that failed to stop.
@@ -4165,12 +4199,7 @@ impl QueryManager {
                 let graph = self.graph.read().await;
                 graph
                     .get_component(&id)
-                    .map(|n| {
-                        matches!(
-                            n.status,
-                            ComponentStatus::Running | ComponentStatus::Starting
-                        )
-                    })
+                    .map(|n| is_valid_transition(&n.kind, &n.status, &ComponentStatus::Stopping))
                     .unwrap_or(false)
             };
 

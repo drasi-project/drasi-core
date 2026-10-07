@@ -47,6 +47,7 @@ impl BootstrapProvider for FailingBootstrapProvider {
     }
 }
 
+/// Poll until the query reaches `expected` or a five-second deadline elapses.
 async fn wait_for_query_status(
     core: &DrasiLib,
     query_id: &str,
@@ -64,9 +65,7 @@ async fn wait_for_query_status(
     Ok(status)
 }
 
-/// When the bootstrap provider fails, the query should end up in the Error state.
-#[tokio::test]
-async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
+async fn core_with_failed_bootstrap_query() -> Result<DrasiLib> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
     mock_source
         .set_bootstrap_provider(Box::new(FailingBootstrapProvider))
@@ -78,14 +77,12 @@ async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
         .auto_start(true)
         .build();
 
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("bootstrap-failure-test")
-            .with_source(mock_source)
-            .with_query(query)
-            .build()
-            .await?,
-    );
+    let core = DrasiLib::builder()
+        .with_id("bootstrap-failure-test")
+        .with_source(mock_source)
+        .with_query(query)
+        .build()
+        .await?;
 
     core.start().await?;
 
@@ -98,7 +95,13 @@ async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
         ComponentStatus::Error,
         "Query should transition to Error state when bootstrap fails, got {status:?}"
     );
+    Ok(core)
+}
 
+/// When the bootstrap provider fails, the query should end up in the Error state.
+#[tokio::test]
+async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
+    let core = core_with_failed_bootstrap_query().await?;
     let query = core
         .query_manager()
         .get_query_instance("q1")
@@ -117,8 +120,96 @@ async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
         wait_for_query_status(&core, "q1", ComponentStatus::Stopped).await?,
         ComponentStatus::Stopped
     );
+    let repeated_stop = core.stop_query("q1").await.unwrap_err();
+    assert!(repeated_stop.to_string().contains("already stopped"));
     core.stop().await?;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn updating_failed_query_releases_old_subscriptions_without_restarting() -> Result<()> {
+    let core = core_with_failed_bootstrap_query().await?;
+    let old_query = core
+        .query_manager()
+        .get_query_instance("q1")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(old_query.subscription_count().await > 0);
+    let mut config = old_query.get_config().clone();
+    config.query = "MATCH (p:Person) RETURN p".to_string();
+    config.enable_bootstrap = false;
+
+    core.update_query("q1", config.clone()).await?;
+    assert_eq!(old_query.subscription_count().await, 0);
+    assert_eq!(old_query.status().await, ComponentStatus::Stopped);
+    let new_query = core
+        .query_manager()
+        .get_query_instance("q1")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(!Arc::ptr_eq(&old_query, &new_query));
+    assert_eq!(new_query.get_config().query, config.query);
+    assert_eq!(new_query.status().await, ComponentStatus::Stopped);
+    assert_eq!(new_query.subscription_count().await, 0);
+    assert_eq!(core.get_query_status("q1").await?, ComponentStatus::Stopped);
+
+    core.start_query("q1").await?;
+    assert_eq!(
+        wait_for_query_status(&core, "q1", ComponentStatus::Running).await?,
+        ComponentStatus::Running
+    );
+    assert!(new_query.subscription_count().await > 0);
+    assert_eq!(old_query.subscription_count().await, 0);
+    core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn removing_failed_query_releases_subscriptions() -> Result<()> {
+    let core = core_with_failed_bootstrap_query().await?;
+    let query = core
+        .query_manager()
+        .get_query_instance("q1")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(query.subscription_count().await > 0);
+
+    core.remove_query("q1").await?;
+    assert_eq!(query.subscription_count().await, 0);
+    assert_eq!(query.status().await, ComponentStatus::Stopped);
+    assert!(core.query_manager().get_query_instance("q1").await.is_err());
+    core.stop().await?;
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::instance(false)]
+#[case::query_manager(true)]
+#[tokio::test]
+async fn stop_all_releases_failed_query_subscriptions(#[case] manager_only: bool) -> Result<()> {
+    let core = core_with_failed_bootstrap_query().await?;
+    let query = core
+        .query_manager()
+        .get_query_instance("q1")
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert!(query.subscription_count().await > 0);
+
+    if manager_only {
+        core.query_manager().stop_all().await?;
+    } else {
+        core.stop().await?;
+    }
+    assert_eq!(query.subscription_count().await, 0);
+    assert_eq!(query.status().await, ComponentStatus::Stopped);
+    assert_eq!(
+        wait_for_query_status(&core, "q1", ComponentStatus::Stopped).await?,
+        ComponentStatus::Stopped
+    );
+    if manager_only {
+        core.stop().await?;
+    }
     Ok(())
 }
 
