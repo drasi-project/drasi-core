@@ -157,7 +157,7 @@ pub fn decode_position(bytes: &[u8]) -> Result<ReplicationState> {
 ///
 /// Orders positions by binlog file, commit position, and transaction row ordinal.
 /// A token without row fields marks a completed cursor, after every row at that
-/// position. Timestamps and GTIDs are metadata, not per-row ordering keys.
+/// position. Timestamps and GTID values are metadata, not per-row ordering keys.
 /// This PositionComparator implementation uses strict ordering (equal tokens
 /// are suppressed) and assumes one binlog lineage with consistently padded
 /// numeric filename suffixes; it cannot compare positions across failover.
