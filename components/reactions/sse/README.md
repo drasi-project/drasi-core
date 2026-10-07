@@ -28,9 +28,11 @@ The SSE Reaction component exposes Drasi continuous query results to web clients
 
 ## Lifecycle
 
-`start()` binds the configured host and port before reporting `Running` or returning success. If binding fails, it returns an error and reports `Error` without starting background tasks. Calling `start()` on an already-started reaction returns an error without replacing the running server; call `stop()` before starting it again.
+`start()` binds the configured host and port before reporting `Running` or returning success. Binding, including hostname resolution, has a five-second timeout. If binding fails or times out, it returns an error and reports `Error` without starting background tasks. Calling `start()` on an already-started reaction returns an error without replacing the running server; call `stop()` before starting it again. Lifecycle transitions are serialized, so a concurrent `stop()` waits for an in-flight `start()`.
 
-`stop()` waits for the heartbeat and HTTP server tasks to terminate and releases the listening socket before returning, so the configured port can be reused immediately. It is safe to call before startup or repeatedly. Unexpected background-task failures are reported as shutdown errors after the remaining tasks have been cleaned up.
+`stop()` signals the heartbeat and HTTP server tasks to shut down, ends active SSE streams, and waits for those tasks to terminate. It also delegates result-processing shutdown and queue cleanup to `ReactionBase::stop_common()`. After a successful stop, the configured port can be reused immediately. It is safe to call before `start()` or repeatedly. Heartbeat panics and HTTP server errors are preserved and reported as shutdown errors after cleanup.
+
+Auxiliary tasks have five seconds to shut down gracefully, followed by up to five seconds to join after cancellation. A timeout reports `Error`, not success. Any tasks still unfinished after cancellation remain tracked and prevent another `start()` until a subsequent `stop()` finishes cleaning them up. Result-processing shutdown retains `ReactionBase`'s existing two-second grace period and abort behavior.
 
 ## Configuration
 

@@ -424,7 +424,7 @@ fn test_recovery_trait_defaults() {
     );
 }
 
-async fn sse_reaction_with_reserved_port(id: &str) -> (SseReaction, TcpListener) {
+pub(crate) async fn sse_reaction_with_reserved_port(id: &str) -> (SseReaction, TcpListener) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let reaction = SseReaction::builder(id)
         .with_host("127.0.0.1")
@@ -515,7 +515,6 @@ async fn test_sse_lifecycle_stop_start_reuses_configured_port() {
 
     for _ in 0..3 {
         reaction.start().await.unwrap();
-        tokio::task::yield_now().await;
         let response = client
             .get(format!("http://{addr}/events"))
             .timeout(Duration::from_secs(5))
@@ -528,7 +527,18 @@ async fn test_sse_lifecycle_stop_start_reuses_configured_port() {
             "text/event-stream"
         );
 
-        reaction.stop().await.unwrap();
+        let mut stream = response.bytes_stream();
+        tokio::time::timeout(Duration::from_secs(5), reaction.stop())
+            .await
+            .expect("stop must finish with an open SSE stream")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+                chunk.expect("the SSE stream must close cleanly");
+            }
+        })
+        .await
+        .expect("the old SSE stream must end, not survive a restart");
         let probe = TcpListener::bind(addr)
             .await
             .expect("stop must release the listener before returning");
@@ -537,6 +547,58 @@ async fn test_sse_lifecycle_stop_start_reuses_configured_port() {
     }
 
     reaction.stop().await.unwrap();
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_concurrent_starts_only_start_once() {
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("concurrent-starts").await;
+    drop(reserved_listener);
+    let startup_gate = reaction.base.shutdown_tx.write().await;
+    let first = reaction.start();
+    let second = reaction.start();
+    tokio::pin!(first, second);
+    assert!(futures::poll!(&mut first).is_pending());
+    assert_eq!(reaction.status().await, ComponentStatus::Starting);
+    assert!(futures::poll!(&mut second).is_pending());
+    drop(startup_gate);
+
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .unwrap();
+    first.unwrap();
+    assert!(second.unwrap_err().to_string().contains("already started"));
+    assert_eq!(reaction.status().await, ComponentStatus::Running);
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_stop_waits_for_in_flight_start() {
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("concurrent-stop").await;
+    let addr = reserved_listener.local_addr().unwrap();
+    drop(reserved_listener);
+    let startup_gate = reaction.base.shutdown_tx.write().await;
+    let start = reaction.start();
+    let stop = reaction.stop();
+    tokio::pin!(start, stop);
+    assert!(futures::poll!(&mut start).is_pending());
+    assert_eq!(reaction.status().await, ComponentStatus::Starting);
+    assert!(futures::poll!(&mut stop).is_pending());
+    drop(startup_gate);
+
+    let (start, stop) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(start, stop) })
+            .await
+            .unwrap();
+    start.unwrap();
+    stop.unwrap();
+    assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+    assert!(reaction.base.processing_task.read().await.is_none());
+    let probe = TcpListener::bind(addr).await.unwrap();
+    drop(probe);
+    reaction.start().await.unwrap();
     reaction.stop().await.unwrap();
 }
 
