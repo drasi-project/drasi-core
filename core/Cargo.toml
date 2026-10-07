@@ -1,6 +1,6 @@
 [package]
 name = "drasi-core"
-version = "0.5.9"
+version = "0.5.10"
 edition.workspace = true
 license.workspace = true
 description = "Drasi Core"
@@ -34,7 +34,6 @@ futures = "0.3.28"
 tokio-stream = "0.1.14"
 async-stream = "0.3.5"
 itoa = "1.0.1"
-caches = "0.2.4"
 log = "0.4.20"
 tracing = "0.1.37"
 opentelemetry = "0.20"
@@ -57,3 +56,4 @@ time-macros = { version = "0.2.6", features = ["serde"] }
 [dev-dependencies]
 mockall = "0.13.1"
 rmp-serde = "1"
+tokio = { version = "1.29.1", features = ["rt-multi-thread"] }

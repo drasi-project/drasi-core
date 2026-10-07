@@ -11,7 +11,7 @@ fail() {
 
 require_token() {
     if [[ -z "${GH_TOKEN:-}" ]]; then
-        fail "PACKAGES_ADMIN_TOKEN is not configured. Add a PAT classic with package administration access."
+        fail "PACKAGES_ADMIN_TOKEN is not configured. Add a PAT classic with read:packages and access to the organization's packages; authorize organization SSO if required."
     fi
 }
 
@@ -26,68 +26,50 @@ validate_package() {
 package_endpoint() {
     local package="$1"
 
-    validate_package "$package"
     package="${package//\//%2F}"
     printf '/orgs/%s/packages/container/%s\n' "$org" "$package"
 }
 
-check_access() {
+verify_public() {
     local package="$1"
     local endpoint
     local visibility
 
     endpoint="$(package_endpoint "$package")"
-    if ! visibility="$(gh api --method PATCH "$endpoint" -f visibility=public --jq .visibility)"; then
-        fail "PACKAGES_ADMIN_TOKEN cannot administer ${org}/${package}. Verify that it is an authorized PAT classic with package administration access."
+    if ! visibility="$(gh api --method GET "$endpoint" --jq .visibility)"; then
+        fail "Unable to read package ${org}/${package}. Verify that the package exists and PACKAGES_ADMIN_TOKEN is a PAT classic with read:packages and access to the organization's packages; authorize organization SSO if required."
     fi
-    if [[ "$visibility" != "public" ]]; then
-        fail "Package visibility preflight returned '$visibility' for ${org}/${package}, expected 'public'."
-    fi
-
-    echo "Package visibility access validated for ${org}/${package}."
+    case "$visibility" in
+        public)
+            echo "Verified ${org}/${package} is public (read-only check)."
+            ;;
+        private | internal)
+            fail "Package ${org}/${package} is '$visibility', expected 'public'. A package administrator must open the package's GitHub Package settings and use Change visibility to select Public, then rerun verification. This script does not change visibility."
+            ;;
+        *)
+            fail "Unexpected visibility response '$visibility' for ${org}/${package}, expected 'public'."
+            ;;
+    esac
 }
-
-set_public() {
-    local package="$1"
-    local endpoint
-    local visibility
-
-    endpoint="$(package_endpoint "$package")"
-    if ! visibility="$(gh api "$endpoint" --jq .visibility)"; then
-        fail "Unable to read package ${org}/${package}."
-    fi
-    if [[ "$visibility" == "public" ]]; then
-        echo "${org}/${package} is already public."
-        return
-    fi
-
-    echo "Setting ${org}/${package} to public..."
-    if ! visibility="$(gh api --method PATCH "$endpoint" -f visibility=public --jq .visibility)"; then
-        fail "Failed to set ${org}/${package} to public."
-    fi
-    if [[ "$visibility" != "public" ]]; then
-        fail "Package ${org}/${package} remained '$visibility' after the visibility update."
-    fi
-}
-
-require_token
 
 case "${1:-}" in
-    check)
-        [[ "$#" -eq 2 ]] || fail "Usage: $0 check <package>"
-        check_access "$2"
-        ;;
-    set-public)
-        [[ "$#" -ge 2 ]] || fail "Usage: $0 set-public <package>..."
-        shift
-        for package in "$@"; do
-            validate_package "$package"
-        done
-        for package in "$@"; do
-            set_public "$package"
-        done
+    verify-public)
+        [[ "$#" -ge 2 ]] || fail "Usage: $0 verify-public <package>..."
         ;;
     *)
-        fail "Usage: $0 {check <package>|set-public <package>...}"
+        fail "Usage: $0 verify-public <package>..."
         ;;
 esac
+shift
+
+if ! [[ "$org" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+    fail "Invalid organization name: $org"
+fi
+for package in "$@"; do
+    validate_package "$package"
+done
+
+require_token
+for package in "$@"; do
+    verify_public "$package"
+done

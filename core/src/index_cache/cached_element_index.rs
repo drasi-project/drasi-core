@@ -16,9 +16,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_stream::stream;
 use async_trait::async_trait;
-use caches::{lru::CacheError, Cache, DefaultHashBuilder, LRUCache};
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
+
+use super::lru::SafeLru;
 
 use crate::{
     interface::{ElementIndex, ElementStream, IndexError},
@@ -28,40 +29,23 @@ use crate::{
 
 pub struct CachedElementIndex {
     element_index: Arc<dyn ElementIndex>,
-    element_cache: Arc<RwLock<LRUCache<ElementReference, Arc<Element>, DefaultHashBuilder>>>,
-    slot_cache: Arc<RwLock<LRUCache<ElementReference, HashMap<usize, bool>, DefaultHashBuilder>>>,
-    inbound_cache:
-        Arc<RwLock<LRUCache<(ElementReference, usize), Vec<ElementReference>, DefaultHashBuilder>>>,
-    outbound_cache:
-        Arc<RwLock<LRUCache<(ElementReference, usize), Vec<ElementReference>, DefaultHashBuilder>>>,
+    element_cache: Arc<RwLock<SafeLru<ElementReference, Arc<Element>>>>,
+    slot_cache: Arc<RwLock<SafeLru<ElementReference, HashMap<usize, bool>>>>,
+    inbound_cache: Arc<RwLock<SafeLru<(ElementReference, usize), Vec<ElementReference>>>>,
+    outbound_cache: Arc<RwLock<SafeLru<(ElementReference, usize), Vec<ElementReference>>>>,
 }
 
 impl CachedElementIndex {
-    pub fn new(
-        element_index: Arc<dyn ElementIndex>,
-        cache_size: usize,
-    ) -> Result<Self, CacheError> {
+    pub fn new(element_index: Arc<dyn ElementIndex>, cache_size: usize) -> Self {
         log::info!("using cached element index with size {cache_size}");
 
-        let element_cache = LRUCache::new(cache_size)?;
-        let element_cache = Arc::new(RwLock::new(element_cache));
-
-        let slot_cache = LRUCache::new(cache_size)?;
-        let slot_cache = Arc::new(RwLock::new(slot_cache));
-
-        let inbound_cache = LRUCache::new(cache_size)?;
-        let inbound_cache = Arc::new(RwLock::new(inbound_cache));
-
-        let outbound_cache = LRUCache::new(cache_size)?;
-        let outbound_cache = Arc::new(RwLock::new(outbound_cache));
-
-        Ok(Self {
+        Self {
             element_index,
-            element_cache,
-            slot_cache,
-            inbound_cache,
-            outbound_cache,
-        })
+            element_cache: Arc::new(RwLock::new(SafeLru::new(cache_size))),
+            slot_cache: Arc::new(RwLock::new(SafeLru::new(cache_size))),
+            inbound_cache: Arc::new(RwLock::new(SafeLru::new(cache_size))),
+            outbound_cache: Arc::new(RwLock::new(SafeLru::new(cache_size))),
+        }
     }
 }
 
@@ -124,44 +108,36 @@ impl ElementIndex for CachedElementIndex {
         slot: usize,
         element_ref: &ElementReference,
     ) -> Result<Option<Arc<Element>>, IndexError> {
-        let mut slot_cache = self.slot_cache.write().await;
-        let slot_elements = slot_cache.get_mut(element_ref);
+        // `caches` LRU nodes are raw pointers. Never hold a reference into the
+        // cache (or its write lock) across an `.await` — eviction can free the
+        // node and SIGSEGV.
+        let cached = {
+            let mut slot_cache = self.slot_cache.write().await;
+            slot_cache
+                .get(element_ref)
+                .and_then(|slot_elements| slot_elements.get(&slot).copied())
+        };
 
-        match slot_elements {
-            Some(slot_elements) => {
-                let slot_element = slot_elements.get(&slot);
-                match slot_element {
-                    Some(slot_element) => {
-                        if *slot_element {
-                            self.get_element(element_ref).await
-                        } else {
-                            Ok(None)
-                        }
-                    }
-                    None => {
-                        let result = self
-                            .element_index
-                            .get_slot_element_by_ref(slot, element_ref)
-                            .await?;
-                        slot_elements.insert(slot, result.is_some());
-
-                        Ok(result)
-                    }
-                }
-            }
+        match cached {
+            Some(true) => self.get_element(element_ref).await,
+            Some(false) => Ok(None),
             None => {
-                drop(slot_cache);
                 let result = self
                     .element_index
                     .get_slot_element_by_ref(slot, element_ref)
                     .await?;
 
-                let mut slot_set = HashMap::new();
-                slot_set.insert(slot, result.is_some());
-
                 let mut slot_cache = self.slot_cache.write().await;
-                slot_cache.put(element_ref.clone(), slot_set);
-                drop(slot_cache);
+                match slot_cache.get_mut(element_ref) {
+                    Some(slot_elements) => {
+                        slot_elements.insert(slot, result.is_some());
+                    }
+                    None => {
+                        let mut slot_set = HashMap::new();
+                        slot_set.insert(slot, result.is_some());
+                        slot_cache.put(element_ref.clone(), slot_set);
+                    }
+                }
 
                 Ok(result)
             }
@@ -297,7 +273,7 @@ impl ElementIndex for CachedElementIndex {
 
 async fn get_element_internal(
     element_index: Arc<dyn ElementIndex>,
-    cache: Arc<RwLock<LRUCache<ElementReference, Arc<Element>, DefaultHashBuilder>>>,
+    cache: Arc<RwLock<SafeLru<ElementReference, Arc<Element>>>>,
     element_ref: &ElementReference,
 ) -> Result<Option<Arc<Element>>, IndexError> {
     let mut element_cache = cache.write().await;

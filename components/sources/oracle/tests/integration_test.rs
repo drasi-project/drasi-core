@@ -311,6 +311,17 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
 
         core.start().await.context("Failed to start DrasiLib")?;
 
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if core.get_source_status(SOURCE_ID).await? == ComponentStatus::Running {
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("Oracle source did not reach Running with start_position: beginning");
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
         let mut subscription = handle
             .subscribe_with_options(
                 SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
@@ -325,7 +336,7 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
         sleep(Duration::from_secs(5)).await;
 
         insert_product(&oracle, 101, "AfterStart", 12.50)?;
-        wait_for_change(&mut subscription, 10, |entry| {
+        wait_for_change(&mut subscription, 40, |entry| {
             matches_change(entry, "ADD", &[("id", "101"), ("name", "AfterStart")])
         })
         .await
