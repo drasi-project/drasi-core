@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "batches": {
+    "release-2026-09-25-darwin-arm64": {
+      "provenance": {
+        "repository": "drasi-project/drasi-core",
+        "source_commit": "22125bf1d66062533b832a166fe4a51079a23d6e",
+        "run_id": 36166389551,
+        "run_path": ".github/workflows/release-plz.yml",
+        "run_event": "workflow_dispatch",
+        "job_id": 108192160538,
+        "job_name": "Publish plugins / Build & Publish (darwin-arm64)",
+        "job_workflow_ref": "drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main",
+        "ffi_sdk_version": "0.14.0",
+        "ffi_source_sha256": "5a58bb191eed01ea896dd7a7b38f9ef53fd82b7b5edd717b05c54f59888d01f9",
+        "reviewed_at": "2026-09-26"
+      },
+      "artifacts": [
+        {
+          "repository": "drasi-project/reaction/sse",
+          "manifest_digest": "sha256:60c70c051c53c423caa9e60d55f09d01fbdea853ff202450412bdc06cf262ad5",
+          "platform": "darwin/arm64",
+          "release_tag": "0.3.8-darwin-arm64",
+          "published_at": "2026-09-25T18:37:41.2999990Z",
+          "binary": {
+            "digest": "sha256:75c6e1433afdc573b02091fd9b2c768fe0f1b227ec8221a9ab02ac612348b733",
+            "size": 4674160
+          },
+          "metadata": {
+            "digest": "sha256:5dde775562948f3c21267ec5e0b0228a36395ad9ec95ed4303c4da0eaf1b1a34",
+            "size": 296,
+            "fields": {
+              "name": "drasi-reaction-sse",
+              "kind": "sse",
+              "type": "reaction",
+              "version": "0.3.8",
+              "sdk_version": "0.11.3",
+              "core_version": "0.5.10",
+              "lib_version": "0.9.3",
+              "target_triple": "aarch64-apple-darwin",
+              "description": "SSE reaction plugin for Drasi",
+              "license": "Apache-2.0"
+            }
+          }
+        },
+        {
+          "repository": "drasi-project/reaction/rabbitmq",
+          "manifest_digest": "sha256:87327fac1978a58f0aace2a5059d4e169c2245f0cd2cde62c33e47d18966677c",
+          "platform": "darwin/arm64",
+          "release_tag": "0.1.6-darwin-arm64",
+          "published_at": "2026-09-25T18:37:23.5582570Z",
+          "binary": {
+            "digest": "sha256:d12d51e73ddb2d36a772c5038818cb0802c41c43998815dc8328f3479ed91dda",
+            "size": 6292944
+          },
+          "metadata": {
+            "digest": "sha256:09f9bcd433cf01cb44a6aaf3c166c547f3dde763c3176b86f6704580a7d2dfc7",
+            "size": 311,
+            "fields": {
+              "name": "drasi-reaction-rabbitmq",
+              "kind": "rabbitmq",
+              "type": "reaction",
+              "version": "0.1.6",
+              "sdk_version": "0.11.3",
+              "core_version": "0.5.10",
+              "lib_version": "0.9.3",
+              "target_triple": "aarch64-apple-darwin",
+              "description": "RabbitMQ reaction plugin for Drasi",
+              "license": "Apache-2.0"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

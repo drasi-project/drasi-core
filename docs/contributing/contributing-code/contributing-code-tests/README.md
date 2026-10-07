@@ -29,5 +29,12 @@ These scenarios are also shared by the Garnet/Redis and RocksDb storage implemen
 
 Running `cargo test` in the `index-garnet` folder will run them against a real Garnet/Redis instance. By default, it will try to use the connection string of `redis://127.0.0.1:6379`, but this can be overridden by setting the `REDIS_URL` environment variable.
 
+Many plugin integration tests are marked `#[ignore]` so default `cargo test` (and the unit-test CI workflow) can run without external services. CI discovers ignored tests that start containers (`testcontainers` or shared Redis/k3s helpers) and runs them from `.github/workflows/test-integration.yml`. Adding a new crate with that pattern is enough; the workflow does not keep a package allowlist. Locally:
+
+```sh
+cargo test -p drasi-source-postgres --test integration_tests -- --ignored --nocapture
+cargo run -p xtask -- list-integration-test-matrix
+```
+
 Running `cargo test` in the `index-rocksdb` folder will run them against a real RocksDb, which is embedded as an in-process library. Running the tests will create a `test-data` directory where the RocksDb files will be stored.
 
