@@ -239,16 +239,24 @@ pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
 
-/// Stable artifact marker checked before plugins are published.
+/// Marker string embedded in every plugin binary to show that the Rustls `ring`
+/// provider is linked in. `xtask build-plugins` searches the built cdylib for
+/// this exact NUL-terminated string and rejects the plugin if it is missing.
+/// `#[used]` keeps it in the binary; it is not a public FFI symbol.
 #[doc(hidden)]
 #[used]
-pub static DRASI_RUSTLS_CRYPTO_PROVIDER: [u8; 27] = *b"drasi-rustls-provider=ring\0";
+pub static DRASI_RUSTLS_CRYPTO_PROVIDER: [u8; 27] =
+    drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER;
 
 /// Installs the Rustls provider required by dynamically loaded plugins.
+///
+/// Called by `drasi_plugin_init` before the plugin creates its runtime or
+/// descriptors.
 #[doc(hidden)]
 pub fn install_default_rustls_crypto_provider() {
     // Keep the provider marker in each cdylib for xtask's artifact check.
     std::hint::black_box(&DRASI_RUSTLS_CRYPTO_PROVIDER);
+    // An error means this cdylib's Rustls copy already has a default provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
@@ -819,11 +827,57 @@ macro_rules! export_plugin {
 
 #[cfg(test)]
 mod tests {
-    use super::install_default_rustls_crypto_provider;
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static PROVIDER_INSTALLED_BEFORE_REGISTRATION: AtomicBool = AtomicBool::new(false);
+
+    fn verify_provider_before_registration() -> (
+        Vec<ffi::SourcePluginVtable>,
+        Vec<ffi::ReactionPluginVtable>,
+        Vec<ffi::BootstrapPluginVtable>,
+        Vec<ffi::IdentityProviderPluginVtable>,
+        Vec<ffi::SecretStorePluginVtable>,
+    ) {
+        PROVIDER_INSTALLED_BEFORE_REGISTRATION.store(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            Ordering::Release,
+        );
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    }
+
+    crate::export_plugin!(
+        @internal
+        plugin_id = "rustls-provider-test",
+        core_version = "test",
+        lib_version = "test",
+        plugin_version = "test",
+        init_fn = verify_provider_before_registration,
+        default_workers = 1usize,
+    );
 
     #[test]
-    fn installs_ring_as_default_rustls_provider() {
+    fn installs_ring_provider_idempotently() {
         install_default_rustls_crypto_provider();
-        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        install_default_rustls_crypto_provider();
+        let _ = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+    }
+
+    #[test]
+    fn plugin_init_installs_provider_before_registration() {
+        PROVIDER_INSTALLED_BEFORE_REGISTRATION.store(false, Ordering::Release);
+
+        assert!(!drasi_plugin_init().is_null());
+        assert!(PROVIDER_INSTALLED_BEFORE_REGISTRATION.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn provider_marker_uses_shared_artifact_contract() {
+        assert_eq!(
+            DRASI_RUSTLS_CRYPTO_PROVIDER,
+            drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER
+        );
     }
 }

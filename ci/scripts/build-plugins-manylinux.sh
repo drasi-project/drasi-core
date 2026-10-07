@@ -10,7 +10,7 @@ fi
 
 restore_workspace_ownership() {
   if [[ -n "${HOST_UID:-}" && -n "${HOST_GID:-}" ]]; then
-    chown -R "${HOST_UID}:${HOST_GID}" target
+    chown -R "${HOST_UID}:${HOST_GID}" /workspace || true
   fi
 }
 trap restore_workspace_ownership EXIT
@@ -30,8 +30,26 @@ dnf install -y \
   protobuf-compiler \
   protobuf-devel
 
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-  | sh -s -- -y --profile minimal --default-toolchain "${toolchain}"
+rustup_version="1.27.1"
+case "${target}" in
+  x86_64-unknown-linux-gnu)
+    rustup_sha256="6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d"
+    ;;
+  aarch64-unknown-linux-gnu)
+    rustup_sha256="1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2"
+    ;;
+  *)
+    echo "unsupported Rustup target: ${target}" >&2
+    exit 1
+    ;;
+esac
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+  "https://static.rust-lang.org/rustup/archive/${rustup_version}/${target}/rustup-init" \
+  --output rustup-init
+echo "${rustup_sha256}  rustup-init" | sha256sum --check -
+chmod +x rustup-init
+./rustup-init -y --profile minimal --default-toolchain "${toolchain}"
+rm rustup-init
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 rustup target add "${target}"

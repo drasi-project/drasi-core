@@ -526,13 +526,11 @@ struct PluginBuildOptions<'a> {
     jobs: usize,
 }
 
-const RUSTLS_CRYPTO_PROVIDER_MARKER: &[u8] = b"drasi-rustls-provider=ring\0";
-
 fn has_rustls_crypto_provider_marker(plugin: &Path) -> std::io::Result<bool> {
     let binary = fs::read(plugin)?;
     Ok(binary
-        .windows(RUSTLS_CRYPTO_PROVIDER_MARKER.len())
-        .any(|window| window == RUSTLS_CRYPTO_PROVIDER_MARKER))
+        .windows(drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER.len())
+        .any(|window| window == drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER))
 }
 
 fn plugin_build_command(options: PluginBuildOptions<'_>) -> Command {
@@ -2550,7 +2548,7 @@ exit 2
             &plugin,
             [
                 b"plugin with a provider marker".as_slice(),
-                RUSTLS_CRYPTO_PROVIDER_MARKER,
+                drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER.as_slice(),
             ]
             .concat(),
         )
@@ -2561,5 +2559,31 @@ exit 2
         );
 
         fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[test]
+    fn rejects_plugin_with_truncated_rustls_provider_marker() {
+        let dir = test_temp_dir("truncated-rustls-provider");
+        let plugin = dir.join("libdrasi_source_kubernetes.so");
+        fs::write(
+            &plugin,
+            &drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER
+                [..drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER.len() - 1],
+        )
+        .expect("plugin fixture should exist");
+
+        assert!(
+            !has_rustls_crypto_provider_marker(&plugin).expect("plugin fixture should be readable")
+        );
+
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[test]
+    fn returns_error_for_missing_plugin_marker_input() {
+        let plugin =
+            test_temp_dir("missing-rustls-provider-input").join("libdrasi_source_kubernetes.so");
+
+        assert!(has_rustls_crypto_provider_marker(&plugin).is_err());
     }
 }
