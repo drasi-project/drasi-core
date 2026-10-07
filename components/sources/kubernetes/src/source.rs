@@ -38,7 +38,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::Instrument;
 
 const SEEN_UIDS_KEY: &str = "seen_uids";
@@ -48,6 +48,7 @@ pub struct KubernetesSource {
     pub(crate) base: SourceBase,
     config: KubernetesSourceConfig,
     state_store_override: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    lifecycle_gate: Mutex<()>,
 }
 
 impl KubernetesSource {
@@ -62,6 +63,7 @@ impl KubernetesSource {
             base: SourceBase::new(params)?,
             config,
             state_store_override: Arc::new(RwLock::new(None)),
+            lifecycle_gate: Mutex::new(()),
         })
     }
 
@@ -95,7 +97,12 @@ impl Source for KubernetesSource {
     }
 
     async fn start(&self) -> Result<()> {
-        let mut task_handle = self.base.task_handle.write().await;
+        let gate = self.lifecycle_gate.lock().await;
+        let mut task_handle = self
+            .base
+            .task_handle
+            .try_write()
+            .map_err(|_| anyhow!("Kubernetes source '{}' is already starting", self.base.id))?;
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
         }
@@ -106,24 +113,42 @@ impl Source for KubernetesSource {
         );
 
         let source_id = self.base.id.clone();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        self.base.set_shutdown_tx(shutdown_tx).await;
         self.base.set_status(ComponentStatus::Starting, None).await;
+        // Stop can signal initialization without waiting for the task handle.
+        drop(gate);
         info!("Starting Kubernetes source '{source_id}'");
 
-        let initialization = tokio::time::timeout(STARTUP_TIMEOUT, async {
-            self.config.validate()?;
-            let client = build_client(&self.config).await?;
-            validate_resource_access(&client, &self.config).await?;
-            Ok::<_, anyhow::Error>(client)
-        })
-        .await
-        .context("Kubernetes source initialization timed out after 10 seconds")
-        .and_then(|result| result);
-        let client = match initialization {
-            Ok(client) => client,
+        let initialization = tokio::select! {
+            biased;
+
+            _ = &mut shutdown_rx => {
+                info!("Kubernetes source '{source_id}' startup cancelled by stop");
+                anyhow::bail!("Kubernetes source '{source_id}' startup cancelled by stop");
+            }
+            result = tokio::time::timeout(STARTUP_TIMEOUT, async {
+                self.config.validate()?;
+                let client = build_client(&self.config).await?;
+                validate_resource_access(&client, &self.config).await?;
+                let state_store = self.resolve_state_store().await;
+                prepare_source_stream(&source_id, &self.config, client, state_store).await
+            }) => result
+                .context("Kubernetes source initialization timed out after 10 seconds")
+                .and_then(|result| result),
+        };
+        let stream = match initialization {
+            Ok(stream) => stream,
             Err(error) => {
+                self.base.shutdown_tx.write().await.take();
                 error!("Failed to start Kubernetes source '{source_id}': {error:#}");
                 self.base
-                    .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(
+                            "Kubernetes source initialization failed; see logs for details".into(),
+                        ),
+                    )
                     .await;
                 return Err(error);
             }
@@ -132,9 +157,6 @@ impl Source for KubernetesSource {
         let config = self.config.clone();
         let base = self.base.clone_shared();
         let status_handle = self.base.status_handle();
-        let state_store = self.resolve_state_store().await;
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        self.base.set_shutdown_tx(shutdown_tx).await;
 
         let instance_id = self
             .base
@@ -159,15 +181,14 @@ impl Source for KubernetesSource {
         let task = tokio::spawn(
             async move {
                 let run_result =
-                    run_source_stream(&source_id, config, client, base, state_store, shutdown_rx)
-                        .await;
+                    run_source_stream(&source_id, config, base, stream, shutdown_rx).await;
 
                 if let Err(e) = run_result {
-                    error!("Kubernetes source task failed for '{source_id}': {e}");
+                    error!("Kubernetes source task failed for '{source_id}': {e:#}");
                     status_handle
                         .set_status(
                             ComponentStatus::Error,
-                            Some(format!("Kubernetes source task failed: {e}")),
+                            Some("Kubernetes source task failed; see logs for details".into()),
                         )
                         .await;
                 } else {
@@ -184,12 +205,25 @@ impl Source for KubernetesSource {
     }
 
     async fn stop(&self) -> Result<()> {
-        let mut task_handle = self.base.task_handle.write().await;
-        if self.base.get_status().await != ComponentStatus::Stopped {
+        let _gate = self.lifecycle_gate.lock().await;
+        let status = self.base.get_status().await;
+        let stopping_startup = status == ComponentStatus::Starting;
+        if !stopping_startup && status != ComponentStatus::Stopped {
             self.base.set_status(ComponentStatus::Stopping, None).await;
         }
         if let Some(shutdown) = self.base.shutdown_tx.write().await.take() {
             let _ = shutdown.send(());
+        }
+        let mut task_handle = self.base.task_handle.write().await;
+        // Startup owns its status until cancellation/completion. Do not race
+        // its final Running/Error update, or overwrite a shutdown failure.
+        if stopping_startup
+            && !matches!(
+                self.base.get_status().await,
+                ComponentStatus::Error | ComponentStatus::Stopped
+            )
+        {
+            self.base.set_status(ComponentStatus::Stopping, None).await;
         }
 
         let mut task_error = None;
@@ -220,7 +254,13 @@ impl Source for KubernetesSource {
             ));
             error!("{error:#}");
             self.base
-                .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(
+                        "Kubernetes source task failed during shutdown; see logs for details"
+                            .into(),
+                    ),
+                )
                 .await;
             return Err(error);
         }
@@ -386,6 +426,7 @@ impl KubernetesSourceBuilder {
             base: SourceBase::new(params)?,
             config: self.config,
             state_store_override: Arc::new(RwLock::new(self.state_store)),
+            lifecycle_gate: Mutex::new(()),
         })
     }
 }
@@ -503,23 +544,17 @@ async fn validate_resource_access(client: &Client, config: &KubernetesSourceConf
                     })?;
                 if !response.status().is_success() {
                     let status = response.status();
-                    let bytes = response.into_body().collect_bytes().await?;
-                    let mut response =
-                        match serde_json::from_slice::<kube::error::ErrorResponse>(&bytes) {
-                            Ok(response) => response,
-                            Err(error) => {
-                                warn!(
-                                    "Non-JSON Kubernetes watch error response ({status}): {error}"
-                                );
-                                kube::error::ErrorResponse {
-                                    status: "Failure".to_string(),
-                                    message: String::from_utf8_lossy(&bytes).into_owned(),
-                                    reason: status.to_string(),
-                                    code: status.as_u16(),
-                                }
-                            }
-                        };
-                    response.code = status.as_u16();
+                    // The HTTP status is sufficient for classification. Do not read
+                    // an untrusted error body, which may be huge or never terminate.
+                    let response = kube::error::ErrorResponse {
+                        status: "Failure".to_string(),
+                        message: format!("Kubernetes watch request failed: {status}"),
+                        reason: status
+                            .canonical_reason()
+                            .unwrap_or("Unknown status")
+                            .to_string(),
+                        code: status.as_u16(),
+                    };
                     return Err(kube::Error::Api(response)).with_context(|| {
                         format!("Cannot watch Kubernetes resource {}", target.key())
                     });
@@ -544,28 +579,35 @@ async fn validate_resource_access(client: &Client, config: &KubernetesSourceConf
     Ok(())
 }
 
-async fn run_source_stream(
-    source_id: &str,
-    config: KubernetesSourceConfig,
-    client: Client,
-    base: SourceBase,
+type WatchStreams = SelectAll<
+    BoxStream<
+        'static,
+        (
+            WatchTarget,
+            std::result::Result<Event<DynamicObject>, watcher::Error>,
+        ),
+    >,
+>;
+
+struct SourceStream {
+    streams: WatchStreams,
+    init_done: HashMap<String, bool>,
+    seen_uids: HashSet<String>,
     state_store: Option<Arc<dyn StateStoreProvider>>,
-    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) -> Result<()> {
-    let targets = build_watch_targets(&config);
+}
+
+async fn prepare_source_stream(
+    source_id: &str,
+    config: &KubernetesSourceConfig,
+    client: Client,
+    state_store: Option<Arc<dyn StateStoreProvider>>,
+) -> Result<SourceStream> {
+    let targets = build_watch_targets(config);
 
     let target_count = targets.len();
     info!("Kubernetes source '{source_id}' watching {target_count} target streams");
 
-    let mut streams: SelectAll<
-        BoxStream<
-            'static,
-            (
-                WatchTarget,
-                std::result::Result<Event<DynamicObject>, watcher::Error>,
-            ),
-        >,
-    > = SelectAll::new();
+    let mut streams = SelectAll::new();
     let mut init_done: HashMap<String, bool> = HashMap::new();
     for target in &targets {
         init_done.insert(target.key(), !matches!(config.start_from, StartFrom::Now));
@@ -587,7 +629,28 @@ async fn run_source_stream(
         streams.push(stream);
     }
 
-    let mut seen_uids = load_seen_uids(source_id, &state_store).await?;
+    let seen_uids = load_seen_uids(source_id, &state_store).await?;
+    Ok(SourceStream {
+        streams,
+        init_done,
+        seen_uids,
+        state_store,
+    })
+}
+
+async fn run_source_stream(
+    source_id: &str,
+    config: KubernetesSourceConfig,
+    base: SourceBase,
+    stream: SourceStream,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> Result<()> {
+    let SourceStream {
+        mut streams,
+        mut init_done,
+        mut seen_uids,
+        state_store,
+    } = stream;
 
     loop {
         tokio::select! {
@@ -759,4 +822,48 @@ async fn save_seen_uids(
         .await
         .map_err(|e| anyhow!("StateStore set '{SEEN_UIDS_KEY}' failed: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn shutdown_wins_over_ready_watch_events() {
+        for _ in 0..32 {
+            let polled = Arc::new(AtomicUsize::new(0));
+            let poll_count = polled.clone();
+            let events = futures::stream::poll_fn(move |_| {
+                poll_count.fetch_add(1, Ordering::SeqCst);
+                std::task::Poll::Ready(Some((
+                    WatchTarget {
+                        api_version: "v1".into(),
+                        kind: "Pod".into(),
+                        namespace: None,
+                    },
+                    Ok(Event::Init),
+                )))
+            });
+            let stream = SourceStream {
+                streams: SelectAll::from_iter([events.boxed()]),
+                init_done: HashMap::new(),
+                seen_uids: HashSet::new(),
+                state_store: None,
+            };
+            let base = SourceBase::new(SourceBaseParams::new("test-source")).unwrap();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            shutdown_tx.send(()).unwrap();
+            run_source_stream(
+                "test-source",
+                KubernetesSourceConfig::default(),
+                base,
+                stream,
+                shutdown_rx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(polled.load(Ordering::SeqCst), 0);
+        }
+    }
 }
