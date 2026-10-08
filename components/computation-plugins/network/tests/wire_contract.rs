@@ -259,12 +259,45 @@ fn query_output_matches_legacy_http_dtos_and_grpc_canonical_fields() -> Result<(
             .payload
             .is_none());
     }
+
     assert_eq!(
         wire::proto_item(&notifications[2], OutputFormat::Proto)?.item_type,
         reaction::QueryResultItemType::Delete as i32
     );
     assert!(wire::notifications(&input, "wrong", &StreamId::try_new("q/out")?).is_err());
     assert!(wire::notifications(&input, "q", &StreamId::try_new("wrong/out")?).is_err());
+    Ok(())
+}
+
+#[test]
+fn native_sse_preserves_the_browser_protocol_and_query_identity() -> Result<()> {
+    let input = input()?;
+    let queries = std::collections::BTreeMap::from([("q".into(), StreamId::try_new("q/out")?)]);
+    let payload = drasi_computation_network::sse::sse_payload(&input, &queries)?;
+    let expected = QueryChangeCodec::to_legacy_result(&input.envelope)?;
+    assert_eq!(payload["queryId"], expected.query_id);
+    assert_eq!(payload["results"], serde_json::to_value(expected.results)?);
+    assert!(payload["timestamp"].as_i64().is_some());
+    let wrong_query =
+        std::collections::BTreeMap::from([("other".into(), StreamId::try_new("q/out")?)]);
+    assert!(drasi_computation_network::sse::sse_payload(&input, &wrong_query).is_err());
+    let wrong_stream =
+        std::collections::BTreeMap::from([("q".into(), StreamId::try_new("other/out")?)]);
+    assert!(drasi_computation_network::sse::sse_payload(&input, &wrong_stream).is_err());
+    let mut wrong_port = input.clone();
+    wrong_port.port = PortId::try_new("wrong")?;
+    assert!(drasi_computation_network::sse::sse_payload(&wrong_port, &queries).is_err());
+    let progress = InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope: QueryChangeCodec::progress_envelope(
+            "q",
+            42,
+            1,
+            &ComponentId::try_new("q")?,
+            SystemMetadata::new(StreamId::try_new("q/out")?, 43),
+        )?,
+    };
+    assert!(drasi_computation_network::sse::sse_payload(&progress, &queries).is_err());
     Ok(())
 }
 

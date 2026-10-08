@@ -1,7 +1,7 @@
-# Native HTTP/gRPC network components
+# Native HTTP/gRPC/SSE network components
 
-`drasi-computation-network` provides four native ComputationGraph factories for
-standard HTTP/gRPC performance comparisons. Plugin identity is
+`drasi-computation-network` provides five native ComputationGraph factories for
+HTTP/gRPC transport and browser SSE delivery. Plugin identity is
 `drasi-computation-network`; native ABI is **1.0.0**, independently of its workspace
 package version. Native wire version is **2**, using binary computation envelopes
 and bulk MessagePack buffers. Rebuild prototype wire-version-1 native libraries.
@@ -15,19 +15,59 @@ is independently versioned.
 | `drasi.network/grpc-source` | `EnvelopeSource` | `out`, `GraphChangeCodec::schema()` |
 | `drasi.network/http-sink` | `EnvelopeSink` | `in`, `QueryChangeCodec::schema()` |
 | `drasi.network/grpc-sink` | `EnvelopeSink` | `in`, `QueryChangeCodec::schema()` |
+| `drasi.network/sse-sink` | `EnvelopeSink` (`Accepted`) | `in`, `QueryChangeCodec::schema()` |
 
 Only existing HTTP DTO/conversion helpers and generated gRPC service/protobuf
 types are reused from the transport crates. Native execution constructs no legacy
 `Source`, `Reaction`, `SourceBase`, `ReactionBase`, `SourceEventWrapper`,
-`QueryResult`, adapter or subscription queue. Sinks project typed query rows at
+adapter or subscription queue. HTTP/gRPC sinks project typed query rows at
 the actual network boundary, using the same core JSON value projection as the
-existing output codecs. The host remains the graph scheduler, fanout owner and
-continuous-query evaluator.
+existing output codecs. SSE reuses the established query-result DTO projection
+only to serialize the unchanged browser protocol; it has no legacy execution
+adapter or result-processing worker. The host remains the graph scheduler,
+fanout owner and continuous-query evaluator.
+
+## Native browser SSE
+
+`drasi.network/sse-sink` consumes query envelopes directly from graph edges:
+
+```json
+{
+  "queryStreams": {"example-query": "example-query/out"},
+  "host": "127.0.0.1",
+  "port": 8080,
+  "ssePath": "/events",
+  "heartbeatIntervalMs": 30000,
+  "broadcastCapacity": 1024
+}
+```
+
+Only `queryStreams` is required; the default host is `0.0.0.0`, with the other
+defaults shown above. Each query ID must match its envelope metadata and the
+configured stream. Connect every query's output to the sink's `in` port.
+The untemplated `queryId`/`results`/`timestamp` data frames, row signatures,
+before/after images and heartbeat data frames remain compatible with the
+existing SSE browser adapter. Read snapshots through the Server query-results
+API; this transport does not own a second result cache or snapshot endpoint.
+
+Delivery is explicitly **volatile, Accepted**, not handled by a browser.
+No connected listener is required; disconnected clients receive no history.
+Each listener uses the bounded broadcast channel; lag closes that stream rather
+than silently delivering a truncated tail. Clients must reconnect and fetch a
+fresh snapshot. Stop cancels active streams and joins the HTTP server, retaining
+ownership after cancelled or timed-out cleanup. Restart requires that cleanup.
+Construction binds no socket or worker.
+
+This focused native factory supports the untemplated protocol used by the
+examples, not legacy templates/dynamic paths or recovery snapshot/progress
+control envelopes; unsupported configuration rejects. GET/OPTIONS permit
+cross-origin reads, as the existing SSE transport does. Configure an
+authenticated reverse proxy before exposing private results.
 
 ## Opt-in HTTP completion service
 
 The separate Rust `delivery` module provides `HttpDeliveryHandler` and
-`HttpDeliveryEndpoint`. None of the four factories constructs them automatically;
+`HttpDeliveryEndpoint`. None of the factories constructs them automatically;
 ordinary configurations, legacy protocols and ABI 1.0 fast-mode binaries are
 unchanged. These services are not yet exposed through native service negotiation.
 

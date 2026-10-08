@@ -31,6 +31,17 @@ native migration of Move-a-Wall and GPU Cluster Lab, including the plugin work
 those examples require. This is not authorization for a general plugin migration
 sweep or a reason to broaden Stage D.
 
+**Example follow-on complete (2026-10-08).** Both examples use native SSE with
+direct query edges and a shared browser binding that validates the real graph.
+GPU Cluster Lab also uses the native PostgreSQL transaction source, coordinated
+snapshot and one persistent atomic query owner; downstream native queries receive
+the policy component's authoritative table projections. Isolated live/browser,
+writer recovery, crash/restart/reset, missing-slot refusal, SQL mutation and
+scenario checks pass. The running deployment is unchanged. Atomic completion of
+all downstream effects remains unsupported and explicitly asserted as such;
+general plugin migration and diagnostic replay/performance work remain separate.
+These example changes are not part of the published native-framework commits.
+
 **Stage A complete (native-only scope).** Bootstrap-v1 supplies query-owned
 preparation, bounded initialization state, streamed snapshots and final handover.
 Consumer-v1 supplies external and transactional completion through the existing

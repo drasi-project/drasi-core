@@ -12,6 +12,7 @@ mod durable_http;
 mod grpc;
 mod http;
 mod ingress;
+pub mod sse;
 pub mod wire;
 
 pub use config::{FailurePolicy, GrpcSinkConfig, HttpSinkConfig, OutputFormat, SourceConfig};
@@ -38,6 +39,7 @@ pub const HTTP_SOURCE: &str = "drasi.network/http-source";
 pub const GRPC_SOURCE: &str = "drasi.network/grpc-source";
 pub const HTTP_SINK: &str = "drasi.network/http-sink";
 pub const GRPC_SINK: &str = "drasi.network/grpc-sink";
+pub const SSE_SINK: &str = "drasi.network/sse-sink";
 
 pub fn plugin() -> anyhow::Result<PluginDefinition> {
     PluginDefinition::new(
@@ -48,6 +50,7 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
             Arc::new(NetworkFactory(Kind::GrpcSource)),
             Arc::new(NetworkFactory(Kind::HttpSink)),
             Arc::new(NetworkFactory(Kind::GrpcSink)),
+            Arc::new(sse::SseFactory),
         ],
         vec![GraphChangeCodec::schema(), QueryChangeCodec::schema()],
     )
