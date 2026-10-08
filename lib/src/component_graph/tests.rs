@@ -497,34 +497,42 @@ fn test_transaction_partial_failure_rollback() {
 #[test]
 fn test_valid_state_transitions() {
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Stopped,
         &ComponentStatus::Starting
     ));
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Starting,
         &ComponentStatus::Running
     ));
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Running,
         &ComponentStatus::Stopping
     ));
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Stopping,
         &ComponentStatus::Stopped
     ));
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Starting,
         &ComponentStatus::Error
     ));
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Running,
         &ComponentStatus::Error
     ));
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Error,
         &ComponentStatus::Starting
     ));
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Error,
         &ComponentStatus::Stopped
     ));
@@ -533,19 +541,23 @@ fn test_valid_state_transitions() {
 #[test]
 fn test_invalid_state_transitions() {
     assert!(!is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Stopped,
         &ComponentStatus::Running
     ));
     assert!(!is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Stopped,
         &ComponentStatus::Stopping
     ));
     assert!(!is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Running,
         &ComponentStatus::Starting
     ));
     // Starting → Stopping is now valid (graceful stop during initialization)
     assert!(is_valid_transition(
+        &ComponentKind::Source,
         &ComponentStatus::Starting,
         &ComponentStatus::Stopping
     ));
@@ -775,6 +787,27 @@ fn test_validate_and_transition_idempotent_same_state() {
 }
 
 #[test]
+fn test_validate_and_transition_stopping_is_idempotent() {
+    let mut graph = create_test_graph();
+    graph.register_query("q1", HashMap::new(), &[]).unwrap();
+    graph
+        .validate_and_transition("q1", ComponentStatus::Starting, None)
+        .unwrap();
+    graph
+        .validate_and_transition("q1", ComponentStatus::Stopping, None)
+        .unwrap();
+
+    assert!(graph
+        .validate_and_transition("q1", ComponentStatus::Stopping, None)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        graph.get_component("q1").unwrap().status,
+        ComponentStatus::Stopping
+    );
+}
+
+#[test]
 fn test_validate_and_transition_invalid_start_while_running() {
     let mut graph = create_test_graph();
     graph.add_component(source_node("s1")).unwrap();
@@ -885,22 +918,56 @@ fn test_validate_and_transition_nonexistent_component() {
 }
 
 #[test]
-fn test_validate_and_transition_cannot_stop_error_state() {
-    let mut graph = create_test_graph();
-    graph.add_component(source_node("s1")).unwrap();
-    graph
-        .validate_and_transition("s1", ComponentStatus::Starting, None)
-        .unwrap();
-    graph
-        .validate_and_transition("s1", ComponentStatus::Error, None)
-        .unwrap();
+fn test_validate_and_transition_cannot_stop_error_non_query() {
+    for node in [source_node("s1"), reaction_node("r1")] {
+        let mut graph = create_test_graph();
+        let id = node.id.clone();
+        graph.add_component(node).unwrap();
+        graph
+            .validate_and_transition(&id, ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition(&id, ComponentStatus::Error, None)
+            .unwrap();
 
-    let result = graph.validate_and_transition("s1", ComponentStatus::Stopping, None);
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("error state"),
-        "Expected 'error state' in: {err_msg}"
+        let error = graph
+            .validate_and_transition(&id, ComponentStatus::Stopping, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("error state"));
+        assert!(graph
+            .update_status(&id, ComponentStatus::Stopping)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            graph.get_component(&id).unwrap().status,
+            ComponentStatus::Error
+        );
+    }
+}
+
+#[test]
+fn test_validate_and_transition_can_stop_error_query() {
+    let mut graph = create_test_graph();
+    graph.register_query("q1", HashMap::new(), &[]).unwrap();
+    graph
+        .validate_and_transition("q1", ComponentStatus::Starting, None)
+        .unwrap();
+    graph
+        .validate_and_transition("q1", ComponentStatus::Error, None)
+        .unwrap();
+    graph
+        .validate_and_transition("q1", ComponentStatus::Stopping, None)
+        .unwrap();
+    assert_eq!(
+        graph.get_component("q1").unwrap().status,
+        ComponentStatus::Stopping
+    );
+    graph
+        .validate_and_transition("q1", ComponentStatus::Stopped, None)
+        .unwrap();
+    assert_eq!(
+        graph.get_component("q1").unwrap().status,
+        ComponentStatus::Stopped
     );
 }
 
