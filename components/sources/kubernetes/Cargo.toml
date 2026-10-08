@@ -51,9 +51,11 @@ prost-types = "0.12"
 ordered-float = "3.0"
 
 [dev-dependencies]
+axum = "0.7"
 drasi-bootstrap-kubernetes.workspace = true
 drasi-reaction-application.workspace = true
 env_logger = "0.10.0"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serial_test = "3.0"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["k3s"] }
