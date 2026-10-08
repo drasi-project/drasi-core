@@ -2,6 +2,37 @@
 mod tests {
     use super::super::*;
 
+    #[tokio::test]
+    async fn test_descriptor_preserves_auto_start_without_starting() {
+        use crate::descriptor::MySqlSourceDescriptor;
+        use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
+
+        let config = serde_json::json!({
+            "database": "testdb",
+            "user": "testuser"
+        });
+        for auto_start in [false, true] {
+            let source = MySqlSourceDescriptor
+                .create_source("test-source", &config, auto_start)
+                .await
+                .unwrap();
+
+            assert_eq!(source.auto_start(), auto_start);
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+    }
+
+    #[test]
+    fn test_builder_defaults_to_auto_start() {
+        let source = MySqlSourceBuilder::new("test-source")
+            .with_database("testdb")
+            .with_user("testuser")
+            .build()
+            .unwrap();
+
+        assert!(source.auto_start());
+    }
+
     #[test]
     fn test_builder_with_valid_config() {
         let source = MySqlReplicationSource::builder("test-source")
