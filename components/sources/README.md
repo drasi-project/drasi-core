@@ -948,6 +948,16 @@ startup succeeds.
 Stop ingestion and clean up local resources. Use `SourceBase::stop_common()` if
 your source stores a `oneshot::Sender<()>` and task handle in `SourceBase`.
 Sources with custom stop logic MUST call `clear_dispatchers()` for channel mode.
+Cleanup MUST also handle `Starting` and `Error`; a failed task can still leave
+subscriptions and other resources alive. A successful stop MUST report `Stopped`.
+Managed lifecycle operations reject a source that returns success without stopping.
+
+MySQL and PostgreSQL share `SourceBase::abort_and_join_task()` for immediate
+cancellation and joining without holding the task-handle lock. Expected cancellation
+succeeds; unexpected task failures are returned after plugin-specific cleanup and
+leave the source in `Error`. This differs from `stop_common()`'s graceful-shutdown
+policy, which logs task failures without failing the stop. See each plugin's
+lifecycle documentation for its policy.
 
 #### `status` — **MUST**
 
@@ -1137,7 +1147,7 @@ very specific reason not to.
 | Construction | `SourceBase::new(SourceBaseParams)` |
 | Configuration persistence | `set_raw_config`, `raw_config`, `properties_or_serialize` |
 | Runtime context | `initialize`, `context`, `state_store`, `identity_provider`, `set_identity_provider` |
-| Status and lifecycle | `get_status`, `set_status`, `status_handle`, `set_task_handle`, `set_shutdown_tx`, `stop_common`, `clear_dispatchers`, `deprovision_common` |
+| Status and lifecycle | `get_status`, `set_status`, `status_handle`, `set_task_handle`, `set_shutdown_tx`, `stop_common`, `abort_and_join_task`, `clear_dispatchers`, `deprovision_common` |
 | Subscription | `apply_subscription_settings`, `create_streaming_receiver`, `wait_for_subscribers`, `subscribe_with_bootstrap`, `subscribe_with_bootstrap_context`, `create_bootstrap_receiver`, `subscribe_with_replay` |
 | Dispatch | `dispatch_source_change`, `dispatch_event`, `dispatch_events_batch` |
 | Replay positions | `create_position_handle`, `remove_position_handle`, `compute_confirmed_position`, `compute_confirmed_source_position`, `prune_position_map`, `clear_sequence_position_map`, `set_next_sequence`, `set_position_comparator` |

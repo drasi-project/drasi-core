@@ -196,7 +196,7 @@ impl SourceManager {
             .await
     }
 
-    /// Stop a running source by ID, transitioning it to the Stopped state.
+    /// Stop a running, starting, or failed source by ID, transitioning it to Stopped.
     ///
     /// # Errors
     /// Returns an error if the source is not found or the stop operation fails.

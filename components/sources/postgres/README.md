@@ -99,6 +99,19 @@ The PostgreSQL database must be configured for logical replication:
    ALTER TABLE your_table REPLICA IDENTITY DEFAULT;
    ```
 
+## Lifecycle
+
+`stop()` cleans up running, starting, and failed sources. It aborts and joins the
+replication task and closes stale streaming subscriptions before reporting
+`Stopped`. Per-subscriber resume filters, stream progress, and the flush fence are
+reset. Repeated direct stops are safe; new subscriptions are required after a
+restart.
+Both database sources use `SourceBase::abort_and_join_task()`: expected task
+cancellation succeeds, while an unexpected task failure is logged and returned
+after cleanup, leaving status `Error`. A subsequent stop can then reach `Stopped`.
+Task joining is not timed out, so an old task cannot outlive cleanup or overlap a
+restart; replication tasks must remain cooperative async tasks.
+
 ## Configuration
 
 ### Builder Pattern (Recommended)

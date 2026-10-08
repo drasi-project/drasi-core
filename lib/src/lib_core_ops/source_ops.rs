@@ -245,7 +245,7 @@ impl DrasiLib {
         )
     }
 
-    /// Stop a running source
+    /// Stop a running, starting, or failed source.
     ///
     /// # Example
     /// ```no_run

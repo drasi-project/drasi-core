@@ -52,7 +52,16 @@ impl ComponentRuntime for Arc<dyn crate::sources::Source> {
         crate::sources::Source::start(self.as_ref()).await
     }
     async fn stop(&self) -> Result<()> {
-        crate::sources::Source::stop(self.as_ref()).await
+        crate::sources::Source::stop(self.as_ref()).await?;
+        let status = crate::sources::Source::status(self.as_ref()).await;
+        // Legacy/custom sources may still no-op in Error. Do not report success
+        // or leave the graph Stopping when the runtime did not actually stop.
+        anyhow::ensure!(
+            status == ComponentStatus::Stopped,
+            "Source '{}' returned from stop with status {status:?}, expected Stopped",
+            self.id()
+        );
+        Ok(())
     }
     async fn deprovision(&self) -> Result<()> {
         crate::sources::Source::deprovision(self.as_ref()).await
@@ -188,7 +197,7 @@ pub async fn stop_component<R: ComponentRuntime>(
         )?;
     }
 
-    if let Err(e) = runtime.stop().await {
+    if let Err(e) = stop_runtime(graph, id, runtime).await {
         // Revert graph status so the component isn't stuck at Stopping
         let mut g = graph.write().await;
         let _ = g.validate_and_transition(
@@ -202,7 +211,31 @@ pub async fn stop_component<R: ComponentRuntime>(
     Ok(())
 }
 
-/// Teardown a component: claim teardown intent → stop if active or failed query → wait →
+async fn stop_runtime<R: ComponentRuntime>(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    id: &str,
+    runtime: &R,
+) -> Result<()> {
+    if let Some(source) = get_runtime::<Arc<dyn crate::sources::Source>>(graph, id).await {
+        // A failed start may leave the runtime already Stopped while the graph is
+        // Error. Use the update channel, not a synchronous graph transition, so
+        // pending lifecycle events are processed before a subsequent restart.
+        if source.status().await == ComponentStatus::Stopped {
+            let update_tx = graph.read().await.update_sender();
+            update_tx
+                .send(crate::component_graph::ComponentUpdate::Status {
+                    component_id: id.to_string(),
+                    status: ComponentStatus::Stopped,
+                    message: Some("Source already stopped".into()),
+                })
+                .await?;
+            return Ok(());
+        }
+    }
+    runtime.stop().await
+}
+
+/// Teardown a component: claim teardown intent → stop if active or failed query/source → wait →
 /// optionally deprovision → remove runtime → clean up logs.
 ///
 /// This is the shared pattern used by all three managers. The caller may
@@ -274,9 +307,15 @@ where
     if needs_stop {
         log::info!("Stopping {component_type} '{id}' before teardown");
         pre_stop().await;
-        if let Err(e) = runtime.stop().await {
+        if let Err(e) = stop_runtime(graph, id, &runtime).await {
             log::warn!(
                 "Failed to stop {component_type} '{id}' during teardown (may already be stopped): {e}"
+            );
+            let mut g = graph.write().await;
+            let _ = g.validate_and_transition(
+                id,
+                ComponentStatus::Error,
+                Some(format!("Stop failed during teardown: {e}")),
             );
         }
 
@@ -313,7 +352,7 @@ where
     Ok(())
 }
 
-/// Reconfigure a component: transition to Reconfiguring → stop if active or failed query →
+/// Reconfigure a component: transition to Reconfiguring → stop if active or failed query/source →
 /// init/replace → restart or transition to Stopped.
 ///
 /// This is the shared reconfiguration state machine used by all three managers.
@@ -365,14 +404,14 @@ where
         (was_running, needs_stop)
     };
 
-    // Failed queries also retain resources, but must not be automatically restarted.
+    // Failed queries/sources retain resources, but must not be automatically restarted.
     // Revert to Error on failure to prevent stuck Reconfiguring state.
     if needs_stop {
         log::info!("Stopping {component_type} '{id}' for reconfiguration");
         pre_stop().await;
 
         if let Err(e) = async {
-            old_runtime.stop().await?;
+            stop_runtime(graph, id, old_runtime).await?;
             crate::component_graph::wait_for_status(
                 graph,
                 id,
@@ -481,7 +520,7 @@ where
 
 /// Stop all active components of a given kind (best-effort).
 ///
-/// Components in Running or Starting state, and failed queries, are stopped via `stop_fn`.
+/// Active components and failed queries/sources are stopped via `stop_fn`.
 /// Errors are logged but do not prevent stopping other components.
 pub async fn stop_all_components<F, Fut>(
     graph: &Arc<RwLock<ComponentGraph>>,
@@ -570,6 +609,66 @@ mod tests {
             status: ComponentStatus::Added,
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_failed_source_noop_stop_is_rejected_without_sticking_graph() {
+        use crate::channels::SubscriptionResponse;
+        use crate::config::SourceSubscriptionSettings;
+        use crate::sources::Source;
+
+        struct NoopSource;
+
+        #[async_trait]
+        impl Source for NoopSource {
+            fn id(&self) -> &str {
+                "s1"
+            }
+            fn type_name(&self) -> &str {
+                "noop"
+            }
+            fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+                Default::default()
+            }
+            async fn start(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn stop(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn status(&self) -> ComponentStatus {
+                ComponentStatus::Error
+            }
+            async fn subscribe(
+                &self,
+                _: SourceSubscriptionSettings,
+            ) -> Result<SubscriptionResponse> {
+                anyhow::bail!("not used in this test")
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            async fn initialize(&self, _: crate::context::SourceRuntimeContext) {}
+        }
+
+        let (mut graph, _rx) = ComponentGraph::new("test");
+        graph.add_component(source_node("s1")).unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Error, None)
+            .unwrap();
+        let graph = Arc::new(RwLock::new(graph));
+        let source: Arc<dyn Source> = Arc::new(NoopSource);
+        let error = stop_component(&graph, "s1", "source", &source)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("expected Stopped"));
+        assert_eq!(
+            graph.read().await.get_component("s1").unwrap().status,
+            ComponentStatus::Error
+        );
     }
 
     #[tokio::test]
