@@ -68,6 +68,8 @@ pub(crate) mod process;
 pub(crate) mod standard_loop;
 
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod tests;
 
 pub use config::{

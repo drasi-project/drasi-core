@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -8,13 +7,8 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::ImageExt;
 use testcontainers::{ContainerAsync, GenericImage};
 
-#[derive(Clone)]
 pub struct LokiGuard {
-    inner: Arc<LokiGuardInner>,
-}
-
-struct LokiGuardInner {
-    container: std::sync::Mutex<Option<ContainerAsync<GenericImage>>>,
+    container: ContainerAsync<GenericImage>,
     endpoint: String,
 }
 
@@ -30,40 +24,19 @@ pub async fn setup_loki() -> Result<LokiGuard> {
     wait_for_loki_ready(&endpoint, Duration::from_secs(20)).await?;
 
     Ok(LokiGuard {
-        inner: Arc::new(LokiGuardInner {
-            container: std::sync::Mutex::new(Some(container)),
-            endpoint,
-        }),
+        container,
+        endpoint,
     })
 }
 
 impl LokiGuard {
     pub fn endpoint(&self) -> &str {
-        &self.inner.endpoint
+        &self.endpoint
     }
 
-    pub async fn cleanup(self) {
-        let container_to_stop = {
-            if let Ok(mut guard) = self.inner.container.lock() {
-                guard.take()
-            } else {
-                None
-            }
-        };
-
-        if let Some(container) = container_to_stop {
-            let _ = container.stop().await;
-        }
-    }
-}
-
-impl Drop for LokiGuardInner {
-    fn drop(&mut self) {
-        if let Ok(mut guard) = self.container.lock() {
-            if let Some(container) = guard.take() {
-                drop(container);
-            }
-        }
+    pub async fn cleanup(&self) -> Result<()> {
+        self.container.stop().await?;
+        Ok(())
     }
 }
 

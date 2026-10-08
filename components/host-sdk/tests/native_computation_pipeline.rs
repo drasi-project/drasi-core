@@ -46,6 +46,9 @@ const CAPTURE: &str = "drasi.standard/capture";
 const ARITHMETIC: &str = "drasi.standard/arithmetic";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "native_computation_pipeline/shared.rs"]
+mod shared;
+
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -686,7 +689,7 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
         "drasi-computation-standard"
     );
     assert_eq!(plugin.metadata().abi_version, "1.0.0");
-    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.15.0");
+    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
     assert_eq!(plugin.factories().len(), 4);
     let source = factory(&plugin, COUNTER)?;
     let middleware = factory(&plugin, MIDDLEWARE)?;

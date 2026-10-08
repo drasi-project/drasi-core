@@ -441,9 +441,9 @@ This shape favours single-query throughput (one RPC per (query, time-window)). F
 low-latency single-query workloads, prefer fixed batching with `batchSize: 1` and a
 small `batchFlushTimeoutMs`.
 
-On shutdown the runner drains the in-flight batch through the batcher on a
-best-effort basis within the reaction stop window. A warning is logged if the drain
-does not complete in time and the in-flight batch is abandoned.
+Forwarding and batch delivery run concurrently inside one owned processor.
+Shutdown closes the batch input and drains already-forwarded items; a stop timeout
+retains the processor instead of abandoning its in-flight batch.
 
 ---
 
@@ -656,6 +656,29 @@ The produced `cdylib` exports the standard Drasi plugin entry point.
 cargo test -p drasi-reaction-grpc
 ```
 
+### Stop and restart
+
+Lifecycle calls are serialized and the processor is registered before it starts.
+Duplicate start, cancelled startup and incomplete cleanup reject replacement.
+Stop cancels subscription forwarders and waits up to two seconds without aborting
+the processor. A timeout means cleanup is incomplete; call stop again to join the
+retained request/checkpoint work before restarting.
+
+The fixed runner flushes its final partial batch using the ordinary configured
+request/retry policy, not the previous shortened 1.5-second retry allowance.
+Adaptive batching has no separately spawned child to abandon. Workers use the
+shutdown signal, not a status read that could discard an already-dequeued result
+while the status changes to Stopping. Successful base cleanup still discards
+undequeued priority-queue entries. Explicit Strict/AutoSkipGap behavior is
+unchanged.
+
+Current-thread lifecycle cases hold actual RPC replies and checkpoint writes
+beyond the two-second stop bound, then verify their completion. They also cover
+final fixed-batch flushing, cancelled startup/cleanup, typed panics, status/signal
+races and three exact-sequence restart cycles in both modes. The legacy graph
+adapter remains acceptance-only; these changes do not make remote effects atomic
+or resolve uncertainty after a process failure or lost acknowledgement.
+
 Unit tests cover config defaults, builder semantics (including per-field adaptive
 setters), endpoint/batching validation, template validation at construction, route
 resolution (exact, dotted-suffix, default), template render success/failure,
@@ -687,7 +710,7 @@ Integration tests in `tests/integration_tests.rs` use an in-process tonic mock
 - Adaptive batching steady-state delivery with `row_signature` round-trip.
 - End-to-end through `DrasiLib` (mock source → query → reaction), and a
   descriptor-created reaction honoring camelCase `batchSize`.
-- Bounded shutdown drain (the 1.5 s `tokio::time::timeout` wrap on the batcher join).
+- Prompt shutdown when there is no held request or checkpoint operation.
 
 ---
 

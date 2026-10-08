@@ -77,6 +77,53 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Opt-in ComputationGraph transactional delivery
+
+The separate Rust API `delivery::PostgresDeliveryHandler` can be used with
+ComputationGraph's [`DeliveryRunner`](../../../lib/docs/computation-graph-qos.md#opt-in-operation-completion).
+It does **not** change this reaction's existing configuration, retry loop or
+log-and-continue behavior, and is not yet exposed by its plugin ABI or factory.
+
+Implement `PostgresDeliveryEffect::apply` using only the supplied PostgreSQL
+transaction. The adapter commits the operation's effect and its stable ordered
+delivery cursor together. Retrying an already committed operation does not invoke
+the effect again, including when the caller lost the commit response or its local
+progress. A procedure used here must not commit/roll back its own transaction,
+perform effects through another connection, or invoke external services.
+
+`PostgresDeliveryHandler::new(client, effect)` performs no I/O. Call
+`initialize().await` at startup to create the reserved
+`public.drasi_delivery_stream_v1` table; the database role needs permission to
+create it and read/write its rows. Concurrent initialization and first-stream
+admission serialize through a PostgreSQL advisory transaction lock. Existing
+streams use independent row locks. Do not manually alter or clear the table.
+
+Deduplication stores one row per stable consumer/port/producer stream, with a
+fixed limit of **4,096 streams**. It retains the latest batch's digest and completed
+operation prefix, not an unbounded row per operation. Older batches reject after
+rollover; changed content, gaps, unfinished preceding batches and corrupt cursors
+also reject before effects. There is no automatic stream retirement. A replacement
+must retain the same logical identity **and the same destination progress table**.
+
+Each effect uses explicit `READ COMMITTED` isolation and sets local
+`synchronous_commit=on` before commit. SQLSTATE `40001`, `40P01` and `55P03` may be
+retried only when the runner's bounded policy enables retries. Other errors remain
+pending. Commit failures report uncertainty; rollback failures retain both causes.
+Transactions do not guarantee survival of permanent storage loss, and power-loss
+survival additionally depends on PostgreSQL's server settings and storage.
+
+The adapter spawns no tasks. Own and drive the client connection, stop incoming
+delivery, await runner cleanup, drop the handler (or obtain its client with
+`into_parts()`), and join the connection driver before replacing it.
+
+Real PostgreSQL/RocksDB tests cover partial delivery, lost responses, concurrent
+duplicates, cancellation after SQL writes, exact capacity and sequence limits,
+corruption and actual database `SIGKILL` recovery:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-reaction-storedproc-postgres --test delivery -- --test-threads=1
+```
+
 ## Configuration
 
 ### Builder API

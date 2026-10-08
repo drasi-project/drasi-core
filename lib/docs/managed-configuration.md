@@ -38,6 +38,16 @@ configuration store to the new builder. It reloads the accepted definition witho
 resubmitting `apply_desired_state`, including declarations whose factory is
 temporarily unavailable.
 
+Hosts that initialize from a startup file only once can use
+`RedbConfigurationStore::initialize_if_absent` before building the instance.
+`initialize_if_absent_with` evaluates a fallible seed only for an uninitialized
+namespace, so obsolete startup definitions do not block accepted stored state.
+Both retain exclusive ownership through the presence check and atomic commit.
+Record presence, not revision zero, distinguishes initialization: accepting an
+unchanged empty definition legitimately keeps revision zero. Seeds use the same
+`DesiredInstance::normalized()` validation and canonical ordering as ordinary
+acceptance; normalization never constructs components or providers.
+
 Dynamic libraries are **not required**. Static factories work equally well.
 For dynamic plugins, the application loads/verifies libraries with Host SDK at
 startup and passes `PluginRegistry::computation_factory_registry()`. Core never
@@ -60,6 +70,43 @@ The same provider can back query resources with
 These are independent of the configuration store. Factory `record_schemas()`
 supplies executable validators for custom persisted records. See the
 [QoS guide](computation-graph-qos.md) for the complete recipe and retention rules.
+
+## Resource dependencies
+
+`DesiredTopology.resource_dependencies` maps each dependent resource to its
+required resource IDs and roles. It is optional; independent resources retain
+their existing behavior. For example:
+
+```yaml
+resource_dependencies:
+  outgoing-journal:
+    processing-storage: IndexBackend
+```
+
+The graph validates missing resources, roles, cycles and ownership before
+effects. A borrowed resource cannot depend on graph-owned storage, because the
+graph cannot control the borrowed user's lifetime. Providers construct before
+their users; cleanup runs in the opposite dependency order. Failed or cancelled
+cleanup retains the provider and blocks replacement. A failed constructor blocks
+its descendants, not unrelated resources.
+
+Resolvers opt into `resolve_with_dependencies`; constructors can implement
+`construct_with_dependencies`. They receive only the actual handles named in
+their declaration, not a global registry. Existing implementations reject a
+nonempty dependency context by default. `management::resource_constructor`
+binds a recipe for graph-owned deferred construction without starting a second
+management service.
+
+Changing a provider reconstructs its transitive resource users and affected
+components. Removing a referenced provider rejects unless its users are removed
+explicitly or through cascade. Subset snapshots include transitive prerequisites;
+inspection exposes resource-to-resource links. Direct builders support
+`resource_dependency`, and desired definitions expose
+`resource_construction_order` for validation.
+
+This is ownership ordering, not permission to discard processing obligations.
+It neither migrates storage nor proves arbitrary path/identity changes safe
+across accepted-definition restart.
 
 ## Desired-state API
 
@@ -109,6 +156,73 @@ and runtime start/stop remain available.
 This is an explicit contract: metadata on an arbitrary Rust object is not a
 constructor. Component `configuration()` getters do not make such an object
 automatically restorable.
+
+### Changing recovery storage and its users
+
+Standard Host and Server resolvers reject changes to persistent recovery domains
+before acceptance unless the runtime can prove safe retirement. This includes
+storage paths, producer definitions, destination membership, removal and downgrade.
+Connected components and resource dependencies belong to the same domain;
+unrelated domains and lifecycle-only settings remain independently editable.
+Resolvers implementing persistent services must implement `validate_transition`,
+and wrappers must forward it. Missing live resources never mean empty storage.
+
+Verified drain supports constructed shared-storage domains, standalone persistent
+QoS journals, initialized built-in queries/native transaction sequences, and
+native consumers with validated completed ledgers and successful storage cleanup.
+Bootstrap providers must supply their own positively stopped retirement gate;
+source-progress resources must match their actual processing owner.
+Quiesce producers and stop the instance after handling its outstanding output,
+then submit the desired change. Ordinary stop may interrupt an active handoff
+and require reconstruction. The graph
+verifies successful component stop, blocks restart/configuration mutations, and
+holds the actual storage-group gates while checking producer output, every live
+journal's required cursors, and scheduled work. Stopped status alone, unused
+storage declarations, or an unlocked progress sample are insufficient.
+
+These leases remain held through configuration commit and authoritative readback.
+A confirmed rejection releases the same old owners. Acceptance fences them and
+reconstructs changed domains, preserving provider recipes even for same-path
+replacement. Uncertain acceptance retains the leases until reconciliation can
+read authoritative state. Cancelling a waiting API caller does not cancel the
+management owner. Abandoning the proof itself fences affected ownership and
+requires instance reconstruction; it never grants permission to discard work.
+Explicit shutdown can revoke its own held storage gates only after terminally
+closing the owners; it does not resolve or overwrite uncertain configuration.
+The next instance restores whichever definition the store actually accepted.
+
+Server returns HTTP 409 `CONFIGURATION_TRANSITION_REQUIRED` for a definite
+pre-acceptance refusal, with no new revision or receipt. HTTP 503 unconfirmed
+configuration is different: consult the request receipt and reconcile after
+storage recovers. Unsupported providers, pending output or timers without explicit
+loss permission, and unavailable initialization remain refused. Replacing storage is not data migration, and
+acceptance still does not promise that the replacement can become ready.
+
+### Explicit loss-authorized removal
+
+`DesiredInstance.retirement: Option<RecoveryRetirementAuthorization>` permits
+abandonment of pending obligations only when removing complete recovery domains.
+Set `allow_data_loss: true`, `from_revision` to the current configuration revision,
+and `resources`/`components` to the exact members of every changed domain.
+All named members must be absent from the new topology; connected unmanaged
+users, omitted members, extra members and in-place reuse are refused.
+The authorization requires a durable store and commits with the existing
+definition and idempotency receipt. The identical request remains retryable;
+carrying accepted permission forward grants no new authorization.
+
+The same actual storage gates and graph freeze remain mandatory. Permission
+relaxes pending-work checks and permits a previously failed processing operation
+on an actually stopped component, never failed cleanup or unhealthy transaction
+owners. A native consumer may abandon partial/unknown completion only after its
+actual delivery storage has successfully closed. Bootstrap stop and actual
+provider/progress identity requirements are unchanged.
+
+Accepted removal does not delete/reset journals, indexes, checkpoints or business
+state, acknowledge input, or undo external effects. Restart follows the accepted
+removed topology; explicitly restoring the original definition later can replay
+the intact work. There is no reset/reuse mode, migration, or permanent storage
+tombstone. Definite rejection resumes old owners; unknown acceptance retains
+the leases until authoritative resolution or terminal shutdown.
 
 ## Acceptance, realization and retries
 

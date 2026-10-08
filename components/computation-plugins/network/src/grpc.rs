@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use drasi_computation_plugin_sdk::Scope;
+use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use drasi_lib::computation::v1::{
     ComponentDescriptor, ComputationComponent, EnvelopeSink, EnvelopeSource, InputEnvelope,
     OutputEnvelope, SinkCompletion,
@@ -25,8 +25,11 @@ impl GrpcSource {
         descriptor: ComponentDescriptor,
         config: SourceConfig,
         scope: Option<&Scope>,
+        admission: Option<NativeAdmission>,
     ) -> Result<Self> {
-        Ok(Self(SourceRuntime::new(descriptor, config, scope)?))
+        Ok(Self(SourceRuntime::new(
+            descriptor, config, scope, admission,
+        )?))
     }
 }
 #[async_trait]
@@ -59,6 +62,11 @@ impl source::source_service_server::SourceService for SourceService {
         &self,
         request: Request<source::SubmitEventRequest>,
     ) -> std::result::Result<Response<source::SubmitEventResponse>, Status> {
+        if self.0.durable().is_some() {
+            return Err(Status::failed_precondition(
+                "durable source requires AdmissionService v1",
+            ));
+        }
         let _permit = self
             .0
             .request_permit()
@@ -98,6 +106,11 @@ impl source::source_service_server::SourceService for SourceService {
         &self,
         request: Request<tonic::Streaming<source::SourceChange>>,
     ) -> std::result::Result<Response<Self::StreamEventsStream>, Status> {
+        if self.0.durable().is_some() {
+            return Err(Status::failed_precondition(
+                "durable source requires AdmissionService v1",
+            ));
+        }
         if self.0.cancel.is_cancelled() {
             return Err(Status::unavailable("source stopped"));
         }
@@ -155,7 +168,12 @@ impl source::source_service_server::SourceService for SourceService {
         }
         Ok(Response::new(source::HealthCheckResponse {
             status: source::health_check_response::Status::Healthy as i32,
-            message: "Native volatile gRPC source is healthy".into(),
+            message: if self.0.durable().is_some() {
+                "Native durable gRPC source is healthy"
+            } else {
+                "Native volatile gRPC source is healthy"
+            }
+            .into(),
             version: env!("CARGO_PKG_VERSION").into(),
         }))
     }
@@ -165,9 +183,14 @@ async fn serve(listener: TcpListener, ingress: Arc<Ingress>) -> Result<()> {
     let service =
         source::source_service_server::SourceServiceServer::new(SourceService(ingress.clone()))
             .max_decoding_message_size(ingress.config.max_message_bytes);
+    let admission = crate::proto::admission::admission_service_server::AdmissionServiceServer::new(
+        crate::durable_grpc::AdmissionService(ingress.clone()),
+    )
+    .max_decoding_message_size(ingress.config.max_message_bytes);
     tonic::transport::Server::builder()
         .timeout(Duration::from_millis(ingress.config.timeout_ms))
         .add_service(service)
+        .add_service(admission)
         .serve_with_incoming_shutdown(
             tokio_stream::wrappers::TcpListenerStream::new(listener),
             cancel.cancelled_owned(),

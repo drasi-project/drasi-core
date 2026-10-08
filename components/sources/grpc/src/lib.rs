@@ -108,7 +108,7 @@ pub mod descriptor;
 mod tests;
 pub use config::GrpcSourceConfig;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
@@ -381,7 +381,8 @@ impl Source for GrpcSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        let task = tokio::spawn(
+        drasi_lib::context::workers::spawn_owned_worker(
+            &self.base.task_handle,
             async move {
                 reporter
                     .set_status(
@@ -406,15 +407,15 @@ impl Source for GrpcSource {
                 reporter.set_status(ComponentStatus::Stopped, None).await;
             }
             .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(task);
+        )
+        .await
+        .with_context(|| format!("gRPC source '{}' listener registration", self.base.id))?;
 
         // Spawn WAL pruning task if durability is enabled
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            let prune_handle = tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -437,8 +438,9 @@ impl Source for GrpcSource {
                         }
                     }
                 }
-            });
-            *self.prune_task.write().await = Some(prune_handle);
+            })
+            .await
+            .with_context(|| format!("gRPC source '{}' WAL pruner registration", self.base.id))?;
         }
 
         Ok(())
@@ -446,10 +448,15 @@ impl Source for GrpcSource {
 
     async fn stop(&self) -> Result<()> {
         log_component_stop("gRPC Source", &self.base.id);
-        // Cancel WAL pruning task
-        if let Some(handle) = self.prune_task.write().await.take() {
-            handle.abort();
+        if let Some(tx) = self.base.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
         }
+        drasi_lib::context::workers::cancel_owned_worker(
+            &mut *self.prune_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("gRPC source '{}' WAL pruning cleanup", self.base.id))?;
         self.base.stop_common().await
     }
 

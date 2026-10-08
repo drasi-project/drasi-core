@@ -20,6 +20,9 @@
 mod config;
 mod decoder;
 pub mod descriptor;
+#[cfg(test)]
+mod lifecycle_tests;
+pub mod native;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -28,16 +31,20 @@ mod types;
 pub use config::{MySqlSourceConfig, SslMode, StartPosition, TableKeyConfig};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc as StdArc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use log::{error, info, warn};
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, watch, Mutex, RwLock};
 use tracing::Instrument;
 
 use drasi_lib::channels::{ComponentStatus, DispatchMode};
+use drasi_lib::context::workers::{
+    join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned, WorkerCompletion,
+};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::{bootstrap::BootstrapProvider, channels::SubscriptionResponse};
@@ -48,7 +55,9 @@ use crate::types::ReplicationState;
 pub struct MySqlReplicationSource {
     base: SourceBase,
     config: MySqlSourceConfig,
-    shutdown: StdArc<AtomicBool>,
+    shutdown: watch::Sender<bool>,
+    cleanup_required: Mutex<bool>,
+    replication_task: RwLock<Option<tokio::task::JoinHandle<Result<()>>>>,
     /// Per-subscriber resume positions from checkpoint recovery.
     /// Populated during subscribe() when a query provides resume_from bytes.
     /// The replication stream uses the minimum position as its start point.
@@ -62,7 +71,9 @@ impl MySqlReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
-            shutdown: StdArc::new(AtomicBool::new(false)),
+            shutdown: watch::channel(false).0,
+            cleanup_required: Mutex::new(false),
+            replication_task: RwLock::new(None),
             subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -84,7 +95,9 @@ impl MySqlReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
-            shutdown: StdArc::new(AtomicBool::new(false)),
+            shutdown: watch::channel(false).0,
+            cleanup_required: Mutex::new(false),
+            replication_task: RwLock::new(None),
             subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -116,12 +129,25 @@ impl Source for MySqlReplicationSource {
     }
 
     async fn start(&self) -> Result<()> {
-        if self.base.get_status().await == ComponentStatus::Running {
-            return Ok(());
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.replication_task.read().await.is_some() {
+            let stopping = *self.shutdown.borrow();
+            if !stopping
+                && self.base.get_status().await == ComponentStatus::Running
+                && self
+                    .replication_task
+                    .read()
+                    .await
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+            {
+                return Ok(());
+            }
+            return Err(WorkerAlreadyOwned.into());
         }
-
+        *cleanup_required = true;
         self.base.set_status(ComponentStatus::Starting, None).await;
-        self.shutdown.store(false, Ordering::Relaxed);
+        self.shutdown.send_replace(false);
         self.base.reset_bootstrap_boundary();
         info!("Starting MySQL replication source: {}", self.base.id);
 
@@ -129,7 +155,7 @@ impl Source for MySqlReplicationSource {
         let source_id = self.base.id.clone();
         let base = self.base.clone_shared();
         let reporter = self.base.status_handle();
-        let shutdown = self.shutdown.clone();
+        let shutdown = self.shutdown.subscribe();
         let subscriber_resume_positions = self.subscriber_resume_positions.clone();
 
         let instance_id = self
@@ -147,7 +173,9 @@ impl Source for MySqlReplicationSource {
             component_type = "source"
         );
 
-        let task = tokio::spawn(
+        let (started, ready) = oneshot::channel();
+        spawn_owned_worker(
+            &self.replication_task,
             async move {
                 let mut stream = ReplicationStream::new(
                     config,
@@ -156,59 +184,75 @@ impl Source for MySqlReplicationSource {
                     shutdown,
                     subscriber_resume_positions,
                 );
-                if let Err(e) = stream.run().await {
-                    error!("Replication task failed for {source_id}: {e}");
+                match std::panic::AssertUnwindSafe(async {
                     reporter
                         .set_status(
-                            ComponentStatus::Error,
-                            Some(format!("Replication failed: {e}")),
+                            ComponentStatus::Running,
+                            Some("MySQL replication started".into()),
                         )
                         .await;
+                    if started.send(()).is_err() {
+                        log::debug!("MySQL startup caller left; replication remains owned");
+                    }
+                    stream.run().await
+                })
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => {
+                        if let Err(error) = &result {
+                            error!("Replication task failed for {source_id}: {error:#}");
+                            reporter
+                                .set_status(
+                                    ComponentStatus::Error,
+                                    Some(format!("Replication failed: {error:#}")),
+                                )
+                                .await;
+                        }
+                        result
+                    }
+                    Err(panic) => {
+                        reporter
+                            .set_status(
+                                ComponentStatus::Error,
+                                Some("MySQL replication task panicked".into()),
+                            )
+                            .await;
+                        std::panic::resume_unwind(panic)
+                    }
                 }
             }
             .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(task);
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("MySQL replication started".to_string()),
-            )
-            .await;
-
+        )
+        .await?;
+        ready
+            .await
+            .context("MySQL worker ended before startup completed")?;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        if self.base.get_status().await != ComponentStatus::Running {
-            return Ok(());
-        }
-
+        let mut cleanup_required = self.cleanup_required.lock().await;
         info!("Stopping MySQL replication source: {}", self.base.id);
 
+        self.shutdown.send_replace(true);
         self.base.set_status(ComponentStatus::Stopping, None).await;
-        self.shutdown.store(true, Ordering::Relaxed);
-
-        if let Some(task) = self.base.task_handle.write().await.take() {
-            task.abort();
+        match join_owned_worker_gracefully(
+            &mut *self.replication_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("MySQL '{}' replication cleanup", self.base.id))?
+        {
+            WorkerCompletion::Completed(result) => result.context("MySQL replication failed")?,
+            WorkerCompletion::Cancelled => {
+                anyhow::bail!("MySQL replication task was unexpectedly cancelled")
+            }
+            WorkerCompletion::Absent => {}
         }
-
-        // Clear stale dispatchers so a subsequent start()+subscribe() cycle
-        // does not dispatch events to dead receivers.
-        self.base.clear_dispatchers().await;
-
-        // Clear stale resume positions — they will be repopulated by subscribe()
-        // on the next lifecycle with fresh checkpoint data.
         self.subscriber_resume_positions.write().await.clear();
-
-        self.base
-            .set_status(
-                ComponentStatus::Stopped,
-                Some("MySQL replication stopped".to_string()),
-            )
-            .await;
-
+        self.base.stop_common().await?;
+        *cleanup_required = false;
         Ok(())
     }
 
@@ -270,6 +314,15 @@ impl Source for MySqlReplicationSource {
             .await
             .remove(query_id);
         self.base.remove_position_handle(query_id).await;
+    }
+}
+
+impl Drop for MySqlReplicationSource {
+    fn drop(&mut self) {
+        self.shutdown.send_replace(true);
+        if self.replication_task.get_mut().is_some() {
+            warn!("MySQL source dropped without awaited replication cleanup");
+        }
     }
 }
 
@@ -434,7 +487,9 @@ impl MySqlSourceBuilder {
         Ok(MySqlReplicationSource {
             base: SourceBase::new(params)?,
             config,
-            shutdown: StdArc::new(AtomicBool::new(false)),
+            shutdown: watch::channel(false).0,
+            cleanup_required: Mutex::new(false),
+            replication_task: RwLock::new(None),
             subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
         })
     }

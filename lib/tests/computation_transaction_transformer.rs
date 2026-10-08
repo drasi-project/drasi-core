@@ -376,6 +376,8 @@ struct Counts {
     rollbacks: AtomicUsize,
     fail_commit: AtomicBool,
     wait_after_commit: AtomicBool,
+    wait_before_commit: AtomicBool,
+    committing: Notify,
     committed: Notify,
 }
 struct CountSession {
@@ -390,6 +392,10 @@ impl SessionControl for CountSession {
     }
     async fn commit(&self) -> std::result::Result<(), IndexError> {
         self.counts.commits.fetch_add(1, Ordering::SeqCst);
+        if self.counts.wait_before_commit.swap(false, Ordering::AcqRel) {
+            self.counts.committing.notify_one();
+            std::future::pending::<()>().await;
+        }
         if self.counts.fail_commit.swap(false, Ordering::AcqRel) {
             return Err(IndexError::IOError);
         }
@@ -794,6 +800,280 @@ async fn failed_commit_rolls_back_but_cancelled_commit_confirmation_recovers_sav
     }
 }
 
+fn tracked_output_bindings(journal: u128) -> OutputBindings {
+    OutputBindings::try_new([OutputDestination {
+        output: port("out"),
+        consumer: id("sink"),
+        input: port("in"),
+        journal: uuid::Uuid::from_u128(journal),
+        subscriber: "sink".into(),
+    }])
+    .expect("output bindings")
+}
+
+#[tokio::test]
+async fn output_bindings_commit_with_the_existing_owner_and_resume_without_recomputation() {
+    for committed in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let probe = Arc::new(Probe::default());
+        let registry = registry(probe.clone());
+        let counts = Arc::new(Counts::default());
+        let provider: Arc<dyn ComputationIndexProvider> = Arc::new(CountProvider {
+            inner: provider(directory.path()),
+            counts: counts.clone(),
+        });
+        let bindings = tracked_output_bindings(1);
+        {
+            let mut subject = open(definition(), registry.clone(), provider.clone()).await;
+            if committed {
+                counts.wait_after_commit.store(true, Ordering::Release);
+                let mut binding = Box::pin(subject.bind_output_destinations(&bindings));
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::select! {
+                        _ = counts.committed.notified() => {},
+                        result = &mut binding => panic!("commit did not pause: {result:?}"),
+                    }
+                })
+                .await
+                .unwrap();
+                drop(binding);
+            } else {
+                counts.fail_commit.store(true, Ordering::Release);
+                assert!(subject.bind_output_destinations(&bindings).await.is_err());
+            }
+            assert!(subject.transform(input(1, 3)).await.is_err());
+            subject.stop().await.unwrap();
+        }
+        let indexes = provider
+            .create_indexes("transactions", "sequence")
+            .await
+            .unwrap();
+        let saved = indexes
+            .checkpoint_store()
+            .unwrap()
+            .read_checkpoint("\0computation:output-bindings:v1")
+            .await
+            .unwrap();
+        assert_eq!(saved.is_some(), committed);
+        if let Some(saved) = saved {
+            let record: serde_json::Value =
+                serde_json::from_slice(saved.source_position.as_ref().unwrap()).unwrap();
+            assert_eq!(
+                record["destinations"],
+                serde_json::to_value(bindings.destinations()).unwrap()
+            );
+        }
+        let owner = drasi_core::computation::ComputationTransaction::try_new(indexes).unwrap();
+        owner.shutdown().await.unwrap();
+        drop(owner);
+        let mut subject = open(definition(), registry.clone(), provider.clone()).await;
+        subject.bind_output_destinations(&bindings).await.unwrap();
+        let original = subject.transform(input(1, 3)).await.unwrap();
+        let calls = probe.trace.lock().unwrap().len();
+        subject.bind_output_destinations(&bindings).await.unwrap();
+        assert!(subject.has_pending_emissions());
+        let replay = subject.on_wakeup().await.unwrap();
+        assert_eq!(probe.trace.lock().unwrap().len(), calls);
+        assert_ne!(original[0].envelope.id(), replay[0].envelope.id());
+        assert_eq!(values(&replay[0].envelope, "first_count"), [1]);
+        subject.delivery_completed(&replay).await.unwrap();
+        subject
+            .bind_output_destinations(&tracked_output_bindings(2))
+            .await
+            .unwrap();
+        subject.stop().await.unwrap();
+    }
+}
+
+const BINDING_CRASH_ROOT: &str = "DRASI_OUTPUT_BINDING_CRASH_ROOT";
+const BINDING_CRASH_BEFORE: &str = "DRASI_OUTPUT_BINDING_CRASH_BEFORE";
+
+#[tokio::test]
+async fn output_bindings_cannot_disappear_from_committed_progress() {
+    const MEMBERSHIP: &str = "\0computation:output-bindings:v1";
+    const HEAD: &str = "\0computation:middleware-head:v1";
+    for corruption in [
+        "missing-membership",
+        "missing-fingerprint",
+        "changed-membership",
+        "changed-fingerprint",
+        "missing-progress",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = provider(directory.path());
+        let registry = registry(Arc::new(Probe::default()));
+        {
+            let mut subject = open(definition(), registry.clone(), provider.clone()).await;
+            subject
+                .bind_output_destinations(&tracked_output_bindings(1))
+                .await
+                .unwrap();
+            subject.transform(input(1, 3)).await.unwrap();
+            subject.stop().await.unwrap();
+        }
+        let indexes = provider
+            .create_indexes("transactions", "sequence")
+            .await
+            .unwrap();
+        let checkpoint = indexes.checkpoint_store().unwrap().clone();
+        let mut saved = checkpoint.read_all_checkpoints().await.unwrap();
+        assert_eq!(saved[HEAD].sequence, 1);
+        assert_eq!(saved[HEAD].source_position.as_ref().unwrap().len(), 32);
+        match corruption {
+            "missing-membership" => {
+                saved.remove(MEMBERSHIP);
+            }
+            "missing-progress" => {
+                saved.remove(HEAD);
+            }
+            "missing-fingerprint" => saved.get_mut(HEAD).unwrap().source_position = None,
+            "changed-fingerprint" => {
+                saved.get_mut(HEAD).unwrap().source_position = Some(Bytes::from_static(b"wrong"))
+            }
+            "changed-membership" => {
+                let record = saved.get_mut(MEMBERSHIP).unwrap();
+                let mut content: serde_json::Value =
+                    serde_json::from_slice(record.source_position.as_ref().unwrap()).unwrap();
+                content["destinations"][0]["consumer"] = "different".into();
+                record.source_position = Some(serde_json::to_vec(&content).unwrap().into());
+            }
+            _ => unreachable!(),
+        }
+        let owner = drasi_core::computation::ComputationTransaction::try_new(indexes).unwrap();
+        owner
+            .run(async {
+                checkpoint.clear_checkpoints().await?;
+                for (key, record) in &saved {
+                    checkpoint
+                        .stage_checkpoint(key, record.sequence, record.source_position.as_ref())
+                        .await?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        owner.shutdown().await.unwrap();
+        drop((owner, checkpoint));
+        let mut subject = TransactionTransformer::new(definition(), registry, provider.clone())
+            .await
+            .unwrap();
+        let error = subject.start().await.expect_err(corruption);
+        assert!(
+            error.chain().any(|cause| cause.is::<OutputBindingError>()),
+            "{corruption}: {error:#}"
+        );
+        subject.stop().await.unwrap();
+        drop(subject);
+        let indexes = provider
+            .create_indexes("transactions", "sequence")
+            .await
+            .unwrap();
+        let after = indexes
+            .checkpoint_store()
+            .unwrap()
+            .read_all_checkpoints()
+            .await
+            .unwrap();
+        assert_eq!(after.len(), saved.len(), "{corruption}");
+        for (key, record) in saved {
+            assert_eq!(after[&key].sequence, record.sequence, "{corruption}: {key}");
+            assert_eq!(
+                after[&key].source_position, record.source_position,
+                "{corruption}: {key}"
+            );
+        }
+        let owner = drasi_core::computation::ComputationTransaction::try_new(indexes).unwrap();
+        owner.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "invoked by output_bindings_survive_process_exit_with_pending_output"]
+async fn output_bindings_crash_child() {
+    let directory = std::path::PathBuf::from(std::env::var(BINDING_CRASH_ROOT).unwrap());
+    let before = std::env::var(BINDING_CRASH_BEFORE).unwrap() == "true";
+    let counts = Arc::new(Counts::default());
+    let provider: Arc<dyn ComputationIndexProvider> = Arc::new(CountProvider {
+        inner: provider(&directory),
+        counts: counts.clone(),
+    });
+    let mut subject = open(definition(), registry(Arc::new(Probe::default())), provider).await;
+    subject
+        .bind_output_destinations(&tracked_output_bindings(1))
+        .await
+        .unwrap();
+    if before {
+        counts.wait_before_commit.store(true, Ordering::Release);
+    } else {
+        counts.wait_after_commit.store(true, Ordering::Release);
+    }
+    let mut processing = Box::pin(subject.transform(input(1, 3)));
+    let reached = if before {
+        &counts.committing
+    } else {
+        &counts.committed
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            _ = reached.notified() => {},
+            result = &mut processing => panic!("commit did not pause: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    std::process::exit(75);
+}
+
+#[tokio::test]
+async fn output_bindings_survive_process_exit_with_pending_output() {
+    for before in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "output_bindings_crash_child", "--ignored", "--nocapture"])
+            .env(BINDING_CRASH_ROOT, directory.path())
+            .env(BINDING_CRASH_BEFORE, before.to_string())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!("output-binding crash child timed out: {output:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(75), "{output:?}");
+        let provider = provider(directory.path());
+        let probe = Arc::new(Probe::default());
+        let registry = registry(probe.clone());
+        let mut subject = open(definition(), registry, provider).await;
+        assert_eq!(subject.has_pending_emissions(), !before);
+        subject
+            .bind_output_destinations(&tracked_output_bindings(1))
+            .await
+            .unwrap();
+        let replay = if before {
+            subject.transform(input(1, 3)).await.unwrap()
+        } else {
+            let replay = subject.on_wakeup().await.unwrap();
+            assert!(probe.trace.lock().unwrap().is_empty());
+            replay
+        };
+        assert_eq!(values(&replay[0].envelope, "first_count"), [1]);
+        assert_eq!(values(&replay[0].envelope, "second_count"), [1]);
+        subject.delivery_completed(&replay).await.unwrap();
+        subject
+            .bind_output_destinations(&tracked_output_bindings(2))
+            .await
+            .unwrap();
+        subject.stop().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn expansion_and_filtering_stay_inside_the_same_transaction_batch() {
     for filter in [false, true] {
@@ -905,6 +1185,551 @@ async fn participating_implementation_remains_usable_as_an_ordinary_transformer(
 struct FiniteSource {
     descriptor: ComponentDescriptor,
     inputs: VecDeque<ChangeEnvelope>,
+}
+
+struct JournalSource {
+    descriptor: ComponentDescriptor,
+    store: Arc<IndexedEnvelopeStore>,
+    progress: Arc<QuerySourceProgress>,
+    position: u64,
+}
+
+#[async_trait]
+impl ComputationComponent for JournalSource {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn recovery_contract(&self) -> ComponentRecovery {
+        ComponentRecovery::admitted(self.store.durability())
+            .replay_until(self.progress.component_id().clone())
+    }
+    async fn start(&mut self) -> TestResult<()> {
+        self.position = 0;
+        Ok(())
+    }
+    async fn stop(&mut self) -> TestResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for JournalSource {
+    fn recovery_progress(&self) -> Option<Arc<QuerySourceProgress>> {
+        Some(self.progress.clone())
+    }
+    async fn next(&mut self) -> TestResult<Option<OutputEnvelope>> {
+        let Some(stored) = self
+            .store
+            .next(self.store.generation(), self.position)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.position = stored.position;
+        Ok(Some(OutputEnvelope {
+            port: port("out"),
+            envelope: stored.envelope,
+        }))
+    }
+}
+
+struct ReplayRelay {
+    descriptor: ComponentDescriptor,
+    stateless: bool,
+}
+
+#[async_trait]
+impl ComputationComponent for ReplayRelay {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn recovery_contract(&self) -> ComponentRecovery {
+        if self.stateless {
+            ComponentRecovery::stateless()
+        } else {
+            ComponentRecovery::default()
+        }
+    }
+    async fn start(&mut self) -> TestResult<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> TestResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Transformer for ReplayRelay {
+    async fn transform(&mut self, input: InputEnvelope) -> TestResult<Vec<OutputEnvelope>> {
+        Ok(vec![OutputEnvelope {
+            port: port("out"),
+            envelope: GraphChangeCodec::derive_changes(
+                &input.envelope,
+                &GraphChangeCodec::decode_changes(&input.envelope)?,
+                stream("relay/out"),
+                input.envelope.system().sequence(),
+            )?,
+        }])
+    }
+}
+
+async fn replay_contract_builder(
+    provider: Arc<dyn ComputationIndexProvider>,
+    store: Arc<IndexedEnvelopeStore>,
+    progress: Arc<QuerySourceProgress>,
+    stateless: bool,
+    mismatched_progress: bool,
+    probe: Arc<Probe>,
+    output: Arc<Mutex<Vec<ChangeEnvelope>>>,
+) -> GraphResult<ComputationGraphBuilder> {
+    let delivery_id = ResourceId::try_new("delivery")?;
+    let mut codec = EnvelopeCodec::new(size(64 * 1024 * 1024));
+    codec
+        .register_schema(GraphChangeCodec::schema())
+        .expect("schema");
+    let delivery = Arc::new(
+        IndexedEnvelopeStore::try_new(
+            provider
+                .create_indexes("transactions", "delivery")
+                .await
+                .expect("delivery indexes"),
+            Arc::new(codec),
+            "delivered-output",
+            size(2),
+            RetentionPolicy::Backpressure,
+        )
+        .expect("delivery store"),
+    );
+    let owner = TransactionTransformer::new(definition(), registry(probe), provider)
+        .await
+        .expect("real transaction")
+        .with_source_progress(progress.clone())
+        .expect("progress owner");
+    let supplied = if mismatched_progress {
+        Arc::new(QuerySourceProgress::new("transactions", id("sequence")).expect("same names"))
+    } else {
+        progress
+    };
+    let requirement = RecoveryRequirement {
+        consumer: id("sequence"),
+        scope: RecoveryScope::Failure(drasi_core::interface::FailureMode::ProcessRestart),
+        guarantees: [RecoveryGuarantee::Replay, RecoveryGuarantee::CommittedProcessing].into(),
+    };
+    Ok(ComputationGraph::builder("transactions")
+        .declare_resource(ResourceSpecification {
+            id: delivery_id.clone(),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Graph,
+            binding: "delivery".into(),
+        })?
+        .provide_resource(
+            delivery_id.clone(),
+            ResourceHandle::new(
+                ResourceRole::StateStore,
+                Arc::new(RetainedStoreResource(delivery.clone())),
+            )
+            .with_cleanup(delivery),
+        )?
+        .source(Box::new(JournalSource {
+            descriptor: ComponentDescriptor::try_new(
+                id("source"),
+                vec![PortDescriptor::new(
+                    port("out"),
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )],
+            )
+            .expect("source descriptor"),
+            store,
+            progress: supplied,
+            position: 0,
+        }))
+        .transformer(Box::new(ReplayRelay {
+            descriptor: descriptor(id("relay"), false),
+            stateless,
+        }))
+        .transformer(Box::new(owner))
+        .sink(Box::new(Collector {
+            descriptor: ComponentDescriptor::try_new(
+                id("sink"),
+                vec![PortDescriptor::new(
+                    port("in"),
+                    PortDirection::Input,
+                    GraphChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )],
+            )
+            .expect("sink descriptor"),
+            output,
+        }))
+        .bind_stream(endpoint("source", "out"), stream("source/out"))
+        .bind_stream(endpoint("relay", "out"), stream("relay/out"))
+        .bind_stream(endpoint("sequence", "out"), stream("sequence/out"))
+        .connect(
+            EdgeDefinition::new(endpoint("source", "out"), endpoint("relay", "in")),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint("relay", "out"), endpoint("sequence", "in")),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint("sequence", "out"), endpoint("sink", "in")),
+            Box::new(RetainedPipeConfig {
+                resource: delivery_id,
+                capacity: size(2),
+                durable: true,
+                retention: RetentionPolicy::Backpressure,
+                gap_policy: ReplayGapPolicy::Strict,
+            }),
+        )
+        .require_recovery(requirement))
+}
+
+async fn reopen_through_stateless_relay() {
+    let directory = tempfile::tempdir().expect("temp");
+    let probe = Arc::new(Probe::default());
+    let mut committed_change = None;
+    for iteration in 0..2 {
+        let provider = provider(directory.path());
+        let mut codec = EnvelopeCodec::new(size(64 * 1024 * 1024));
+        codec
+            .register_schema(GraphChangeCodec::schema())
+            .expect("schema");
+        let store = Arc::new(
+            IndexedEnvelopeStore::try_new(
+                provider
+                    .create_indexes("transactions", "admission")
+                    .await
+                    .expect("admission indexes"),
+                Arc::new(codec),
+                "accepted-input",
+                size(1),
+                RetentionPolicy::Backpressure,
+            )
+            .expect("journal"),
+        );
+        let generation = store.acquire_generation().expect("journal lease");
+        if iteration == 0 {
+            store
+                .append(generation, &input(1, 3).envelope)
+                .await
+                .expect("durable admission");
+        }
+        let progress =
+            Arc::new(QuerySourceProgress::new("transactions", id("sequence")).expect("progress"));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let mut graph = replay_contract_builder(
+            provider.clone(),
+            store.clone(),
+            progress.clone(),
+            true,
+            false,
+            probe.clone(),
+            output.clone(),
+        )
+        .await
+        .expect("builder")
+        .build()
+        .expect("verified stateless path");
+        let publication = graph
+            .recovery_report(&RecoveryRequirement {
+                consumer: id("sequence"),
+                scope: RecoveryScope::Failure(drasi_core::interface::FailureMode::ProcessRestart),
+                guarantees: [RecoveryGuarantee::Publication].into(),
+            })
+            .expect("publication assessment");
+        assert!(
+            publication.satisfied(),
+            "committed output has durable delivery"
+        );
+        graph
+            .start()
+            .expect("scope")
+            .await
+            .expect("processed graph");
+        assert_eq!(
+            probe.trace.lock().expect("trace").len(),
+            2,
+            "committed steps are not repeated"
+        );
+        {
+            let output = output.lock().expect("output");
+            assert_eq!(output.len(), 1);
+            assert_eq!(values(&output[0], "value"), [20]);
+            assert_eq!(
+                GraphProducerProgress::from_envelope(&output[0])
+                    .expect("logical output")
+                    .expect("producer")
+                    .sequence(),
+                1
+            );
+            if let Some(original) = &committed_change {
+                assert_eq!(
+                    output[0].changes().id(),
+                    original,
+                    "replay reuses committed output"
+                );
+            } else {
+                committed_change = Some(output[0].changes().id().clone());
+            }
+        }
+        assert_eq!(
+            progress.snapshot().checkpoints[&SourceProgressKey::Stream(stream("relay/out"))]
+                .sequence,
+            1,
+        );
+        assert!(store
+            .next(generation, 0)
+            .await
+            .expect("retained input")
+            .is_some());
+        graph.dispose().await.expect("dispose");
+        drop(graph);
+        store.shutdown().await.expect("release admission indexes");
+        drop(store);
+        drop(provider);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_atomic_progress_covers_a_stateless_relay_current_thread() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        reopen_through_stateless_relay(),
+    )
+    .await
+    .expect("replay path stalled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_atomic_progress_covers_a_stateless_relay_multi_thread() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        reopen_through_stateless_relay(),
+    )
+    .await
+    .expect("replay path stalled");
+}
+
+#[tokio::test]
+async fn publication_assertion_rejects_unbinding_its_output_before_mutation() {
+    let directory = tempfile::tempdir().expect("temp");
+    let provider = provider(directory.path());
+    let mut codec = EnvelopeCodec::new(size(64 * 1024 * 1024));
+    codec
+        .register_schema(GraphChangeCodec::schema())
+        .expect("schema");
+    let store = Arc::new(
+        IndexedEnvelopeStore::try_new(
+            provider
+                .create_indexes("transactions", "admission")
+                .await
+                .expect("admission indexes"),
+            Arc::new(codec),
+            "accepted-input",
+            size(1),
+            RetentionPolicy::Backpressure,
+        )
+        .expect("journal"),
+    );
+    let publication = RecoveryRequirement {
+        consumer: id("sequence"),
+        scope: RecoveryScope::Failure(drasi_core::interface::FailureMode::ProcessRestart),
+        guarantees: [RecoveryGuarantee::Publication].into(),
+    };
+    let output = EdgeDefinition::new(endpoint("sequence", "out"), endpoint("sink", "in"));
+    let mut graph = replay_contract_builder(
+        provider.clone(),
+        store.clone(),
+        Arc::new(QuerySourceProgress::new("transactions", id("sequence")).expect("progress")),
+        true,
+        false,
+        Arc::new(Probe::default()),
+        Arc::new(Mutex::new(Vec::new())),
+    )
+    .await
+    .expect("builder")
+    .relationship_policy(
+        output.clone(),
+        RelationshipPolicy {
+            required_for_binding: false,
+            orphan_permitted: true,
+            ..RelationshipPolicy::default()
+        },
+    )
+    .require_recovery(publication.clone())
+    .build()
+    .expect("verified publication");
+    let run = graph.run().expect("controller");
+    let control = run.control();
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::join!(run, async {
+            control.deployment_report().await.expect("deployment");
+            assert!(control
+                .recovery_report(publication)
+                .await
+                .expect("publication")
+                .satisfied());
+            let revision = control.desired_snapshot().revision;
+            let preview = control
+                .preview(
+                    revision,
+                    vec![DesiredMutation::Unbind {
+                        edge: output.clone(),
+                        policy: RemovalPolicy::Orphan,
+                    }],
+                )
+                .await
+                .expect("orphaning is structurally permitted");
+            let error = control
+                .reconcile(preview, TopologyBindings::default())
+                .await
+                .expect_err("publication must prevent losing its delivery boundary");
+            let GraphError::Recovery(error) = error else {
+                panic!("expected a typed recovery rejection: {error}");
+            };
+            assert!(error.issues.iter().any(|issue| {
+                issue.participant == RecoveryParticipant::Connection(output.clone())
+                    && issue.reason == RecoveryIncompatibility::MissingPublication
+            }));
+            assert_eq!(control.desired_snapshot().revision, revision);
+            assert!(control
+                .desired_snapshot()
+                .edges
+                .iter()
+                .any(|edge| edge.definition == output));
+            control.cancel();
+        })
+    })
+    .await
+    .expect("publication reconfiguration stalled");
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    graph.dispose().await.expect("dispose");
+    store.shutdown().await.expect("close admission indexes");
+}
+
+#[tokio::test]
+async fn stateful_intermediates_and_matching_progress_names_do_not_prove_recovery() {
+    let directory = tempfile::tempdir().expect("temp");
+    let provider = provider(directory.path());
+    for (stateless, mismatch, diamond, expected) in [
+        (
+            false,
+            false,
+            false,
+            RecoveryIncompatibility::UnknownProcessing,
+        ),
+        (
+            true,
+            true,
+            false,
+            RecoveryIncompatibility::MismatchedProgressResource,
+        ),
+        (
+            true,
+            false,
+            true,
+            RecoveryIncompatibility::AmbiguousReplayPath,
+        ),
+    ] {
+        let mut codec = EnvelopeCodec::new(size(64 * 1024 * 1024));
+        codec
+            .register_schema(GraphChangeCodec::schema())
+            .expect("schema");
+        let store = Arc::new(
+            IndexedEnvelopeStore::try_new(
+                provider
+                    .create_indexes("transactions", "admission")
+                    .await
+                    .expect("indexes"),
+                Arc::new(codec),
+                "accepted-input",
+                size(1),
+                RetentionPolicy::Backpressure,
+            )
+            .expect("journal"),
+        );
+        let progress =
+            Arc::new(QuerySourceProgress::new("transactions", id("sequence")).expect("progress"));
+        let mut builder = replay_contract_builder(
+            provider.clone(),
+            store.clone(),
+            progress,
+            stateless,
+            mismatch,
+            Arc::new(Probe::default()),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .await
+        .expect("builder");
+        if diamond {
+            builder = builder.connect(
+                EdgeDefinition::new(endpoint("source", "out"), endpoint("sequence", "in")),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            );
+        }
+        let Err(GraphError::Recovery(error)) = builder.build() else {
+            panic!("invalid progress path must be rejected");
+        };
+        assert!(error.issues.iter().any(|issue| issue.reason == expected));
+        store.shutdown().await.expect("release journal");
+    }
+}
+
+#[tokio::test]
+async fn another_branch_cannot_borrow_the_transaction_owners_checkpoint() {
+    let directory = tempfile::tempdir().expect("temp");
+    let provider = provider(directory.path());
+    let mut codec = EnvelopeCodec::new(size(64 * 1024 * 1024));
+    codec
+        .register_schema(GraphChangeCodec::schema())
+        .expect("schema");
+    let store = Arc::new(
+        IndexedEnvelopeStore::try_new(
+            provider
+                .create_indexes("transactions", "admission")
+                .await
+                .expect("indexes"),
+            Arc::new(codec),
+            "accepted-input",
+            size(1),
+            RetentionPolicy::Backpressure,
+        )
+        .expect("journal"),
+    );
+    let progress =
+        Arc::new(QuerySourceProgress::new("transactions", id("sequence")).expect("progress"));
+    let direct = EdgeDefinition::new(endpoint("source", "out"), endpoint("sink", "in"));
+    let mut graph = replay_contract_builder(
+        provider.clone(),
+        store.clone(),
+        progress,
+        true,
+        false,
+        Arc::new(Probe::default()),
+        Arc::new(Mutex::new(Vec::new())),
+    )
+    .await
+    .expect("builder")
+    .connect(direct.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
+    .build()
+    .expect("transaction branch remains supported");
+    let report = graph
+        .recovery_report(&RecoveryRequirement {
+            consumer: id("sink"),
+            scope: RecoveryScope::Failure(drasi_core::interface::FailureMode::ProcessRestart),
+            guarantees: [RecoveryGuarantee::Replay].into(),
+        })
+        .expect("combined path");
+    assert!(report.issues.iter().any(|issue| {
+        issue.participant == RecoveryParticipant::Connection(direct.clone())
+            && issue.reason == RecoveryIncompatibility::MissingReplayBoundary
+    }));
+    graph.dispose().await.expect("dispose");
+    drop(graph);
+    store.shutdown().await.expect("journal cleanup");
 }
 #[async_trait]
 impl ComputationComponent for FiniteSource {

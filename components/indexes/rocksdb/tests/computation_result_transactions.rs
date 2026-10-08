@@ -21,7 +21,9 @@ use bytes::Bytes;
 use drasi_core::{
     computation::{
         AtomicResultTransaction, ComputationIndexProvider, ComputationIndexes, ComputationQuery,
-        ComputationQueryError, ComputationResource, TransactionDomain,
+        ComputationQueryError, ComputationResource, ComputationTransaction,
+        ComputationTransactionGroup, TransactionDomain, TransactionGroupContext,
+        TransactionGroupMutation,
     },
     evaluation::{
         context::QueryPartEvaluationContext,
@@ -43,6 +45,9 @@ use drasi_query_cypher::CypherParser;
 use serde_json::json;
 
 const QUERY: &str = "people";
+
+#[path = "computation_result_transactions/source_transactions.rs"]
+mod source_transactions;
 
 struct Fixture {
     query: ComputationQuery,
@@ -68,6 +73,577 @@ async fn resources(path: &Path, graph: &str) -> ComputationIndexes {
         .create_indexes(graph, QUERY)
         .await
         .expect("graph-owned indexes")
+}
+
+#[tokio::test]
+async fn constructed_durability_does_not_upgrade_transaction_participation() {
+    use drasi_core::interface::{FailureMode, StorageDurability};
+    let directory = tempfile::tempdir().expect("directory");
+    let provider = provider(directory.path());
+    assert_eq!(
+        provider.durability(),
+        StorageDurability::LOCAL_PROCESS_RESTART
+    );
+    let resources = provider
+        .create_indexes("durability", QUERY)
+        .await
+        .expect("resources");
+    assert_eq!(resources.durability(), provider.durability());
+    assert!(resources
+        .durability()
+        .require(FailureMode::ProcessRestart)
+        .is_ok());
+    assert!(resources
+        .durability()
+        .require(FailureMode::PowerLoss)
+        .is_err());
+    let independent = rebind_resources(
+        &resources,
+        resources.indexes().session_control.clone(),
+        false,
+    );
+    assert_eq!(independent.durability(), StorageDurability::UNKNOWN);
+    let independent = independent.with_durability(provider.durability());
+    assert!(independent.atomic_result_transaction().is_err());
+    resources
+        .cleanup()
+        .expect("owner")
+        .shutdown()
+        .await
+        .expect("shutdown");
+}
+
+enum GroupAppendOutcome {
+    Commit,
+    Reject,
+    ExitBeforeCommit,
+    ExitAfterCommit,
+}
+
+struct GroupJournalAppend {
+    journal: std::sync::Weak<ComputationTransaction>,
+    visible: Arc<std::sync::atomic::AtomicUsize>,
+    outcome: GroupAppendOutcome,
+}
+
+#[async_trait]
+impl TransactionGroupMutation for GroupJournalAppend {
+    async fn stage(&mut self, context: &TransactionGroupContext<'_>) -> Result<(), IndexError> {
+        let journal = self.journal.upgrade().ok_or(IndexError::NotSupported)?;
+        context
+            .require_member(&journal)
+            .map_err(IndexError::other)?;
+        journal
+            .resources()
+            .outbox_writer()
+            .expect("journal")
+            .append("pipe-output", 1, b"pending")
+            .await?;
+        match self.outcome {
+            GroupAppendOutcome::Reject => Err(IndexError::IOError),
+            GroupAppendOutcome::ExitBeforeCommit => std::process::exit(76),
+            _ => Ok(()),
+        }
+    }
+
+    async fn committed(&mut self) -> Result<(), IndexError> {
+        if matches!(self.outcome, GroupAppendOutcome::ExitAfterCommit) {
+            std::process::exit(76);
+        }
+        self.visible
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn shared_group_preserves_atomic_output_and_independent_member_lifetimes() {
+    let directory = tempfile::tempdir().expect("directory");
+    {
+        let group =
+            ComputationTransactionGroup::try_new(resources(directory.path(), "shared").await)
+                .expect("shared group");
+        let journal = Arc::new(group.journal_transaction("output").expect("journal"));
+        let visible = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mutation = |outcome| -> Box<dyn TransactionGroupMutation> {
+            Box::new(GroupJournalAppend {
+                journal: Arc::downgrade(&journal),
+                visible: visible.clone(),
+                outcome,
+            })
+        };
+        let pipe = journal
+            .resources()
+            .outbox_writer()
+            .expect("pipe outbox")
+            .clone();
+        let fixture = from_resources(
+            group.processor_indexes().expect("processor"),
+            "MATCH (n:Person) RETURN n.name AS name",
+        )
+        .await;
+        let rejected = fixture
+            .query
+            .process_source_changes_with_transaction_group(
+                vec![person("alice")],
+                &fixture.transaction,
+                |result| {
+                    let fixture = &fixture;
+                    let mutation = mutation(GroupAppendOutcome::Reject);
+                    async move {
+                        stage(fixture, 1, result[0].row_signature()).await?;
+                        Ok(vec![mutation])
+                    }
+                },
+            )
+            .await;
+        assert!(rejected.is_err());
+        assert!(!group.recovery_required());
+        assert_eq!(visible.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_empty_committed_output(&fixture).await;
+        assert!(pipe
+            .read_from("pipe-output", 0)
+            .await
+            .expect("rolled back pipe")
+            .is_empty());
+        let result = fixture
+            .query
+            .process_source_changes_with_transaction_group(
+                vec![person("alice")],
+                &fixture.transaction,
+                |result| {
+                    let fixture = &fixture;
+                    let mutation = mutation(GroupAppendOutcome::Commit);
+                    async move {
+                        stage(fixture, 1, result[0].row_signature()).await?;
+                        Ok(vec![mutation])
+                    }
+                },
+            )
+            .await
+            .expect("shared commit");
+        assert!(matches!(
+            result.as_ref(),
+            [QueryPartEvaluationContext::Adding { .. }]
+        ));
+        assert_eq!(visible.load(std::sync::atomic::Ordering::SeqCst), 1);
+        fixture.query.shutdown().await.expect("stop producer only");
+        drop(fixture);
+        journal
+            .run(async {
+                pipe.append("pipe-handled", 1, b"handled").await?;
+                Ok(())
+            })
+            .await
+            .expect("journal drains after producer stop");
+        let replacement = from_resources(
+            group.processor_indexes().expect("replacement"),
+            "MATCH (n:Person) RETURN n.name AS name",
+        )
+        .await;
+        assert_eq!(
+            replacement
+                .checkpoint
+                .read_result_sequence(QUERY)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            pipe.read_from("pipe-output", 0).await.unwrap(),
+            [(1, b"pending".to_vec())]
+        );
+        replacement
+            .query
+            .shutdown()
+            .await
+            .expect("stop replacement");
+        journal.shutdown().await.expect("stop journal only");
+        group.shutdown().await.expect("stop storage owner");
+    }
+    let group =
+        ComputationTransactionGroup::try_new(resources(directory.path(), "shared").await).unwrap();
+    let reopened = ComputationTransaction::try_new(group.processor_indexes().unwrap()).unwrap();
+    let journal = group.journal_transaction("output").unwrap();
+    assert_eq!(
+        reopened
+            .resources()
+            .checkpoint_store()
+            .unwrap()
+            .read_result_sequence(QUERY)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let outbox = reopened.resources().outbox_writer().unwrap();
+    let pipe = journal.resources().outbox_writer().unwrap();
+    for (writer, key, value) in [
+        (outbox, QUERY, b"output".as_slice()),
+        (pipe, "pipe-output", b"pending"),
+        (pipe, "pipe-handled", b"handled"),
+    ] {
+        assert_eq!(
+            writer.read_from(key, 0).await.unwrap(),
+            [(1, value.to_vec())]
+        );
+    }
+    reopened.shutdown().await.unwrap();
+    journal.shutdown().await.unwrap();
+    group.shutdown().await.unwrap();
+}
+
+const GROUP_CRASH_ROOT: &str = "DRASI_TRANSACTION_GROUP_CRASH_ROOT";
+const GROUP_CRASH_AFTER: &str = "DRASI_TRANSACTION_GROUP_CRASH_AFTER";
+
+#[tokio::test]
+async fn shared_group_journals_survive_processor_clear_without_cross_member_eviction() {
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let group = ComputationTransactionGroup::try_new(
+            resources(directory.path(), "group-namespaces").await,
+        )
+        .unwrap();
+        let processor =
+            ComputationTransaction::try_new(group.processor_indexes().unwrap()).unwrap();
+        let first = group.journal_transaction("a").unwrap();
+        let second = group.journal_transaction("a_b").unwrap();
+        for (member, value) in [
+            (&processor, b"producer".as_slice()),
+            (&first, b"first"),
+            (&second, b"second"),
+        ] {
+            member
+                .run(async {
+                    let outbox = member.resources().outbox_writer().unwrap();
+                    outbox.append("same", 1, value).await?;
+                    outbox.append("metadata", 1, b"metadata").await?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let producer_output = processor.resources().outbox_writer().unwrap();
+        processor
+            .run(async {
+                producer_output.clear("same").await?;
+                producer_output.clear("metadata").await?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        processor
+            .resources()
+            .checkpoint_store()
+            .unwrap()
+            .clear_checkpoints()
+            .await
+            .unwrap();
+        let output = first.resources().outbox_writer().unwrap();
+        assert_eq!(output.read_latest_sequence("same").await.unwrap(), Some(1));
+        for (member, value) in [(&first, b"first".as_slice()), (&second, b"second")] {
+            assert_eq!(
+                member
+                    .resources()
+                    .outbox_writer()
+                    .unwrap()
+                    .read_from("same", 0)
+                    .await
+                    .unwrap(),
+                [(1, value.to_vec())]
+            );
+        }
+        first
+            .run(async {
+                output.append("same", 2, b"two").await?;
+                assert_eq!(output.append_and_trim("same", 3, b"three", 2).await?, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let failed: Result<(), ComputationQueryError> = first
+            .run(async {
+                assert_eq!(output.trim_before("same", 3).await?, 1);
+                Err(IndexError::IOError.into())
+            })
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(
+            output.read_from("same", 0).await.unwrap(),
+            [(2, b"two".to_vec()), (3, b"three".to_vec())]
+        );
+        first
+            .run(async {
+                assert_eq!(output.trim_to_capacity("same", 1).await?, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            output.read_from("same", 2).await.unwrap(),
+            [(3, b"three".to_vec())]
+        );
+        assert_eq!(output.read_latest_sequence("same").await.unwrap(), Some(3));
+        processor.shutdown().await.unwrap();
+        first.shutdown().await.unwrap();
+        second.shutdown().await.unwrap();
+        group.shutdown().await.unwrap();
+    }
+    let group =
+        ComputationTransactionGroup::try_new(resources(directory.path(), "group-namespaces").await)
+            .unwrap();
+    let processor = ComputationTransaction::try_new(group.processor_indexes().unwrap()).unwrap();
+    assert!(processor
+        .resources()
+        .outbox_writer()
+        .unwrap()
+        .read_from("same", 0)
+        .await
+        .unwrap()
+        .is_empty());
+    for (name, position, value) in [("a", 3, b"three".as_slice()), ("a_b", 1, b"second")] {
+        let journal = group.journal_transaction(name).unwrap();
+        let output = journal.resources().outbox_writer().unwrap();
+        assert_eq!(
+            output.read_from("same", 0).await.unwrap(),
+            [(position, value.to_vec())]
+        );
+        assert_eq!(
+            output.read_from("metadata", 0).await.unwrap(),
+            [(1, b"metadata".to_vec())]
+        );
+        journal.shutdown().await.unwrap();
+    }
+    processor.shutdown().await.unwrap();
+    group.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_group_scheduled_output_rolls_back_and_preserves_source_provenance() {
+    let directory = tempfile::tempdir().unwrap();
+    let group =
+        ComputationTransactionGroup::try_new(resources(directory.path(), "group-future").await)
+            .unwrap();
+    let journal = Arc::new(group.journal_transaction("output").unwrap());
+    let visible = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pipe = journal.resources().outbox_writer().unwrap();
+    let fixture = from_resources(
+        group.processor_indexes().unwrap(),
+        "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
+    )
+    .await;
+    assert!(fixture
+        .query
+        .process_source_change(person("alice"))
+        .await
+        .unwrap()
+        .is_empty());
+    let foreign = journal.resources().atomic_result_transaction().unwrap();
+    assert!(matches!(
+        fixture
+            .query
+            .process_due_futures_with_transaction_group(&foreign, |_| async {
+                panic!("another member's proof must not evaluate or call the hook")
+            })
+            .await,
+        Err(ComputationQueryError::TransactionMismatch)
+    ));
+    for outcome in [GroupAppendOutcome::Reject, GroupAppendOutcome::Commit] {
+        let reject = matches!(outcome, GroupAppendOutcome::Reject);
+        let mutation: Box<dyn TransactionGroupMutation> = Box::new(GroupJournalAppend {
+            journal: Arc::downgrade(&journal),
+            visible: visible.clone(),
+            outcome,
+        });
+        let result = fixture
+            .query
+            .process_due_futures_with_transaction_group(&fixture.transaction, |result| {
+                let fixture = &fixture;
+                async move {
+                    assert_eq!(result.source_id.as_ref(), "source");
+                    stage(fixture, 1, result.results[0].row_signature()).await?;
+                    Ok(vec![mutation])
+                }
+            })
+            .await;
+        if reject {
+            assert!(matches!(
+                result,
+                Err(ComputationQueryError::Index(IndexError::IOError))
+            ));
+            assert!(!group.recovery_required());
+            assert_empty_committed_output(&fixture).await;
+            assert!(pipe.read_from("pipe-output", 0).await.unwrap().is_empty());
+            assert_eq!(
+                fixture
+                    .query
+                    .resources()
+                    .indexes()
+                    .future_queue
+                    .peek_due_time()
+                    .await
+                    .unwrap(),
+                Some(2000)
+            );
+            assert_eq!(visible.load(std::sync::atomic::Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(result.unwrap().unwrap().source_id.as_ref(), "source");
+            assert_eq!(
+                pipe.read_from("pipe-output", 0).await.unwrap(),
+                [(1, b"pending".to_vec())]
+            );
+            assert_eq!(visible.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+    assert!(fixture
+        .query
+        .process_due_futures_with_transaction_group(&fixture.transaction, |_| async {
+            panic!("an empty queue cannot invoke the hook")
+        })
+        .await
+        .unwrap()
+        .is_none());
+    fixture.query.shutdown().await.unwrap();
+    journal.shutdown().await.unwrap();
+    group.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "explicit child of shared_group_recovers_atomic_output_after_process_exit"]
+async fn shared_group_crash_child() {
+    let directory = std::path::PathBuf::from(std::env::var(GROUP_CRASH_ROOT).unwrap());
+    let outcome = match std::env::var(GROUP_CRASH_AFTER).unwrap().as_str() {
+        "true" => GroupAppendOutcome::ExitAfterCommit,
+        "false" => GroupAppendOutcome::ExitBeforeCommit,
+        value => panic!("invalid crash boundary: {value}"),
+    };
+    let group =
+        ComputationTransactionGroup::try_new(resources(&directory, "group-crash").await).unwrap();
+    let journal = Arc::new(group.journal_transaction("output").unwrap());
+    let fixture = from_resources(
+        group.processor_indexes().unwrap(),
+        "MATCH (n:Person) RETURN n.name AS name",
+    )
+    .await;
+    let mutation: Box<dyn TransactionGroupMutation> = Box::new(GroupJournalAppend {
+        journal: Arc::downgrade(&journal),
+        visible: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        outcome,
+    });
+    fixture
+        .query
+        .process_source_changes_with_transaction_group(
+            vec![person("alice")],
+            &fixture.transaction,
+            |result| {
+                let fixture = &fixture;
+                async move {
+                    stage(fixture, 1, result[0].row_signature()).await?;
+                    Ok(vec![mutation])
+                }
+            },
+        )
+        .await
+        .unwrap();
+    panic!("the child must exit at the requested transaction boundary");
+}
+
+#[tokio::test]
+async fn shared_group_recovers_atomic_output_after_process_exit() {
+    for committed in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "shared_group_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(GROUP_CRASH_ROOT, directory.path())
+            .env(GROUP_CRASH_AFTER, committed.to_string())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!("shared transaction child timed out: {output:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(76), "{output:?}");
+        let group =
+            ComputationTransactionGroup::try_new(resources(directory.path(), "group-crash").await)
+                .unwrap();
+        let journal = group.journal_transaction("output").unwrap();
+        let fixture = from_resources(
+            group.processor_indexes().unwrap(),
+            "MATCH (n:Person) RETURN n.name AS name",
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .checkpoint
+                .read_result_sequence(QUERY)
+                .await
+                .unwrap(),
+            committed.then_some(1)
+        );
+        let progress = fixture.checkpoint.read_checkpoint("source").await.unwrap();
+        assert_eq!(
+            progress.as_ref().map(|value| value.sequence),
+            committed.then_some(1)
+        );
+        if let Some(progress) = progress {
+            assert_eq!(
+                progress.source_position,
+                Some(Bytes::from_static(b"position"))
+            );
+        }
+        for (writer, key, value) in [
+            (&fixture.outbox, QUERY, b"output".as_slice()),
+            (
+                journal.resources().outbox_writer().unwrap(),
+                "pipe-output",
+                b"pending",
+            ),
+        ] {
+            assert_eq!(
+                writer.read_from(key, 0).await.unwrap(),
+                if committed {
+                    vec![(1, value.to_vec())]
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+        let live = fixture.live.read_snapshot(QUERY).await.unwrap();
+        assert_eq!(live.len(), usize::from(committed));
+        fixture
+            .query
+            .resource_transaction(|| async {
+                assert_eq!(
+                    fixture
+                        .query
+                        .resources()
+                        .indexes()
+                        .element_index
+                        .get_element(&ElementReference::new("source", "alice"))
+                        .await?
+                        .is_some(),
+                    committed
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        fixture.query.shutdown().await.unwrap();
+        journal.shutdown().await.unwrap();
+        group.shutdown().await.unwrap();
+    }
 }
 
 async fn fixture(path: &Path, graph: &str, query: &str) -> Fixture {

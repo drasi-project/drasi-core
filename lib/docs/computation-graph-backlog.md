@@ -16,6 +16,11 @@ configure, restart, and operate confidently. A demonstration, an embedded-only
 application, or a deliberately nonpersistent pipeline can reasonably choose a
 smaller scope.
 
+For the proposed work specifically addressing resilience, see the
+[opt-in resilience and recovery plan](computation-graph-reliability-plan.md).
+It groups the relevant backlog items into nine work packages while preserving a
+fast in-memory path and making stronger guarantees primarily pipe/provider choices.
+
 ## How to read the ratings
 
 | Rating | Meaning |
@@ -367,10 +372,12 @@ status timing; this finding alone does not establish lost query data.
 
 **Priority: P1. Complexity: High. Disruption risk: High.**
 
-**What happens now:** When a state-store provider fails or panics while listing
-keys, the host bridge returns an empty array. The receiving plugin treats that
-array as a successful result. "The store has no keys" and "we could not read the
-store" become indistinguishable.
+**Current status (2026-10-04):** The listing defect is fixed in the working tree.
+Legacy ABI 0.16 returns an explicit result, and the plugin reads the output array
+only on success. Provider failures and panics remain errors; empty stores still
+return a successful empty list. Old or unversioned libraries are rejected before
+initialization. Storage durability descriptions and the broader provider
+ownership contract remain unfinished.
 
 **Why it matters and what completion means:** A caller must be able to stop,
 report the failure, or retry instead of making decisions on a false empty result.
@@ -393,10 +400,14 @@ are swallowed.
 
 **Priority: P1 where bootstrap uses those values. Complexity: Medium. Disruption risk: High.**
 
-**What happens now:** The bootstrap plugin proxies accept subscription settings
-but do not forward them. They also send server/source identifiers without the
-complete bootstrap context properties. A plugin does not receive all the
-information its caller supplied.
+**Current status (2026-10-04):** Legacy ABI 0.16 forwards subscription settings
+and runtime context properties through both proxies. Non-default labels, optional
+source positions, resume sequence zero and properties have regression coverage;
+the real mock-source library also preserves bootstrap subscription settings.
+Malformed settings fail rather than becoming defaults. Bootstrap provider proxy
+ownership is released when the proxy is dropped. Sequence counters remain
+provider-local across FFI, and full snapshot/live/restart handover is still W4 of
+the [reliability plan](computation-graph-reliability-plan.md).
 
 **Why it matters and what completion means:** A bootstrap provider that relies on
 those values cannot reliably perform the requested initial load. Forward the
@@ -767,6 +778,14 @@ for source, transformer and sink. Both Tokio runtime flavors check exact values,
 ordering, lineage, lifecycle calls and release of all three component instances.
 This is 1,024 connected pipeline combinations, not a sustained leak measurement.
 
+**Resilience implementation progress:** Ready sources and repeated continuations
+now yield to control work, and slow construction cannot drain commands into an
+unbounded side queue. New tests on both Tokio flavors cover nested stop during
+startup and during propagated failure cleanup, checking that the existing cleanup
+owner is not interrupted or called twice. Ordinary removal also uses a coherent,
+generation-fenced mutation rather than racing unrelated graph revisions.
+The broader worker/socket accounting and recovery combinations remain open.
+
 ### CG-22: Test delivery rules under corruption, disconnection, and heavy load
 
 **Priority: P1 for delivery correctness; larger capacity measurements are P2.
@@ -866,6 +885,12 @@ changes found necessary belong to the relevant implementation item.
 
 **Where/evidence:** Ledger **A01, A04, A05**. Keeping a loaded library resident for
 the process lifetime is intentional and must not itself be reported as a leak.
+
+**Resilience implementation progress:** Real libraries now check legacy ABI 0.16
+bootstrap settings/properties and provider release, and reject absent, null or
+old metadata before initialization. Storage-list failures stay errors, including
+provider panics. Server's mixed-ABI suites use the rebuilt libraries. This does
+not qualify late lifecycle callbacks or the unfinished shared recovery services.
 
 ### CG-26: Qualify the Server APIs and test infrastructure
 

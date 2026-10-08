@@ -186,6 +186,52 @@ pub struct StopReport {
     pub components: BTreeMap<ComponentId, StopOutcome>,
 }
 
+/// A lifecycle request completed with unsuccessful members. The complete report
+/// retains every member's outcome; the source chain follows its first failure.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum LifecycleReportError {
+    Start(StartReport),
+    Stop(StopReport),
+    Reconciliation(super::ReconciliationReport),
+}
+
+impl std::fmt::Display for LifecycleReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Start(report) => write!(f, "native activation failed: {:?}", report.components),
+            Self::Stop(report) => write!(f, "native stop failed: {:?}", report.components),
+            Self::Reconciliation(_) => write!(
+                f,
+                "one or more components failed; inspect graph observations"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LifecycleReportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        let failure = match self {
+            Self::Start(report) => report
+                .components
+                .values()
+                .find_map(|outcome| match outcome {
+                    StartOutcome::StartFailed(failure) => Some(failure),
+                    _ => None,
+                }),
+            Self::Stop(report) => report
+                .components
+                .values()
+                .find_map(|outcome| match outcome {
+                    StopOutcome::StopFailed(failure) => Some(failure),
+                    _ => None,
+                }),
+            Self::Reconciliation(report) => report.failures.first(),
+        };
+        failure.map(|failure| failure.cause.as_ref() as &(dyn std::error::Error + 'static))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObservedGraph {
     pub revision: GraphRevision,

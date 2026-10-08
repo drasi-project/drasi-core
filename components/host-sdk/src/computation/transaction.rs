@@ -21,6 +21,11 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+#[async_trait::async_trait]
+pub(super) trait RequestHandler: Sync {
+    async fn apply(&self, code: u32, input: &[u8]) -> anyhow::Result<Vec<u8>>;
+}
+
 const REQUEST_CAPACITY: usize = 16;
 struct Request {
     code: u32,
@@ -33,13 +38,15 @@ struct State {
     failed: AtomicBool,
     outstanding: AtomicUsize,
     requests: mpsc::Sender<Request>,
+    codes: std::ops::RangeInclusive<u32>,
+    limit: usize,
 }
-struct StepScope {
+pub(super) struct RequestScope {
     state: Arc<State>,
     requests: mpsc::Receiver<Request>,
 }
-impl StepScope {
-    fn new() -> Self {
+impl RequestScope {
+    pub(super) fn new(codes: std::ops::RangeInclusive<u32>, limit: usize) -> Self {
         let (send, receive) = mpsc::channel(REQUEST_CAPACITY);
         Self {
             state: Arc::new(State {
@@ -48,11 +55,13 @@ impl StepScope {
                 failed: AtomicBool::new(false),
                 outstanding: AtomicUsize::new(0),
                 requests: send,
+                codes,
+                limit,
             }),
             requests: receive,
         }
     }
-    fn table(&self) -> abi::Transaction {
+    pub(super) fn table(&self) -> abi::Transaction {
         abi::Transaction {
             header: abi::Header::new::<abi::Transaction>(),
             context: Arc::as_ptr(&self.state).cast_mut().cast(),
@@ -61,7 +70,7 @@ impl StepScope {
             request: Some(request),
         }
     }
-    fn revoke(&mut self) {
+    pub(super) fn revoke(&mut self) {
         let admission = self
             .state
             .admission
@@ -74,18 +83,15 @@ impl StepScope {
             let _ = request.response.send(Err(Failure::closed()));
         }
     }
-    async fn serve(
-        &mut self,
-        context: &TransactionContext<'_>,
-        codec: &BinaryEnvelopeCodec,
-    ) -> anyhow::Result<()> {
+    pub(super) async fn serve(&mut self, handler: &dyn RequestHandler) -> anyhow::Result<()> {
         while let Some(request) = self.requests.recv().await {
             if request.response.is_closed() || !self.state.active.load(Ordering::Acquire) {
                 self.state.failed.store(true, Ordering::Release);
                 let _ = request.response.send(Err(Failure::cancelled()));
                 continue;
             }
-            let result = apply(context, codec, request.code, &request.input)
+            let result = handler
+                .apply(request.code, &request.input)
                 .await
                 .map_err(Failure::from);
             if result.is_err() {
@@ -95,10 +101,19 @@ impl StepScope {
                 self.state.failed.store(true, Ordering::Release);
             }
         }
-        anyhow::bail!("native transaction request scope closed while the participant was running")
+        anyhow::bail!("native request scope closed while its operation was running")
+    }
+    pub(super) fn finish(&mut self) -> anyhow::Result<()> {
+        self.revoke();
+        anyhow::ensure!(
+            !self.state.failed.load(Ordering::Acquire)
+                && self.state.outstanding.load(Ordering::Acquire) == 0,
+            "native operation completed with failed, cancelled or unfinished state requests"
+        );
+        Ok(())
     }
 }
-impl Drop for StepScope {
+impl Drop for RequestScope {
     fn drop(&mut self) {
         self.revoke();
     }
@@ -129,27 +144,27 @@ unsafe extern "C" fn request(
     out: *mut abi::OperationHandle,
 ) -> abi::Status {
     transport::status_boundary(|| {
-        if out.is_null() {
+        if out.is_null() || context.is_null() {
             return Err(Failure::protocol(
-                "null native transaction operation output",
+                "null native state request context or output",
             ));
         }
         let state = unsafe { &*context.cast::<State>() };
         let admission = state.admission.lock().map_err(|_| {
             state.failed.store(true, Ordering::Release);
-            Failure::failed("native transaction admission poisoned")
+            Failure::failed("native state request admission poisoned")
         })?;
         if !state.active.load(Ordering::Acquire) {
             return Err(Failure::closed());
         }
-        if !(abi::transaction::GET..=abi::transaction::DERIVE).contains(&code) {
+        if !state.codes.contains(&code) {
             state.failed.store(true, Ordering::Release);
             return Err(Failure::new(
                 abi::status::UNSUPPORTED,
-                "unsupported transaction state request",
+                "unsupported scoped state request",
             ));
         }
-        let input = unsafe { transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES) }
+        let input = unsafe { transport::borrowed_bytes(input, state.limit) }
             .inspect_err(|_| state.failed.store(true, Ordering::Release))?
             .to_vec();
         unsafe { Arc::increment_strong_count(context.cast::<State>()) };
@@ -169,10 +184,9 @@ unsafe extern "C" fn request(
                 response,
             })
             .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => Failure::new(
-                    abi::status::BUSY,
-                    "native transaction request capacity exceeded",
-                ),
+                mpsc::error::TrySendError::Full(_) => {
+                    Failure::new(abi::status::BUSY, "native state request capacity exceeded")
+                }
                 mpsc::error::TrySendError::Closed(_) => Failure::closed(),
             })?;
         let operation = transport::export_operation(
@@ -195,7 +209,10 @@ pub(super) async fn run(
     input: ChangeEnvelope,
     context: &TransactionContext<'_>,
 ) -> anyhow::Result<ChangeEnvelope> {
-    let mut scope = StepScope::new();
+    let mut scope = RequestScope::new(
+        abi::transaction::GET..=abi::transaction::DERIVE,
+        abi::MAX_MESSAGE_BYTES,
+    );
     let operation = {
         let table = scope.table();
         component.inner.begin(
@@ -204,23 +221,34 @@ pub(super) async fn run(
             Some(&table),
         )?
     };
+    let handler = TransactionRequests {
+        context,
+        codec: &component.codec,
+    };
     tokio::pin!(operation);
     let result = tokio::select! {
         biased;
         result = &mut operation => result.map_err(anyhow::Error::from),
-        result = scope.serve(context, &component.codec) => {
+        result = scope.serve(&handler) => {
             result?;
             unreachable!("request service never completes successfully")
         },
     };
     scope.revoke();
     let output = result?;
-    anyhow::ensure!(
-        !scope.state.failed.load(Ordering::Acquire)
-            && scope.state.outstanding.load(Ordering::Acquire) == 0,
-        "native participant completed with failed, cancelled or unfinished state requests"
-    );
+    scope.finish()?;
     Ok(component.codec.decode(&output)?)
+}
+
+pub(super) struct TransactionRequests<'a, 'b> {
+    pub(super) context: &'a TransactionContext<'b>,
+    pub(super) codec: &'a BinaryEnvelopeCodec,
+}
+#[async_trait::async_trait]
+impl RequestHandler for TransactionRequests<'_, '_> {
+    async fn apply(&self, code: u32, input: &[u8]) -> anyhow::Result<Vec<u8>> {
+        apply(self.context, self.codec, code, input).await
+    }
 }
 
 async fn apply(
@@ -274,7 +302,10 @@ mod tests {
 
     #[tokio::test]
     async fn retained_context_survives_revocation_and_pending_requests_fail_closed() {
-        let mut scope = StepScope::new();
+        let mut scope = RequestScope::new(
+            abi::transaction::GET..=abi::transaction::DERIVE,
+            abi::MAX_MESSAGE_BYTES,
+        );
         let raw = scope.table();
         let weak = Arc::downgrade(&scope.state);
         unsafe { raw.retain.unwrap()(raw.context) };
@@ -315,7 +346,10 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_suboperation_poisoning_cannot_be_ignored() {
-        let scope = StepScope::new();
+        let scope = RequestScope::new(
+            abi::transaction::GET..=abi::transaction::DERIVE,
+            abi::MAX_MESSAGE_BYTES,
+        );
         let raw = scope.table();
         let bytes = wire::encode(&"key").unwrap();
         let mut operation = abi::OperationHandle::null();

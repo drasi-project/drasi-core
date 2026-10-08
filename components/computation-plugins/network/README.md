@@ -6,7 +6,8 @@ standard HTTP/gRPC performance comparisons. Plugin identity is
 package version. Native wire version is **2**, using binary computation envelopes
 and bulk MessagePack buffers. Rebuild prototype wire-version-1 native libraries.
 Each implementation has version `"1"` and configuration version `1`. The legacy
-Source/Reaction/Bootstrap ABI **0.15.0** is unchanged.
+Source/Reaction/Bootstrap ABI **0.17.0** (with 0.16 fast-mode compatibility)
+is independently versioned.
 
 | Factory | Native role | Port/schema |
 |---|---|---|
@@ -22,6 +23,68 @@ types are reused from the transport crates. Native execution constructs no legac
 the actual network boundary, using the same core JSON value projection as the
 existing output codecs. The host remains the graph scheduler, fanout owner and
 continuous-query evaluator.
+
+## Opt-in HTTP completion service
+
+The separate Rust `delivery` module provides `HttpDeliveryHandler` and
+`HttpDeliveryEndpoint`. None of the four factories constructs them automatically;
+ordinary configurations, legacy protocols and ABI 1.0 fast-mode binaries are
+unchanged. These services are not yet exposed through native service negotiation.
+
+Use `HttpDeliveryHandler` with the shared
+[`DeliveryRunner`](../../../lib/docs/computation-graph-qos.md#opt-in-operation-completion)
+on the sending side. Supply a reqwest client, the complete endpoint URL, an
+`EnvelopeCodec` with the allowed schemas, a message limit and a timeout. Configure
+redirects/authentication/TLS on that client explicitly; disable redirects when
+delivery must stay at that exact destination.
+
+The reference endpoint exposes `POST /drasi/delivery/v1`. A JSON request contains
+`version: 1`, the input `port`, expected batch `identity` and the complete
+`EnvelopeCodec` JSON `envelope`. The receiver decodes/validates the actual envelope
+and derives the identity again using its **configured consumer scope** before
+allowing any effects. Sender and receiver must represent the same logical
+consumer scope, graph and component ID. A supplied digest is never accepted as
+proof of the request's content.
+
+One request carries the entire batch, not another full-envelope encoding for
+each operation. The receiver runs operations in order and retains partial
+progress. Only after the entire batch completes does it return HTTP **200** with
+the exact `DeliveryBatchIdentity`. The sender checks that response before
+advancing its local progress; HTTP 202, a different identity, malformed replies
+and missing replies are not completion. Remaining local operations reuse that
+one checked confirmation. Use JSON parsers that preserve unsigned 64-bit integers.
+
+The receiver owns a dedicated `DeliveryRunner` and an explicit `DeliveryHandler`.
+For once-only PostgreSQL effects, use
+[`PostgresDeliveryHandler`](../../reactions/storedproc-postgres/README.md#opt-in-computationgraph-transactional-delivery)
+as that handler. Ordinary nontransactional effects may repeat after failure:
+stable keys and an HTTP endpoint do not make them atomic. Retain both progress
+stores and the destination's deduplication state across replacement. The upstream
+lossless pipe must retain input until sender completion.
+
+Admission allows one active request per endpoint and rejects excess requests
+before parsing their bodies. Message limits are explicit and at most **16 MiB**;
+confirmation/error replies are limited to **4,096 bytes**. Sender timeouts must be
+positive and at most 60 seconds; the endpoint also bounds active requests to
+60 seconds. Connection/time-out errors and explicit HTTP 429/503 responses are
+retryable only through the runner's configured bounded policy. Permanent handler
+failures return 422; conflicting identity/history returns 409. Nothing silently
+skips a failed operation.
+
+Construction spawns no workers or listener. The application owns the HTTP server
+and destination connection driver. Call endpoint `shutdown()` to reject/cancel
+requests and finish progress-store cleanup; stop and join the HTTP server, then
+join the destination driver before reconstruction. Configure authentication and
+TLS outside this reference router before exposing it to untrusted clients.
+
+Six real HTTP cases cover lost replies, two-sided reconstruction, partial SQL
+effects, forged input/confirmations, exact limits, full-width sequences, bounded
+admission and shutdown cancellation. A nontransactional fixture explicitly
+demonstrates repeated effects. Run them with:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-reaction-storedproc-postgres --test delivery http:: -- --test-threads=1
+```
 
 ## Source configuration
 
@@ -83,9 +146,79 @@ which is deliberately different from HTTP. Event and element source IDs must
 match `sourceId`; relation endpoint source IDs may differ. Missing/invalid IDs,
 unsupported change types and nonfinite protobuf numeric properties reject.
 
-### Volatility, ordering and lifetime
+### Optional durable admission
 
-Ingress is **volatile**. Successful network submission means acceptance into the
+Fast mode remains the default. To enable durable acceptance, bind the source
+specification's `admission` dependency to an actual `QosChannel` with producer
+admission enabled, and use that same channel for every outgoing edge. Configure
+its storage, failure scope, capacity and receipt limits using the
+[QoS admission contract](../../../lib/docs/computation-graph-qos.md).
+The source's `stream` must match the channel. Missing service support, incompatible
+storage, foreign scope or a memory/mixed output path rejects rather than silently
+downgrading. Construction still performs no network I/O.
+
+This uses the optional native service-v1 interface. Existing ABI 1.0 binaries
+remain usable in fast mode but must be rebuilt for durable admission. No volatile
+event queue, local producer sequence or second journal is allocated in durable
+mode. HTTP and gRPC acknowledge only after host graph validation and the outgoing
+QoS commit. That is not completion or exactly-once execution of downstream effects.
+
+HTTP durable routes are all `POST` under
+`/sources/{sourceId}/admission/v1`:
+
+| Route | Request | Successful response |
+|---|---|---|
+| `/producers/register` | `{"producer":"client-name"}` | Session: `incarnation`, `producer`, `epoch` |
+| `/producers/status` | `{"session":...}` | Session, `next_sequence`, `earliest_receipt` |
+| `/producers/retire` | `{"session":...}` | `{"retired":true}` after all subscriber obligations finish |
+| `/receipts` | `{"session":...,"sequence":1}` | Receipt, or `null` only for the next unaccepted sequence |
+| `/events` | `{"session":...,"sequence":1,"event":...}` | `{"receipts":[...],"error":null}` |
+| `/events/batch` | `{"session":...,"first_sequence":1,"events":[...]}` | The same receipt-list shape |
+
+Pass the complete returned session unchanged. Sequences start at 1 and increase
+consecutively; a batch covers consecutive numbers, not one atomic transaction.
+Each receipt contains the session, client `sequence`, and shared journal
+`position`. Batches validate/convert their events first, then admit individually.
+Failure returns the committed prefix receipts and a typed error; an empty list
+accompanies rejection before admission. Do not mistake an unknown result for
+proof that its next event was rejected.
+
+Durable HTTP events require an explicit timestamp. Both transports normalize to
+their existing graph-change mapping; map ordering and receiving-side clocks do
+not affect retries. Effective timestamps remain milliseconds after the existing
+nanosecond conversion, and the envelope timestamp uses that client event time.
+Retry the same normalized event, session and sequence. A changed retained event
+conflicts; an expired receipt cannot be resubmitted as new input.
+
+Application errors have `kind` and `message`. Busy/full is HTTP 429,
+closed/unknown acceptance is 503, conflicts are 409, expired sessions/receipts
+are 410, and invalid input is 400. Normal HTTP router/body/JSON errors can precede
+these application responses. `AcceptanceUnknown`, `MetadataUnknown`, a timeout,
+disconnect or unread response requires lookup or retry of the original identity.
+Never change producer identity merely to retry an uncertain request.
+Registration is idempotent while that producer name is active. Retirement
+invalidates the old session and a new registration obtains a new epoch.
+
+gRPC adds the separate `drasi.admission.v1.AdmissionService` defined in
+[`proto/admission.proto`](proto/admission.proto), reusing the existing event DTO.
+The imported `common.proto` declaration is packaged locally for standalone crate
+builds; workspace builds reject any difference from the shared source protocol.
+It exposes registration, status, retirement, receipt lookup, unary `Admit`, and
+bidirectional `StreamEvents`. Each streamed request carries its session and
+sequence; each response is a receipt or typed error, never a cumulative count.
+A failed event terminates the stream after its error response; preceding receipts
+remain valid. Transport failures still require resolving the same input identity.
+
+On a durable source, the old HTTP event routes return 409 and old gRPC submissions
+return `FailedPrecondition`; they cannot accidentally accept without the session
+protocol. Health remains available and identifies the active mode. Admission
+retains existing request/body limits and deadlines; host outstanding operations
+and graph pending requests are independently bounded. Listeners report failure
+separately from event publication and are joined during cleanup.
+
+### Fast-mode volatility, ordering and lifetime
+
+Without an admission binding, ingress is **volatile**. Successful network submission means acceptance into the
 bounded component queue, not persistent storage, query completion or sink
 completion. Every event carries a real nonpersistent `GraphProducerProgress`
 identity; existing persistent graph processing can reject this upstream.
@@ -241,5 +374,9 @@ individual batch evaluation, backpressure, errors, retries/skips, independent
 health, cancelled operations, awaited listener stop/rebind, and the unchanged
 host continuous-query evaluator between native endpoints.
 
-Query-role hosting, native resource injection, durable/adaptive transports,
-source recovery, in-place reconfiguration and hot unloading remain unsupported.
+The durable cases also cover receipt conflicts/expiry, partial-batch prefixes,
+retirement, stopped consumers, abrupt process exit without a saved client receipt,
+and before/after-commit client timeout or source stop for both transports.
+
+Query-role hosting, arbitrary native resource injection, adaptive transports,
+snapshot/live handover, in-place reconfiguration and hot unloading remain unsupported.

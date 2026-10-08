@@ -169,9 +169,19 @@ pub trait IndexBackendPlugin: Send + Sync {
 
     /// Returns true if this backend is volatile (data lost on restart).
     ///
-    /// Volatile backends (like in-memory) require re-bootstrapping after restart,
-    /// while persistent backends (like RocksDB) retain data.
+    /// This legacy flag selects bootstrap/replay behavior. A false value does
+    /// not prove a specific failure-survival boundary; use `durability()` for that.
     fn is_volatile(&self) -> bool;
+
+    /// The successful commit boundary. Legacy persistence flags alone do not
+    /// establish which failures stored data survives.
+    fn durability(&self) -> super::StorageDurability {
+        if self.is_volatile() {
+            super::StorageDurability::VOLATILE
+        } else {
+            super::StorageDurability::UNKNOWN
+        }
+    }
 
     /// Whether query output writers participate in the returned index session.
     ///

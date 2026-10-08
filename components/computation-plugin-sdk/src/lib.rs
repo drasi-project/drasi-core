@@ -5,13 +5,20 @@
 //! and capability contracts. No legacy Source/Reaction interfaces are involved.
 
 pub use drasi_computation_plugin_abi as abi;
+pub mod admission;
+pub mod bootstrap;
+pub mod consumer;
 mod control;
 mod export;
 pub mod metadata;
+pub mod progress;
 mod transaction;
 pub mod transport;
 pub mod wire;
 
+pub use admission::{AdmissionError, AdmissionErrorKind, NativeAdmission};
+pub use bootstrap::{BootstrapFactory, BootstrapFactoryMetadata};
+pub use consumer::{ConsumerMode, NativeConsumer, NativeTransactionalConsumer};
 pub use control::{
     ControlDirection, ControlMessage, ControlNotification, ControlSender, ControlTarget,
     NativeControlHandler, SendControl,
@@ -20,6 +27,7 @@ pub use export::{Component, CreatedComponent, ExportedPlugin, Factory, PluginDef
 pub use metadata::{
     Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, PluginMetadata,
 };
+pub use progress::NativeSourceProgress;
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
 pub use wire::{CreateRequest, Scope};
 
@@ -48,6 +56,50 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.metadata(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_services_v1(
+        ) -> *const $crate::abi::services::PluginServicesV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.services(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_recovery_v1(
+        ) -> *const $crate::abi::recovery::PluginRecoveryV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.recovery(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_bootstrap_v1(
+        ) -> *const $crate::abi::bootstrap::PluginBootstrapV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.bootstrap(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_consumer_v1(
+        ) -> *const $crate::abi::consumer::PluginConsumerV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.consumer(),
                     Err(_) => std::ptr::null(),
                 }
             }))

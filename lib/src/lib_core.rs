@@ -226,7 +226,12 @@ impl DrasiLib {
         config: Arc<RuntimeConfig>,
         wal: Option<Arc<dyn crate::wal::WalProvider>>,
     ) -> Self {
-        // Initialize middleware registry and register all standard middleware factories
+        Self::new_with_services(config, Self::default_middleware_registry(), wal)
+    }
+
+    /// Standard middleware factories enabled by this build, for host-owned
+    /// reconstructible resource recipes as well as ordinary instance components.
+    pub fn default_middleware_registry() -> Arc<MiddlewareTypeRegistry> {
         let mut middleware_registry = MiddlewareTypeRegistry::new();
 
         #[cfg(feature = "middleware-jq")]
@@ -256,7 +261,7 @@ impl DrasiLib {
             drasi_middleware::promote::PromoteMiddlewareFactory::new(),
         ));
 
-        Self::new_with_services(config, Arc::new(middleware_registry), wal)
+        Arc::new(middleware_registry)
     }
 
     pub(crate) fn new_with_middleware(

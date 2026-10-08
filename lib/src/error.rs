@@ -32,6 +32,10 @@
 //! `DrasiError::Internal(#[from] anyhow::Error)` auto-converts internal `anyhow` errors
 //! at the public API boundary via the `?` operator. For errors with known semantics, use
 //! the structured variants directly (e.g., `DrasiError::invalid_state()`).
+//! When translating an existing failure, attach it with [`DrasiError::with_cause`]
+//! rather than discarding it after formatting. Such errors use the existing
+//! `Internal` carrier; match [`DrasiError::classification`] for the public category
+//! and use [`DrasiError::downcast_ref`] for the retained typed cause.
 //!
 //! ## Rules
 //!
@@ -133,6 +137,53 @@ pub enum DrasiError {
 // ============================================================================
 
 impl DrasiError {
+    /// Attach an underlying failure without changing this error's public category.
+    ///
+    /// The returned variant is `Internal`, since the other existing variants have
+    /// no source field. Use [`Self::classification`] rather than matching the outer
+    /// variant when handling errors returned by library operations.
+    pub fn with_cause(self, cause: impl Into<anyhow::Error>) -> Self {
+        Self::Internal(cause.into().context(self))
+    }
+
+    /// Return the outermost structured public category, including through contexts.
+    /// An unclassified internal error returns itself.
+    pub fn classification(&self) -> &Self {
+        match self {
+            Self::Internal(error) => error
+                .downcast_ref::<Self>()
+                .map_or(self, Self::classification),
+            _ => self,
+        }
+    }
+
+    /// Find a retained typed cause, including `anyhow` contexts and nested sources.
+    ///
+    /// Errors can contain several failures (for example `GraphError::Cleanup`).
+    /// Downcast to that aggregate to inspect all failures; the standard source
+    /// chain alone represents only its primary failure.
+    pub fn downcast_ref<E: std::error::Error + Send + Sync + 'static>(&self) -> Option<&E> {
+        match self {
+            Self::Internal(error) => error
+                .downcast_ref::<E>()
+                .or_else(|| {
+                    error
+                        .downcast_ref::<Self>()
+                        .and_then(Self::downcast_ref::<E>)
+                })
+                .or_else(|| {
+                    error.chain().find_map(|cause| {
+                        cause.downcast_ref::<E>().or_else(|| {
+                            cause
+                                .downcast_ref::<Self>()
+                                .and_then(Self::downcast_ref::<E>)
+                        })
+                    })
+                }),
+            _ => None,
+        }
+    }
+
     /// Create a component not found error.
     ///
     /// # Example
@@ -232,6 +283,46 @@ impl DrasiError {
 /// It uses `DrasiError` which supports pattern matching on specific error variants.
 pub type Result<T> = std::result::Result<T, DrasiError>;
 
+/// Multiple operation failures, all retained in encounter order.
+///
+/// The standard source chain follows the first failure. Inspect [`Self::failures`]
+/// to recover other causes or ownership-bearing cleanup errors.
+#[derive(Debug)]
+pub struct OperationFailures {
+    message: String,
+    failures: Vec<anyhow::Error>,
+}
+
+impl OperationFailures {
+    /// Retains the individual causes of an operation and its required cleanup.
+    pub fn new(message: impl Into<String>, failures: Vec<anyhow::Error>) -> Self {
+        Self {
+            message: message.into(),
+            failures,
+        }
+    }
+
+    pub fn failures(&self) -> &[anyhow::Error] {
+        &self.failures
+    }
+}
+
+impl std::fmt::Display for OperationFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)?;
+        for (index, error) in self.failures.iter().enumerate() {
+            write!(f, "{}{error:#}", if index == 0 { ": " } else { "; " })?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for OperationFailures {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.failures.first().map(|error| error.as_ref())
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -286,6 +377,92 @@ mod tests {
         let drasi_err: DrasiError = anyhow_err.into();
         assert!(matches!(drasi_err, DrasiError::Internal(_)));
         assert!(drasi_err.to_string().contains("Something went wrong"));
+    }
+
+    #[test]
+    fn public_classification_and_typed_cause_survive_contexts() {
+        let cause = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "checkpoint denied",
+        ))
+        .context("saving checkpoint");
+        let error = DrasiError::operation_failed("source", "input", "stop", cause.to_string())
+            .with_cause(cause);
+        let error = DrasiError::from(anyhow::Error::new(error).context("outer operation"));
+        assert!(matches!(
+            error.classification(),
+            DrasiError::OperationFailed { component_type, component_id, operation, reason }
+                if component_type == "source" && component_id == "input"
+                    && operation == "stop" && reason == "saving checkpoint"
+        ));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn outer_public_classification_wins_over_inner_classification() {
+        let inner = DrasiError::invalid_state("not ready");
+        let error = DrasiError::operation_failed("query", "q", "start", inner.to_string())
+            .with_cause(inner);
+        assert!(matches!(
+            error.classification(),
+            DrasiError::OperationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn unclassified_internal_error_stays_internal() {
+        let error = DrasiError::from(anyhow::anyhow!("unclassified"));
+        assert!(std::ptr::eq(error.classification(), &error));
+        assert!(error.downcast_ref::<std::io::Error>().is_none());
+    }
+
+    #[test]
+    fn nested_internal_carriers_retain_the_root_error_not_only_its_source() {
+        use crate::computation::v1::{ComponentId, GraphError};
+
+        let graph_error = GraphError::Component {
+            component: ComponentId::try_new("input").unwrap(),
+            operation: "stop",
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
+        };
+        let inner = DrasiError::from(anyhow::Error::new(graph_error));
+        let error = DrasiError::from(anyhow::Error::new(inner).context("outer operation"));
+        assert!(matches!(
+            error.downcast_ref::<GraphError>(),
+            Some(GraphError::Component { .. })
+        ));
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+    }
+
+    #[test]
+    fn aggregate_retains_all_causes_and_primary_downcasting() {
+        use crate::context::workers::WorkerCleanupError;
+
+        let failures = OperationFailures::new(
+            "shutdown failed",
+            vec![
+                WorkerCleanupError::TimedOut {
+                    timeout: std::time::Duration::from_secs(2),
+                }
+                .into(),
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
+            ],
+        );
+        let error = DrasiError::operation_failed("source", "input", "stop", failures.to_string())
+            .with_cause(failures);
+        assert!(error.downcast_ref::<WorkerCleanupError>().is_some());
+        let failures = error
+            .downcast_ref::<OperationFailures>()
+            .unwrap()
+            .failures();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(
+            failures[1].downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

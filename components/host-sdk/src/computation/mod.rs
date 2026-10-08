@@ -10,12 +10,19 @@
 //! graph execution manager, or task-local transfer between runtimes. The graph
 //! owns scheduling and cancellation of every operation.
 
+mod admission;
+mod bootstrap;
+mod consumer;
 mod control;
 mod factory;
 mod loader;
+mod progress;
 mod proxy;
 mod transaction;
 
+pub use bootstrap::{NativeBootstrapFactories, NativeBootstrapFactory, NativeBootstrapProxy};
+pub use consumer::{NativeConsumerProxy, NativeConsumerResource};
+pub use drasi_computation_plugin_sdk::bootstrap::BootstrapFactoryMetadata;
 pub use drasi_computation_plugin_sdk::metadata::{
     Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, PluginMetadata,
 };
@@ -24,6 +31,12 @@ pub use factory::NativeFactory;
 pub use loader::{load, try_load, NativePlugin};
 pub(crate) use loader::{try_load_library, try_read_metadata};
 pub use proxy::NativeComponentProxy;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NativeConsumerFactoryMetadata {
+    pub implementation: drasi_lib::computation::v1::ImplementationIdentity,
+    pub mode: drasi_computation_plugin_sdk::ConsumerMode,
+}
 
 #[cfg(test)]
 mod tests;

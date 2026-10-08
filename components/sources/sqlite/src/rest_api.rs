@@ -13,18 +13,20 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::thread::SqliteParam;
-use crate::{RestApiConfig, SqliteSourceHandle, TableKeyConfig};
+use crate::{SqliteSourceHandle, TableKeyConfig};
 
 #[derive(Clone)]
 struct RestApiState {
@@ -56,13 +58,13 @@ pub enum BatchOperation {
     },
 }
 
-pub async fn start_rest_api(
-    config: RestApiConfig,
+pub async fn run_rest_api(
+    listener: tokio::net::TcpListener,
     handle: SqliteSourceHandle,
     tables: Option<Vec<String>>,
     table_keys: Vec<TableKeyConfig>,
-    shutdown_rx: oneshot::Receiver<()>,
-) -> Result<()> {
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> std::io::Result<()> {
     let allowed_tables = tables.map(|items| items.into_iter().collect::<HashSet<_>>());
     let state = Arc::new(RestApiState {
         handle,
@@ -79,19 +81,29 @@ pub async fn start_rest_api(
             get(get_row).put(update_row).delete(delete_row),
         )
         .route("/api/batch", post(batch_operations))
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            shutdown_rx.clone(),
+            reject_after_shutdown,
+        ));
 
-    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.wait_for(|stopped| *stopped).await;
+        })
+        .await
+}
 
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await;
-    });
-
-    Ok(())
+async fn reject_after_shutdown(
+    State(shutdown): State<watch::Receiver<bool>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let stopped = *shutdown.borrow();
+    if stopped {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    next.run(request).await
 }
 
 async fn health_check() -> Json<Value> {

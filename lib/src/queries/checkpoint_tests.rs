@@ -263,7 +263,7 @@ mod tests {
             .initialize(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
                 source_id: "seq-src".to_string(),
-                update_tx,
+                update_tx: update_tx.into(),
                 state_store: None,
                 identity_provider: None,
                 wal_provider: None,
@@ -331,7 +331,7 @@ mod tests {
             .initialize(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
                 source_id: "pos-src".to_string(),
-                update_tx,
+                update_tx: update_tx.into(),
                 state_store: None,
                 identity_provider: None,
                 wal_provider: None,
@@ -848,7 +848,7 @@ mod tests {
             .initialize(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
                 source_id: "size-src".to_string(),
-                update_tx,
+                update_tx: update_tx.into(),
                 state_store: None,
                 identity_provider: None,
                 wal_provider: None,

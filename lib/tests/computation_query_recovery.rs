@@ -37,6 +37,82 @@ struct InvalidWatermarks {
     duplicate: bool,
 }
 
+struct OwnedBootstrap {
+    worker: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
+    release: Arc<tokio::sync::Notify>,
+    stopping: tokio::sync::Notify,
+    stops: AtomicUsize,
+}
+
+#[async_trait]
+impl ComputationBootstrapProvider for OwnedBootstrap {
+    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        let release = self.release.clone();
+        drasi_lib::context::workers::spawn_owned_worker(&self.worker, async move {
+            release.notified().await;
+        })
+        .await?;
+        Ok(ComputationBootstrapSnapshot {
+            changes: Box::pin(futures::stream::iter([Err(anyhow::anyhow!(
+                "snapshot failed after worker registration"
+            ))])),
+            watermarks: Vec::new(),
+        })
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        self.stopping.notify_one();
+        drasi_lib::context::workers::join_owned_worker_gracefully(
+            &mut *self.worker.write().await,
+            std::time::Duration::from_millis(20),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_retains_bootstrap_cleanup_across_cancelled_and_timed_out_stop() {
+    let bootstrap = Arc::new(OwnedBootstrap {
+        worker: tokio::sync::RwLock::new(None),
+        release: Arc::new(tokio::sync::Notify::new()),
+        stopping: tokio::sync::Notify::new(),
+        stops: AtomicUsize::new(0),
+    });
+    let mut query = ContinuousQueryTransformer::new(
+        definition("MATCH (n:Person) RETURN n.name AS name"),
+        Arc::new(InMemoryComputationProvider),
+    )
+    .await
+    .expect("query")
+    .with_bootstrap(bootstrap.clone());
+    query.start().await.expect_err("failed snapshot");
+    {
+        let stop = query.stop();
+        tokio::pin!(stop);
+        tokio::select! {
+            result = &mut stop => panic!("unfinished cleanup returned: {result:?}"),
+            _ = bootstrap.stopping.notified() => {}
+        }
+    }
+    assert!(bootstrap.worker.read().await.is_some());
+    let error = query.stop().await.expect_err("worker still owns cleanup");
+    assert!(error
+        .downcast_ref::<drasi_lib::context::workers::WorkerCleanupError>()
+        .is_some());
+    assert!(bootstrap.worker.read().await.is_some());
+    assert!(bootstrap.snapshot().await.is_err());
+    bootstrap.release.notify_one();
+    query.stop().await.expect("joined snapshot worker");
+    assert!(bootstrap.worker.read().await.is_none());
+    query
+        .deprovision()
+        .await
+        .expect("deprovision after cleanup");
+    assert_eq!(bootstrap.stops.load(Ordering::SeqCst), 4);
+}
+
 #[async_trait]
 impl ComputationBootstrapProvider for InvalidWatermarks {
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
@@ -843,6 +919,168 @@ mod persistent {
                 RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("budget"),
             ),
         ))
+    }
+
+    struct CoordinatedBootstrap {
+        fail: bool,
+        observed: std::sync::Mutex<Vec<Option<bytes::Bytes>>>,
+        calls: AtomicUsize,
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_snapshot_releases_published_storage_views_before_same_object_restart() {
+        let temp = tempfile::tempdir().expect("temp");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut query = query(
+            provider(temp.path()),
+            "MATCH (n:Person) RETURN n.name AS name",
+            QueryRecoveryPolicy::Strict,
+            true,
+            calls,
+        )
+        .await;
+        let results = query.results();
+        query.start().await.expect_err("partial bootstrap");
+        query.stop().await.expect("release failed storage owner");
+        let error = query
+            .start()
+            .await
+            .expect_err("partial bootstrap requires reset");
+        assert!(
+            matches!(
+                error.downcast_ref::<QueryRecoveryError>(),
+                Some(QueryRecoveryError::IncompleteBootstrap)
+            ),
+            "restart must read recovery state, not retain its old database lock: {error:#}"
+        );
+        query.stop().await.expect("release reconstructed owner");
+        query
+            .deprovision()
+            .await
+            .expect("reopen and clear incomplete state");
+        query
+            .start()
+            .await
+            .expect_err("new bootstrap still intentionally fails");
+        assert_eq!(results.snapshot().expect("view").rows.len(), 1);
+        query.stop().await.expect("cleanup");
+    }
+
+    #[async_trait]
+    impl ComputationBootstrapProvider for CoordinatedBootstrap {
+        async fn prepare_with_state(
+            &self,
+            state: &dyn BootstrapState,
+        ) -> anyhow::Result<BootstrapPreparation> {
+            state
+                .durability()
+                .require(drasi_core::interface::FailureMode::ProcessRestart)?;
+            let recovered = state.read().await?;
+            self.observed.lock().expect("observed").push(recovered);
+            Ok(BootstrapPreparation::Ready)
+        }
+
+        async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+            anyhow::bail!("coordinated bootstrap requires query-owned state")
+        }
+
+        async fn snapshot_with_state(
+            &self,
+            state: &dyn BootstrapState,
+        ) -> anyhow::Result<ComputationBootstrapSnapshot> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(state.write(bytes::Bytes::new()).await.is_err());
+            assert!(state
+                .write(bytes::Bytes::from(vec![0; MAX_BOOTSTRAP_STATE_BYTES + 1]))
+                .await
+                .is_err());
+            state
+                .write(bytes::Bytes::from_static(b"initialization-intent"))
+                .await?;
+            let mut changes = vec![Ok(envelope(1, "Alice", false))];
+            if self.fail {
+                changes.push(Err(anyhow::anyhow!("interrupted snapshot")));
+            }
+            Ok(ComputationBootstrapSnapshot {
+                changes: Box::pin(futures::stream::iter(changes)),
+                watermarks: vec![BootstrapWatermark {
+                    stream: StreamId::try_new("source/out")?,
+                    source_id: Some("people".into()),
+                    sequence: 17,
+                    position: Some(bytes::Bytes::from_static(b"consistent-boundary")),
+                }],
+            })
+        }
+
+        fn completion_state(&self) -> anyhow::Result<Option<bytes::Bytes>> {
+            assert!(!self.fail, "failed snapshot cannot reach completion");
+            Ok(Some(bytes::Bytes::from_static(b"completed-initialization")))
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_handover_intent_survives_reset_and_completes_with_its_watermark() {
+        let temp = tempfile::tempdir().expect("temp");
+        let provider = provider(temp.path());
+        let text = "MATCH (n:Person) RETURN n.name AS name";
+        for (index, recovery, fail) in [
+            (0, QueryRecoveryPolicy::Strict, true),
+            (1, QueryRecoveryPolicy::AutoReset, false),
+            (2, QueryRecoveryPolicy::Strict, false),
+        ] {
+            let bootstrap = Arc::new(CoordinatedBootstrap {
+                fail,
+                observed: std::sync::Mutex::new(Vec::new()),
+                calls: AtomicUsize::new(0),
+            });
+            let progress = Arc::new(
+                QuerySourceProgress::new("recovery", ComponentId::try_new("query").expect("id"))
+                    .expect("progress"),
+            );
+            let mut query = ContinuousQueryTransformer::new_with_options(
+                definition(text),
+                provider.clone(),
+                QueryOptions {
+                    recovery,
+                    publication: QueryPublicationMode::Atomic,
+                },
+            )
+            .await
+            .expect("construct")
+            .with_source_progress(progress.clone())
+            .expect("bind")
+            .with_bootstrap(bootstrap.clone());
+            if fail {
+                query.start().await.expect_err("partial snapshot");
+                assert!(!progress.snapshot().ready);
+                assert!(progress.snapshot().checkpoints.is_empty());
+            } else {
+                query.start().await.expect("complete or recover");
+                let snapshot = progress.snapshot();
+                assert!(snapshot.ready && snapshot.bootstrap_complete);
+                let checkpoint = &snapshot.checkpoints[&SourceProgressKey::Source("people".into())];
+                assert_eq!(checkpoint.sequence, 17);
+                assert_eq!(
+                    checkpoint.source_position.as_deref(),
+                    Some(b"consistent-boundary".as_slice())
+                );
+                assert_eq!(query.results().snapshot().expect("snapshot").rows.len(), 1);
+            }
+            let expected = match index {
+                0 => None,
+                1 => Some(bytes::Bytes::from_static(b"initialization-intent")),
+                _ => Some(bytes::Bytes::from_static(b"completed-initialization")),
+            };
+            assert_eq!(
+                *bootstrap.observed.lock().expect("observed"),
+                vec![expected]
+            );
+            assert_eq!(
+                bootstrap.calls.load(Ordering::SeqCst),
+                usize::from(index < 2)
+            );
+            query.stop().await.expect("cleanup");
+        }
     }
 
     #[tokio::test]

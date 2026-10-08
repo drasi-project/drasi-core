@@ -113,6 +113,11 @@ impl BootstrapContext {
         self.properties.get(key).cloned()
     }
 
+    /// Runtime properties passed to the provider, including across plugin boundaries.
+    pub fn properties(&self) -> &HashMap<String, serde_json::Value> {
+        &self.properties
+    }
+
     /// Get a typed property from the context
     pub fn get_typed_property<T>(&self, key: &str) -> Result<Option<T>>
     where

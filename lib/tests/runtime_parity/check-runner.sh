@@ -44,13 +44,139 @@ cargo() {
         mappings=/dev/null
         package=drasi-plugin-sdk
         profile=plugin-factories
-        sources=(components/plugin-sdk/tests/computation_factories.rs)
+        sources=(lib components/plugin-sdk/tests/computation_factories.rs)
     elif [[ " $* " == *" -p drasi-host-sdk "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
         package=drasi-host-sdk
         profile=host-sdk
-        sources=(lib components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs)
+        sources=(lib components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
+    elif [[ " $* " == *" -p drasi-state-store-redb "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-state-store-redb
+        profile=configuration-store
+        sources=(lib)
+    elif [[ " $* " == *" -p drasi-reaction-storedproc-postgres "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-storedproc-postgres
+        profile=postgres-delivery
+        sources=(components/reactions/storedproc-postgres/tests/delivery.rs)
+    elif [[ " $* " == *" -p drasi-source-postgres "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-source-postgres
+        profile=postgres-transactions
+        sources=(lib components/sources/postgres/tests/native_transactions.rs)
+    elif [[ " $* " == *" -p drasi-reaction-dashboard "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-dashboard
+        profile=dashboard-lifecycle
+        sources=(lib components/reactions/dashboard/tests/integration_tests.rs)
+    elif [[ " $* " == *" -p drasi-reaction-sse "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-sse
+        profile=sse-lifecycle
+        sources=(lib components/reactions/sse/tests/integration_tests.rs components/reactions/sse/tests/recovery_e2e.rs)
+    elif [[ " $* " == *" -p drasi-reaction-mcp "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-mcp
+        profile=mcp-lifecycle
+        sources=(lib components/reactions/mcp/tests/integration_test.rs)
+    elif [[ " $* " == *" -p drasi-source-cloudflare-radar "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-source-cloudflare-radar
+        profile=cloudflare-radar-lifecycle
+        sources=(lib components/sources/cloudflare-radar/tests/integration_test.rs)
+    elif [[ " $* " == *" -p drasi-source-open511 "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-source-open511
+        profile=open511-lifecycle
+        sources=(lib components/sources/open511/tests/integration_test.rs)
+    elif [[ " $* " == *" -p drasi-source-here-traffic "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-source-here-traffic
+        profile=here-traffic-lifecycle
+        sources=(lib components/sources/here-traffic/tests/integration_test.rs)
+    elif [[ " $* " == *" -p drasi-source-sqlite "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-source-sqlite
+        profile=sqlite-lifecycle
+        sources=(lib components/sources/sqlite/tests/integration_test.rs components/sources/sqlite/tests/native.rs)
+    elif [[ " $* " == *" -p drasi-source-mysql "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-source-mysql
+        profile=mysql-lifecycle
+        sources=(lib components/sources/mysql/tests/integration_test.rs)
+    elif [[ " $* " == *" -p drasi-reaction-file "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-file
+        profile=file-lifecycle
+        sources=(lib components/reactions/file/tests/integration_test.rs)
+    elif [[ " $* " == *" -p drasi-reaction-log "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-log
+        profile=log-lifecycle
+        sources=(lib components/reactions/log/tests/recovery_e2e.rs)
+    elif [[ " $* " == *" -p drasi-reaction-profiler "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-profiler
+        profile=profiler-lifecycle
+        sources=(lib components/reactions/profiler/tests/recovery_e2e.rs)
+    elif [[ " $* " == *" -p drasi-reaction-http "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-http
+        profile=http-lifecycle
+        sources=(lib components/reactions/http/tests/*.rs)
+    elif [[ " $* " == *" -p drasi-reaction-grpc "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-grpc
+        profile=grpc-lifecycle
+        sources=(lib components/reactions/grpc/tests/*.rs)
+    elif [[ " $* " == *" -p drasi-reaction-application "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-application
+        profile=application-lifecycle
+        sources=(lib components/reactions/application/tests/*.rs)
+    elif [[ " $* " == *" -p drasi-reaction-aws-sqs "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-aws-sqs
+        profile=aws-sqs-lifecycle
+        sources=(lib components/reactions/aws-sqs/tests/*.rs)
+    elif [[ " $* " == *" -p drasi-reaction-loki "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-reaction-loki
+        profile=loki-lifecycle
+        sources=(lib components/reactions/loki/tests/*.rs)
+    elif [[ " $* " == *" -p drasi-core "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-core
+        profile=core-transactions
+        sources=(lib)
+    elif [[ " $* " == *" -p drasi-index-rocksdb "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-index-rocksdb
+        profile=rocksdb-backends
+        sources=(lib components/indexes/rocksdb/tests/computation_result_transactions.rs)
     elif [[ " $* " == *" -p drasi-index-garnet "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
@@ -156,7 +282,7 @@ for omitted in baseline suite discovery execution ignored failure capability map
         printf 'Runner accepted missing %s coverage.\n' "$omitted" >&2
         exit 1
     fi
-    for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk garnet-backends; do
+    for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
         test -f "$logs/missing-$omitted/$profile.exit-code"
     done
 done

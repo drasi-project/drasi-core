@@ -88,7 +88,7 @@ impl RuntimeComponent for SourceInstance {
             self.observations.drive(self.source.stop(), true).await?;
             life.needs_stop = false;
         }
-        self.observations.reset().await;
+        self.observations.reset().await?;
         life.initialized = true;
         let mut context = SourceRuntimeContext::new(
             self.services.scope.as_ref(),
@@ -122,7 +122,7 @@ impl RuntimeComponent for SourceInstance {
             anyhow::bail!("source is not initialized for activation");
         }
         life.needs_stop = true;
-        self.observations.reset().await;
+        self.observations.reset().await?;
         let result = self.observations.drive(self.source.start(), false).await;
         self.notify();
         result
@@ -142,6 +142,7 @@ impl RuntimeComponent for SourceInstance {
             self.notify();
             update?;
             if self.source.status().await == ComponentStatus::Stopped {
+                self.observations.drain().await?;
                 return Ok(());
             }
         }

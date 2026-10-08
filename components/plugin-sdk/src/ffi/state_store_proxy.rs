@@ -31,11 +31,53 @@ pub struct FfiStateStoreProxy {
     pub(crate) vtable: *const StateStoreVtable,
 }
 
+impl FfiStateStoreProxy {
+    /// Take ownership of a host-provided ABI 0.17 state-store vtable.
+    ///
+    /// # Safety
+    /// `vtable` must be a non-null, uniquely transferred `Box<StateStoreVtable>`
+    /// with valid callbacks and state. It must not be a borrowed/ABI 0.16 table.
+    pub unsafe fn new(vtable: *const StateStoreVtable) -> Self {
+        assert!(!vtable.is_null(), "state-store vtable must not be null");
+        Self { vtable }
+    }
+
+    /// Read the declaration without hiding an unsupported or failed description.
+    pub fn try_durability(&self) -> StateStoreResult<drasi_core::interface::StorageDurability> {
+        unsafe {
+            let vtable = &*self.vtable;
+            let mut out = std::mem::MaybeUninit::uninit();
+            (vtable.durability_fn)(vtable.state, out.as_mut_ptr())
+                .into_result()
+                .map_err(drasi_lib::StateStoreError::Other)?;
+            out.assume_init()
+                .try_into()
+                .map_err(drasi_lib::StateStoreError::Other)
+        }
+    }
+}
+
+impl Drop for FfiStateStoreProxy {
+    fn drop(&mut self) {
+        unsafe {
+            let vtable = Box::from_raw(self.vtable as *mut StateStoreVtable);
+            (vtable.drop_fn)(vtable.state);
+        }
+    }
+}
+
 unsafe impl Send for FfiStateStoreProxy {}
 unsafe impl Sync for FfiStateStoreProxy {}
 
 #[async_trait::async_trait]
 impl StateStoreProvider for FfiStateStoreProxy {
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.try_durability().unwrap_or_else(|error| {
+            log::error!("State-store durability could not be established: {error}");
+            drasi_core::interface::StorageDurability::UNKNOWN
+        })
+    }
+
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         unsafe {
             let vtable = &*self.vtable;
@@ -137,8 +179,11 @@ impl StateStoreProvider for FfiStateStoreProxy {
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
         unsafe {
             let vtable = &*self.vtable;
-            let array = (vtable.list_keys_fn)(vtable.state, FfiStr::from_str(store_id));
-            Ok(array.into_vec())
+            let mut array = std::mem::MaybeUninit::uninit();
+            (vtable.list_keys_fn)(vtable.state, FfiStr::from_str(store_id), array.as_mut_ptr())
+                .into_result()
+                .map_err(drasi_lib::StateStoreError::Other)?;
+            Ok(array.assume_init().into_vec())
         }
     }
 
@@ -225,8 +270,14 @@ mod tests {
             _ => -1,
         }
     }
-    extern "C" fn list(_: *mut c_void, _: FfiStr) -> FfiStringArray {
-        FfiStringArray::from_vec(vec![])
+    extern "C" fn list(_: *mut c_void, store: FfiStr, out_keys: *mut FfiStringArray) -> FfiResult {
+        let keys = match unsafe { store.to_string() }.as_str() {
+            "populated" => vec!["first".into(), "second".into()],
+            "empty" => vec![],
+            _ => return FfiResult::err("storage unavailable".into()),
+        };
+        unsafe { out_keys.write(FfiStringArray::from_vec(keys)) };
+        FfiResult::ok()
     }
     extern "C" fn exists(_: *mut c_void, _: FfiStr) -> FfiResult {
         FfiResult::err("ambiguous legacy slot".into())
@@ -235,10 +286,16 @@ mod tests {
         FfiResult::ok()
     }
     extern "C" fn release(_: *mut c_void) {}
+    extern "C" fn durability(
+        _: *mut c_void,
+        out: *mut super::super::durability::FfiStorageDurability,
+    ) -> FfiResult {
+        unsafe { out.write(drasi_core::interface::StorageDurability::VOLATILE.into()) };
+        FfiResult::ok()
+    }
 
-    #[tokio::test]
-    async fn existence_and_deletion_preserve_absence_errors_and_exact_counts() {
-        let table = StateStoreVtable {
+    fn test_table() -> StateStoreVtable {
+        StateStoreVtable {
             state: std::ptr::null_mut(),
             get_fn: get,
             set_fn: set,
@@ -253,14 +310,93 @@ mod tests {
             key_count_fn: count,
             sync_fn: sync,
             drop_fn: release,
-        };
-        let proxy = FfiStateStoreProxy { vtable: &table };
+            durability_fn: durability,
+        }
+    }
+
+    #[test]
+    fn abi_016_prefix_offsets_are_preserved() {
+        let table = test_table();
+        let base = &table as *const StateStoreVtable as usize;
+        let width = std::mem::size_of::<*mut c_void>();
+        for (index, address) in [
+            std::ptr::addr_of!(table.state) as usize,
+            std::ptr::addr_of!(table.get_fn) as usize,
+            std::ptr::addr_of!(table.set_fn) as usize,
+            std::ptr::addr_of!(table.delete_fn) as usize,
+            std::ptr::addr_of!(table.contains_key_fn) as usize,
+            std::ptr::addr_of!(table.get_many_fn) as usize,
+            std::ptr::addr_of!(table.set_many_fn) as usize,
+            std::ptr::addr_of!(table.delete_many_fn) as usize,
+            std::ptr::addr_of!(table.clear_store_fn) as usize,
+            std::ptr::addr_of!(table.list_keys_fn) as usize,
+            std::ptr::addr_of!(table.store_exists_fn) as usize,
+            std::ptr::addr_of!(table.key_count_fn) as usize,
+            std::ptr::addr_of!(table.sync_fn) as usize,
+            std::ptr::addr_of!(table.drop_fn) as usize,
+            std::ptr::addr_of!(table.durability_fn) as usize,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(address - base, index * width);
+        }
+        assert_eq!(std::mem::size_of::<StateStoreVtable>(), 15 * width);
+    }
+
+    #[test]
+    fn failed_or_invalid_durability_descriptions_are_not_evidence() {
+        use super::super::durability::FfiStorageDurability;
+        use drasi_core::interface::StorageDurability;
+
+        extern "C" fn failed(_: *mut c_void, _: *mut FfiStorageDurability) -> FfiResult {
+            FfiResult::err("description unavailable".into())
+        }
+        extern "C" fn invalid(_: *mut c_void, out: *mut FfiStorageDurability) -> FfiResult {
+            unsafe {
+                out.write(FfiStorageDurability {
+                    version: 2,
+                    process_restart: 2,
+                    power_loss: 2,
+                    storage_loss: 2,
+                })
+            };
+            FfiResult::ok()
+        }
+        for callback in [failed as extern "C" fn(_, _) -> _, invalid] {
+            let mut table = test_table();
+            table.durability_fn = callback;
+            let proxy = unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) };
+            assert!(proxy.try_durability().is_err());
+            assert_eq!(proxy.durability(), StorageDurability::UNKNOWN);
+        }
+    }
+
+    #[tokio::test]
+    async fn existence_and_deletion_preserve_absence_errors_and_exact_counts() {
+        let table = test_table();
+        let proxy = unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) };
+        assert_eq!(
+            proxy.durability(),
+            drasi_core::interface::StorageDurability::VOLATILE
+        );
         assert!(proxy.contains_key("store", "present").await.unwrap());
         assert!(!proxy.contains_key("store", "missing").await.unwrap());
         assert!(proxy.contains_key("store", "error").await.is_err());
         assert!(proxy.store_exists("populated").await.unwrap());
         assert!(!proxy.store_exists("empty").await.unwrap());
         assert!(proxy.store_exists("error").await.is_err());
+        assert_eq!(
+            proxy.list_keys("populated").await.unwrap(),
+            vec!["first", "second"]
+        );
+        assert!(proxy.list_keys("empty").await.unwrap().is_empty());
+        assert!(proxy
+            .list_keys("error")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("storage unavailable"));
         assert!(proxy.delete("store", "present").await.unwrap());
         assert!(!proxy.delete("store", "missing").await.unwrap());
         assert_eq!(

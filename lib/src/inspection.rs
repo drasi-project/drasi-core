@@ -35,6 +35,7 @@ fn classify_component_error(
         DrasiError::component_not_found(not_found.component_type, &not_found.component_id)
     } else {
         DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
+            .with_cause(e)
     }
 }
 
@@ -254,7 +255,10 @@ impl InspectionAPI {
         crate::queries::Query::fetch_snapshot(query.as_ref())
             .await
             .map(|snapshot| snapshot.to_vec())
-            .map_err(|e| DrasiError::operation_failed("query", id, "get_results", e.to_string()))
+            .map_err(|e| {
+                DrasiError::operation_failed("query", id, "get_results", e.to_string())
+                    .with_cause(e)
+            })
     }
 
     /// Get the full configuration for a specific query

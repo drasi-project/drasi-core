@@ -246,9 +246,10 @@ impl RuntimeComponent for ReactionInstance {
         let cleanup = host.stop_component().await;
         self.notify();
         match (result, cleanup) {
-            (Err(error), Err(cleanup)) => {
-                Err(error.context(format!("reaction stop also failed: {cleanup:#}")))
-            }
+            (Err(error), Err(cleanup)) => Err(error.context(crate::error::OperationFailures::new(
+                "reaction stop also failed",
+                vec![cleanup],
+            ))),
             (Err(error), Ok(())) => Err(error),
             (Ok(()), cleanup) => cleanup,
         }

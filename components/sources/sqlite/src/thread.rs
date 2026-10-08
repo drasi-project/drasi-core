@@ -153,6 +153,7 @@ pub fn run_sqlite_thread(
     config: SqliteThreadConfig,
     mut command_rx: mpsc::UnboundedReceiver<SqliteCommand>,
     event_tx: mpsc::UnboundedSender<ChangeEvent>,
+    ready: oneshot::Sender<()>,
 ) -> Result<()> {
     let conn = if let Some(path) = config.path {
         Connection::open_with_flags(
@@ -283,6 +284,7 @@ pub fn run_sqlite_thread(
         }
     }));
 
+    let _ = ready.send(());
     while let Some(command) = command_rx.blocking_recv() {
         match command {
             SqliteCommand::Execute { sql, response_tx } => {
@@ -564,6 +566,7 @@ mod tests {
     ) {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (ready, _) = oneshot::channel();
         let join_handle = std::thread::spawn(move || {
             run_sqlite_thread(
                 SqliteThreadConfig {
@@ -572,6 +575,7 @@ mod tests {
                 },
                 command_rx,
                 event_tx,
+                ready,
             )
             .expect("sqlite thread failed");
         });

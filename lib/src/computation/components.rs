@@ -91,6 +91,16 @@ impl ComponentBatchBuilder {
         Ok(self)
     }
 
+    pub fn resource_dependency(
+        mut self,
+        resource: ResourceId,
+        dependency: ResourceId,
+        role: super::v1::ResourceRole,
+    ) -> GraphResult<Self> {
+        self.inner = self.inner.resource_dependency(resource, dependency, role)?;
+        Ok(self)
+    }
+
     pub fn connect(mut self, edge: EdgeDefinition, provider: Box<dyn PipeProvider>) -> Self {
         self.inner = self.inner.connect(edge, provider);
         self
@@ -123,6 +133,11 @@ impl ComponentBatchBuilder {
 
     pub fn requirements(mut self, requirements: PipeRequirements) -> Self {
         self.inner = self.inner.requirements(requirements);
+        self
+    }
+
+    pub fn require_recovery(mut self, requirement: super::v1::RecoveryRequirement) -> Self {
+        self.inner = self.inner.require_recovery(requirement);
         self
     }
 
@@ -162,6 +177,8 @@ pub(crate) fn append_definition(
                 current == resource
                     && target.resource_configurations.get(&resource.id)
                         == addition.resource_configurations.get(&resource.id)
+                    && target.resource_dependencies.get(&resource.id)
+                        == addition.resource_dependencies.get(&resource.id)
                     && existing
                         .get(&resource.id)
                         .zip(supplied.get(&resource.id))
@@ -183,8 +200,14 @@ pub(crate) fn append_definition(
         .boundary_relationships
         .extend(addition.boundary_relationships.iter().cloned());
     target
+        .recovery_requirements
+        .extend(addition.recovery_requirements.iter().cloned());
+    target
         .resource_configurations
         .extend(addition.resource_configurations.clone());
+    target
+        .resource_dependencies
+        .extend(addition.resource_dependencies.clone());
     target
         .control_connections
         .extend(addition.control_connections.iter().cloned());

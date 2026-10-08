@@ -380,6 +380,7 @@ impl MiddlewareTransformer {
             .await?;
         let store = MiddlewareStore::new(indexes, &transformer.definition, options, scope)?;
         transformer.elements = store.elements();
+        transformer.failed = store.bindings.failure.clone();
         transformer.descriptor = transformer.definition.durable_descriptor();
         transformer.durable = Some(store);
         Ok(transformer)
@@ -499,6 +500,22 @@ impl MiddlewareTransformer {
 
 #[async_trait]
 impl ComputationComponent for MiddlewareTransformer {
+    fn recovery_contract(&self) -> super::ComponentRecovery {
+        match &self.durable {
+            Some(store) => {
+                let contract =
+                    super::ComponentRecovery::transactional(store.transaction.resources())
+                        .expect("durable middleware validates atomic resource participation")
+                        .with_output_bindings(store.bindings.clone());
+                match &self.source_progress {
+                    Some(progress) => contract.with_committed_progress(progress.clone()),
+                    None => contract,
+                }
+            }
+            None => super::ComponentRecovery::default(),
+        }
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -564,6 +581,27 @@ impl ComputationComponent for MiddlewareTransformer {
 
 #[async_trait]
 impl Transformer for MiddlewareTransformer {
+    async fn bind_output_destinations(
+        &mut self,
+        bindings: &super::OutputBindings,
+    ) -> anyhow::Result<()> {
+        self.check_running()?;
+        let mut guard = self.guard();
+        if let Some(store) = &mut self.durable {
+            store.bind_output_destinations(bindings).await?;
+            self.pending = store.pending()?;
+            self.wakeup
+                .set(!self.pending.is_empty() || self.deferred.is_some());
+        } else {
+            anyhow::ensure!(
+                bindings.destinations().is_empty(),
+                "volatile middleware does not track durable output destinations"
+            );
+        }
+        guard.complete = true;
+        Ok(())
+    }
+
     fn has_pending_emissions(&self) -> bool {
         !self.pending.is_empty() || self.deferred.is_some()
     }

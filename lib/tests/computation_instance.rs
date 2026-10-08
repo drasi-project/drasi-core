@@ -41,13 +41,21 @@ struct Calls {
     fail_dispose: AtomicBool,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("resource cleanup needs retry")]
+struct ResourceCleanupFailure;
+
+#[derive(Debug, thiserror::Error)]
+#[error("incomplete native cleanup")]
+struct NativeCleanupFailure;
+
 #[async_trait]
 impl ResourceCleanup for Calls {
     async fn shutdown(&self) -> anyhow::Result<()> {
         tokio::task::yield_now().await;
         self.disposals.fetch_add(1, Ordering::SeqCst);
         if self.fail_dispose.swap(false, Ordering::AcqRel) {
-            anyhow::bail!("resource cleanup needs retry");
+            return Err(ResourceCleanupFailure.into());
         }
         Ok(())
     }
@@ -75,7 +83,7 @@ impl ComputationComponent for Source {
             self.calls.stop_release.notified().await;
         }
         if self.calls.fail_stop.swap(false, Ordering::AcqRel) {
-            anyhow::bail!("incomplete native cleanup");
+            return Err(NativeCleanupFailure.into());
         }
         Ok(())
     }
@@ -253,6 +261,42 @@ async fn managed_driver_runs_and_restarts_on_multiple_threads() {
 }
 
 #[tokio::test]
+async fn instance_stop_preserves_typed_member_failure_and_allows_cleanup_retry() {
+    let calls = Arc::new(Calls::default());
+    let (batch, _input, _output) = components(calls.clone());
+    let drasi = DrasiLib::builder()
+        .with_components(batch)
+        .build()
+        .await
+        .unwrap();
+    drasi.start().await.unwrap();
+    calls.fail_stop.store(true, Ordering::Release);
+    let error = tokio::time::timeout(Duration::from_secs(5), drasi.stop())
+        .await
+        .expect("stop must report its failed member")
+        .unwrap_err();
+    assert!(
+        error.downcast_ref::<NativeCleanupFailure>().is_some(),
+        "{error:?}"
+    );
+    let report = error
+        .downcast_ref::<LifecycleReportError>()
+        .expect("typed stop report");
+    let LifecycleReportError::Stop(report) = report else {
+        panic!("expected stop report");
+    };
+    assert!(matches!(
+        report.components[&component("native-source")],
+        StopOutcome::StopFailed(_)
+    ));
+    tokio::time::timeout(Duration::from_secs(5), drasi.shutdown())
+        .await
+        .expect("cleanup retry must finish")
+        .unwrap();
+    assert_eq!(calls.disposals.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn component_batches_share_identity_and_preserve_existing_instance_members() {
     let drasi = DrasiLib::builder().build().await.expect("instance");
     let control = drasi.computation_control().unwrap();
@@ -427,6 +471,10 @@ async fn failed_builder_rollback_returns_the_actual_retryable_cleanup_owner() {
         .downcast_ref::<ComputationCleanupError>()
         .expect("typed cleanup ownership");
     assert!(matches!(owner.cause(), DrasiError::AlreadyExists { .. }));
+    assert!(owner
+        .cleanup_error()
+        .downcast_ref::<ResourceCleanupFailure>()
+        .is_some());
     assert_eq!(first.disposals.load(Ordering::SeqCst), 1);
     assert_eq!(second.disposals.load(Ordering::SeqCst), 1);
     owner.cleanup().await.expect("retry actual owned resource");

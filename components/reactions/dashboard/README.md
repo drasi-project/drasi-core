@@ -8,6 +8,20 @@
 - Dashboard configuration CRUD via REST API
 - Persistence through DrasiLib `StateStoreProvider`
 
+## Lifecycle and completion
+
+Await `stop()` before restarting or releasing the reaction. Processing, heartbeat
+and HTTP workers are owned before spawning. Stop closes admission, drains the
+HTTP server and WebSocket connection owners, and joins workers before publishing
+`Stopped`. WebSocket send/receive loops are scoped futures, not detached tasks.
+
+Cancelled or timed-out cleanup retains unfinished ownership; another start is
+rejected until cleanup completes. Server draining times out after five seconds
+without aborting the task that owns its active HTTP requests; retry `stop()` to
+finish the join. I/O errors and worker panics are returned with their typed causes.
+These lifecycle guarantees do not make browser notifications durable or
+acknowledged: the legacy graph adapter still reports acceptance only.
+
 ## Configuration
 
 Use the builder pattern:

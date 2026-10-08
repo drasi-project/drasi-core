@@ -44,11 +44,17 @@ struct MockServerState {
     events: Arc<RwLock<HashMap<String, Open511Event>>>,
 }
 
+struct MockServer {
+    port: u16,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
 /// Bind to an ephemeral port and start the mock server on it, returning the port.
 ///
 /// The listener is created once and handed directly to `axum::serve` so the
 /// OS-assigned port remains reserved — no TOCTOU race.
-async fn start_mock_open511_server(initial_events: Vec<Open511Event>) -> Result<u16> {
+async fn start_mock_open511_server(initial_events: Vec<Open511Event>) -> Result<MockServer> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("failed to bind mock Open511 server")?;
@@ -70,13 +76,20 @@ async fn start_mock_open511_server(initial_events: Vec<Open511Event>) -> Result<
         .route("/admin/events/:event_id", delete(admin_delete_event))
         .with_state(state);
 
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("mock Open511 server failed: {e}");
-        }
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
     });
 
-    Ok(port)
+    Ok(MockServer {
+        port,
+        shutdown,
+        task,
+    })
 }
 
 async fn handle_events(
@@ -217,19 +230,19 @@ where
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test -p drasi-source-open511 --test integration_test -- --ignored --nocapture
 async fn test_open511_change_detection_with_client_harness() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .is_test(true)
         .try_init();
 
     timeout(Duration::from_secs(30), async {
-        let port = start_mock_open511_server(vec![
+        let server = start_mock_open511_server(vec![
             make_event("test-EVT-001", "MAJOR", "2026-03-08T01:00:00Z"),
             make_event("test-EVT-002", "MAJOR", "2026-03-08T01:00:00Z"),
         ])
         .await
         .context("failed to start mock open511 server")?;
+        let port = server.port;
 
         let source = Open511Source::builder("road-events")
             .with_base_url(format!("http://127.0.0.1:{port}"))
@@ -347,7 +360,11 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
         .await
         .context("did not observe DELETE")?;
 
-        core.stop().await.context("failed to stop DrasiLib")?;
+        core.shutdown()
+            .await
+            .context("failed to shut down DrasiLib")?;
+        server.shutdown.send(()).expect("mock server shutdown");
+        server.task.await??;
 
         Ok::<(), anyhow::Error>(())
     })

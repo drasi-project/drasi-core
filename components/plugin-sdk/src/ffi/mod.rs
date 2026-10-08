@@ -31,9 +31,11 @@
 pub mod bootstrap_proxy;
 pub mod bootstrap_stream;
 pub mod callbacks;
+pub mod durability;
 pub mod identity;
 pub mod identity_proxy;
 pub mod metadata;
+pub use durability::FfiStorageDurability;
 pub mod payload;
 pub mod secret_store;
 pub mod snapshot_fetcher_proxy;

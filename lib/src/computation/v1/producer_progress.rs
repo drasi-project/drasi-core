@@ -266,6 +266,18 @@ impl GraphInputProgress {
             progress.volatile_producer = inherited_volatile;
             return Ok(progress);
         }
+        if let Some((source, sequence)) = super::SourceTransactionCodec::replay_progress(input)? {
+            return Ok(Self {
+                stream: input.system().stream().clone(),
+                transport_sequence: Some(input.system().sequence()),
+                key: super::query::progress_key(input.system().stream().as_str(), Some(&source)),
+                identity: SourceProgressKey::Source(source),
+                sequence,
+                position: input.system().source_position().cloned(),
+                producer: None,
+                volatile_producer: false,
+            });
+        }
         let raw = GraphChangeCodec::source_metadata(input)?;
         let stable = raw.as_ref().and_then(|metadata| {
             metadata

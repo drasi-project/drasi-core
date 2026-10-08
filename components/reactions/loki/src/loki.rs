@@ -23,6 +23,7 @@ use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use tokio::sync::Mutex;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
@@ -52,6 +53,7 @@ struct BufferedStream {
 pub struct LokiReaction {
     pub(crate) base: ReactionBase,
     config: LokiReactionConfig,
+    cleanup_required: Mutex<bool>,
 }
 
 impl LokiReaction {
@@ -97,6 +99,7 @@ impl LokiReaction {
         Ok(Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         })
     }
 
@@ -400,9 +403,14 @@ impl Reaction for LokiReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.base.processing_task.read().await.is_some() {
+            return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         log_component_start("Loki Reaction", &self.base.id);
         info!(
-            "[{}] Loki reaction started - endpoint: {}",
+            "[{}] Loki reaction starting - endpoint: {}",
             self.base.id, self.config.endpoint
         );
 
@@ -413,16 +421,25 @@ impl Reaction for LokiReaction {
             )
             .await;
 
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("Loki reaction started".to_string()),
-            )
-            .await;
+        let client = match Client::builder()
+            .timeout(std::time::Duration::from_millis(self.config.timeout_ms))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                error!("[{}] failed to create HTTP client: {error}", self.base.id);
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Failed to create HTTP client: {error}")),
+                    )
+                    .await;
+                return Err(error.into());
+            }
+        };
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
         let reaction_name = self.base.id.clone();
-        let status_handle = self.base.status_handle();
         let priority_queue = self.base.priority_queue.clone();
         let endpoint = self.config.endpoint.clone();
         let token = self.config.token.clone();
@@ -433,24 +450,7 @@ impl Reaction for LokiReaction {
         let routes = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
 
-        let processing_task = tokio::spawn(async move {
-            let client = match Client::builder()
-                .timeout(std::time::Duration::from_millis(timeout_ms))
-                .build()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("[{reaction_name}] failed to create HTTP client: {e}");
-                    status_handle
-                        .set_status(
-                            ComponentStatus::Error,
-                            Some(format!("Failed to create HTTP client: {e}")),
-                        )
-                        .await;
-                    return;
-                }
-            };
-
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
             info!(
                 "[{reaction_name}] config - endpoint: {endpoint}, timeout_ms: {timeout_ms}, labels: {}, routes: {}, token: {}, basic_auth: {}, tenant_id: {}",
                 labels.len(),
@@ -482,10 +482,6 @@ impl Reaction for LokiReaction {
 
                     result = priority_queue.dequeue() => result,
                 };
-
-                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
-                    break;
-                }
 
                 let query_result = query_result_arc.as_ref();
                 debug!(
@@ -616,27 +612,29 @@ impl Reaction for LokiReaction {
             }
 
             info!("[{reaction_name}] Loki reaction stopped");
-            status_handle
-                .set_status(
-                    ComponentStatus::Stopped,
-                    Some("Loki reaction processing task stopped".to_string()),
-                )
-                .await;
-        });
-
-        self.base.set_processing_task(processing_task).await;
+        })
+        .await?;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Loki reaction started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
         info!("[{}] stopping Loki reaction", self.base.id);
-        self.base.stop_common().await?;
+        self.base.stop_common_gracefully().await?;
         self.base
             .set_status(
                 ComponentStatus::Stopped,
                 Some("Loki reaction stopped".to_string()),
             )
             .await;
+        *cleanup_required = false;
         Ok(())
     }
 
@@ -652,6 +650,10 @@ impl Reaction for LokiReaction {
         self.base.enqueue_query_result(result).await
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

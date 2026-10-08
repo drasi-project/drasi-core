@@ -34,6 +34,11 @@
 //! cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
 //! cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
 //! ```
+//!
+//! For old/new compatibility runs, set `DRASI_HOST_TEST_PLUGINS_DIR` to a
+//! directory of separately built libraries and `DRASI_HOST_TEST_EXPECTED_LEGACY_ABI`
+//! to their exact ABI version. Keep genuine older binaries; changing only the
+//! version string in the current SDK does not test an older implementation.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +53,9 @@ use serial_test::serial;
 ///
 /// Looks for plugins in the workspace target directory (drasi-core/target/debug/).
 fn plugin_dir() -> PathBuf {
+    if let Some(directory) = std::env::var_os("DRASI_HOST_TEST_PLUGINS_DIR") {
+        return directory.into();
+    }
     // Walk up from this crate's manifest dir to the workspace root
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // host-sdk is at components/host-sdk, workspace root is ../../
@@ -93,6 +101,218 @@ fn plugin_exists(crate_name: &str) -> bool {
     let dir = plugin_dir();
     let filename = plugin_filename(crate_name);
     dir.join(&filename).exists()
+}
+
+#[test]
+#[serial]
+fn selected_legacy_fixtures_have_the_expected_abi() {
+    let expected = std::env::var("DRASI_HOST_TEST_EXPECTED_LEGACY_ABI")
+        .unwrap_or_else(|_| drasi_plugin_sdk::ffi::FFI_SDK_VERSION.to_owned());
+    for name in [
+        "drasi-source-mock",
+        "drasi-reaction-log",
+        "drasi-reaction-sse",
+    ] {
+        let path = require_plugin(name);
+        let metadata = drasi_host_sdk::loader::scan_plugin_metadata(&path)
+            .expect("required compatibility fixture must exist and expose metadata");
+        assert_eq!(metadata.sdk_version, expected, "{}", path.display());
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn legacy_library_loading_does_not_grant_durable_admission() {
+    use drasi_core::interface::FailureMode;
+    use drasi_lib::computation::v1::*;
+    use std::sync::Arc;
+
+    struct UnstartedSink(ComponentDescriptor);
+    #[async_trait::async_trait]
+    impl ComputationComponent for UnstartedSink {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.0
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            panic!("an unsupported recovery path must not activate")
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    #[async_trait::async_trait]
+    impl EnvelopeSink for UnstartedSink {
+        fn completion(&self) -> SinkCompletion {
+            SinkCompletion::Handled
+        }
+        async fn handle(&mut self, _: InputEnvelope) -> anyhow::Result<()> {
+            panic!("an unsupported recovery path must not process input")
+        }
+    }
+
+    let plugin = load_plugin_from_path(
+        &require_plugin("drasi-source-mock"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+    let source = plugin.source_plugins[0]
+        .create_source(
+            "unknown-admission",
+            &serde_json::json!({"dataType": {"type": "counter"}}),
+            false,
+        )
+        .await
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut services = LegacyPluginServices::empty("recovery-boundary");
+    services.state_store = Some(Arc::new(
+        drasi_state_store_redb::RedbStateStoreProvider::new(directory.path().join("state.redb"))
+            .unwrap(),
+    ));
+    let host = SourcePluginHost::owned(source, services);
+    let id = ComponentId::try_new("unknown-admission").unwrap();
+    let stream = StreamId::try_new("source/out").unwrap();
+    let subscription = LegacySourceSubscription::new(
+        host,
+        SourceSubscriptionOptions {
+            allow_broadcast_loss: true,
+            ..Default::default()
+        },
+        stream.clone(),
+        None,
+    )
+    .unwrap();
+    let from = Endpoint {
+        component: id.clone(),
+        port: PortId::try_new("out").unwrap(),
+    };
+    let to = Endpoint {
+        component: ComponentId::try_new("sink").unwrap(),
+        port: PortId::try_new("in").unwrap(),
+    };
+    let sink = UnstartedSink(
+        ComponentDescriptor::try_new(
+            to.component.clone(),
+            vec![PortDescriptor::new(
+                to.port.clone(),
+                PortDirection::Input,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )
+        .unwrap(),
+    );
+    let result = ComputationGraph::builder("legacy-admission")
+        .source(Box::new(SourcePluginAdapter::new(id.clone(), subscription)))
+        .sink(Box::new(sink))
+        .bind_stream(from.clone(), stream)
+        .connect(
+            EdgeDefinition { from, to },
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .require_recovery(RecoveryRequirement {
+            consumer: id.clone(),
+            scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
+            guarantees: [RecoveryGuarantee::Acceptance].into_iter().collect(),
+        })
+        .build();
+    match result {
+        Err(GraphError::Recovery(error)) => assert!(error.issues.iter().any(|issue| issue
+            .participant
+            == RecoveryParticipant::Component(id.clone())
+            && issue.reason == RecoveryIncompatibility::UnknownAdmission)),
+        Err(error) => panic!("expected a recovery rejection, got {error:#}"),
+        Ok(_) => panic!("a persistent provider must not grant an opaque plugin durable admission"),
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn state_store_context_ownership_across_actual_plugin_initialization() {
+    use std::sync::Arc;
+
+    let path = require_plugin("drasi-source-mock");
+    let metadata = drasi_host_sdk::loader::scan_plugin_metadata(&path).unwrap();
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+    let source = plugin.source_plugins[0]
+        .create_source(
+            "store-ownership",
+            &serde_json::json!({"dataType": {"type": "counter"}, "intervalMs": 60000}),
+            false,
+        )
+        .await
+        .unwrap();
+    let reaction_plugin = load_plugin_from_path(
+        &require_plugin("drasi-reaction-log"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+    let reaction = reaction_plugin.reaction_plugins[0]
+        .create_reaction("store-reaction", vec![], &serde_json::json!({}), false)
+        .await
+        .unwrap();
+    let mut stores = Vec::new();
+    for _ in 0..2 {
+        let store = Arc::new(drasi_lib::MemoryStateStoreProvider::new());
+        stores.push(Arc::downgrade(&store));
+        let (updates, _receiver) = tokio::sync::mpsc::channel(16);
+        source
+            .initialize(drasi_lib::SourceRuntimeContext::new(
+                "store-instance",
+                "store-ownership",
+                Some(store.clone()),
+                updates,
+                None,
+            ))
+            .await;
+        source.start().await.unwrap();
+        source.stop().await.unwrap();
+        let (updates, _receiver) = tokio::sync::mpsc::channel(16);
+        reaction
+            .initialize(drasi_lib::ReactionRuntimeContext {
+                instance_id: "store-instance".into(),
+                reaction_id: "store-reaction".into(),
+                update_tx: updates.into(),
+                state_store: Some(store),
+                identity_provider: None,
+                snapshot_fetcher: None,
+                resource_observer: None,
+            })
+            .await;
+        reaction.start().await.unwrap();
+        reaction.stop().await.unwrap();
+    }
+    drop(source);
+    assert!(
+        stores.last().unwrap().upgrade().is_some(),
+        "the reaction still owns the shared store"
+    );
+    drop(reaction);
+    if metadata.sdk_version.starts_with("0.17.") {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while stores.iter().any(|store| store.upgrade().is_some()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all transferred stores must be released after plugin cleanup");
+    } else {
+        // ABI 0.16 proxies retain their original persistent-pointer lifetime.
+        assert!(stores.iter().all(|store| store.upgrade().is_some()));
+    }
 }
 
 /// Test-owned log/lifecycle capture.
@@ -1919,7 +2139,7 @@ async fn test_source_with_null_identity_provider() {
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
         source_id: "null-ip-test".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         wal_provider: None,
@@ -1968,7 +2188,7 @@ async fn test_source_with_identity_provider_injection() {
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
         source_id: "ip-inject-test".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: Some(provider),
         wal_provider: None,
@@ -2106,7 +2326,7 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
         source_id: "identity-xcdylib".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: Some(provider),
         wal_provider: None,
@@ -2243,7 +2463,7 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "identity-xcdylib-reaction".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: Some(provider),
         snapshot_fetcher: None,
@@ -2305,7 +2525,7 @@ async fn test_reaction_enqueue_query_result() {
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "enqueue-test".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
@@ -2369,7 +2589,7 @@ async fn test_reaction_enqueue_multiple_query_results() {
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "multi-enqueue-test".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
@@ -2428,7 +2648,7 @@ async fn test_reaction_enqueue_query_result_with_data() {
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "data-enqueue-test".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: None,
@@ -2511,7 +2731,7 @@ async fn test_reaction_start_stop_stress() {
         let context = drasi_lib::ReactionRuntimeContext {
             instance_id: format!("stress-instance-{i}"),
             reaction_id: format!("stress-{i}"),
-            update_tx,
+            update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
             snapshot_fetcher: None,
@@ -3219,7 +3439,7 @@ async fn test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels
         .initialize(drasi_lib::ReactionRuntimeContext {
             instance_id: "status-instance".into(),
             reaction_id: "status-reaction".into(),
-            update_tx,
+            update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
             snapshot_fetcher: None,
@@ -3379,6 +3599,7 @@ async fn test_ffi_resume_from_skips_bootstrap() {
 /// source_position, without sending any bootstrap events.
 struct TestBootstrapProvider {
     source_position: Option<bytes::Bytes>,
+    expected_settings: drasi_lib::config::SourceSubscriptionSettings,
 }
 
 #[async_trait::async_trait]
@@ -3386,10 +3607,18 @@ impl drasi_lib::bootstrap::BootstrapProvider for TestBootstrapProvider {
     async fn bootstrap(
         &self,
         _request: drasi_lib::bootstrap::BootstrapRequest,
-        _context: &drasi_lib::bootstrap::BootstrapContext,
+        context: &drasi_lib::bootstrap::BootstrapContext,
         _event_tx: drasi_lib::channels::BootstrapEventSender,
-        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+        settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> anyhow::Result<drasi_lib::bootstrap::BootstrapResult> {
+        anyhow::ensure!(
+            settings == Some(&self.expected_settings),
+            "subscription settings did not survive the source library boundary"
+        );
+        anyhow::ensure!(
+            context.source_id == self.expected_settings.source_id,
+            "bootstrap context belongs to another source"
+        );
         // Drop event_tx immediately to signal "no bootstrap events"
         drop(_event_tx);
         Ok(drasi_lib::bootstrap::BootstrapResult {
@@ -3411,22 +3640,23 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
 
     // Set a bootstrap provider through FFI
     let position_bytes = bytes::Bytes::from_static(b"\xDE\xAD\xBE\xEF\x00\x01\x02\x03");
-    let provider = TestBootstrapProvider {
-        source_position: Some(position_bytes.clone()),
-    };
-    source.set_bootstrap_provider(Box::new(provider)).await;
-
     // Subscribe with bootstrap enabled
     let settings = drasi_lib::config::SourceSubscriptionSettings {
         source_id: "bootstrap-test".to_string(),
         enable_bootstrap: true,
         query_id: "bootstrap-query".to_string(),
-        nodes: std::collections::HashSet::new(),
-        relations: std::collections::HashSet::new(),
+        nodes: ["Person".to_string(), "Team".to_string()].into(),
+        relations: ["MEMBER_OF".to_string()].into(),
         resume_from: None,
         resume_sequence: None,
         request_position_handle: true,
     };
+    source
+        .set_bootstrap_provider(Box::new(TestBootstrapProvider {
+            source_position: Some(position_bytes.clone()),
+            expected_settings: settings.clone(),
+        }))
+        .await;
     let sub = source
         .subscribe(settings)
         .await

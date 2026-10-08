@@ -48,6 +48,11 @@ mysql_async = { version = "0.37", features = ["binlog", "rustls-tls", "ring", "t
 mysql_common = { version = "0.37", features = ["binlog"] }
 futures-util = "0.3"
 bytes = "1.0"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+rsa = "0.9"
+sha1 = "0.10"
+sha2 = "0.10"
 
 [features]
 dynamic-plugin = []
@@ -58,9 +63,10 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["mysql"] }
 drasi-reaction-application = { workspace = true }
 drasi-bootstrap-mysql = { workspace = true }
-drasi-index-rocksdb = { workspace = true }
+drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 env_logger = "0.11"
 tempfile = "3"
+rcgen = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure

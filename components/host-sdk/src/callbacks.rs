@@ -74,8 +74,8 @@ impl CallbackContext {
 /// Per-source/reaction-instance callback context.
 ///
 /// Created during `SourceProxy.initialize()` / `ReactionProxy.initialize()`.
-/// Uses the `ComponentUpdateSender` channel from the runtime context so
-/// lifecycle events flow through the ComponentGraph update loop.
+/// Uses the runtime's `ComponentUpdateSender` so lifecycle observations reach the
+/// graph-owned adapter, including catch-up after a burst of callbacks.
 pub struct InstanceCallbackContext {
     /// The DrasiLib instance ID.
     pub instance_id: String,
@@ -83,13 +83,9 @@ pub struct InstanceCallbackContext {
     pub runtime_handle: tokio::runtime::Handle,
     /// The global log registry.
     pub log_registry: Arc<ComponentLogRegistry>,
-    /// Channel for status updates to the ComponentGraph.
+    /// Lifecycle mailbox supplied by the graph-owned adapter.
     pub update_tx: ComponentUpdateSender,
 }
-
-// Safety: contains only Arc and tokio mpsc::Sender (which is Send+Sync).
-unsafe impl Send for InstanceCallbackContext {}
-unsafe impl Sync for InstanceCallbackContext {}
 
 impl InstanceCallbackContext {
     pub fn into_raw(self: Arc<Self>) -> *mut c_void {
@@ -411,8 +407,8 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
             };
 
             let tx = context.update_tx.clone();
-            // Use try_send to avoid spawning an async task that may block
-            // the host runtime's current_thread scheduler during drop sequences.
+            // The graph mailbox coalesces status bursts without losing failure
+            // or readiness. No blocking callback or detached forwarding task.
             if let Err(e) = tx.try_send(update) {
                 log::error!("Failed to send lifecycle event: {e}");
             }

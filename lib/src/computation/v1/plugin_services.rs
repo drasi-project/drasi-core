@@ -33,11 +33,20 @@ pub struct LegacyWalResource(pub Arc<dyn WalProvider>);
 pub struct LegacySecretStoreResource(pub Arc<dyn SecretStoreProvider>);
 pub struct LegacyBootstrapResource(pub Arc<dyn crate::bootstrap::BootstrapProvider>);
 
+#[derive(Debug, thiserror::Error)]
+pub enum PluginObservationError {
+    #[error("plugin {expected} reported another component's status: {reported}")]
+    ForeignComponent { expected: String, reported: String },
+    #[error("plugin {component_id} failed: {message}")]
+    ReportedFailure {
+        component_id: String,
+        message: String,
+    },
+}
+
 pub(crate) struct PluginObservations {
     id: String,
-    updates: tokio::sync::Mutex<
-        Option<tokio::sync::mpsc::Receiver<crate::component_graph::ComponentUpdate>>,
-    >,
+    updates: tokio::sync::Mutex<Option<crate::channels::ComponentUpdateObserver>>,
     status: tokio::sync::watch::Sender<(crate::ComponentStatus, Option<String>)>,
     running: tokio::sync::watch::Sender<bool>,
 }
@@ -51,22 +60,25 @@ impl PluginObservations {
         }
     }
     pub(crate) async fn channel(&self) -> crate::component_graph::ComponentUpdateSender {
-        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        let (sender, receiver) = crate::channels::ComponentUpdateSender::observed(&self.id);
         *self.updates.lock().await = Some(receiver);
         sender
     }
-    pub(crate) async fn reset(&self) {
+    pub(crate) async fn reset(&self) -> anyhow::Result<()> {
         self.running.send_replace(false);
         self.status
             .send_replace((crate::ComponentStatus::Stopped, None));
         if let Some(receiver) = self.updates.lock().await.as_mut() {
-            while let Ok(update) = receiver.try_recv() {
-                log::trace!("Discarding prior plugin operation observation: {update:?}");
-            }
+            receiver.reset()?;
         }
+        Ok(())
     }
     pub(crate) async fn close(&self) {
         *self.updates.lock().await = None;
+    }
+    #[cfg(test)]
+    fn status(&self) -> crate::ComponentStatus {
+        self.status.borrow().0
     }
     pub(crate) async fn read(&self) -> anyhow::Result<()> {
         let mut updates = self.updates.lock().await;
@@ -74,7 +86,7 @@ impl PluginObservations {
             drop(updates);
             return std::future::pending().await;
         }
-        match updates.as_mut().expect("status receiver").recv().await {
+        match updates.as_mut().expect("status receiver").recv().await? {
             Some(update) => self.apply_update(update)?,
             None => {
                 *updates = None;
@@ -90,27 +102,34 @@ impl PluginObservations {
                 message,
             } => {
                 if component_id != self.id {
-                    anyhow::bail!("plugin reported another component's status");
+                    return Err(PluginObservationError::ForeignComponent {
+                        expected: self.id.clone(),
+                        reported: component_id,
+                    }
+                    .into());
                 }
                 self.status.send_replace((status, message.clone()));
                 if status == crate::ComponentStatus::Running {
                     self.running.send_replace(true);
                 }
                 if status == crate::ComponentStatus::Error {
-                    anyhow::bail!(
-                        "plugin {} failed: {}",
-                        self.id,
-                        message.as_deref().unwrap_or("unspecified failure")
-                    );
+                    return Err(PluginObservationError::ReportedFailure {
+                        component_id,
+                        message: message.unwrap_or_else(|| "unspecified failure".into()),
+                    }
+                    .into());
                 }
             }
         }
         Ok(())
     }
-    async fn drain(&self) -> anyhow::Result<()> {
+    pub(crate) async fn drain(&self) -> anyhow::Result<()> {
         let mut updates = self.updates.lock().await;
         if let Some(receiver) = updates.as_mut() {
-            while let Ok(update) = receiver.try_recv() {
+            for _ in 0..crate::channels::MAX_COMPONENT_OBSERVATIONS {
+                let Some(update) = receiver.try_recv()? else {
+                    break;
+                };
                 self.apply_update(update)?;
             }
         }
@@ -121,11 +140,14 @@ impl PluginObservations {
         let status = status
             .wait_for(|(status, _)| *status == crate::ComponentStatus::Error)
             .await?;
-        anyhow::bail!(
-            "plugin {} failed: {}",
-            self.id,
-            status.1.as_deref().unwrap_or("unspecified failure")
-        );
+        Err(PluginObservationError::ReportedFailure {
+            component_id: self.id.clone(),
+            message: status
+                .1
+                .clone()
+                .unwrap_or_else(|| "unspecified failure".into()),
+        }
+        .into())
     }
     pub(crate) async fn wait_running(&self) -> anyhow::Result<()> {
         let mut running = self.running.subscribe();
@@ -166,6 +188,120 @@ impl PluginObservations {
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::{channels::ComponentUpdate, ComponentStatus};
+
+    fn update(id: &str, status: ComponentStatus, message: &str) -> ComponentUpdate {
+        ComponentUpdate::Status {
+            component_id: id.into(),
+            status,
+            message: Some(message.into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_operation_catches_up_to_failure_after_callback_flood() {
+        let observations = PluginObservations::new("plugin");
+        let sender = observations.channel().await;
+        let error = observations
+            .drive(
+                async {
+                    for _ in 0..10_000 {
+                        sender.try_send(update("plugin", ComponentStatus::Starting, "busy"))?;
+                    }
+                    sender.try_send(update("plugin", ComponentStatus::Running, "ready"))?;
+                    sender.try_send(update("plugin", ComponentStatus::Error, "first failure"))?;
+                    sender.try_send(update("plugin", ComponentStatus::Stopped, "finished"))?;
+                    Ok(())
+                },
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<PluginObservationError>(),
+            Some(PluginObservationError::ReportedFailure { message, .. })
+                if message == "first failure"
+        ));
+        observations.read().await.unwrap();
+        assert_eq!(observations.status(), ComponentStatus::Stopped);
+        observations.wait_running().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_finishes_after_observing_a_reported_failure() {
+        let observations = PluginObservations::new("plugin");
+        let sender = observations.channel().await;
+        sender
+            .try_send(update("plugin", ComponentStatus::Error, "cleanup failure"))
+            .unwrap();
+        let mut cleaned_up = false;
+        let error = observations
+            .drive(
+                async {
+                    tokio::task::yield_now().await;
+                    cleaned_up = true;
+                    Ok(())
+                },
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(cleaned_up);
+        assert!(error.downcast_ref::<PluginObservationError>().is_some());
+    }
+
+    #[tokio::test]
+    async fn reset_clears_readiness_and_channel_replacement_revokes_old_callbacks() {
+        let observations = PluginObservations::new("plugin");
+        let old = observations.channel().await;
+        old.try_send(update("plugin", ComponentStatus::Running, "old"))
+            .unwrap();
+        observations.read().await.unwrap();
+        observations.wait_running().await.unwrap();
+        observations.reset().await.unwrap();
+        {
+            let ready = observations.wait_running();
+            tokio::pin!(ready);
+            assert!(futures::poll!(&mut ready).is_pending());
+        }
+        let current = observations.channel().await;
+        assert!(old
+            .try_send(update("plugin", ComponentStatus::Error, "stale"))
+            .is_err());
+        current
+            .try_send(update("plugin", ComponentStatus::Running, "current"))
+            .unwrap();
+        observations.drive(async { Ok(()) }, false).await.unwrap();
+        observations.wait_running().await.unwrap();
+        observations.close().await;
+        assert!(current.is_closed());
+    }
+
+    #[tokio::test]
+    async fn foreign_component_failure_stays_typed_after_coalescing() {
+        let observations = PluginObservations::new("plugin");
+        let sender = observations.channel().await;
+        sender
+            .try_send(update("wrong", ComponentStatus::Starting, "invalid"))
+            .unwrap();
+        sender
+            .try_send(update("plugin", ComponentStatus::Running, "valid"))
+            .unwrap();
+        let error = observations
+            .drive(async { Ok(()) }, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<PluginObservationError>(),
+            Some(PluginObservationError::ForeignComponent { expected, reported })
+                if expected == "plugin" && reported == "wrong"
+        ));
     }
 }
 

@@ -264,7 +264,7 @@ impl SourcePluginHost {
                 }
                 life.needs_stop = true;
                 life.activation_incomplete = true;
-                self.observations.reset().await;
+                self.observations.reset().await?;
                 self.with_observations(self.source()?.start()).await?;
                 life.running = true;
                 life.activation_incomplete = false;

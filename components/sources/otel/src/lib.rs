@@ -368,7 +368,8 @@ impl Source for OtelSource {
                 Some("OpenTelemetry source listening".to_string()),
             )
             .await;
-        let task = tokio::spawn(
+        drasi_lib::context::workers::spawn_owned_worker(
+            &self.base.task_handle,
             async move {
                 if let Err(e) = receiver::serve(runtime, endpoints, shutdown_rx).await {
                     error_log(&e);
@@ -380,13 +381,14 @@ impl Source for OtelSource {
                 }
             }
             .instrument(span),
-        );
-        self.base.set_task_handle(task).await;
+        )
+        .await
+        .with_context(|| format!("OTel source '{}' receiver registration", self.base.id))?;
 
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            let prune_handle = tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -396,8 +398,9 @@ impl Source for OtelSource {
                         }
                     }
                 }
-            });
-            *self.prune_task.write().await = Some(prune_handle);
+            })
+            .await
+            .with_context(|| format!("OTel source '{}' WAL pruner registration", self.base.id))?;
         }
 
         Ok(())
@@ -405,10 +408,28 @@ impl Source for OtelSource {
 
     async fn stop(&self) -> Result<()> {
         log_component_stop("OTel Source", &self.base.id);
-        if let Some(handle) = self.prune_task.write().await.take() {
-            handle.abort();
+        self.base.set_status(ComponentStatus::Stopping, None).await;
+        if let Some(tx) = self.base.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
         }
-        persist_lifecycle(&self.base, &self.lifecycle).await;
+        drasi_lib::context::workers::cancel_owned_worker(
+            &mut *self.prune_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("OTel source '{}' WAL pruning cleanup", self.base.id))?;
+        drasi_lib::context::workers::join_owned_worker(
+            &mut *self.base.task_handle.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("OTel source '{}' receiver cleanup", self.base.id))?;
+        if let Err(error) = persist_lifecycle(&self.base, &self.lifecycle).await {
+            self.base
+                .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                .await;
+            return Err(error);
+        }
         self.base.stop_common().await
     }
 
@@ -720,23 +741,19 @@ fn rel(label: &str, from: Option<&str>, to: Option<&str>, props: &[&str]) -> Rel
     }
 }
 
-async fn persist_lifecycle(base: &SourceBase, lifecycle: &RwLock<LifecycleState>) {
+async fn persist_lifecycle(base: &SourceBase, lifecycle: &RwLock<LifecycleState>) -> Result<()> {
     let Some(store) = base.state_store().await else {
-        return;
+        return Ok(());
     };
-    let bytes = {
-        let state = lifecycle.read().await;
-        match state.to_bytes() {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                warn!("[{}] failed to serialize lifecycle on stop: {e}", base.id);
-                return;
-            }
-        }
-    };
-    if let Err(e) = store.set(&base.id, "lifecycle", bytes).await {
-        warn!("[{}] failed to persist lifecycle on stop: {e}", base.id);
-    }
+    let bytes = lifecycle
+        .read()
+        .await
+        .to_bytes()
+        .with_context(|| format!("OTel source '{}' lifecycle serialization", base.id))?;
+    store
+        .set(&base.id, "lifecycle", bytes)
+        .await
+        .with_context(|| format!("OTel source '{}' lifecycle persistence", base.id))
 }
 
 fn error_log(err: &anyhow::Error) {
@@ -757,6 +774,85 @@ drasi_plugin_sdk::export_plugin!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_lib::state_store::{StateStoreError, StateStoreResult};
+
+    struct RejectLifecycleWrite;
+
+    #[async_trait]
+    impl StateStoreProvider for RejectLifecycleWrite {
+        async fn get(&self, _: &str, _: &str) -> StateStoreResult<Option<Vec<u8>>> {
+            unreachable!("shutdown does not read state")
+        }
+        async fn set(&self, store: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+            assert_eq!(store, "failed-save");
+            assert_eq!(key, "lifecycle");
+            assert!(!value.is_empty());
+            Err(StateStoreError::StorageError(
+                "injected write failure".into(),
+            ))
+        }
+        async fn delete(&self, _: &str, _: &str) -> StateStoreResult<bool> {
+            unreachable!("shutdown does not delete state")
+        }
+        async fn contains_key(&self, _: &str, _: &str) -> StateStoreResult<bool> {
+            unreachable!("shutdown does not inspect keys")
+        }
+        async fn get_many(
+            &self,
+            _: &str,
+            _: &[&str],
+        ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
+            unreachable!("shutdown does not read state")
+        }
+        async fn set_many(&self, _: &str, _: &[(&str, &[u8])]) -> StateStoreResult<()> {
+            unreachable!("shutdown writes one lifecycle record")
+        }
+        async fn delete_many(&self, _: &str, _: &[&str]) -> StateStoreResult<usize> {
+            unreachable!("shutdown does not delete state")
+        }
+        async fn clear_store(&self, _: &str) -> StateStoreResult<usize> {
+            unreachable!("shutdown must preserve state")
+        }
+        async fn list_keys(&self, _: &str) -> StateStoreResult<Vec<String>> {
+            unreachable!("shutdown does not inspect keys")
+        }
+        async fn store_exists(&self, _: &str) -> StateStoreResult<bool> {
+            unreachable!("shutdown does not inspect stores")
+        }
+        async fn key_count(&self, _: &str) -> StateStoreResult<usize> {
+            unreachable!("shutdown does not inspect keys")
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_shutdown_save_is_typed_and_does_not_report_stopped() {
+        let source = OtelSource::builder("failed-save")
+            .with_state_store(Arc::new(RejectLifecycleWrite))
+            .build()
+            .unwrap();
+        let error = source.stop().await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<StateStoreError>(),
+            Some(StateStoreError::StorageError(message)) if message == "injected write failure"
+        ));
+        assert_eq!(source.status().await, ComponentStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn stop_joins_the_wal_pruner() {
+        let source = OtelSource::builder("pruner").build().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let worker = task.abort_handle();
+        *source.prune_task.write().await = Some(task);
+        ready.await.unwrap();
+        source.stop().await.unwrap();
+        assert!(worker.is_finished());
+        assert!(source.prune_task.read().await.is_none());
+    }
 
     mod construction {
         use super::*;

@@ -23,7 +23,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::sync::{oneshot, Mutex, Notify, Semaphore};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
@@ -35,6 +35,7 @@ use crate::proto::drasi_v1::{ProcessResultsRequest, ProcessResultsResponse};
 pub(crate) struct RecordedBatch {
     pub query_id: String,
     pub item_count: usize,
+    pub sequences: Vec<u64>,
     /// ASCII gRPC metadata headers observed on the inbound request.
     /// Binary headers and framework-internal entries (`te`, `user-agent`,
     /// `grpc-*`) are intentionally not filtered out — tests should assert
@@ -49,15 +50,21 @@ pub(crate) struct Recorder {
     /// Number of leading requests to reject with `success: false`.
     fail_remaining: Arc<AtomicUsize>,
     notify: Arc<Notify>,
+    response_gate: Option<Arc<Semaphore>>,
 }
 
 impl Recorder {
-    fn new(fail_first: usize) -> Self {
+    fn new(fail_first: usize, hold_responses: bool) -> Self {
         Self {
             batches: Arc::new(Mutex::new(Vec::new())),
             fail_remaining: Arc::new(AtomicUsize::new(fail_first)),
             notify: Arc::new(Notify::new()),
+            response_gate: hold_responses.then(|| Arc::new(Semaphore::new(0))),
         }
+    }
+
+    pub(crate) fn release_responses(&self, count: usize) {
+        self.response_gate.as_ref().unwrap().add_permits(count);
     }
 
     /// Snapshot of all successfully recorded batches so far.
@@ -115,9 +122,15 @@ impl ReactionService for MockReactionService {
             .collect();
 
         let req = request.into_inner();
-        let (query_id, item_count) = req
+        let (query_id, item_count, sequences) = req
             .results
-            .map(|r| (r.query_id, r.results.len()))
+            .map(|r| {
+                (
+                    r.query_id,
+                    r.results.len(),
+                    r.results.iter().map(|item| item.sequence).collect(),
+                )
+            })
             .unwrap_or_default();
 
         // Inject leading failures to drive retry logic.
@@ -134,9 +147,13 @@ impl ReactionService for MockReactionService {
         self.recorder.batches.lock().await.push(RecordedBatch {
             query_id,
             item_count,
+            sequences,
             metadata_headers,
         });
         self.recorder.notify.notify_waiters();
+        if let Some(gate) = &self.recorder.response_gate {
+            gate.acquire().await.unwrap().forget();
+        }
 
         Ok(Response::new(ProcessResultsResponse {
             success: true,
@@ -162,7 +179,7 @@ impl MockServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        let _ = self.handle.await;
+        self.handle.await.unwrap();
     }
 }
 
@@ -174,7 +191,15 @@ pub(crate) async fn start() -> MockServer {
 /// Start a mock server that rejects the first `fail_first` requests with
 /// `success: false` before accepting subsequent ones.
 pub(crate) async fn start_with_failures(fail_first: usize) -> MockServer {
-    let recorder = Recorder::new(fail_first);
+    start_with_options(fail_first, false).await
+}
+
+pub(crate) async fn start_held() -> MockServer {
+    start_with_options(0, true).await
+}
+
+async fn start_with_options(fail_first: usize, hold_responses: bool) -> MockServer {
+    let recorder = Recorder::new(fail_first, hold_responses);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let endpoint = format!("grpc://{addr}");
@@ -185,12 +210,13 @@ pub(crate) async fn start_with_failures(fail_first: usize) -> MockServer {
     };
 
     let handle = tokio::spawn(async move {
-        let _ = tonic::transport::Server::builder()
+        tonic::transport::Server::builder()
             .add_service(ReactionServiceServer::new(service))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                 let _ = shutdown_rx.await;
             })
-            .await;
+            .await
+            .unwrap();
     });
 
     MockServer {

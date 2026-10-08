@@ -24,7 +24,7 @@ The pre-removal checkpoint is `milestone/computation-only-baseline`, at core
 The query evaluator, Cypher/GQL, joins, middleware, initial data loading, scheduled
 work, storage transactions and supported recovery remain. Source/reaction
 adapters retain the existing plugin interfaces while direct graph components
-can use ports and change envelopes. The SDK contract remains `0.15.0`; locally
+can use ports and change envelopes. The current legacy SDK contract is `0.16.0`; locally
 built hosts and plugins must use matching SDK versions.
 
 These improvements were already present before the single-runtime change:

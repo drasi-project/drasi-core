@@ -13,6 +13,11 @@ use drasi_core::{
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::computation::v1::*;
 
+#[path = "computation_qos/configured.rs"]
+mod configured;
+#[path = "computation_qos/replay.rs"]
+mod replay;
+
 fn definition(durable: bool, retention: RetentionPolicy, capacity: usize) -> QosChannelDefinition {
     QosChannelDefinition {
         stream: StreamId::try_new("source/out").expect("stream"),
@@ -83,7 +88,12 @@ async fn persistent(root: &Path, definition: QosChannelDefinition) -> Result<Arc
     let indexes = provider.create_indexes("qos", "channel").await?;
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1024 * 1024).expect("codec limit"));
     codec.register_schema(GraphChangeCodec::schema())?;
-    Ok(QosChannel::persistent(definition, indexes, codec, "journal").await?)
+    let channel = QosChannel::persistent(definition, indexes, codec, "journal").await?;
+    assert_eq!(
+        channel.durability(),
+        drasi_core::interface::StorageDurability::LOCAL_PROCESS_RESTART
+    );
+    Ok(channel)
 }
 
 #[tokio::test]
@@ -1017,6 +1027,7 @@ struct LoseCommitResponse {
     inner: Arc<dyn drasi_core::interface::SessionControl>,
     fail: Arc<std::sync::atomic::AtomicBool>,
     gate: Option<Arc<CommitGate>>,
+    skip: std::sync::atomic::AtomicUsize,
 }
 #[async_trait]
 impl drasi_core::interface::SessionControl for LoseCommitResponse {
@@ -1024,6 +1035,18 @@ impl drasi_core::interface::SessionControl for LoseCommitResponse {
         self.inner.begin().await
     }
     async fn commit(&self) -> std::result::Result<(), drasi_core::interface::IndexError> {
+        if self.fail.load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .skip
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+        {
+            return self.inner.commit().await;
+        }
         let fail = self.fail.swap(false, std::sync::atomic::Ordering::AcqRel);
         if let Some(gate) = self.gate.as_ref().filter(|gate| fail && gate.before_commit) {
             gate.entered.notify_one();
@@ -1127,10 +1150,31 @@ async fn uncertain_channel(
     fail: Arc<std::sync::atomic::AtomicBool>,
     gate: Option<Arc<CommitGate>>,
 ) -> Result<Arc<QosChannel>> {
-    use drasi_core::{
-        computation::{ComputationIndexes, ComputationResource, TransactionDomain},
-        interface::IndexSet,
-    };
+    let indexes = uncertain_indexes(root, fail, gate).await?;
+    Ok(QosChannel::persistent(
+        definition,
+        indexes,
+        FactoryRegistry::standard()
+            .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
+        "journal",
+    )
+    .await?)
+}
+
+async fn uncertain_indexes(
+    root: &Path,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+    gate: Option<Arc<CommitGate>>,
+) -> Result<drasi_core::computation::ComputationIndexes> {
+    uncertain_indexes_after(root, fail, gate, 0).await
+}
+
+async fn uncertain_indexes_after(
+    root: &Path,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+    gate: Option<Arc<CommitGate>>,
+    skip: usize,
+) -> Result<drasi_core::computation::ComputationIndexes> {
     let provider =
         LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)));
     let original = provider.create_indexes("qos", "channel").await?;
@@ -1138,7 +1182,21 @@ async fn uncertain_channel(
         inner: original.indexes().session_control.clone(),
         fail,
         gate,
+        skip: std::sync::atomic::AtomicUsize::new(skip),
     });
+    let outbox = original.outbox_writer().expect("outbox").clone();
+    wrapped_indexes(original, control, outbox)
+}
+
+fn wrapped_indexes(
+    original: drasi_core::computation::ComputationIndexes,
+    control: Arc<dyn drasi_core::interface::SessionControl>,
+    outbox: Arc<dyn drasi_core::interface::OutboxWriter>,
+) -> Result<drasi_core::computation::ComputationIndexes> {
+    use drasi_core::{
+        computation::{ComputationIndexes, ComputationResource, TransactionDomain},
+        interface::IndexSet,
+    };
     let domain = TransactionDomain::new(control.clone());
     let set = original.indexes();
     let indexes = ComputationIndexes::try_new(
@@ -1157,10 +1215,7 @@ async fn uncertain_channel(
                 .clone(),
             &domain,
         )),
-        Some(ComputationResource::participating(
-            original.outbox_writer().expect("outbox").clone(),
-            &domain,
-        )),
+        Some(ComputationResource::participating(outbox, &domain)),
         Some(ComputationResource::participating(
             original
                 .live_results_writer()
@@ -1169,15 +1224,9 @@ async fn uncertain_channel(
             &domain,
         )),
     )?
-    .with_cleanup(original.cleanup().expect("storage owner").clone());
-    Ok(QosChannel::persistent(
-        definition,
-        indexes,
-        FactoryRegistry::standard()
-            .envelope_codec(NonZeroUsize::new(1024 * 1024).expect("codec limit"))?,
-        "journal",
-    )
-    .await?)
+    .with_cleanup(original.cleanup().expect("storage owner").clone())
+    .with_durability(original.durability());
+    Ok(indexes)
 }
 
 #[tokio::test]
@@ -1226,5 +1275,1366 @@ async fn ambiguous_acceptance_and_acknowledgement_recover_the_committed_state() 
         );
         channel.shutdown().await?;
     }
+    Ok(())
+}
+
+fn admission_options() -> Result<AdmissionOptions> {
+    Ok(AdmissionOptions {
+        construction_scope: "instance".into(),
+        graph_id: "qos".into(),
+        component_id: ComponentId::try_new("source")?,
+        failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
+        max_producers: NonZeroUsize::new(2).expect("producer limit"),
+        receipts_per_producer: NonZeroUsize::new(2).expect("receipt window"),
+    })
+}
+
+fn rejected(error: PipeError, expected: AdmissionRejection) {
+    match error {
+        PipeError::Backend(error) => assert_eq!(
+            error.downcast_ref::<AdmissionRejection>(),
+            Some(&expected),
+            "{error:#}"
+        ),
+        error => panic!("expected typed admission rejection, got {error}"),
+    }
+}
+
+async fn handle_admitted(
+    channel: &Arc<QosChannel>,
+    definition: &QosChannelDefinition,
+    sequence: u64,
+) -> Result<()> {
+    for subscriber in ["fast", "slow"] {
+        let mut connection = endpoint(channel, definition, subscriber, false)?;
+        let mut receiver = connection.pipe.take_receiver()?;
+        let delivery = receiver.receive().await?.expect("admitted event");
+        let progress =
+            GraphProducerProgress::from_envelope(delivery.envelope())?.expect("durable producer");
+        assert!(progress.identity().persistent());
+        assert_eq!(progress.sequence(), sequence);
+        assert_eq!(delivery.envelope().system().sequence(), sequence);
+        delivery
+            .into_parts()
+            .1
+            .expect("completion")
+            .complete(HandlingOutcome::Handled)
+            .await?;
+        connection.control.cancel();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn producer_admission_atomically_replays_receipts_and_bounds_retired_sessions() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let definition = definition(true, RetentionPolicy::Backpressure, 1);
+    let channel = persistent(directory.path(), definition.clone()).await?;
+    channel.enable_admission(admission_options()?).await?;
+    let name = ComponentId::try_new("client-a")?;
+    let session = channel.register_producer(name.clone()).await?;
+    assert_eq!(channel.register_producer(name.clone()).await?, session);
+    let second = channel
+        .register_producer(ComponentId::try_new("client-b")?)
+        .await?;
+    assert!(matches!(
+        channel
+            .register_producer(ComponentId::try_new("client-c")?)
+            .await,
+        Err(PipeError::CapacityExhausted)
+    ));
+    assert!(channel.admission_receipt(&session, 1).await?.is_none());
+    rejected(
+        channel.admit(&session, 0, &event(1)?).await.unwrap_err(),
+        AdmissionRejection::Sequence {
+            received: 0,
+            expected: Some(1),
+        },
+    );
+    rejected(
+        channel.admit(&session, 2, &event(1)?).await.unwrap_err(),
+        AdmissionRejection::Sequence {
+            received: 2,
+            expected: Some(1),
+        },
+    );
+    let receipt = channel.admit(&session, 1, &event(1)?).await?;
+    assert_eq!(receipt.position, 1);
+    assert_eq!(channel.admit(&session, 1, &event(1)?).await?, receipt);
+    rejected(
+        channel.admit(&session, 1, &event(2)?).await.unwrap_err(),
+        AdmissionRejection::PayloadConflict(1),
+    );
+    assert!(matches!(
+        channel.admit(&second, 1, &event(2)?).await,
+        Err(PipeError::CapacityExhausted)
+    ));
+    rejected(
+        channel.retire_producer(&session).await.unwrap_err(),
+        AdmissionRejection::PendingObligations,
+    );
+    assert!(
+        channel.publish(&event(2)?).await.is_err(),
+        "raw publication cannot bypass producer receipts"
+    );
+    channel.shutdown().await?;
+    drop(channel);
+
+    let restored = persistent(directory.path(), definition.clone()).await?;
+    restored.enable_admission(admission_options()?).await?;
+    assert_eq!(restored.register_producer(name.clone()).await?, session);
+    assert_eq!(
+        restored.admission_receipt(&session, 1).await?,
+        Some(receipt.clone())
+    );
+    assert_eq!(restored.admit(&session, 1, &event(1)?).await?, receipt);
+    for sequence in 1..=3 {
+        if sequence > 1 {
+            assert_eq!(
+                restored
+                    .admit(&session, sequence, &event(sequence)?)
+                    .await?
+                    .position,
+                sequence
+            );
+        }
+        handle_admitted(&restored, &definition, sequence).await?;
+    }
+    rejected(
+        restored.admit(&session, 1, &event(1)?).await.unwrap_err(),
+        AdmissionRejection::ReceiptExpired(1),
+    );
+    rejected(
+        restored.admission_receipt(&session, 1).await.unwrap_err(),
+        AdmissionRejection::ReceiptExpired(1),
+    );
+    assert_eq!(
+        restored.admit(&session, 2, &event(2)?).await?.position,
+        2,
+        "receipt survives pruning of its already handled input"
+    );
+    restored.retire_producer(&session).await?;
+    let fresh = restored.register_producer(name).await?;
+    assert_ne!(fresh.epoch, session.epoch);
+    rejected(
+        restored.admit(&session, 4, &event(4)?).await.unwrap_err(),
+        AdmissionRejection::SessionExpired,
+    );
+    assert_eq!(restored.admit(&fresh, 1, &event(4)?).await?.position, 4);
+    assert_eq!(restored.progress().await?.accepted, 4);
+    restored.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn producer_admission_rejects_volatile_lossy_and_weakened_configuration() -> Result<()> {
+    let volatile = QosChannel::volatile(definition(false, RetentionPolicy::Backpressure, 2))?;
+    assert!(volatile
+        .enable_admission(admission_options()?)
+        .await
+        .is_err());
+    let directory = tempfile::tempdir()?;
+    let definition = definition(true, RetentionPolicy::Backpressure, 2);
+    let channel = persistent(directory.path(), definition.clone()).await?;
+    let mut unsupported = admission_options()?;
+    unsupported.failure_scope = drasi_core::interface::FailureMode::PowerLoss;
+    assert!(
+        channel.enable_admission(unsupported).await.is_err(),
+        "RocksDB without sync cannot promise power-loss survival"
+    );
+    channel.enable_admission(admission_options()?).await?;
+    let mut changed = admission_options()?;
+    changed.receipts_per_producer = NonZeroUsize::new(3).expect("window");
+    assert!(channel.enable_admission(changed).await.is_err());
+    channel.shutdown().await?;
+    drop(channel);
+    let mut lossy = definition;
+    lossy.retention = RetentionPolicy::PruneOldest;
+    assert!(persistent(directory.path(), lossy).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_producer_admission_resolves_input_and_receipt_in_one_commit() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for before_commit in [true, false] {
+        let directory = tempfile::tempdir()?;
+        let definition = definition(true, RetentionPolicy::Backpressure, 2);
+        let fail = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(CommitGate {
+            before_commit,
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        let channel = uncertain_channel(
+            directory.path(),
+            definition.clone(),
+            fail.clone(),
+            Some(gate.clone()),
+        )
+        .await?;
+        channel.enable_admission(admission_options()?).await?;
+        let session = channel
+            .register_producer(ComponentId::try_new("client")?)
+            .await?;
+        let input = event(1)?;
+        fail.store(true, Ordering::Release);
+        let mut operation = Box::pin(channel.admit(&session, 1, &input));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                _ = gate.entered.notified() => {},
+                result = &mut operation => panic!("commit response should be withheld: {result:?}"),
+            }
+        })
+        .await?;
+        rejected(
+            channel.admit(&session, 1, &input).await.unwrap_err(),
+            AdmissionRejection::Busy,
+        );
+        drop(operation);
+        assert!(
+            channel.admission_receipt(&session, 1).await.is_err(),
+            "uncertain cached state is not a receipt authority"
+        );
+        channel.shutdown().await?;
+        let reopened = persistent(directory.path(), definition.clone()).await?;
+        let receipt = reopened.admission_receipt(&session, 1).await?;
+        assert_eq!(receipt.is_some(), !before_commit);
+        assert_eq!(
+            reopened.progress().await?.accepted,
+            u64::from(!before_commit)
+        );
+        assert_eq!(reopened.admit(&session, 1, &input).await?.position, 1);
+        handle_admitted(&reopened, &definition, 1).await?;
+        assert_eq!(reopened.progress().await?.accepted, 1);
+        reopened.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn lost_producer_registration_and_acceptance_responses_are_recoverable() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for registration in [true, false] {
+        let directory = tempfile::tempdir()?;
+        let definition = definition(true, RetentionPolicy::Backpressure, 2);
+        let fail = Arc::new(AtomicBool::new(false));
+        let channel =
+            uncertain_channel(directory.path(), definition.clone(), fail.clone(), None).await?;
+        channel.enable_admission(admission_options()?).await?;
+        let producer = ComponentId::try_new("client")?;
+        let session = if registration {
+            fail.store(true, Ordering::Release);
+            assert!(matches!(
+                channel.register_producer(producer.clone()).await,
+                Err(PipeError::AcknowledgementUnknown { .. })
+            ));
+            None
+        } else {
+            let session = channel.register_producer(producer.clone()).await?;
+            fail.store(true, Ordering::Release);
+            assert!(matches!(
+                channel.admit(&session, 1, &event(1)?).await,
+                Err(PipeError::AcceptanceUnknown { .. })
+            ));
+            Some(session)
+        };
+        channel.shutdown().await?;
+        let reopened = persistent(directory.path(), definition).await?;
+        let restored = reopened.register_producer(producer).await?;
+        assert_eq!(
+            restored.epoch, 1,
+            "lost registration response must not allocate another session"
+        );
+        if let Some(session) = session {
+            assert_eq!(session, restored);
+            assert_eq!(
+                reopened
+                    .admission_receipt(&session, 1)
+                    .await?
+                    .expect("committed receipt")
+                    .position,
+                1
+            );
+            assert_eq!(reopened.admit(&session, 1, &event(1)?).await?.position, 1);
+        } else {
+            assert!(reopened.admission_receipt(&restored, 1).await?.is_none());
+        }
+        reopened.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn admission_metadata_corruption_cannot_fabricate_a_retry_receipt() -> Result<()> {
+    for fault in [
+        "version",
+        "scope",
+        "epoch",
+        "sequence-gap",
+        "position",
+        "missing-receipt",
+        "bounds",
+        "durability",
+        "progress-identity",
+        "shared-epoch",
+        "shared-position",
+        "future-client-head",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let desired = definition(true, RetentionPolicy::Backpressure, 2);
+        let channel = persistent(directory.path(), desired.clone()).await?;
+        channel.enable_admission(admission_options()?).await?;
+        let session = channel
+            .register_producer(ComponentId::try_new("client")?)
+            .await?;
+        channel.admit(&session, 1, &event(1)?).await?;
+        let second = channel
+            .register_producer(ComponentId::try_new("second")?)
+            .await?;
+        channel.admit(&second, 1, &event(2)?).await?;
+        channel.shutdown().await?;
+        drop(channel);
+        let provider = LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
+            directory.path(),
+            false,
+            false,
+        )));
+        let indexes = provider.create_indexes("qos", "channel").await?;
+        let checkpoint = indexes.checkpoint_store().expect("checkpoint").clone();
+        let saved = checkpoint
+            .read_checkpoint("journal")
+            .await?
+            .expect("metadata");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(saved.source_position.as_ref().expect("saved metadata"))?;
+        let admission = &mut metadata["admission"];
+        match fault {
+            "version" => admission["version"] = serde_json::json!(2),
+            "scope" => admission["options"]["graph_id"] = serde_json::json!("another-graph"),
+            "epoch" => admission["producers"]["client"]["epoch"] = serde_json::json!(0),
+            "sequence-gap" => admission["producers"]["client"]["head"] = serde_json::json!(2),
+            "position" => {
+                admission["producers"]["client"]["receipts"]["1"]["position"] = serde_json::json!(0)
+            }
+            "missing-receipt" => {
+                admission["producers"]["client"]["receipts"] = serde_json::json!({})
+            }
+            "bounds" => admission["options"]["max_producers"] = serde_json::json!(1025),
+            "durability" => {
+                admission["options"]["failure_scope"] =
+                    serde_json::to_value(drasi_core::interface::FailureMode::PowerLoss)?
+            }
+            "progress-identity" => {
+                admission["identity"]["incarnation"] =
+                    serde_json::json!("b747582e-b71a-4281-85cd-9918953316ee")
+            }
+            "shared-epoch" => admission["producers"]["second"]["epoch"] = serde_json::json!(1),
+            "shared-position" => {
+                admission["producers"]["second"]["last_position"] = serde_json::json!(1);
+                admission["producers"]["second"]["receipts"]["1"]["position"] =
+                    serde_json::json!(1);
+            }
+            "future-client-head" => {
+                admission["producers"]["client"]["head"] = serde_json::json!(u64::MAX)
+            }
+            _ => unreachable!(),
+        }
+        let bytes = Bytes::from(serde_json::to_vec(&metadata)?);
+        let transaction = drasi_core::computation::ComputationTransaction::try_new(indexes)?;
+        transaction
+            .run(async {
+                checkpoint
+                    .stage_checkpoint("journal", 2, Some(&bytes))
+                    .await?;
+                Ok(())
+            })
+            .await?;
+        drop(checkpoint);
+        transaction.shutdown().await?;
+        drop((transaction, provider));
+        assert!(
+            persistent(directory.path(), desired).await.is_err(),
+            "{fault}: corrupt admission was accepted"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn producer_admission_limits_do_not_advance_session_or_journal_progress() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let desired = definition(true, RetentionPolicy::Backpressure, 2);
+    let channel = persistent(directory.path(), desired.clone()).await?;
+    channel.enable_admission(admission_options()?).await?;
+    rejected(
+        channel
+            .register_producer(ComponentId::try_new("x".repeat(257))?)
+            .await
+            .unwrap_err(),
+        AdmissionRejection::IdentifierTooLong,
+    );
+    let one = channel
+        .register_producer(ComponentId::try_new("one")?)
+        .await?;
+    let two = channel
+        .register_producer(ComponentId::try_new("two")?)
+        .await?;
+    let mut oversized = event(1)?;
+    oversized.append_annotation(ContextEntry::try_new(
+        ComponentId::try_new("client")?,
+        "large",
+        ContextValue::Bytes(Arc::from(vec![0; 1024 * 1024])),
+    )?)?;
+    assert!(channel.admit(&one, 1, &oversized).await.is_err());
+    assert!(channel.admission_receipt(&one, 1).await?.is_none());
+    assert_eq!(channel.producer_status(&one).await?.next_sequence, Some(1));
+    assert_eq!(channel.producer_status(&one).await?.earliest_receipt, None);
+    assert_eq!(channel.admit(&one, 1, &event(1)?).await?.position, 1);
+    assert_eq!(channel.admit(&two, 1, &event(2)?).await?.position, 2);
+    handle_admitted(&channel, &desired, 1).await?;
+    handle_admitted(&channel, &desired, 2).await?;
+    for sequence in 2..=3 {
+        channel.admit(&one, sequence, &event(sequence + 1)?).await?;
+        handle_admitted(&channel, &desired, sequence + 1).await?;
+    }
+    assert_eq!(
+        channel.producer_status(&one).await?.earliest_receipt,
+        Some(2)
+    );
+    assert_eq!(
+        channel.producer_status(&two).await?.earliest_receipt,
+        Some(1)
+    );
+    assert_eq!(channel.admit(&two, 1, &event(2)?).await?.position, 2);
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn admission_preserves_lineage_without_confusing_client_and_journal_sequences() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let desired = definition(true, RetentionPolicy::Backpressure, 2);
+    let channel = persistent(directory.path(), desired.clone()).await?;
+    channel.enable_admission(admission_options()?).await?;
+    let session = channel
+        .register_producer(ComponentId::try_new("client")?)
+        .await?;
+    let original = event(37)?;
+    let mut input = original.derive(
+        original.id().clone(),
+        original.changes().clone(),
+        SystemMetadata::new(StreamId::try_new("client/out")?, 37)
+            .with_timestamp(chrono::DateTime::from_timestamp(123, 0).expect("time"))
+            .with_source_position(Bytes::from_static(b"client-checkpoint")),
+    );
+    GraphProducerProgress::annotate(
+        &mut input,
+        &GraphProducerIdentity::volatile(
+            "upstream".into(),
+            "graph".into(),
+            ComponentId::try_new("client")?,
+            StreamId::try_new("client/out")?,
+        )?,
+        37,
+    )?;
+    let receipt = channel.admit(&session, 1, &input).await?;
+    let mut pipe = endpoint(&channel, &desired, "fast", false)?;
+    let mut receiver = pipe.pipe.take_receiver()?;
+    let (output, acknowledgement) = receiver
+        .receive()
+        .await?
+        .expect("admitted input")
+        .into_parts();
+    assert_eq!(output.system().sequence(), 1);
+    assert_eq!(output.system().timestamp(), input.system().timestamp());
+    assert_eq!(output.system().source_position(), None);
+    let lineage = output.lineage().expect("client lineage");
+    assert_eq!(lineage.envelope_id(), input.id());
+    assert_eq!(
+        lineage.system().source_position(),
+        input.system().source_position()
+    );
+    assert_eq!(lineage.system().sequence(), 37);
+    assert_eq!(output.annotations().len(), input.annotations().len() + 1);
+    let progress = GraphProducerProgress::from_envelope(&output)?.expect("admission progress");
+    assert_eq!(progress.sequence(), receipt.position);
+    assert_eq!(progress.identity().incarnation(), session.incarnation);
+    assert!(progress.identity().persistent());
+    acknowledgement
+        .expect("completion")
+        .complete(HandlingOutcome::Handled)
+        .await?;
+    pipe.control.cancel();
+    drop((pipe, receiver));
+    channel.shutdown().await?;
+    drop(channel);
+    let reopened = persistent(directory.path(), desired).await?;
+    assert_eq!(reopened.admit(&session, 1, &input).await?, receipt);
+    reopened.shutdown().await?;
+    Ok(())
+}
+
+// Executed only by the parent crash case, in an isolated process/database.
+#[tokio::test]
+async fn producer_admission_process_fixture() -> Result<()> {
+    let Some(root) = std::env::var_os("DRASI_ADMISSION_CRASH_ROOT") else {
+        return Ok(());
+    };
+    let phase = std::env::var("DRASI_ADMISSION_CRASH_PHASE")?;
+    let root = std::path::PathBuf::from(root);
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate = Arc::new(CommitGate {
+        before_commit: phase == "before",
+        entered: tokio::sync::Notify::new(),
+        resume: tokio::sync::Notify::new(),
+    });
+    let channel = uncertain_channel(
+        &root,
+        definition(true, RetentionPolicy::Backpressure, 2),
+        fail.clone(),
+        Some(gate.clone()),
+    )
+    .await?;
+    channel.enable_admission(admission_options()?).await?;
+    let session = channel
+        .register_producer(ComponentId::try_new("crash-client")?)
+        .await?;
+    std::fs::write(
+        root.join("client-session.json"),
+        serde_json::to_vec(&session)?,
+    )?;
+    let input = event(1)?;
+    if phase == "accepted" {
+        channel.admit(&session, 1, &input).await?;
+    } else {
+        fail.store(true, std::sync::atomic::Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = gate.entered.notified() => {},
+                result = channel.admit(&session, 1, &input) => panic!("commit barrier bypassed: {result:?}"),
+            }
+        }).await?;
+    }
+    // No Rust destructors or provider shutdown; this is process loss, not power loss.
+    std::process::exit(93);
+}
+
+#[tokio::test]
+async fn producer_admission_survives_fresh_process_crashes_around_commit_and_response() -> Result<()>
+{
+    for phase in ["before", "after", "accepted"] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().to_path_buf();
+        let executable = std::env::current_exe()?;
+        let status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "producer_admission_process_fixture",
+                    "--nocapture",
+                ])
+                .env("DRASI_ADMISSION_CRASH_ROOT", path)
+                .env("DRASI_ADMISSION_CRASH_PHASE", phase)
+                .output()
+        })
+        .await??;
+        assert_eq!(
+            status.status.code(),
+            Some(93),
+            "{phase}: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let session: ProducerSession = serde_json::from_slice(&std::fs::read(
+            directory.path().join("client-session.json"),
+        )?)?;
+        let desired = definition(true, RetentionPolicy::Backpressure, 2);
+        let recovered = persistent(directory.path(), desired.clone()).await?;
+        assert_eq!(
+            recovered.admission_receipt(&session, 1).await?.is_some(),
+            phase != "before",
+            "{phase}"
+        );
+        assert_eq!(recovered.admit(&session, 1, &event(1)?).await?.position, 1);
+        assert_eq!(recovered.progress().await?.accepted, 1);
+        handle_admitted(&recovered, &desired, 1).await?;
+        recovered.shutdown().await?;
+    }
+    Ok(())
+}
+
+struct JournalIngress {
+    descriptor: ComponentDescriptor,
+    admission: Arc<SourceAdmission>,
+}
+#[async_trait]
+impl ComputationComponent for JournalIngress {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+#[async_trait]
+impl EnvelopeSource for JournalIngress {
+    fn admission(&self) -> Option<Arc<SourceAdmission>> {
+        Some(self.admission.clone())
+    }
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        panic!("journal ingress must be graph-driven, not polled as a second producer");
+    }
+}
+
+fn admission_builder(
+    admission: &Arc<SourceAdmission>,
+    fast: Arc<std::sync::Mutex<Vec<u64>>>,
+    slow: Arc<std::sync::Mutex<Vec<u64>>>,
+) -> Result<ComputationGraphBuilder> {
+    let channel = admission.channel();
+    let resource = ResourceId::try_new("journal")?;
+    let source = Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?);
+    Ok(ComputationGraph::builder("qos")
+        .declare_resource(ResourceSpecification {
+            id: resource.clone(),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Borrowed,
+            binding: "journal".into(),
+        })?
+        .provide_resource(resource.clone(), channel.resource())?
+        .source(Box::new(JournalIngress {
+            descriptor: descriptor("source", "out", PortDirection::Output),
+            admission: admission.clone(),
+        }))
+        .sink(Box::new(RecordingSink {
+            descriptor: descriptor("fast", "in", PortDirection::Input),
+            seen: fast,
+        }))
+        .sink(Box::new(RecordingSink {
+            descriptor: descriptor("slow", "in", PortDirection::Input),
+            seen: slow,
+        }))
+        .bind_stream(source, channel.definition().stream.clone()))
+}
+
+fn admission_graph(
+    admission: &Arc<SourceAdmission>,
+    fast: Arc<std::sync::Mutex<Vec<u64>>>,
+    slow: Arc<std::sync::Mutex<Vec<u64>>>,
+    memory_output: bool,
+) -> Result<ComputationGraph> {
+    let mut builder = admission_builder(admission, fast, slow)?;
+    let resource = ResourceId::try_new("journal")?;
+    let source = Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?);
+    for subscriber in ["fast", "slow"] {
+        let pipe: Box<dyn PipeProvider> = if memory_output {
+            Box::new(BoundedPipeConfig { capacity: 2 })
+        } else {
+            Box::new(
+                admission
+                    .channel()
+                    .definition()
+                    .pipe(resource.clone(), subscriber),
+            )
+        };
+        builder = builder.connect(
+            EdgeDefinition::new(
+                source.clone(),
+                Endpoint::new(ComponentId::try_new(subscriber)?, PortId::try_new("in")?),
+            ),
+            pipe,
+        );
+    }
+    Ok(builder.build()?)
+}
+
+async fn graph_admit(
+    admission: &SourceAdmission,
+    session: &ProducerSession,
+    sequence: u64,
+    input: &ChangeEnvelope,
+) -> Result<AdmissionReceipt, PipeError> {
+    loop {
+        match admission.admit(session, sequence, input).await {
+            Err(PipeError::Backend(error))
+                if error.downcast_ref::<AdmissionRejection>()
+                    == Some(&AdmissionRejection::Busy) =>
+            {
+                tokio::task::yield_now().await;
+            }
+            result => return result,
+        }
+    }
+}
+
+#[tokio::test]
+async fn graph_admission_validates_before_one_shared_commit_and_rebinds_after_stop() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let channel = uncertain_channel(
+        directory.path(),
+        definition(true, RetentionPolicy::Backpressure, 4),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        None,
+    )
+    .await?;
+    let mut options = admission_options()?;
+    options.construction_scope = "qos".into();
+    channel.enable_admission(options).await?;
+    let session = channel
+        .register_producer(ComponentId::try_new("client")?)
+        .await?;
+    let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+    assert!(!admission.is_active()?);
+    assert!(matches!(
+        admission.admit(&session, 1, &event(1)?).await,
+        Err(PipeError::Closed)
+    ));
+    let fast = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let slow = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut graph = admission_graph(&admission, fast.clone(), slow.clone(), false)?;
+    let recovery = graph.recovery_report(&RecoveryRequirement {
+        consumer: ComponentId::try_new("source")?,
+        scope: RecoveryScope::Failure(drasi_core::interface::FailureMode::ProcessRestart),
+        guarantees: std::collections::BTreeSet::from([RecoveryGuarantee::Acceptance]),
+    })?;
+    assert!(recovery.satisfied(), "{recovery:?}");
+    let run = graph.run()?;
+    let control = run.control();
+    let client = async {
+        let deployment = control.deployment_report().await?;
+        assert_eq!(
+            deployment.summary,
+            OperationSummary::Completed,
+            "{deployment:?}"
+        );
+        let started = control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await?;
+        assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !admission.is_active()? {
+                tokio::task::yield_now().await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .unwrap_or_else(|_| panic!("admission inactive: {:?}", control.observed()))?;
+        assert!(control
+            .set_subscriptions(vec![(
+                ComponentId::try_new("source")?,
+                ComponentId::try_new("fast")?,
+            )])
+            .await
+            .is_err());
+        let edge = control.desired_snapshot().edges[0].clone();
+        let weakened = control
+            .preview(
+                GraphRevision(1),
+                vec![DesiredMutation::Bind(DesiredRelationship {
+                    definition: edge.definition,
+                    policy: edge.policy,
+                    pipe: DesiredPipe::Bounded { capacity: 2 },
+                })],
+            )
+            .await?;
+        assert!(control
+            .reconcile(weakened, TopologyBindings::default())
+            .await
+            .is_err());
+        assert_eq!(control.desired_snapshot().revision, GraphRevision(1));
+        assert!(admission.is_active()?);
+        let original = event(1)?;
+        let invalid = original.derive(
+            original.id().clone(),
+            ChangeSet::try_new(
+                original.changes().id().clone(),
+                QueryChangeCodec::schema().descriptor().clone(),
+                vec![],
+            )?,
+            original.system().as_ref().clone(),
+        );
+        let error = admission
+            .admit(&session, 1, &invalid)
+            .await
+            .expect_err("wrong output schema");
+        assert!(
+            matches!(error, PipeError::Backend(ref error) if error.downcast_ref::<GraphError>().is_some())
+        );
+        assert_eq!(channel.progress().await?.accepted, 0);
+        for sequence in 1..=2 {
+            let input = event(sequence)?;
+            let receipt = graph_admit(&admission, &session, sequence, &input).await?;
+            assert_eq!(receipt.position, sequence);
+            assert_eq!(
+                graph_admit(&admission, &session, sequence, &input).await?,
+                receipt
+            );
+        }
+        while channel
+            .progress()
+            .await?
+            .processed
+            .values()
+            .any(|position| *position != 2)
+        {
+            tokio::task::yield_now().await;
+        }
+        let selection = GraphSelection::Exact(vec![ComponentId::try_new("source")?]);
+        control
+            .stop_components(GraphRevision(1), selection.clone())
+            .await?;
+        assert!(!admission.is_active()?);
+        assert!(matches!(
+            admission.admit(&session, 3, &event(3)?).await,
+            Err(PipeError::Closed)
+        ));
+        control
+            .start_components(GraphRevision(1), selection)
+            .await?;
+        while !admission.is_active()? {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            graph_admit(&admission, &session, 3, &event(3)?)
+                .await?
+                .position,
+            3
+        );
+        while channel
+            .progress()
+            .await?
+            .processed
+            .values()
+            .any(|position| *position != 3)
+        {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            admission
+                .register_producer(session.producer.clone())
+                .await?,
+            session
+        );
+        let status = admission.producer_status(&session).await?;
+        assert_eq!(status.next_sequence, Some(4));
+        assert_eq!(status.earliest_receipt, Some(2));
+        assert_eq!(
+            admission
+                .admission_receipt(&session, 3)
+                .await?
+                .unwrap()
+                .position,
+            3
+        );
+        assert_eq!(admission.admission_receipt(&session, 4).await?, None);
+        rejected(
+            admission.admission_receipt(&session, 1).await.unwrap_err(),
+            AdmissionRejection::ReceiptExpired(1),
+        );
+        admission.retire_producer(&session).await?;
+        rejected(
+            admission.producer_status(&session).await.unwrap_err(),
+            AdmissionRejection::SessionExpired,
+        );
+        let next = admission
+            .register_producer(session.producer.clone())
+            .await?;
+        assert!(next.epoch > session.epoch);
+        control.cancel();
+        Ok::<_, anyhow::Error>(())
+    };
+    let (run, client) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(run, async {
+            let result = client.await;
+            control.cancel();
+            result
+        })
+    })
+    .await?;
+    client?;
+    assert!(matches!(run, Err(GraphError::Cancelled)));
+    assert_eq!(*fast.lock().expect("fast"), [1, 2, 3]);
+    assert_eq!(*slow.lock().expect("slow"), [1, 2, 3]);
+    assert_eq!(channel.progress().await?.accepted, 3);
+    graph.shutdown().await?;
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graph_admission_refuses_memory_outputs_without_accepting_client_input() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let channel = persistent(
+        directory.path(),
+        definition(true, RetentionPolicy::Backpressure, 2),
+    )
+    .await?;
+    channel.enable_admission(admission_options()?).await?;
+    let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+    let error = admission_graph(
+        &admission,
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        true,
+    )
+    .err()
+    .expect("memory output rejected before construction");
+    assert!(matches!(
+        error.downcast_ref::<GraphError>(),
+        Some(GraphError::Emission { .. })
+    ));
+    assert!(!admission.is_active()?);
+    assert_eq!(channel.progress().await?.accepted, 0);
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graph_admission_mailbox_bounds_cancelled_requests_without_consuming_sequences(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let channel = persistent(
+        directory.path(),
+        definition(true, RetentionPolicy::Backpressure, 2),
+    )
+    .await?;
+    let mut options = admission_options()?;
+    options.construction_scope = "qos".into();
+    channel.enable_admission(options).await?;
+    let session = channel
+        .register_producer(ComponentId::try_new("client")?)
+        .await?;
+    let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut graph = admission_graph(&admission, seen.clone(), seen.clone(), false)?;
+    let run = graph.run()?;
+    let control = run.control();
+    let client = async {
+        control.deployment_report().await?;
+        let started = control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await?;
+        assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
+        while !admission.is_active()? {
+            tokio::task::yield_now().await;
+        }
+        let input = event(1)?;
+        let mut pending = Vec::new();
+        // The graph driver is not polled while this task fills its mailbox.
+        for _ in 0..16 {
+            let mut request = Box::pin(admission.admit(&session, 1, &input));
+            assert!(futures::poll!(&mut request).is_pending());
+            pending.push(request);
+        }
+        rejected(
+            admission.admit(&session, 1, &input).await.unwrap_err(),
+            AdmissionRejection::Busy,
+        );
+        assert_eq!(channel.progress().await?.accepted, 0);
+        drop(pending);
+        assert_eq!(
+            graph_admit(&admission, &session, 1, &input).await?.position,
+            1
+        );
+        while channel
+            .progress()
+            .await?
+            .processed
+            .values()
+            .any(|position| *position != 1)
+        {
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let (result, client) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(run, async {
+            let result = client.await;
+            control.cancel();
+            result
+        })
+    })
+    .await?;
+    client?;
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    assert_eq!(*seen.lock().unwrap(), [1, 1]);
+    assert!(!admission.is_active()?);
+    graph.shutdown().await?;
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graph_admission_cancellation_fences_active_commit_and_closes_queued_requests() -> Result<()>
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for (before_commit, registration) in
+        [(true, false), (false, false), (true, true), (false, true)]
+    {
+        for stop_source in [true, false] {
+            let directory = tempfile::tempdir()?;
+            let desired = definition(true, RetentionPolicy::Backpressure, 2);
+            let fail = Arc::new(AtomicBool::new(false));
+            let gate = Arc::new(CommitGate {
+                before_commit,
+                entered: tokio::sync::Notify::new(),
+                resume: tokio::sync::Notify::new(),
+            });
+            let channel = uncertain_channel(
+                directory.path(),
+                desired.clone(),
+                fail.clone(),
+                Some(gate.clone()),
+            )
+            .await?;
+            let mut options = admission_options()?;
+            options.construction_scope = "qos".into();
+            channel.enable_admission(options).await?;
+            let session = channel
+                .register_producer(ComponentId::try_new("client")?)
+                .await?;
+            let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut graph = admission_graph(&admission, seen.clone(), seen, false)?;
+            let run = graph.run()?;
+            let control = run.control();
+            let client = async {
+                control.deployment_report().await?;
+                let started = control
+                    .start_components(GraphRevision(1), GraphSelection::All)
+                    .await?;
+                assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
+                while !admission.is_active()? {
+                    tokio::task::yield_now().await;
+                }
+                fail.store(true, Ordering::Release);
+                let input = event(1)?;
+                let mut active = Box::pin(async {
+                    if registration {
+                        admission
+                            .register_producer(ComponentId::try_new("next-client").unwrap())
+                            .await
+                            .map(|_| ())
+                    } else {
+                        admission.admit(&session, 1, &input).await.map(|_| ())
+                    }
+                });
+                tokio::select! {
+                    _ = gate.entered.notified() => {}
+                    result = &mut active => panic!("commit should be blocked: {result:?}"),
+                }
+                let next = event(2)?;
+                let mut queued = Box::pin(admission.admit(&session, 2, &next));
+                assert!(futures::poll!(&mut queued).is_pending());
+                if stop_source {
+                    let stopped = control
+                        .stop_components(
+                            GraphRevision(1),
+                            GraphSelection::Exact(vec![ComponentId::try_new("source")?]),
+                        )
+                        .await?;
+                    assert_eq!(stopped.summary, OperationSummary::Completed, "{stopped:?}");
+                } else {
+                    control.cancel();
+                }
+                let error = active.await.unwrap_err();
+                if registration {
+                    assert!(matches!(error, PipeError::AcknowledgementUnknown { .. }));
+                } else {
+                    assert!(matches!(error, PipeError::AcceptanceUnknown { .. }));
+                }
+                assert!(matches!(queued.await, Err(PipeError::Closed)));
+                assert!(
+                    channel.progress().await.is_err(),
+                    "cancelled transaction must fence cached state"
+                );
+                Ok::<_, anyhow::Error>(())
+            };
+            let (result, client) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(run, async {
+                    let result = client.await;
+                    control.cancel();
+                    result
+                })
+            })
+            .await?;
+            client?;
+            assert!(matches!(result, Err(GraphError::Cancelled)));
+            graph.shutdown().await?;
+            channel.shutdown().await?;
+            let reopened = persistent(directory.path(), desired).await?;
+            assert_eq!(
+                reopened.admission_receipt(&session, 1).await?.is_some(),
+                !before_commit && !registration
+            );
+            assert_eq!(
+                reopened
+                    .admission_receipt(&session, if before_commit || registration { 1 } else { 2 })
+                    .await?,
+                None
+            );
+            if registration {
+                let next = ProducerSession {
+                    incarnation: session.incarnation,
+                    producer: ComponentId::try_new("next-client")?,
+                    epoch: session.epoch + 1,
+                };
+                if before_commit {
+                    rejected(
+                        reopened.producer_status(&next).await.unwrap_err(),
+                        AdmissionRejection::SessionExpired,
+                    );
+                } else {
+                    assert_eq!(reopened.producer_status(&next).await?.session, next);
+                }
+                assert_eq!(
+                    reopened.register_producer(next.producer.clone()).await?,
+                    next
+                );
+            }
+            assert_eq!(reopened.admit(&session, 1, &event(1)?).await?.position, 1);
+            assert_eq!(reopened.progress().await?.accepted, 1);
+            reopened.shutdown().await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn graph_admission_rejects_missing_mixed_foreign_and_unbound_outputs() -> Result<()> {
+    for fault in ["missing", "mixed", "foreign", "graph", "port", "stream"] {
+        let directory = tempfile::tempdir()?;
+        let desired = definition(true, RetentionPolicy::Backpressure, 2);
+        let channel = persistent(directory.path(), desired.clone()).await?;
+        let mut options = admission_options()?;
+        if fault == "graph" {
+            options.graph_id = "foreign".into();
+        }
+        channel.enable_admission(options).await?;
+        let admission = SourceAdmission::new(
+            channel.clone(),
+            PortId::try_new(if fault == "port" { "unknown" } else { "out" })?,
+        )
+        .await?;
+        let empty = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut builder = admission_builder(&admission, empty.clone(), empty)?;
+        let resource = ResourceId::try_new("journal")?;
+        let other_directory = tempfile::tempdir()?;
+        let other = persistent(other_directory.path(), desired.clone()).await?;
+        let foreign = ResourceId::try_new("foreign")?;
+        if fault == "foreign" {
+            builder = builder
+                .declare_resource(ResourceSpecification {
+                    id: foreign.clone(),
+                    role: ResourceRole::StateStore,
+                    ownership: ResourceOwnership::Borrowed,
+                    binding: "foreign".into(),
+                })?
+                .provide_resource(foreign.clone(), other.resource())?;
+        }
+        if fault == "stream" {
+            builder = builder.bind_stream(
+                Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
+                StreamId::try_new("wrong")?,
+            );
+        }
+        if fault != "missing" {
+            for subscriber in ["fast", "slow"] {
+                let pipe: Box<dyn PipeProvider> = if fault == "mixed" && subscriber == "slow" {
+                    Box::new(BoundedPipeConfig { capacity: 2 })
+                } else {
+                    Box::new(desired.pipe(
+                        if fault == "foreign" {
+                            foreign.clone()
+                        } else {
+                            resource.clone()
+                        },
+                        subscriber,
+                    ))
+                };
+                builder = builder.connect(
+                    EdgeDefinition::new(
+                        Endpoint::new(ComponentId::try_new("source")?, PortId::try_new("out")?),
+                        Endpoint::new(ComponentId::try_new(subscriber)?, PortId::try_new("in")?),
+                    ),
+                    pipe,
+                );
+            }
+        }
+        assert!(builder.build().is_err(), "{fault} output accepted");
+        assert!(!admission.is_active()?);
+        assert_eq!(channel.progress().await?.accepted, 0);
+        channel.shutdown().await?;
+        other.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn graph_admission_rejects_a_foreign_construction_scope_before_activation() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let channel = persistent(
+        directory.path(),
+        definition(true, RetentionPolicy::Backpressure, 2),
+    )
+    .await?;
+    channel.enable_admission(admission_options()?).await?;
+    let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+    let empty = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut graph = admission_graph(&admission, empty.clone(), empty, false)?;
+    let run = graph.run()?;
+    let control = run.control();
+    let (result, started) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(run, async {
+            let report = control
+                .start_components(GraphRevision(1), GraphSelection::All)
+                .await;
+            control.cancel();
+            report
+        })
+    })
+    .await?;
+    let report =
+        started.unwrap_or_else(|error| panic!("scope start failed: {error}; driver={result:?}"));
+    assert_eq!(
+        report.summary,
+        OperationSummary::CompletedWithFailures,
+        "{report:?}"
+    );
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    assert!(!admission.is_active()?);
+    assert_eq!(channel.progress().await?.accepted, 0);
+    graph.shutdown().await?;
+    channel.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graph_admission_reconstruction_replays_obligations_without_accepting_retries_twice(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let desired = definition(true, RetentionPolicy::Backpressure, 1);
+    let channel = persistent(directory.path(), desired.clone()).await?;
+    let mut options = admission_options()?;
+    options.construction_scope = "qos".into();
+    channel.enable_admission(options).await?;
+    let session = channel
+        .register_producer(ComponentId::try_new("client")?)
+        .await?;
+    let input = event(1)?;
+    {
+        let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+        let empty = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut graph = admission_graph(&admission, empty.clone(), empty.clone(), false)?;
+        let run = graph.run()?;
+        let control = run.control();
+        let client = async {
+            control.deployment_report().await?;
+            let started = control
+                .start_components(
+                    GraphRevision(1),
+                    GraphSelection::Exact(vec![ComponentId::try_new("source")?]),
+                )
+                .await?;
+            assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
+            while !admission.is_active()? {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                graph_admit(&admission, &session, 1, &input).await?.position,
+                1
+            );
+            assert!(matches!(
+                graph_admit(&admission, &session, 2, &event(2)?).await,
+                Err(PipeError::CapacityExhausted)
+            ));
+            Ok::<_, anyhow::Error>(())
+        };
+        let (result, client) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(run, async {
+                let result = client.await;
+                control.cancel();
+                result
+            })
+        })
+        .await?;
+        client?;
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        assert!(empty.lock().unwrap().is_empty());
+        assert!(channel
+            .progress()
+            .await?
+            .processed
+            .values()
+            .all(|position| *position == 0));
+        graph.shutdown().await?;
+    }
+    channel.shutdown().await?;
+    let channel = persistent(directory.path(), desired).await?;
+    let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut graph = admission_graph(&admission, seen.clone(), seen.clone(), false)?;
+    let run = graph.run()?;
+    let control = run.control();
+    let client = async {
+        control.deployment_report().await?;
+        let started = control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await?;
+        assert_eq!(started.summary, OperationSummary::Completed, "{started:?}");
+        while !admission.is_active()? {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            graph_admit(&admission, &session, 1, &input).await?.position,
+            1
+        );
+        while channel
+            .progress()
+            .await?
+            .processed
+            .values()
+            .any(|position| *position != 1)
+        {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            graph_admit(&admission, &session, 2, &event(2)?)
+                .await?
+                .position,
+            2
+        );
+        while channel
+            .progress()
+            .await?
+            .processed
+            .values()
+            .any(|position| *position != 2)
+        {
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let (result, client) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(run, async {
+            let result = client.await;
+            control.cancel();
+            result
+        })
+    })
+    .await?;
+    client?;
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort_unstable();
+    assert_eq!(seen, [1, 1, 2, 2]);
+    assert_eq!(channel.progress().await?.accepted, 2);
+    graph.shutdown().await?;
+    channel.shutdown().await?;
     Ok(())
 }

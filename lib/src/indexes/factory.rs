@@ -207,29 +207,39 @@ impl IndexFactory {
     pub(crate) fn computation_backend(
         &self,
         requested: Option<&StorageBackendRef>,
-    ) -> Result<(StorageBackendRef, bool), IndexError> {
+    ) -> Result<
+        (
+            StorageBackendRef,
+            bool,
+            drasi_core::interface::StorageDurability,
+        ),
+        IndexError,
+    > {
+        use drasi_core::interface::StorageDurability;
         let backend = requested
             .cloned()
             .or_else(|| self.default_backend.clone())
             .unwrap_or(StorageBackendRef::Inline(StorageBackendSpec::Memory {
                 enable_archive: false,
             }));
-        let volatile = match &backend {
+        let (volatile, durability) = match &backend {
             StorageBackendRef::Named(name) => {
                 if let Some(provider) = self.providers.get(name) {
-                    provider.is_volatile()
+                    (provider.is_volatile(), provider.durability())
                 } else if self.memory_backends.contains_key(name) {
-                    true
+                    (true, StorageDurability::VOLATILE)
                 } else {
                     return Err(IndexError::UnknownStore(name.clone()));
                 }
             }
-            StorageBackendRef::Inline(StorageBackendSpec::Memory { .. }) => true,
+            StorageBackendRef::Inline(StorageBackendSpec::Memory { .. }) => {
+                (true, StorageDurability::VOLATILE)
+            }
             StorageBackendRef::Inline(StorageBackendSpec::Plugin { .. }) => {
                 return Err(IndexError::NotSupported)
             }
         };
-        Ok((backend, volatile))
+        Ok((backend, volatile, durability))
     }
 
     /// Whether a query using `query_backend` (or the factory default) is volatile.
@@ -415,6 +425,65 @@ mod tests {
         let mut m: HashMap<String, Arc<dyn IndexBackendPlugin>> = HashMap::new();
         m.insert(name.to_string(), Arc::new(MockPlugin { volatile }));
         m
+    }
+
+    #[test]
+    fn computation_durability_comes_from_the_selected_provider_not_its_name() {
+        use drasi_core::interface::StorageDurability;
+
+        struct DeclaredProvider;
+        #[async_trait]
+        impl IndexBackendPlugin for DeclaredProvider {
+            async fn create_indexes(
+                &self,
+                _query_id: &str,
+            ) -> Result<CreatedIndexes, drasi_core::interface::IndexError> {
+                Err(drasi_core::interface::IndexError::NotSupported)
+            }
+            fn is_volatile(&self) -> bool {
+                false
+            }
+            fn durability(&self) -> StorageDurability {
+                StorageDurability::LOCAL_POWER_LOSS
+            }
+        }
+        let mut providers = providers_with("persistent-looking", false);
+        providers.insert("declared".into(), Arc::new(DeclaredProvider));
+        let factory = IndexFactory::new_with_default(
+            vec![StorageBackendConfig {
+                id: "memory".into(),
+                spec: StorageBackendSpec::Memory {
+                    enable_archive: true,
+                },
+            }],
+            providers,
+            Some(StorageBackendRef::Named("declared".into())),
+        );
+        for (name, volatile, durability) in [
+            ("persistent-looking", false, StorageDurability::UNKNOWN),
+            ("declared", false, StorageDurability::LOCAL_POWER_LOSS),
+            ("memory", true, StorageDurability::VOLATILE),
+        ] {
+            let backend = StorageBackendRef::Named(name.into());
+            assert_eq!(
+                factory
+                    .computation_backend(Some(&backend))
+                    .expect("backend"),
+                (backend, volatile, durability)
+            );
+        }
+        assert_eq!(
+            factory.computation_backend(None).expect("default").2,
+            StorageDurability::LOCAL_POWER_LOSS
+        );
+        assert!(factory
+            .computation_backend(Some(&StorageBackendRef::Named("missing".into())))
+            .is_err());
+        let memory = IndexFactory::new(vec![], HashMap::new());
+        assert_eq!(
+            memory.computation_backend(None).expect("memory").2,
+            StorageDurability::VOLATILE
+        );
     }
 
     #[tokio::test]

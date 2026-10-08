@@ -46,11 +46,19 @@ serde_json = "1.0"
 handlebars = "5.1"
 log = "0.4"
 anyhow = "1.0"
+thiserror = "1.0"
 chrono = "0.4"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
 [dev-dependencies]
+drasi-computation-network = { path = "../../computation-plugins/network" }
+drasi-core.workspace = true
+drasi-index-rocksdb = { path = "../../indexes/rocksdb" }
+tempfile = "3.8"
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio-test = "0.4"
 env_logger = "0.10.0"
 serial_test = "3.0"

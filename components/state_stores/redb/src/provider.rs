@@ -179,6 +179,10 @@ impl RedbStateStoreProvider {
 
 #[async_trait]
 impl StateStoreProvider for RedbStateStoreProvider {
+    fn durability(&self) -> drasi_lib::state_store::StorageDurability {
+        drasi_lib::state_store::StorageDurability::LOCAL_POWER_LOSS
+    }
+
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         let table_name = self.get_or_create_table_name(store_id).await;
         let db = self.db.clone();
@@ -221,11 +225,12 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let store_id = store_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -272,11 +277,12 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let store_id = store_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -410,11 +416,12 @@ impl StateStoreProvider for RedbStateStoreProvider {
             .collect();
 
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -460,11 +467,12 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let store_id = store_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             let result = {
                 let table_def = Self::make_table_def(table_name);
@@ -514,11 +522,12 @@ impl StateStoreProvider for RedbStateStoreProvider {
         let store_id = store_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!(
                     "Failed to begin write transaction for store '{store_id}': {e}"
                 ))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             // Get count and delete table in one pass
             let table_def = Self::make_table_def(table_name);
@@ -687,9 +696,10 @@ impl StateStoreProvider for RedbStateStoreProvider {
 
         tokio::task::spawn_blocking(move || {
             // Perform a write transaction with no changes to force a sync
-            let write_txn = db.begin_write().map_err(|e| {
+            let mut write_txn = db.begin_write().map_err(|e| {
                 StateStoreError::StorageError(format!("Failed to begin sync transaction: {e}"))
             })?;
+            write_txn.set_durability(redb::Durability::Immediate);
 
             write_txn.commit().map_err(|e| {
                 StateStoreError::StorageError(format!("Failed to commit sync transaction: {e}"))
@@ -711,6 +721,47 @@ impl StateStoreProvider for RedbStateStoreProvider {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn committed_mutations_survive_reopen_and_progress_preserves_the_boundary() {
+        use drasi_lib::{
+            computation::v1::{ConsumerProgressStore, StateStoreConsumerProgress},
+            state_store::StorageDurability,
+        };
+        let directory = TempDir::new().expect("directory");
+        let path = directory.path().join("durability.redb");
+        {
+            let provider = Arc::new(RedbStateStoreProvider::new(&path).expect("provider"));
+            assert_eq!(provider.durability(), StorageDurability::LOCAL_POWER_LOSS);
+            let progress = StateStoreConsumerProgress::new("graph", "consumer", provider.clone())
+                .expect("progress");
+            assert_eq!(progress.durability(), provider.durability());
+            provider
+                .set("single", "removed", vec![1])
+                .await
+                .expect("set");
+            provider.delete("single", "removed").await.expect("delete");
+            provider
+                .set_many("batch", &[("kept", &[2]), ("removed", &[3])])
+                .await
+                .expect("batch");
+            provider
+                .delete_many("batch", &["removed"])
+                .await
+                .expect("delete batch");
+            provider.set("cleared", "key", vec![4]).await.expect("set");
+            provider.clear_store("cleared").await.expect("clear");
+            provider.sync().await.expect("sync");
+        }
+        let provider = RedbStateStoreProvider::new(&path).expect("reopen");
+        assert_eq!(provider.get("single", "removed").await.expect("read"), None);
+        assert_eq!(
+            provider.get("batch", "kept").await.expect("read"),
+            Some(vec![2])
+        );
+        assert_eq!(provider.get("batch", "removed").await.expect("read"), None);
+        assert_eq!(provider.get("cleared", "key").await.expect("read"), None);
+    }
 
     #[tokio::test]
     async fn test_redb_state_store_get_set() {

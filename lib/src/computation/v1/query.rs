@@ -101,10 +101,31 @@ pub struct ContinuousQueryDefinition {
 
 impl ContinuousQueryDefinition {
     pub fn descriptor(&self) -> ComponentDescriptor {
-        query_descriptor(self.id.clone())
+        query_descriptor(self.id.clone(), false)
+    }
+
+    pub fn descriptor_with_execution(
+        &self,
+        execution: &QueryExecutionSettings,
+    ) -> ComponentDescriptor {
+        query_descriptor(self.id.clone(), execution.source_transactions.is_some())
     }
 
     fn configuration_bytes(&self, execution: &QueryExecutionSettings) -> anyhow::Result<Bytes> {
+        if execution.source_transactions.is_some() {
+            // Admission limits may increase to resume rejected input without
+            // resetting already committed state. Grouped semantics may not.
+            let mut semantics = execution.clone();
+            semantics.source_transactions = None;
+            return Ok(Bytes::from(serde_json::to_vec(&(
+                4u32,
+                &self.query,
+                self.language,
+                self.output_stream.as_str(),
+                &semantics,
+                "complete-source-transactions-v1",
+            ))?));
+        }
         Ok(Bytes::from(serde_json::to_vec(&(
             3u32,
             &self.query,
@@ -122,14 +143,18 @@ impl ContinuousQueryDefinition {
     }
 }
 
-fn query_descriptor(id: ComponentId) -> ComponentDescriptor {
+fn query_descriptor(id: ComponentId, source_transactions: bool) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
         id,
         vec![
             PortDescriptor::new(
                 PortId::try_new("in").expect("port"),
                 PortDirection::Input,
-                GraphChangeCodec::schema().descriptor().clone(),
+                if source_transactions {
+                    super::SourceTransactionCodec::schema().descriptor().clone()
+                } else {
+                    GraphChangeCodec::schema().descriptor().clone()
+                },
                 PipeRequirements::default(),
             ),
             PortDescriptor::new(
@@ -302,6 +327,7 @@ pub struct ContinuousQueryTransformer {
     descriptor: ComponentDescriptor,
     provider: Arc<dyn ComputationIndexProvider>,
     query: Option<ComputationQuery>,
+    recovery_contract: super::ComponentRecovery,
     results: QueryResults,
     codec: EnvelopeCodec,
     failure: Arc<AtomicBool>,
@@ -333,6 +359,8 @@ pub struct ContinuousQueryTransformer {
     delivery_changed: Arc<tokio::sync::Notify>,
     delivery_sequence: Arc<AtomicU64>,
     delivered_output: AtomicU64,
+    output_binding_state: Option<Arc<super::output_bindings::OutputBindingState>>,
+    output_bindings: super::OutputBindings,
 }
 
 impl ContinuousQueryTransformer {
@@ -376,6 +404,11 @@ impl ContinuousQueryTransformer {
         defer_build: bool,
     ) -> anyhow::Result<Self> {
         execution.validate(middleware.as_deref())?;
+        anyhow::ensure!(
+            execution.source_transactions.is_none()
+                || options.publication == QueryPublicationMode::Atomic,
+            "complete source transactions require atomic publication"
+        );
         if !execution.middleware.is_empty() && middleware.is_none() {
             anyhow::bail!("query middleware requires a registered middleware resource");
         }
@@ -391,11 +424,12 @@ impl ContinuousQueryTransformer {
             notify: Arc::new(tokio::sync::Notify::new()),
         };
         let mut instance = Self {
-            descriptor: definition.descriptor(),
+            descriptor: definition.descriptor_with_execution(&execution),
             recovery_scope: Arc::from(definition.graph_id.as_str()),
             definition,
             provider,
             query: None,
+            recovery_contract: super::ComponentRecovery::default(),
             results,
             codec,
             failure: Arc::new(AtomicBool::new(false)),
@@ -426,6 +460,8 @@ impl ContinuousQueryTransformer {
             delivery_changed: Arc::new(tokio::sync::Notify::new()),
             delivery_sequence: Arc::new(AtomicU64::new(0)),
             delivered_output: AtomicU64::new(0),
+            output_binding_state: None,
+            output_bindings: super::OutputBindings::default(),
         };
         if !defer_build {
             instance.build().await?;
@@ -684,10 +720,19 @@ impl ContinuousQueryTransformer {
                 *identity = Some(uuid::Uuid::new_v4());
             }
         }
-        if !self.provider.is_volatile() && self.options.publication == QueryPublicationMode::Atomic
+        if self.execution.source_transactions.is_some()
+            || (!self.provider.is_volatile()
+                && self.options.publication == QueryPublicationMode::Atomic)
         {
             resources.atomic_result_transaction()?;
         }
+        let recovery_contract = if self.options.publication == QueryPublicationMode::Atomic
+            && resources.atomic_result_transaction().is_ok()
+        {
+            super::ComponentRecovery::transactional(&resources)?
+        } else {
+            super::ComponentRecovery::default()
+        };
         if !self.runtime_compatibility && !self.provider.is_volatile() && !self.output_persistent {
             anyhow::bail!(
                 "persistent query recovery requires persistent checkpoint, outbox and live-result resources"
@@ -698,12 +743,15 @@ impl ContinuousQueryTransformer {
             QueryBuilder::new(&self.definition.query, parser).with_function_registry(functions),
             self.middleware.clone(),
         )?;
+        let query = ComputationQuery::try_build(builder, resources).await?;
+        let checkpoint = query.resources().checkpoint_store().cloned();
+        self.query = Some(query);
         *self
             .checkpoint_view
             .write()
-            .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))? =
-            resources.checkpoint_store().cloned();
-        self.query = Some(ComputationQuery::try_build(builder, resources).await?);
+            .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))? = checkpoint;
+        self.recovery_contract = recovery_contract;
+        self.configure_output_binding_state();
         self.results
             .state
             .write()
@@ -714,6 +762,19 @@ impl ContinuousQueryTransformer {
             .write()
             .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? =
             Some(self.output_persistent);
+        Ok(())
+    }
+
+    fn release_query(&mut self) -> anyhow::Result<()> {
+        *self
+            .checkpoint_view
+            .write()
+            .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))? = None;
+        *self
+            .output_persistence_view
+            .write()
+            .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? = None;
+        self.query = None;
         Ok(())
     }
 
@@ -756,6 +817,9 @@ impl ContinuousQueryTransformer {
         let Some(checkpoint) = query.resources().checkpoint_store() else {
             return Ok(());
         };
+        if self.output_persistent {
+            self.load_delivery_bindings().await?;
+        }
         if self.runtime_compatibility && checkpoint.is_persistent() {
             if let Some(expected) = self.legacy_hash {
                 match checkpoint.read_config_hash().await {
@@ -1136,12 +1200,37 @@ impl ContinuousQueryTransformer {
         Ok(())
     }
 
-    async fn process(&self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+    // The caller selects the input contract once; ordinary evaluation carries
+    // neither grouped-transaction branches nor deadline checks through its hook.
+    async fn process<const SOURCE_TRANSACTION: bool>(
+        &self,
+        input: InputEnvelope,
+    ) -> anyhow::Result<Vec<OutputEnvelope>> {
         if self.failure.load(Ordering::Acquire) {
             anyhow::bail!("query processing is fenced pending recovery");
         }
         let query = self.query()?;
+        let source_transaction = self
+            .execution
+            .source_transactions
+            .filter(|_| SOURCE_TRANSACTION)
+            .map(|limits| super::SourceTransactionCodec::decode(&input.envelope, limits))
+            .transpose()?;
+        let transaction_deadline = self
+            .execution
+            .source_transactions
+            .filter(|_| SOURCE_TRANSACTION)
+            .map(|limits| {
+                tokio::time::Instant::now()
+                    .checked_add(limits.duration())
+                    .ok_or(super::SourceTransactionError::InvalidDeadline)
+            })
+            .transpose()?;
         let mut progress = input_progress(&input.envelope)?;
+        let transaction_changes = source_transaction.map(|transaction| {
+            progress.source_id = transaction.source_id().to_owned();
+            transaction.into_changes()
+        });
         let saved = if let Some(checkpoint) = query.resources().checkpoint_store() {
             progress
                 .graph
@@ -1187,7 +1276,15 @@ impl ContinuousQueryTransformer {
             log::warn!("Query {} retains its last valid checkpoint cursor because the new source position is oversized", self.definition.id);
             progress.position = saved.and_then(|saved| saved.source_position);
         }
-        let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let changes = match transaction_changes {
+            Some(changes) => changes,
+            None => GraphChangeCodec::decode_changes(&input.envelope)?,
+        };
+        let reservations = if self.output_bindings.has_shared() {
+            Some(Box::pin(self.output_bindings.reserve()).await?)
+        } else {
+            None
+        };
         self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);
         let mut profiling = progress.profiling.clone().unwrap_or_else(|| {
@@ -1240,6 +1337,11 @@ impl ContinuousQueryTransformer {
                     self.stamp_output_identity(output)
                         .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
                 }
+                if transaction_deadline
+                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
+                    return Err(IndexError::other(super::SourceTransactionError::Deadline));
+                }
                 if let Some(checkpoint) = query.resources().checkpoint_store() {
                     progress.graph.stage(checkpoint.as_ref()).await?;
                     if let Some(output) = &output {
@@ -1264,9 +1366,53 @@ impl ContinuousQueryTransformer {
         };
         match query.resources().atomic_result_transaction() {
             Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
-                query
-                    .process_source_changes_with_result_hook(changes, &transaction, hook)
+                if SOURCE_TRANSACTION {
+                    // Keep opt-in transaction futures out of the ordinary input's allocation.
+                    if let Some(reservations) = reservations {
+                        Box::pin(query.process_source_transaction_with_transaction_group(
+                            changes,
+                            &transaction,
+                            |results| {
+                                let pending = hook(results);
+                                let prepared = &prepared;
+                                async move {
+                                    pending.await?;
+                                    let output =
+                                        prepared.lock().map_err(|_| IndexError::CorruptedData)?;
+                                    self.shared_delivery_mutations(reservations, output.as_ref())
+                                }
+                            },
+                        ))
+                        .await?;
+                    } else {
+                        Box::pin(query.process_source_transaction_with_result_hook(
+                            changes,
+                            &transaction,
+                            hook,
+                        ))
+                        .await?;
+                    }
+                } else if let Some(reservations) = reservations {
+                    Box::pin(query.process_source_changes_with_transaction_group(
+                        changes,
+                        &transaction,
+                        |results| {
+                            let pending = hook(results);
+                            let prepared = &prepared;
+                            async move {
+                                pending.await?;
+                                let output =
+                                    prepared.lock().map_err(|_| IndexError::CorruptedData)?;
+                                self.shared_delivery_mutations(reservations, output.as_ref())
+                            }
+                        },
+                    ))
                     .await?;
+                } else {
+                    query
+                        .process_source_changes_with_result_hook(changes, &transaction, hook)
+                        .await?;
+                }
             }
             _ if self.provider.is_volatile()
                 || self.options.publication == QueryPublicationMode::NonAtomic =>
@@ -1319,6 +1465,20 @@ impl Drop for ContinuousQueryTransformer {
 
 #[async_trait]
 impl ComputationComponent for ContinuousQueryTransformer {
+    fn recovery_contract(&self) -> super::ComponentRecovery {
+        let contract = match &self.source_progress {
+            Some(progress) => self
+                .recovery_contract
+                .clone()
+                .with_committed_progress(progress.clone()),
+            None => self.recovery_contract.clone(),
+        };
+        match &self.output_binding_state {
+            Some(bindings) => contract.with_output_bindings(bindings.clone()),
+            None => contract,
+        }
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1398,6 +1558,28 @@ impl ComputationComponent for ContinuousQueryTransformer {
             complete: false,
             progress: self.source_progress.clone(),
         };
+        if let Some(provider) = &self.bootstrap {
+            provider.validate_query_scope(
+                &self.recovery_scope,
+                &self.definition.graph_id,
+                &self.definition.id,
+            )?;
+        }
+        if let Some(reader) = self
+            .bootstrap
+            .as_ref()
+            .and_then(|provider| provider.recovery_reader())
+        {
+            let owner = self.source_progress.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "bootstrap recovery reader requires the query's source progress owner"
+                )
+            })?;
+            anyhow::ensure!(
+                reader.same_owner(&super::SourceProgressReader::Local(owner.clone())),
+                "bootstrap recovery reader is not bound to this query's actual progress owner"
+            );
+        }
         if self.failure.load(Ordering::Acquire)
             && self.provider.is_volatile()
             && (self.options.recovery != QueryRecoveryPolicy::AutoReset || self.bootstrap.is_none())
@@ -1447,6 +1629,9 @@ impl ComputationComponent for ContinuousQueryTransformer {
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
             .ready = false;
+        if let Some(bootstrap) = &self.bootstrap {
+            bootstrap.stop().await?;
+        }
         if self.failure.load(Ordering::Acquire)
             || self
                 .query
@@ -1456,7 +1641,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
             if let Some(query) = &self.query {
                 query.shutdown().await?;
             }
-            self.query = None;
+            self.release_query()?;
         } else if let Some(query) = &self.query {
             query.quiesce().await?;
         }
@@ -1466,6 +1651,13 @@ impl ComputationComponent for ContinuousQueryTransformer {
 
 #[async_trait]
 impl Transformer for ContinuousQueryTransformer {
+    async fn bind_output_destinations(
+        &mut self,
+        bindings: &super::OutputBindings,
+    ) -> anyhow::Result<()> {
+        self.bind_delivery_destinations(bindings).await
+    }
+
     async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
         self.confirm_delivery(outputs).await
     }
@@ -1475,7 +1667,8 @@ impl Transformer for ContinuousQueryTransformer {
             self.pending_output.is_empty(),
             "drain recovered query output before accepting input"
         );
-        let futures_due = GraphChangeCodec::is_futures_due(&input.envelope);
+        let futures_due = self.execution.source_transactions.is_none()
+            && GraphChangeCodec::is_futures_due(&input.envelope);
         let progress = if futures_due {
             super::GraphProducerProgress::from_envelope(&input.envelope)?
         } else {
@@ -1498,7 +1691,14 @@ impl Transformer for ContinuousQueryTransformer {
             complete: false,
             progress: self.source_progress.clone(),
         };
-        let mut result = self.process(input).await;
+        let mut result = match self.execution.source_transactions {
+            Some(limits) => {
+                tokio::time::timeout(limits.duration(), Box::pin(self.process::<true>(input)))
+                    .await
+                    .map_err(|_| super::SourceTransactionError::Deadline)?
+            }
+            None => self.process::<false>(input).await,
+        };
         if futures_due && result.is_ok() {
             // The empty batch commits the middleware's logical input progress.
             // Due work already belongs to the query's durable future queue, so
@@ -1572,6 +1772,11 @@ impl Transformer for ContinuousQueryTransformer {
             return Ok(Vec::new());
         }
         let query = self.query()?;
+        let reservations = if self.output_bindings.has_shared() {
+            Some(self.output_bindings.reserve().await?)
+        } else {
+            None
+        };
         self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);
         let owner = &*self;
@@ -1648,9 +1853,24 @@ impl Transformer for ContinuousQueryTransformer {
         };
         match query.resources().atomic_result_transaction() {
             Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
-                query
-                    .process_due_futures_with_result_hook(&transaction, hook)
-                    .await?;
+                if let Some(reservations) = reservations {
+                    query
+                        .process_due_futures_with_transaction_group(&transaction, |due| {
+                            let pending = hook(due);
+                            let prepared = &prepared;
+                            async move {
+                                pending.await?;
+                                let output =
+                                    prepared.lock().map_err(|_| IndexError::CorruptedData)?;
+                                owner.shared_delivery_mutations(reservations, output.as_ref())
+                            }
+                        })
+                        .await?;
+                } else {
+                    query
+                        .process_due_futures_with_result_hook(&transaction, hook)
+                        .await?;
+                }
             }
             _ if self.provider.is_volatile()
                 || self.options.publication == QueryPublicationMode::NonAtomic =>
@@ -1943,8 +2163,25 @@ impl ComponentFactory for ContinuousQueryFactory {
         {
             anyhow::bail!("auto_reset requires a declared bootstrap provider");
         }
-        if spec.descriptor != query_descriptor(spec.descriptor.id().clone()) {
-            anyhow::bail!("query requires typed graph input and typed query-row output");
+        let execution: QueryExecutionSettings = literals
+            .get("execution")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?
+            .unwrap_or_default();
+        if execution.source_transactions.is_some()
+            && options(&literals)?.publication != QueryPublicationMode::Atomic
+        {
+            anyhow::bail!("complete source transactions require atomic publication");
+        }
+        if spec.descriptor
+            != query_descriptor(
+                spec.descriptor.id().clone(),
+                execution.source_transactions.is_some(),
+            )
+        {
+            anyhow::bail!(
+                "query input must match its configured graph-change or complete-transaction schema"
+            );
         }
         let language_value = spec.configuration.get("language").and_then(|value| {
             if let ConfigurationValue::Literal(value) = value {

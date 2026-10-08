@@ -32,6 +32,10 @@ use super::{
 
 #[async_trait]
 pub trait ConsumerProgressStore: Send + Sync {
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        drasi_core::computation::StorageDurability::UNKNOWN
+    }
+
     async fn load(&self, query: &str) -> anyhow::Result<Option<ConsumerCheckpoint>>;
     async fn commit_handled(
         &self,
@@ -138,6 +142,10 @@ pub struct MemoryConsumerProgress {
 
 #[async_trait]
 impl ConsumerProgressStore for MemoryConsumerProgress {
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        drasi_core::computation::StorageDurability::VOLATILE
+    }
+
     async fn load(&self, query: &str) -> anyhow::Result<Option<ConsumerCheckpoint>> {
         Ok(self.handled.lock().await.get(query).cloned())
     }
@@ -277,6 +285,10 @@ impl StateStoreConsumerProgress {
 
 #[async_trait]
 impl ConsumerProgressStore for StateStoreConsumerProgress {
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        self.provider.durability()
+    }
+
     async fn load(&self, query: &str) -> anyhow::Result<Option<ConsumerCheckpoint>> {
         self.provider
             .get(&self.partition, &format!("handled:{query}"))

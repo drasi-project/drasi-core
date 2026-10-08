@@ -36,7 +36,7 @@ use super::{
     UpdateSemantics,
 };
 
-const QUERY_METADATA: &str = "drasi.query-output.v1";
+pub(super) const QUERY_METADATA: &str = "drasi.query-output.v1";
 const QUERY_SEQUENCE: &str = "drasi.query-output-sequence.v1";
 const SNAPSHOT: &str = "drasi.query-snapshot.v1";
 const PROGRESS_ONLY: &str = "drasi.query-progress-only.v1";
@@ -264,17 +264,42 @@ impl QueryChangeCodec {
     }
 
     pub fn query_sequence(envelope: &ChangeEnvelope) -> Result<u64, QueryCodecError> {
+        Ok(Self::explicit_query_sequence(envelope)?.unwrap_or(envelope.system().sequence()))
+    }
+
+    pub(crate) fn output_sequence(envelope: &ChangeEnvelope) -> Result<u64, QueryCodecError> {
+        let query = Self::metadata(envelope)?.query_id;
+        let mut metadata_seen = false;
+        for entry in envelope.annotations().entries() {
+            if entry.key() == QUERY_METADATA && std::mem::replace(&mut metadata_seen, true) {
+                break;
+            }
+            if entry.key() == QUERY_SEQUENCE {
+                if entry.contributor() != query {
+                    break;
+                }
+                return Self::explicit_query_sequence(envelope)?
+                    .filter(|sequence| *sequence > 0)
+                    .ok_or(QueryCodecError::InvalidRow);
+            }
+        }
+        Err(QueryCodecError::InvalidRow)
+    }
+
+    pub(crate) fn explicit_query_sequence(
+        envelope: &ChangeEnvelope,
+    ) -> Result<Option<u64>, QueryCodecError> {
         match envelope
             .annotations()
             .entries()
             .find(|entry| entry.key() == QUERY_SEQUENCE)
         {
             Some(entry) => match entry.value() {
-                ContextValue::Unsigned(sequence) => Ok(sequence),
+                ContextValue::Unsigned(sequence) => Ok(Some(sequence)),
                 _ => Err(QueryCodecError::InvalidRow),
             },
             // Earlier v1 envelopes used the query producer's system sequence.
-            None => Ok(envelope.system().sequence()),
+            None => Ok(None),
         }
     }
 
@@ -445,6 +470,34 @@ impl QueryChangeCodec {
             )?)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn without_post_commit_profiling(
+        envelope: &ChangeEnvelope,
+    ) -> Result<ChangeEnvelope, QueryCodecError> {
+        let query = Self::metadata(envelope)?.query_id;
+        let mut current = true;
+        let mut entries: Vec<_> = envelope
+            .annotations()
+            .entries()
+            .filter(|entry| {
+                if entry.key() == QUERY_METADATA {
+                    current = false;
+                }
+                !(current
+                    && entry.contributor() == query
+                    && matches!(entry.key(), QUERY_CORE_RETURN_NS | QUERY_SEND_NS))
+            })
+            .collect();
+        entries.reverse();
+        Ok(ChangeEnvelope::restore(
+            envelope.id().clone(),
+            envelope.changes().clone(),
+            envelope.system().as_ref().clone(),
+            envelope.lineage().cloned(),
+            envelope.context_identity(),
+            entries,
+        )?)
     }
 
     pub fn encode_evaluation(

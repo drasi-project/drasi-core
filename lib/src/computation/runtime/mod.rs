@@ -53,14 +53,7 @@ type BootstrapRegistration = (String, String, HashMap<String, serde_json::Value>
 
 pub(crate) fn map_addition_error(kind: &str, id: &str, error: anyhow::Error) -> crate::DrasiError {
     let context = crate::DrasiError::operation_failed(kind, id, "add", format!("{error:#}"));
-    if matches!(
-        error.downcast_ref::<GraphError>(),
-        Some(GraphError::AdditionRejected { .. })
-    ) {
-        crate::DrasiError::Internal(error.context(context))
-    } else {
-        context
-    }
+    context.with_cause(error)
 }
 
 pub(crate) async fn build(
@@ -774,7 +767,10 @@ impl Runtime {
                 ) {
                     record.owner.rejection_owned.store(true, Ordering::Release);
                 } else if let Err(cleanup) = self.discard_uninstalled(&record).await {
-                    return Err(error.context(format!("addition cleanup also failed: {cleanup:#}")));
+                    return Err(error.context(crate::error::OperationFailures::new(
+                        "addition cleanup also failed",
+                        vec![cleanup],
+                    )));
                 }
                 Err(error)
             }
@@ -953,17 +949,17 @@ impl Runtime {
         record: &Record,
     ) -> anyhow::Result<(GraphControl, GraphRevision, ObservedComponent)> {
         let control = self.parent()?.control();
-        let desired = control.desired_snapshot();
-        if record_token(&desired, &record.node) != Some(record.token) {
+        let publication = control.registry_snapshot();
+        if record_token(&publication.desired, &record.node) != Some(record.token) {
             return Err(GraphError::StaleGeneration.into());
         }
-        let observed = control
-            .observed()
+        let observed = publication
+            .observed
             .components
             .get(&record.node)
             .cloned()
             .ok_or(GraphError::StaleGeneration)?;
-        Ok((control, desired.revision, observed))
+        Ok((control, publication.desired.revision, observed))
     }
 
     fn active(&self, record: &Record) -> anyhow::Result<bool> {
@@ -1032,7 +1028,7 @@ impl Runtime {
                 Some(StartOutcome::Started | StartOutcome::AlreadyRunning)
             )
         {
-            anyhow::bail!("native activation failed: {:?}", report.components);
+            return Err(super::v1::LifecycleReportError::Start(report).into());
         }
         Ok(())
     }
@@ -1241,10 +1237,13 @@ impl Runtime {
         {
             self.stop_record(&record).await?;
         }
-        let (control, revision, _) = self.control_for(&record)?;
-        let preview = control
-            .preview(
-                revision,
+        let (control, _, observed) = self.control_for(&record)?;
+        if cleanup || kind == "query" {
+            record.owner.remove_data();
+        }
+        let result = control
+            .mutate_members(
+                BTreeMap::from([(record.node.clone(), observed.generation)]),
                 vec![
                     DesiredMutation::RemoveComponents {
                         selection: GraphSelection::Exact(vec![record.node.clone()]),
@@ -1255,13 +1254,9 @@ impl Runtime {
                         policy: RemovalPolicy::Reject,
                     },
                 ],
+                TopologyBindings::default(),
+                BTreeSet::new(),
             )
-            .await?;
-        if cleanup || kind == "query" {
-            record.owner.remove_data();
-        }
-        let result = control
-            .reconcile(preview, TopologyBindings::default())
             .await;
         match result {
             Ok(report) if report.summary == OperationSummary::Completed => {}
@@ -1389,7 +1384,10 @@ impl Runtime {
         .await;
         if let Err(error) = result {
             if let Err(cleanup) = self.discard_uninstalled(&new).await {
-                return Err(error.context(format!("replacement cleanup also failed: {cleanup:#}")));
+                return Err(error.context(crate::error::OperationFailures::new(
+                    "replacement cleanup also failed",
+                    vec![cleanup],
+                )));
             }
             return Err(error);
         }
@@ -1432,11 +1430,15 @@ impl Runtime {
             let component = old.value.instance();
             let record = self.record(component.id(), component.kind()).await?;
             if let Err(error) = self.start_record(&record).await {
-                failures.push(format!("{}: {error:#}", component.id()));
+                failures.push(error.context(component.id().to_owned()));
             }
         }
         if !failures.is_empty() {
-            anyhow::bail!("native dependent restart failed: {}", failures.join("; "));
+            return Err(crate::error::OperationFailures::new(
+                "native dependent restart failed",
+                failures,
+            )
+            .into());
         }
         Ok(())
     }
@@ -1632,12 +1634,16 @@ impl Runtime {
                 }
             } else {
                 if let Err(error) = result {
-                    failures.push(format!("{error:#}"));
+                    failures.push(error);
                 }
             }
         }
         if !failures.is_empty() {
-            anyhow::bail!("native {kind} startup failed: {}", failures.join("; "));
+            return Err(crate::error::OperationFailures::new(
+                format!("native {kind} startup failed"),
+                failures,
+            )
+            .into());
         }
         Ok(())
     }
@@ -1693,22 +1699,30 @@ impl Runtime {
                 result = handle.wait_created() => result.map_err(anyhow::Error::from),
             };
             if let Err(error) = settled {
-                failures.push(format!("{id}: {error:#}"));
+                failures.push(error.context(id.to_string()));
                 continue;
             }
             let observed = match handle.observed() {
                 Ok(observed) => observed,
                 Err(error) => {
-                    failures.push(format!("{id}: {error}"));
+                    failures.push(anyhow::Error::new(error).context(id.to_string()));
                     continue;
                 }
             };
             if let Some(failure) = observed.failure {
-                failures.push(format!("{id}: {:#}", failure.cause));
+                failures.push(
+                    anyhow::Error::new(GraphError::Reported {
+                        cause: failure.cause,
+                    })
+                    .context(id.to_string()),
+                );
             } else if observed.realization == RealizationState::Created {
                 ready.push(handle);
             } else {
-                failures.push(format!("{id}: creation is {:?}", observed.realization));
+                failures.push(anyhow::anyhow!(
+                    "{id}: creation is {:?}",
+                    observed.realization
+                ));
             }
         }
         if !ready.is_empty() {
@@ -1728,11 +1742,15 @@ impl Runtime {
                 )
                 .await?;
             if report.summary != OperationSummary::Completed {
-                failures.push(format!("native activation failed: {:?}", report.components));
+                failures.push(super::v1::LifecycleReportError::Start(report).into());
             }
         }
         if !failures.is_empty() {
-            anyhow::bail!("native component startup failed: {}", failures.join("; "));
+            return Err(crate::error::OperationFailures::new(
+                "native component startup failed",
+                failures,
+            )
+            .into());
         }
         Ok(())
     }
@@ -1763,8 +1781,8 @@ impl Runtime {
                 .await
             {
                 Ok(report) if report.summary == OperationSummary::Completed => {}
-                Ok(report) => failures.push(format!("native stop failed: {:?}", report.components)),
-                Err(error) => failures.push(error.to_string()),
+                Ok(report) => failures.push(super::v1::LifecycleReportError::Stop(report).into()),
+                Err(error) => failures.push(anyhow::Error::new(error)),
             }
         }
         for kind in ["reaction", "query", "source"] {
@@ -1784,13 +1802,15 @@ impl Runtime {
                     && (self.active(&record)? || observed.failure.is_some())
                 {
                     if let Err(error) = self.stop_record(&record).await {
-                        failures.push(error.to_string());
+                        failures.push(error);
                     }
                 }
             }
         }
         if !failures.is_empty() {
-            anyhow::bail!("native stop failed: {}", failures.join("; "));
+            return Err(
+                crate::error::OperationFailures::new("native stop failed", failures).into(),
+            );
         }
         Ok(())
     }
@@ -1809,12 +1829,16 @@ impl Runtime {
                 && (self.active(record)? || observed.failure.is_some())
             {
                 if let Err(error) = self.stop_record(record).await {
-                    failures.push(format!("{}: {error:#}", record.node));
+                    failures.push(error.context(record.node.to_string()));
                 }
             }
         }
         if !failures.is_empty() {
-            anyhow::bail!("stopping {kind} components failed: {}", failures.join("; "));
+            return Err(crate::error::OperationFailures::new(
+                format!("stopping {kind} components failed"),
+                failures,
+            )
+            .into());
         }
         Ok(())
     }

@@ -58,31 +58,44 @@ struct Driver {
     desired: watch::Sender<CommittedConfiguration>,
     status: watch::Sender<ManagementStatus>,
     confirmed: Arc<AtomicBool>,
+    transition: Option<super::transitions::PreparedRecoveryTransition>,
 }
 
-struct ManagedResource {
-    resolver: Arc<dyn ManagementResourceResolver>,
-    instance_id: String,
-    graph_id: String,
-    specification: ResourceSpecification,
-    configuration: serde_json::Value,
+pub(super) struct ManagedResource {
+    pub(super) resolver: Arc<dyn ManagementResourceResolver>,
+    pub(super) instance_id: String,
+    pub(super) graph_id: String,
+    pub(super) specification: ResourceSpecification,
+    pub(super) configuration: serde_json::Value,
 }
 
 #[async_trait::async_trait]
 impl ResourceConstructor for ManagedResource {
     async fn construct(&self) -> Result<ResourceHandle> {
+        self.construct_with_dependencies(&BTreeMap::new()).await
+    }
+
+    async fn construct_with_dependencies(
+        &self,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<ResourceHandle> {
         self.resolver
-            .resolve(
+            .resolve_with_dependencies(
                 &self.instance_id,
                 &self.graph_id,
                 &self.specification,
                 &self.configuration,
+                dependencies,
             )
             .await
     }
 }
 
 impl Management {
+    pub(crate) fn persistent(&self) -> bool {
+        self.status.borrow().persistent
+    }
+
     pub(crate) async fn open(
         instance_id: String,
         graph: Arc<InstanceGraph>,
@@ -139,6 +152,7 @@ impl Management {
             desired,
             status,
             confirmed: confirmed.clone(),
+            transition: None,
         };
         let (commands, receive) = mpsc::channel(32);
         let task = tokio::spawn(async move { driver.run(receive).await });
@@ -295,6 +309,13 @@ impl Driver {
             return Err(error);
         }
         let changed = self.current != committed;
+        if let Some(transition) = self.transition.take() {
+            if changed {
+                transition.retire();
+            } else {
+                transition.resume();
+            }
+        }
         self.current = committed;
         self.desired.send_replace(self.current.clone());
         let was_confirmed = self.confirmed.swap(true, Ordering::AcqRel);
@@ -342,6 +363,14 @@ impl Driver {
         );
         let graph = self.graph.clone();
         let _lifecycle = graph.lifecycle.lock().await;
+        if !self.confirmed.load(Ordering::Acquire) {
+            self.refresh_committed().await?;
+        }
+        let retry = if let Some(store) = &self.store {
+            store.receipt(&request).await?.is_some()
+        } else {
+            self.receipts.contains_key(&request)
+        };
         if self.store.is_none() {
             if let Some((prior, receipt)) = self.receipts.get(&request) {
                 if prior != &desired {
@@ -357,7 +386,45 @@ impl Driver {
                 .into());
             }
         }
+        let mut required_transition = None;
+        if !retry {
+            if expected != self.current.revision {
+                return Err(ManagementError::RevisionConflict {
+                    expected,
+                    actual: self.current.revision,
+                }
+                .into());
+            }
+            if let Err(error) = self
+                .resolver
+                .validate_transition(&self.current.desired.topology, &desired.topology)
+            {
+                let Some(required) = error.downcast_ref::<RecoveryTransitionRequired>() else {
+                    return Err(error);
+                };
+                if *self.running.read().await
+                    || !equivalent(&self.applied, &self.current.desired.topology)?
+                {
+                    return Err(error);
+                }
+                required_transition = Some(required.clone());
+            }
+        }
         let control = graph.get().await?.control();
+        let allow_pending = match &desired.retirement {
+            Some(authorization)
+                if !retry && desired.retirement != self.current.desired.retirement =>
+            {
+                authorization.validate_transition(
+                    self.store.is_some(),
+                    self.current.revision,
+                    &self.current.desired.topology,
+                    required_transition.as_ref(),
+                )?;
+                true
+            }
+            _ => false,
+        };
         self.protect(&control, &desired.topology).await?;
         let admission =
             check_ownership(&control, &self.applied, &desired.topology).and_then(|()| {
@@ -375,6 +442,25 @@ impl Driver {
             self.protect(&control, &self.current.desired.topology)
                 .await?;
             return Err(error);
+        }
+        if self.store.is_none() && desired != self.current.desired {
+            self.current
+                .revision
+                .checked_add(1)
+                .context("configuration revision exhausted")?;
+        }
+        if let Some(required) = required_transition {
+            match required
+                .prepare(&control, &self.current.desired.topology, allow_pending)
+                .await
+            {
+                Ok(transition) => self.transition = Some(transition),
+                Err(error) => {
+                    self.protect(&control, &self.current.desired.topology)
+                        .await?;
+                    return Err(error);
+                }
+            }
         }
         if let Some(store) = &self.store {
             let result = store.commit(expected, &request, &desired).await;
@@ -415,6 +501,9 @@ impl Driver {
                 .checked_add(1)
                 .context("configuration revision exhausted")?;
             self.current.desired = desired.clone();
+        }
+        if let Some(transition) = self.transition.take() {
+            transition.retire();
         }
         let receipt = AcceptanceReceipt {
             request_id: request.clone(),
@@ -473,16 +562,26 @@ impl Driver {
                 defer_activation: !*self.running.read().await,
                 ..Default::default()
             };
+            let mut changed_resources = control.retired_resources().await?;
             for resource in &desired.resources {
                 let current_resource = observed.resources.get(&resource.id);
                 let needs_resource = old.resources.iter().find(|prior| prior.id == resource.id)
                     != Some(resource)
                     || old.resource_configurations.get(&resource.id)
                         != desired.resource_configurations.get(&resource.id)
+                    || old.resource_dependencies.get(&resource.id)
+                        != desired.resource_dependencies.get(&resource.id)
                     || current_resource.map_or(true, |state| {
-                        state.realization != ResourceRealization::Created
+                        state.realization != ResourceRealization::Created || state.failure.is_some()
                     });
-                if !needs_resource {
+                if needs_resource {
+                    changed_resources.insert(resource.id.clone());
+                }
+            }
+            old.include_resource_dependents(&mut changed_resources);
+            desired.include_resource_dependents(&mut changed_resources);
+            for resource in &desired.resources {
+                if !changed_resources.contains(&resource.id) {
                     continue;
                 }
                 let configuration = desired
@@ -491,13 +590,13 @@ impl Driver {
                     .context("missing provider construction recipe")?;
                 bindings.resource_constructors.insert(
                     resource.id.clone(),
-                    Arc::new(ManagedResource {
-                        resolver: self.resolver.clone(),
-                        instance_id: self.instance_id.clone(),
-                        graph_id: id.clone(),
-                        specification: resource.clone(),
-                        configuration: configuration.clone(),
-                    }),
+                    resource_constructor(
+                        self.resolver.clone(),
+                        &self.instance_id,
+                        id,
+                        resource.clone(),
+                        configuration.clone(),
+                    ),
                 );
             }
             let report = control
@@ -765,6 +864,9 @@ pub(crate) fn equivalent(left: &DesiredTopology, right: &DesiredTopology) -> Res
 fn canonical_graph(graph: &mut DesiredTopology) {
     graph.revision = GraphRevision(0);
     graph
+        .resource_dependencies
+        .retain(|_, dependencies| !dependencies.is_empty());
+    graph
         .components
         .sort_by(|left, right| left.descriptor.id().cmp(right.descriptor.id()));
     graph
@@ -779,6 +881,9 @@ fn canonical_graph(graph: &mut DesiredTopology) {
 
 pub(super) fn normalize(mut desired: DesiredInstance) -> Result<DesiredInstance> {
     anyhow::ensure!(desired.version == 1, "unsupported desired instance version");
+    if let Some(authorization) = &desired.retirement {
+        authorization.validate_removed(&desired.topology)?;
+    }
     {
         let topology = &mut desired.topology;
         anyhow::ensure!(
@@ -899,6 +1004,12 @@ pub(crate) fn compose_definition(
         .resource_configurations
         .extend(desired.resource_configurations.clone());
     current
+        .resource_dependencies
+        .retain(|id, _| !old_resources.contains(id));
+    current
+        .resource_dependencies
+        .extend(desired.resource_dependencies.clone());
+    current
         .relationships
         .retain(|edge| !previous.relationships.contains(edge));
     current
@@ -934,6 +1045,12 @@ pub(crate) fn compose_definition(
     current
         .component_plugins
         .extend(desired.component_plugins.clone());
+    current
+        .recovery_requirements
+        .retain(|requirement| !previous.recovery_requirements.contains(requirement));
+    current
+        .recovery_requirements
+        .extend(desired.recovery_requirements.iter().cloned());
     current.requirements = PipeRequirements::new(
         current
             .requirements
@@ -969,12 +1086,171 @@ pub(crate) fn compose_definition(
                 .chain(&current.boundary_relationships)
                 .flat_map(|edge| edge.pipe.resource_dependencies().into_keys()),
         )
+        .chain(
+            current
+                .resource_dependencies
+                .values()
+                .flat_map(|dependencies| dependencies.keys().cloned()),
+        )
         .collect();
-    current.resources.retain(|resource| {
-        !detached.contains(&resource.id)
-            || !resource.id.as_str().starts_with("attached/")
-            || referenced.contains(&resource.id)
-    });
+    let unused: BTreeSet<_> = detached
+        .into_iter()
+        .filter(|id| id.as_str().starts_with("attached/") && !referenced.contains(id))
+        .collect();
+    current
+        .resources
+        .retain(|resource| !unused.contains(&resource.id));
+    current
+        .resource_configurations
+        .retain(|id, _| !unused.contains(id));
+    current
+        .resource_dependencies
+        .retain(|id, _| !unused.contains(id));
     current.validate_structure()?;
     Ok(current)
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::computation::v1::*;
+
+    struct Service(ComponentDescriptor);
+
+    #[async_trait]
+    impl ComputationComponent for Service {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.0
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ComputationService for Service {
+        async fn run(&mut self) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    fn definition(ids: &[&str]) -> DesiredTopology {
+        let mut builder = ComputationGraph::builder("managed-recovery");
+        for id in ids {
+            builder = builder.service(Box::new(Service(
+                ComponentDescriptor::try_new(ComponentId::try_new(*id).unwrap(), vec![]).unwrap(),
+            )));
+        }
+        builder
+            .build()
+            .unwrap()
+            .snapshot()
+            .select(GraphSelection::All)
+            .unwrap()
+    }
+
+    fn requirement(id: &str) -> RecoveryRequirement {
+        RecoveryRequirement {
+            consumer: ComponentId::try_new(id).unwrap(),
+            scope: RecoveryScope::MemoryLifetime,
+            guarantees: [RecoveryGuarantee::Acceptance].into(),
+        }
+    }
+
+    #[test]
+    fn managed_composition_preserves_unmanaged_assertions_and_applies_managed_assertions() {
+        let mut previous = definition(&["managed"]);
+        previous.recovery_requirements.push(requirement("managed"));
+        let mut current = definition(&["managed", "manual"]);
+        current.recovery_requirements = vec![requirement("managed"), requirement("manual")];
+        let mut desired = previous.clone();
+        desired.recovery_requirements[0]
+            .guarantees
+            .insert(RecoveryGuarantee::Replay);
+        let composed = compose_definition(current, &previous, &desired).unwrap();
+        assert_eq!(composed.recovery_requirements.len(), 2);
+        assert!(composed
+            .recovery_requirements
+            .contains(&requirement("manual")));
+        assert!(composed
+            .recovery_requirements
+            .contains(&desired.recovery_requirements[0]));
+        assert!(!composed
+            .recovery_requirements
+            .contains(&requirement("managed")));
+    }
+
+    #[tokio::test]
+    async fn detached_dependent_resources_leave_no_dangling_recipes_or_dependencies() {
+        let previous = definition(&["managed"]);
+        let mut current = previous.clone();
+        let parent = ResourceId::try_new("parent").unwrap();
+        let child = ResourceId::try_new("attached/child").unwrap();
+        for id in [&parent, &child] {
+            current.resources.push(ResourceSpecification {
+                id: id.clone(),
+                role: ResourceRole::StateStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: id.as_str().into(),
+            });
+        }
+        current
+            .resource_configurations
+            .insert(child.clone(), serde_json::json!({}));
+        current.resource_dependencies.insert(
+            child.clone(),
+            BTreeMap::from([(parent.clone(), ResourceRole::StateStore)]),
+        );
+        current.component_resources.insert(
+            ComponentId::try_new("managed").unwrap(),
+            BTreeSet::from([child.clone()]),
+        );
+        current.validate_structure().unwrap();
+        let mut target = previous.clone();
+        target.components.clear();
+        target.allow_incomplete = true;
+        let composed = compose_definition(current.clone(), &previous, &target).unwrap();
+        assert!(composed.resource_dependencies.is_empty());
+        assert!(composed.resource_configurations.is_empty());
+        assert_eq!(composed.resources.len(), 1);
+        assert_eq!(composed.resources[0].id, parent);
+
+        let ComponentConstruction::External { binding } = &current.components[0].construction
+        else {
+            panic!("external test component");
+        };
+        let mut bindings = TopologyBindings::default();
+        bindings.components.insert(
+            binding.clone(),
+            ConstructedComponent::service(Box::new(Service(
+                current.components[0].descriptor.clone(),
+            ))),
+        );
+        let mut graph = current.build(bindings).unwrap();
+        let run = graph.run().unwrap();
+        let control = run.control();
+        let (outcome, preview) = tokio::join!(run, async {
+            let preview = control
+                .preview(
+                    control.desired_snapshot().revision,
+                    vec![DesiredMutation::RemoveComponents {
+                        selection: GraphSelection::All,
+                        policy: RemovalPolicy::Cascade,
+                    }],
+                )
+                .await;
+            control.cancel();
+            preview
+        });
+        assert!(matches!(outcome, Err(GraphError::Cancelled)));
+        let preview = preview.unwrap();
+        assert!(preview.desired().resource_dependencies.is_empty());
+        assert!(preview.desired().resource_configurations.is_empty());
+        assert_eq!(preview.desired().resources.len(), 1);
+        assert_eq!(preview.desired().resources[0].id, parent);
+        graph.dispose().await.unwrap();
+    }
 }

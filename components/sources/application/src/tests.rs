@@ -21,6 +21,22 @@ mod tests {
     use std::collections::HashMap;
 
     #[tokio::test]
+    async fn stop_joins_the_wal_pruner() {
+        let (source, _) = create_test_application_source("pruner").await;
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let worker = task.abort_handle();
+        *source.prune_task.write().await = Some(task);
+        ready.await.unwrap();
+        source.stop().await.unwrap();
+        assert!(worker.is_finished());
+        assert!(source.prune_task.read().await.is_none());
+    }
+
+    #[tokio::test]
     async fn restart_preserves_existing_handles_buffered_input_and_source_sequence() {
         let (source, handle) = create_test_application_source("restart-source").await;
         let mut subscription = source

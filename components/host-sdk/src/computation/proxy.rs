@@ -24,6 +24,9 @@ pub(super) struct RemoteComponent {
 unsafe impl Send for RemoteComponent {}
 unsafe impl Sync for RemoteComponent {}
 impl RemoteComponent {
+    pub(super) fn state(&self) -> *mut std::ffi::c_void {
+        self.raw.state
+    }
     unsafe fn new(raw: abi::ComponentHandle, plugin: Arc<PluginOwner>) -> anyhow::Result<Self> {
         let table = unsafe { checked_table(raw.vtable)? };
         anyhow::ensure!(
@@ -120,7 +123,22 @@ pub struct NativeComponentProxy {
     pub(super) codec: Arc<BinaryEnvelopeCodec>,
     schemas: Vec<Arc<Schema>>,
     pending: bool,
+    bindings: SourceBindings,
 }
+
+#[derive(Default)]
+pub(super) struct SourceBindings {
+    pub(super) admission: Option<(Arc<SourceAdmission>, super::admission::AdmissionBinding)>,
+    pub(super) progress: Option<BoundProgress>,
+}
+
+pub(super) struct BoundProgress {
+    pub(super) owner: Arc<QuerySourceProgress>,
+    pub(super) binding: super::progress::ProgressBinding,
+    pub(super) extension: abi::recovery::PluginRecoveryV1,
+    pub(super) retention: Option<drasi_core::interface::StorageDurability>,
+}
+
 impl NativeComponentProxy {
     pub(super) unsafe fn new(
         raw: abi::ComponentHandle,
@@ -129,8 +147,10 @@ impl NativeComponentProxy {
         codec: Arc<BinaryEnvelopeCodec>,
         schemas: Vec<Arc<Schema>>,
         plugin: Arc<PluginOwner>,
+        bindings: SourceBindings,
     ) -> anyhow::Result<Self> {
         let inner = Arc::new(unsafe { RemoteComponent::new(raw, plugin)? });
+        let mut bindings = bindings;
         let actual = inner.inspect()?;
         anyhow::ensure!(
             actual.descriptor == metadata.descriptor(id.clone())?
@@ -138,6 +158,20 @@ impl NativeComponentProxy {
             "constructed native component changed its descriptor/capabilities"
         );
         metadata.configuration.validate(&inner.configuration()?)?;
+        if let Some(progress) = &mut bindings.progress {
+            let bytes = unsafe {
+                take_reply(progress.extension.inspect.expect("validated")(
+                    inner.raw.state,
+                ))?
+            };
+            let recovery: drasi_computation_plugin_sdk::progress::InstanceRecovery =
+                drasi_computation_plugin_sdk::progress::decode(&bytes)?;
+            anyhow::ensure!(
+                recovery.version == abi::recovery::VERSION,
+                "unsupported native source recovery declaration"
+            );
+            progress.retention = recovery.retention;
+        }
         Ok(Self {
             inner,
             descriptor: actual.descriptor,
@@ -145,6 +179,7 @@ impl NativeComponentProxy {
             codec,
             schemas,
             pending: false,
+            bindings,
         })
     }
     pub fn metadata(&self) -> &FactoryMetadata {
@@ -211,6 +246,8 @@ impl NativeComponentProxy {
 }
 impl Drop for NativeComponentProxy {
     fn drop(&mut self) {
+        self.bindings.admission.take();
+        self.bindings.progress.take();
         self.inner.revoke_control();
     }
 }
@@ -219,6 +256,19 @@ impl Drop for NativeComponentProxy {
 impl ComputationComponent for NativeComponentProxy {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+    fn recovery_contract(&self) -> ComponentRecovery {
+        match &self.bindings.progress {
+            Some(progress) => {
+                progress
+                    .retention
+                    .map_or_else(ComponentRecovery::default, |retention| {
+                        ComponentRecovery::admitted(retention)
+                            .replay_until(progress.owner.component_id().clone())
+                    })
+            }
+            None => ComponentRecovery::default(),
+        }
     }
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         let value = self.inner.configuration()?;
@@ -258,6 +308,18 @@ impl ComputationComponent for NativeComponentProxy {
 }
 #[async_trait]
 impl EnvelopeSource for NativeComponentProxy {
+    fn recovery_progress(&self) -> Option<Arc<QuerySourceProgress>> {
+        self.bindings
+            .progress
+            .as_ref()
+            .map(|progress| progress.owner.clone())
+    }
+    fn admission(&self) -> Option<Arc<SourceAdmission>> {
+        self.bindings
+            .admission
+            .as_ref()
+            .map(|(admission, _)| admission.clone())
+    }
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         let reply = self.inner.call(abi::operation::NEXT, &[]).await?;
         let output: Option<wire::Envelope<'_>> = wire::decode(&reply)?;

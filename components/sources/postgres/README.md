@@ -21,6 +21,152 @@ The PostgreSQL Replication Source is a Change Data Capture (CDC) plugin for Dras
 - Audit logging and change tracking
 - Data replication and ETL pipelines
 
+## Native complete-transaction source
+
+`native::PostgresTransactionSource` (also exported as `NativePostgresSource`)
+is a separate, opt-in Rust ComputationGraph source. It does **not** replace the
+legacy `PostgresReplicationSource` per-change contract or its plugin ABI. Use a native graph/pipeline,
+not the ordinary legacy source builder.
+
+It emits one `drasi.source-transaction` envelope for each committed PostgreSQL
+transaction. Repeated updates, key changes and deletions remain in that group.
+A query configured with `QueryExecutionSettings::source_transactions` applies
+the group atomically and publishes only its final result changes.
+
+Bind the **same** `Arc<QuerySourceProgress>` to the source constructor and the
+query's `with_source_progress` method. The query must have real atomic,
+persistent storage. Every source branch must lead to that one immediate owner;
+another query needs its own source/slot. Explicitly bind the source's `out`
+stream and connect it to the query's complete-transaction `in` port.
+WAL feedback follows this owner's committed input, never queue acceptance.
+This protects query state/output recovery, not atomic external reaction effects.
+
+The source and coordinated constructors also accept a `SourceProgressReader`.
+Local readers retain the actual progress owner; an external read-only provider
+does not supply local ownership proof. Source/bootstrap pairing requires the
+same reader handle and read failures propagate before WAL feedback. This is
+preparation for host-provided progress, not a completed native plugin ABI service.
+
+`PostgresTransactionConfig` has these fields (required unless marked optional):
+
+| Field | Meaning |
+|-------|---------|
+| `connection` | Existing `PostgresSourceConfig`, including credentials, publication, tables, keys and SSL mode. |
+| `tls_ca_pem` | Optional additional trusted CA certificate in PEM form, bounded by `max_protocol_bytes` and 64 KiB. Omitted configurations keep platform trust unchanged. This does not disable hostname verification or enable TLS when the SSL mode is `Disable`. |
+| `start_lsn` | Explicit initial position in replay-only mode, used only before the first committed checkpoint. Coordinated snapshot mode derives its own boundary. |
+| `transactions` | Positive `max_changes`, `max_bytes` and `max_duration_ms`. Bytes bound the complete binary transaction payload; time runs from received Begin through Commit. A key change can produce two graph changes. |
+| `max_protocol_bytes` | Additional limits for an individual wire frame, one catalog result set and accounted cached relation metadata; not a total process-memory limit. |
+| `io_timeout_ms` | Database startup, feedback writes, snapshot I/O and incomplete wire-frame timeout. Waiting for the query's initial snapshot is not database I/O. An otherwise idle connection is allowed. |
+| `feedback_interval_ms` | Heartbeat interval; configure below PostgreSQL's sender timeout. |
+
+For replay-only mode, provision a persistent, exclusively owned `pgoutput` slot before starting.
+Native operation requires PostgreSQL 13 or newer, `max_slot_wal_keep_size = -1`,
+and, where available, `idle_replication_slot_timeout = 0`. Startup rejects
+temporary/missing slots, unavailable cursors and unsafe automatic slot-retention
+settings. Operators must preserve the slot and retained WAL across outages and
+monitor disk use; this does not promise recovery after administrative deletion,
+storage loss or power loss.
+
+SSL `Prefer` negotiates TLS when offered; `Require` rejects plaintext.
+TLS validates the hostname and certificate using the platform trust store plus
+the optional `tls_ca_pem` certificate. The same settings protect coordinated
+snapshot and streaming connections. An advertised TLS handshake or certificate
+failure is an error, including in `Prefer` mode; it never retries plaintext.
+There is no insecure certificate-verification bypass or change to system trust.
+
+One owned worker keeps sending confirmed-position heartbeats while its
+capacity-one output queue is full. At most one additional complete group waits
+for queue capacity. Stop cancels network work and joins that owner before
+restart; cancelled or timed-out cleanup cannot authorize a replacement worker.
+Protocol/decoding errors, unsupported operations, deadlines and size/count limits
+fail explicitly without acknowledging the rejected group. Stop/reconstruct with
+higher limits to replay the whole group; no oversized disk staging or partial
+publication occurs.
+
+Commit LSNs supply stable logical identity, independently of increasing transport
+sequences. Checkpoints also bind the PostgreSQL system/database, slot, publication,
+selected key definitions, publication flags/filters/columns, column types and
+replica identity, source ID and stream. A different binding cannot reuse old
+progress. Numeric limit changes do not change that binding.
+
+Native row IDs use the shared `drasi-postgres-common::transaction_element_id`
+encoding: `pg:v1:` followed by JSON containing schema, table and sorted
+column-name/key-value pairs. This avoids ambiguous underscore-joined composite
+keys and random replay identities. It intentionally differs from legacy row IDs.
+SQL NULL stays NULL; unchanged TOAST properties are preserved. A key-changing
+update with omitted TOAST values requires a complete old image from
+`REPLICA IDENTITY FULL`, otherwise it fails rather than constructing a partial row.
+
+`PostgresTransactionSourceFactory` exposes implementation
+`drasi/postgres-transactions`, version `1`. Its fields are `stream` and `settings`;
+because settings include credentials, supply them through a secret
+`ConfigurationResolverResource` reference, not a literal. Its required
+`source_progress` dependency is the actual `QuerySourceProgressResource`.
+Use `PostgresTransactionSource::describe(id)` for its port declaration.
+
+### Coordinated initial snapshot
+
+`PostgresTransactionSource::coordinated(id, stream, settings, progress)` returns
+the native source and an `Arc<PostgresSnapshot>`. Attach that same provider to
+the owner query with `with_bootstrap`. This explicit mode requires PostgreSQL
+15+ and uses `connection.slot_name` as a prefix of at most 30 characters, not as
+an externally managed slot name. A dedicated UUID-suffixed persistent slot is
+created for this query/source pair; existing slots are never adopted.
+
+The query first persists bounded initialization ownership metadata in its own
+atomic storage. PostgreSQL then creates a logical slot with an exported snapshot;
+a second, directly owned connection imports that snapshot. A server-side cursor
+reads one bounded row at a time while the slot retains concurrent WAL. Snapshot
+and live rows use the same key encoding and value conversion. Snapshot rows build
+initial state, not live transaction notifications; they are not represented as
+one fictitious upstream transaction.
+
+Only successful stream exhaustion commits the snapshot's source boundary,
+completed marker and ownership state together. The live source then starts at
+that boundary and acknowledges only committed query progress. No extra worker or
+local WAL staging is needed during the snapshot. Dropping the stream closes its
+connection and cancels the read-only database transaction.
+
+Interrupted initial loads remain incomplete under strict recovery. With an
+explicitly selected `QueryRecoveryPolicy::AutoReset`, the query discards its
+unfinished initial state and the provider replaces only its recorded, unfinished
+slot. Completed slots survive stop/restart. Lost completed history, changed
+bindings or missing ownership metadata fail rather than silently reinitializing.
+Completed-slot retirement is an operator action: retire it before deprovisioning
+the query and deleting its ownership metadata. Do not share that state or managed
+slot between concurrently running query owners.
+
+The source factory also accepts `coordinated_snapshot: true` with a `snapshot`
+dependency: a `ResourceRole::Bootstrap` handle containing the paired
+`PostgresSnapshot`. The query uses that same object as its bootstrap provider
+(or inside `QueryBootstrapResource`). Construction checks the actual progress
+resource, source, stream and settings rather than trusting resource names.
+
+The initial implementation accepts ordinary non-partitioned tables and complete
+insert/update/delete publications. It rejects row/column filters, inheritance and
+partition-root remapping for coordinated snapshots. Keep schema/publication
+definitions stable while running. The legacy bootstrapper is not upgraded to this
+coordinated contract.
+
+**Remaining limitations:** no native cdylib/Server registration, TRUNCATE, streaming/two-phase transaction protocol,
+automatic schema/key/publication migration or cross-database transaction.
+Configured keys must be complete and carried by replica identity. Runtime policy
+owns restart after a failure; the source does not silently reconnect at a newer
+cursor. These limitations are not upgrades to the legacy source's guarantees.
+Keep table definitions and publication semantics unchanged during operation and
+recovery; automatic DDL migration and failover/timeline transitions are not
+qualified by this source.
+
+`cargo test -p drasi-source-postgres --lib --test native_transactions` includes
+real PostgreSQL/RocksDB cases, direct/factory graph pipes in both modes,
+backpressure beyond the server timeout, cancelled stop/restart, rejected-group
+recovery, concurrent snapshot/WAL handover and four required abrupt child-process
+exits. Temporary, short-lived certificates qualify successful verified TLS for
+streaming, coordinated initial loading and persistent restart. Tests inspect
+server-side encryption and session retirement, and reject unknown CAs, wrong
+hostnames, expired certificates and invalid certificate settings without advancing
+query progress. The existing TLS-refusal case also remains required.
+
 ## Architecture
 
 ### Components

@@ -62,7 +62,16 @@ async fn test_loki_reaction_insert_update_delete() {
         .expect("DrasiLib should build");
 
     drasi.start().await.expect("DrasiLib should start");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        drasi
+            .computation_component("test-reaction")
+            .expect("reaction handle")
+            .wait_started(),
+    )
+    .await
+    .expect("reaction readiness deadline")
+    .expect("reaction ready");
 
     handle
         .send_node_insert(
@@ -120,6 +129,6 @@ async fn test_loki_reaction_insert_update_delete() {
     .await
     .expect("DELETE should be visible in Loki");
 
-    drasi.stop().await.expect("DrasiLib should stop");
-    loki.cleanup().await;
+    drasi.shutdown().await.expect("DrasiLib should shut down");
+    loki.cleanup().await.expect("Loki container should stop");
 }

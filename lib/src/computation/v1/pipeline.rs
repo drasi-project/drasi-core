@@ -34,6 +34,7 @@ struct FactoryProvider {
     backend: StorageBackendRef,
     volatile: bool,
     atomic_output: bool,
+    durability: drasi_core::interface::StorageDurability,
 }
 #[async_trait]
 impl IndexBackendPlugin for FactoryProvider {
@@ -55,6 +56,9 @@ impl IndexBackendPlugin for FactoryProvider {
     }
     fn is_volatile(&self) -> bool {
         self.volatile
+    }
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.durability
     }
     fn supports_atomic_query_output(&self) -> bool {
         self.atomic_output
@@ -661,7 +665,7 @@ impl ComputationPipelineBuilder {
                         ResourceOwnership::Borrowed,
                     )
                 } else {
-                    let (backend, volatile) = self
+                    let (backend, volatile, durability) = self
                         .indexes
                         .computation_backend(config.storage_backend.as_ref())
                         .map_err(|error| invalid(error.to_string()))?;
@@ -692,6 +696,7 @@ impl ComputationPipelineBuilder {
                                 backend,
                                 volatile,
                                 atomic_output,
+                                durability,
                             }),
                             self.services.scope.clone(),
                         )?;

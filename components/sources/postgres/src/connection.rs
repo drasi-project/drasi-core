@@ -16,7 +16,9 @@ use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::num::NonZeroUsize;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::protocol::{
@@ -26,10 +28,14 @@ use super::protocol::{
 use super::scram::ScramClient;
 use super::types::{ReplicationSlotInfo, StandbyStatusUpdate};
 
-pub struct ReplicationConnection {
-    stream: TcpStream,
+pub struct ReplicationConnection<S = TcpStream> {
+    stream: S,
     read_buffer: BytesMut,
     write_buffer: BytesMut,
+    write_pending: bool,
+    max_message_bytes: Option<NonZeroUsize>,
+    partial_read_timeout: Option<Duration>,
+    read_started: Option<tokio::time::Instant>,
     parameters: HashMap<String, String>,
     process_id: Option<i32>,
     secret_key: Option<i32>,
@@ -50,10 +56,26 @@ impl ReplicationConnection {
         let stream = TcpStream::connect((host, port)).await?;
         stream.set_nodelay(true)?;
 
+        Self::from_stream(stream, database, user, password, None).await
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> ReplicationConnection<S> {
+    pub(crate) async fn from_stream(
+        stream: S,
+        database: &str,
+        user: &str,
+        password: &str,
+        max_message_bytes: Option<NonZeroUsize>,
+    ) -> Result<Self> {
         let mut conn = Self {
             stream,
             read_buffer: BytesMut::with_capacity(8192),
             write_buffer: BytesMut::with_capacity(8192),
+            write_pending: false,
+            max_message_bytes,
+            partial_read_timeout: None,
+            read_started: None,
             parameters: HashMap::new(),
             process_id: None,
             secret_key: None,
@@ -490,13 +512,29 @@ impl ReplicationConnection {
     }
 
     async fn send_message(&mut self, msg: FrontendMessage) -> Result<()> {
+        self.finish_pending_write().await?;
         self.write_buffer.clear();
         msg.encode(&mut self.write_buffer)?;
+        self.write_pending = true;
+        self.finish_pending_write().await?;
 
-        self.stream.write_all(&self.write_buffer).await?;
-        self.stream.flush().await?;
+        // Authentication frames can contain passwords or SCRAM proofs.
+        trace!("Sent PostgreSQL protocol message");
+        Ok(())
+    }
 
-        trace!("Sent message: {msg:?}");
+    async fn finish_pending_write(&mut self) -> Result<()> {
+        if self.write_pending {
+            while !self.write_buffer.is_empty() {
+                let written = self.stream.write(&self.write_buffer).await?;
+                if written == 0 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+                }
+                self.write_buffer.advance(written);
+            }
+            self.stream.flush().await?;
+            self.write_pending = false;
+        }
         Ok(())
     }
 
@@ -514,6 +552,7 @@ impl ReplicationConnection {
     }
 
     async fn read_message(&mut self) -> Result<BackendMessage> {
+        self.finish_pending_write().await?;
         loop {
             // Try to parse a message from the buffer
             if let Some(msg) = self.try_parse_message()? {
@@ -523,12 +562,28 @@ impl ReplicationConnection {
 
             // Read more data
             let mut temp_buf = vec![0u8; 4096];
-            let n = self.stream.read(&mut temp_buf).await?;
+            let n = match (self.read_started, self.partial_read_timeout) {
+                (Some(started), Some(timeout)) => {
+                    let deadline = started
+                        .checked_add(timeout)
+                        .ok_or_else(|| anyhow!("PostgreSQL frame deadline is not representable"))?;
+                    tokio::time::timeout_at(deadline, self.stream.read(&mut temp_buf))
+                        .await
+                        .map_err(|error| {
+                            anyhow::Error::new(error)
+                                .context("incomplete PostgreSQL wire frame timed out")
+                        })??
+                }
+                _ => self.stream.read(&mut temp_buf).await?,
+            };
             if n == 0 {
                 return Err(anyhow!("Connection closed by server"));
             }
 
             self.read_buffer.extend_from_slice(&temp_buf[..n]);
+            if self.partial_read_timeout.is_some() && self.read_started.is_none() {
+                self.read_started = Some(tokio::time::Instant::now());
+            }
         }
     }
 
@@ -549,7 +604,15 @@ impl ReplicationConnection {
             return Err(anyhow!("Invalid message length: {length}"));
         }
 
-        let total_length = 1 + length; // Type byte + length (includes self)
+        let total_length = length
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("PostgreSQL message length overflow"))?;
+        if let Some(limit) = self.max_message_bytes {
+            anyhow::ensure!(
+                total_length <= limit.get(),
+                "PostgreSQL wire message exceeds configured {limit} byte limit"
+            );
+        }
 
         if self.read_buffer.len() < total_length {
             return Ok(None); // Need more data
@@ -558,21 +621,78 @@ impl ReplicationConnection {
         // Extract message
         let body = self.read_buffer[5..total_length].to_vec();
         self.read_buffer.advance(total_length);
+        if self.read_buffer.is_empty() {
+            self.read_started = None;
+        }
 
         // Parse message
         let msg = parse_backend_message(msg_type, &body)?;
         Ok(Some(msg))
     }
 
+    pub(crate) fn set_partial_read_timeout(&mut self, timeout: Duration) {
+        self.partial_read_timeout = Some(timeout);
+        if !self.read_buffer.is_empty() && self.read_started.is_none() {
+            self.read_started = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Metadata queries on the same owned connection, before replication starts.
+    pub(crate) async fn query_rows(
+        &mut self,
+        query: String,
+        max_bytes: NonZeroUsize,
+    ) -> Result<Vec<Vec<Option<Bytes>>>> {
+        anyhow::ensure!(!self.in_copy_mode, "metadata query during replication");
+        self.send_message(FrontendMessage::Query(query)).await?;
+        let mut rows = Vec::new();
+        let mut bytes = 0usize;
+        loop {
+            match self.read_message().await? {
+                BackendMessage::DataRow(row) => {
+                    let row_bytes = std::mem::size_of::<Vec<Option<Bytes>>>()
+                        + row.len() * std::mem::size_of::<Option<Bytes>>()
+                        + row.iter().flatten().map(Vec::len).sum::<usize>();
+                    bytes = bytes
+                        .checked_add(row_bytes)
+                        .ok_or_else(|| anyhow!("PostgreSQL metadata size overflow"))?;
+                    anyhow::ensure!(
+                        bytes <= max_bytes.get(),
+                        "PostgreSQL metadata exceeds configured byte limit"
+                    );
+                    rows.push(
+                        row.into_iter()
+                            .map(|value| value.map(Bytes::from))
+                            .collect(),
+                    );
+                }
+                BackendMessage::RowDescription(_) | BackendMessage::CommandComplete(_) => {}
+                BackendMessage::NoticeResponse(notice) => info!("Notice: {}", notice.message),
+                BackendMessage::ReadyForQuery(status) => {
+                    self.transaction_status = status;
+                    return Ok(rows);
+                }
+                BackendMessage::ErrorResponse(error) => {
+                    anyhow::bail!("PostgreSQL metadata query failed: {}", error.message);
+                }
+                message => anyhow::bail!("unexpected PostgreSQL metadata response: {message:?}"),
+            }
+        }
+    }
+
     pub async fn close(mut self) -> Result<()> {
         if self.in_copy_mode {
             let _ = self.send_message(FrontendMessage::CopyDone).await;
         }
+
         let _ = self.send_message(FrontendMessage::Terminate).await;
         let _ = self.stream.shutdown().await;
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod io_tests;
 
 /// Formats a WAL LSN `u64` as the PostgreSQL `"high/low"` hex notation (e.g. `"0/1A3F00"`).
 pub(crate) fn format_lsn(lsn: u64) -> String {
@@ -587,8 +707,8 @@ pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
         return Err(anyhow!("Invalid LSN format: {lsn_str}"));
     }
 
-    let high = u64::from_str_radix(parts[0], 16)?;
-    let low = u64::from_str_radix(parts[1], 16)?;
+    let high = u64::from(u32::from_str_radix(parts[0], 16)?);
+    let low = u64::from(u32::from_str_radix(parts[1], 16)?);
 
     Ok((high << 32) | low)
 }

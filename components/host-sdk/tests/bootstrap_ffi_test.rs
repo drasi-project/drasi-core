@@ -361,7 +361,7 @@ async fn test_ffi_snapshot_fetcher_vtable() {
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "vtable-test-instance".to_string(),
         reaction_id: "vtable-test-1".to_string(),
-        update_tx,
+        update_tx: update_tx.into(),
         state_store: None,
         identity_provider: None,
         snapshot_fetcher: Some(mock_fetcher.clone()),

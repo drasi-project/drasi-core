@@ -44,6 +44,26 @@ impl RetainedTransaction {
         unsafe { raw.retain.expect("validated")(raw.context) };
         Ok(Self(raw))
     }
+    pub(crate) async fn call<I: Serialize, O: DeserializeOwned>(
+        &self,
+        code: u32,
+        input: &I,
+    ) -> anyhow::Result<O> {
+        let bytes = wire::encode(input)?;
+        let operation = {
+            let mut operation = abi::OperationHandle::null();
+            unsafe {
+                take_status(self.0.request.expect("validated")(
+                    self.0.context,
+                    code,
+                    abi::BorrowedBytes::new(&bytes),
+                    &mut operation,
+                ))?;
+                OperationFuture::new(operation)?
+            }
+        };
+        wire::decode(&operation.await?)
+    }
 }
 impl Drop for RetainedTransaction {
     fn drop(&mut self) {
@@ -79,22 +99,7 @@ impl<'a> NativeTransactionContext<'a> {
         code: u32,
         input: &I,
     ) -> anyhow::Result<O> {
-        let bytes = wire::encode(input)?;
-        let operation = {
-            let mut operation = abi::OperationHandle::null();
-            let raw = &self.transaction.0;
-            unsafe {
-                take_status(raw.request.expect("validated")(
-                    raw.context,
-                    code,
-                    abi::BorrowedBytes::new(&bytes),
-                    &mut operation,
-                ))?;
-                OperationFuture::new(operation)?
-            }
-        };
-        let bytes = operation.await?;
-        wire::decode(&bytes)
+        self.transaction.call(code, input).await
     }
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<ElementValue>> {
         self.call(abi::transaction::GET, &key).await

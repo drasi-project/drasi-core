@@ -35,6 +35,24 @@ use std::{
 const TEXT: &str = "MATCH (p:Person) RETURN p.name AS name";
 const IDENTITY_ANNOTATION: &str = "drasi.query-recovery-identity.v1";
 
+#[test]
+fn memory_backed_progress_does_not_become_durable_through_a_state_store_wrapper() {
+    use drasi_core::interface::{FailureMode, StorageDurability};
+
+    let provider = Arc::new(MemoryStateStoreProvider::new());
+    let wrapped =
+        StateStoreConsumerProgress::new("graph", "consumer", provider.clone()).expect("progress");
+    let memory = MemoryConsumerProgress::default();
+    assert_eq!(provider.durability(), StorageDurability::VOLATILE);
+    for progress in [&wrapped as &dyn ConsumerProgressStore, &memory] {
+        assert_eq!(progress.durability(), StorageDurability::VOLATILE);
+        assert!(progress
+            .durability()
+            .require(FailureMode::ProcessRestart)
+            .is_err());
+    }
+}
+
 fn id(value: &str) -> ComponentId {
     ComponentId::try_new(value).unwrap()
 }

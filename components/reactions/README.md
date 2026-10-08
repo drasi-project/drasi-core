@@ -5,6 +5,11 @@
 This document is a guide for software developers that explains how to create and
 maintain custom **Reaction plugins** in Rust for `drasi-lib`.
 
+The `Reaction`/`ReactionBase` requirements below apply to legacy plugins.
+Native `EnvelopeSink` components follow the ComputationGraph contract instead;
+the [native application reaction](application/README.md#native-application-delivery)
+is an in-process example without a legacy adapter or background processor.
+
 Reactions are the component of Drasi that act when Continuous Query results change.
 
 It is through Reactions that Drasi achieves the flexibility to integrate with any
@@ -115,6 +120,61 @@ appending to a file, or updating a UI.
    (`cdylib`), every trait method is dispatched across a stable C ABI
    vtable. Panics at the boundary are caught and turned into
    transient errors — but you SHOULD NOT rely on this.
+
+### Bundled completion boundaries
+
+All 19 bundled legacy reaction crates reach ComputationGraph through
+`ReactionPluginAdapter`, whose successful call means **Accepted**, not handled
+or durably completed. Its factory rejects stronger declarations. Internal
+checkpoints, broker replies, or a persistent destination do not change that
+boundary. None currently qualifies for graph-level handled-input or once-only
+external-effect guarantees through the legacy adapter.
+
+The inventory below records existing behavior, not a change to it. A configured
+skip or fallback MUST NOT silently become a stronger guarantee.
+
+| Legacy reaction | Actual processing and failure boundary |
+|---|---|
+| [application](application/src/application.rs) | Forwards into the application's channel, not completion of the application's work. A closed receiver logs an error and ends forwarding. |
+| [aws-sqs](aws-sqs/src/reaction.rs) | Sends individual messages; render/send failures are logged and processing continues. FIFO queue settings alone do not establish a graph-wide deduplication contract. |
+| [azure-storage](azure-storage/src/reaction.rs) | Prepares and writes individual storage operations; payload/write failures are logged and later operations continue. |
+| [dashboard](dashboard/src/dashboard.rs) | Updates its snapshot view and broadcasts WebSocket notifications. No connected listener or browser acknowledgement is required. |
+| [eventgrid](eventgrid/src/reaction.rs) | Template errors can fall back to an unpacked notification; exhausted publish failures are logged and the loop continues. |
+| [file](file/src/file.rs) | Formats and writes output; per-result render/write failures are logged rather than returned to the graph. Trailing-line repair is not atomic effect/checkpoint recovery. |
+| [grpc](grpc/src/runner_fixed.rs) | Fixed/adaptive runners checkpoint fully acknowledged result boundaries after remote success. Strict sustained-delivery/checkpoint errors stop; `AutoSkipGap` permits skipping. Remote acknowledgement is not atomic external effects, and partial sends may repeat. |
+| [http](http/src/standard_loop.rs) | Standard/adaptive runners checkpoint after HTTP outcomes. Strict sustained failures stop, but permanent poison outcomes are intentionally dropped and checkpointed even under Strict; `AutoSkipGap` additionally allows sustained-failure skipping. This is not the separate completion protocol. |
+| [log](log/src/log.rs) | Prints output; render errors fall back to raw values. Logging has no atomic destination receipt or durable completion acknowledgement. |
+| [loki](loki/src/loki.rs) | Some label errors fall back, invalid render/key operations are skipped, and failed pushes are logged before continuing. |
+| [mcp](mcp/src/mcp.rs) | Sends notifications to session queues, not acknowledged client handling. Invalid templates/JSON are skipped; absent subscribers receive nothing; full or closed session queues cause disconnection. |
+| [platform](platform/src/platform.rs) | Retries publication, then logs failures. Batch buffers are cleared even after exhausted publish failure. |
+| [profiler](profiler/src/profiler.rs) | Accumulates in-memory timing samples and periodically logs statistics. It is deliberately non-durable and has no external completion contract. |
+| [rabbitmq](rabbitmq/src/rabbitmq.rs) | Waits on its publish futures and checkpoints after a successful result. A failed result does not stop later results, whose checkpoint can pass it; checkpoint-load errors default to empty and checkpoint-write errors are logged. Not a gap-free handled contract. |
+| [snapshot-test](snapshot-test/src/lib.rs) | Unpublished FFI/bootstrap harness; ordinary result enqueue is a no-op. Not a production delivery adapter. |
+| [sse](sse/src/sse.rs) | Broadcasts to current listeners without client acknowledgements; no listeners is allowed and template errors fall back. Snapshot reads are separate from notification delivery. |
+| [storedproc-mssql](storedproc-mssql/src/reaction.rs) | Renders and executes individual commands; render errors skip and command errors log without stopping later work. |
+| [storedproc-mysql](storedproc-mysql/src/reaction.rs) | Renders and executes individual commands; render errors skip and command errors log without stopping later work. |
+| [storedproc-postgres](storedproc-postgres/src/reaction.rs) | Renders and executes individual commands; render/command failures log and later operations continue. The separate transactional delivery API below does not upgrade this loop. |
+
+Native sink calls have a different, synchronous boundary, but their `Handled`
+declaration still does not imply durable or once-only external effects:
+
+| Native sink | Declared boundary and remaining limitation |
+|---|---|
+| [Application](application/README.md#native-application-delivery) | Bounded channel is `Accepted`; awaited callback is `Handled` only after its future succeeds. Interrupted callback work stays owned through cleanup. Neither has automatic durable recovery, atomic external effects or serializable application bindings. |
+| [Standard capture](../computation-plugins/standard/src/capture.rs) | `Handled` after file write and flush; errors propagate. No `sync_all`, atomic receipt, or deduplication; append replay may duplicate and non-append startup truncates. |
+| [Network HTTP](../computation-plugins/network/src/http.rs) | `Handled` after notification attempts. Strict propagates exhausted failure; explicit Skip logs and succeeds. Any successful HTTP status, including 202, is accepted; remote business completion is not established. |
+| [Network gRPC](../computation-plugins/network/src/grpc.rs) | `Handled` after the receiver reports success. Strict propagates exhausted failure; explicit Skip logs and succeeds. The remote effect/receipt transaction is not established. |
+
+For new stronger integrations, use the opt-in
+[shared operation-completion service](../../lib/docs/computation-graph-qos.md#opt-in-operation-completion).
+Its transactional mode commits consumer business state with each completed
+operation. The separate
+[PostgreSQL delivery handler](storedproc-postgres/README.md#opt-in-computationgraph-transactional-delivery)
+atomically commits database effects and a bounded destination cursor. The separate
+[HTTP completion service](../computation-plugins/network/README.md#opt-in-http-completion-service)
+confirms the actual whole-batch identity instead of queued acceptance. These Rust
+services have recovery evidence; factory/ABI integration remains separate work.
+Wrapping a legacy enqueue method in `DeliveryRunner` MUST NOT claim completion.
 
 ### A reaction in context
 
@@ -451,7 +511,7 @@ impl Reaction for MyReaction {
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         // Run a dequeue → handle loop until shutdown.
-        let task = tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
             info!("[{id}] dispatching to endpoint='{endpoint}'");
             loop {
                 let arc_result = tokio::select! {
@@ -481,9 +541,7 @@ impl Reaction for MyReaction {
                     }
                 }
             }
-        });
-
-        self.base.set_processing_task(task).await;
+        }).await?;
 
         self.base
             .set_status(ComponentStatus::Running, Some("started".into()))
@@ -598,8 +656,8 @@ Every reaction follows the same state machine:
 > which is idempotent.
 
 > 🔴 **MUST** — `start()` MUST return promptly. If you need long-running
-> work, spawn a tokio task and store it via
-> `ReactionBase::set_processing_task()`. A blocking `start()` will hold
+> work, register the future with
+> `context::workers::spawn_owned_worker`. A blocking `start()` will hold
 > up the entire `drasi-lib` instance startup.
 
 ### 4.2 Runtime-Owned Query Subscriptions
@@ -659,7 +717,7 @@ from the runtime:
 |----------------------|-------------------------------------------------|----------------------|
 | `instance_id`        | `String`                                        | Yes                  |
 | `reaction_id`        | `String`                                        | Yes                  |
-| `update_tx`          | mpsc sender for status updates                  | Yes                  |
+| `update_tx`          | Lifecycle sender for graph-owned observation   | Yes                  |
 | `state_store`        | `Option<Arc<dyn StateStoreProvider>>`           | If configured        |
 | `identity_provider`  | `Option<Arc<dyn IdentityProvider>>`             | If configured        |
 | `snapshot_fetcher`   | `Option<Arc<dyn SnapshotFetcher>>`              | If query is loaded   |
@@ -729,7 +787,7 @@ when you delegate; doing so is SHOULD throughout.
 | `query_ids` | `Vec<String>` | The `drasi-lib` instance subscribes to these queries on the reaction's behalf after `start()` returns. | Returns `self.base.queries.clone()`. |
 | `initialize` | `()` | Single dependency-injection call: wires the status handle to the runtime's graph channel; stashes state-store and identity-provider references. | `self.base.initialize(context).await` does the full wiring. |
 | `start` | `Result<()>` | Begin processing. Returning `Err` puts the reaction into `Error`. | Provides `create_shutdown_channel`, `priority_queue`, `set_processing_task`, `set_status`. |
-| `stop` | `Result<()>` | Graceful teardown. Must be idempotent. | `self.base.stop_common().await` sends the shutdown signal, waits up to 2 s, aborts otherwise, drains the queue, and sets status to `Stopped`. |
+| `stop` | `Result<()>` | Graceful teardown. Must be idempotent. | `self.base.stop_common().await` sends shutdown, joins forwarders and processing, then drains the queue and sets `Stopped`. Timeout requests abort and returns an error; the handle remains owned for a later join. |
 | `status` | `ComponentStatus` | Anytime status read, including before `start`. | Returns `self.base.get_status().await`. |
 | `enqueue_query_result` | `Result<()>` | The runtime's push entry-point. The trait default is a **no-op that silently drops results** — you MUST override it. | `self.base.enqueue_query_result(result).await` pushes onto the priority queue with the appropriate backpressure strategy. |
 
@@ -783,15 +841,15 @@ perspective.
 #### `start()` — **MUST**
 
 Start your processing loop. **Must return promptly.** Long-running
-work belongs in a spawned task whose handle is stored via
-`ReactionBase::set_processing_task()`. The standard recipe:
+work belongs in a worker registered with
+`context::workers::spawn_owned_worker`. The standard recipe:
 
 1. Set status to `Starting`.
 2. Create a shutdown receiver with `create_shutdown_channel().await`.
 3. Snapshot whatever the spawned task needs (queue handle, config, id).
-4. `tokio::spawn` the processing loop.
-5. Call `set_processing_task(handle).await`.
-6. Set status to `Running`.
+4. Pass the loop future and `&self.base.processing_task` to
+   `spawn_owned_worker(...).await?`, which refuses an occupied task slot.
+5. Set status to `Running`.
 
 If start-up genuinely fails (cannot connect, invalid config detected
 late), set status to `Error` and return an `Err`. The `drasi-lib` instance will surface
@@ -800,9 +858,29 @@ this to the operator.
 #### `stop()` — **MUST**
 
 Stop processing. SHOULD delegate to `self.base.stop_common().await`,
-which sends the shutdown signal, waits up to 2 seconds for graceful
-exit, aborts the task otherwise, drains the queue, and sets status to
-`Stopped`.
+which sends shutdown, aborts and joins forwarders, and waits up to 2 seconds for
+the processing task. Only completed cleanup drains the queue and sets `Stopped`.
+A timeout requests abort and returns a typed error; cancellation and timeout
+retain ownership for a later join. Never take or drain task handles before
+awaiting them, or replace a worker whose cleanup is incomplete.
+
+Use `stop_common_gracefully()` when the processor must finish an in-flight
+effect, such as submitted filesystem or database work. It uses the same
+forwarder/queue cleanup ordering but never aborts the processor on its two-second
+timeout. File, Log, Profiler, HTTP and gRPC use this path. Serialize lifecycle calls and keep
+a cleanup-required guard until all teardown succeeds, including after the worker
+handle is gone. A cancelled start also needs cleanup before replacement.
+This does not persist queued events; completed cleanup still drains them.
+HTTP/gRPC adaptive delivery scopes forwarding and batching with `tokio::join!`
+inside the processor. Early forwarding exit still drains batching, and a batcher
+panic reaches the processor's typed join result instead of disappearing into an
+unobserved child handle.
+
+Custom servers must also own and drain their active connections. Use
+`join_owned_worker_gracefully` when aborting the server would destroy its
+child-drain boundary; its timeout retains the task without requesting abort.
+Join custom workers/connections before calling `stop_common`, so `Stopped`
+never precedes their exit. Prefer scoped send/receive futures to detached tasks.
 
 > 🔴 **MUST** — Be idempotent. Calling `stop()` twice or before
 > `start()` MUST NOT panic.
@@ -859,10 +937,10 @@ steady state          drasi-lib pushes results via enqueue_query_result(qr)
 shutdown              drasi-lib calls stop()
                       └── ReactionBase::stop_common()
                           ├── sends the shutdown signal
-                          ├── waits up to 2 s for graceful exit
-                          ├── aborts the processing task on timeout
-                          └── drains the priority queue
-                      └── status: Stopped
+                          ├── aborts and joins subscription forwarders
+                          ├── waits up to 2 s for processing to exit
+                          ├── timeout: requests abort, returns error, retains handle
+                          └── success: drains queue, sets status Stopped
                           ─────────────────────────────────────
 optional teardown     drasi-lib calls deprovision()
                       (only if removed with cleanup=true)
@@ -1052,12 +1130,13 @@ Methods you call from your `Reaction` implementation, alphabetical:
 | `read_checkpoint(query_id)` | Read one checkpoint (state store required). |
 | `run_standard_loop(rx, ckpts, handler)` | Optional convenience: dedup-aware dequeue → handler → checkpoint loop. |
 | `set_identity_provider(provider)` | Stash a programmatically-supplied identity provider; takes precedence over the context one. |
-| `set_processing_task(handle)` | Register your `tokio::spawn` handle so `stop_common` can join or abort it. |
+| `set_processing_task(handle)` | Legacy handle setter. Prefer `context::workers::spawn_owned_worker(&base.processing_task, future)` to acquire ownership before spawning and reject unjoined predecessors. |
 | `set_raw_config(json)` | Stash the raw config JSON (used by descriptor `create_reaction`). |
 | `set_status(status, msg)` | Set local status AND notify the component graph. |
 | `state_store()` | Lazy accessor for the `StateStoreProvider` injected via context. |
 | `status_handle()` | Clone a `ComponentStatusHandle` into spawned tasks. |
-| `stop_common()` | Send shutdown, await for up to 2 s, abort otherwise, drain the queue, set status to `Stopped`. |
+| `stop_common()` | Send shutdown and join owned workers. Timeout requests abort and returns an error with the handle retained. Only success drains the queue and sets `Stopped`. |
+| `stop_common_gracefully()` | The same cleanup ordering without aborting the processor. Timeout/cancellation leaves it owned and `Stopping`; later cleanup is required before restart. |
 | `write_checkpoint(query_id, ckpt)` | Persist a checkpoint (state store required). |
 
 Public fields you may read or pass to spawned tasks: `id`, `queries`,
@@ -2530,9 +2609,10 @@ Walk this list before publishing your reaction.
 
 - [ ] `id`, `type_name`, `properties`, `query_ids` are implemented.
 - [ ] `initialize` delegates to `ReactionBase::initialize`.
-- [ ] `start` returns promptly and stores its task handle via
-      `set_processing_task`.
-- [ ] `stop` delegates to `ReactionBase::stop_common`.
+- [ ] `start` returns promptly and registers its future with
+      `context::workers::spawn_owned_worker`.
+- [ ] `stop` delegates to `ReactionBase::stop_common` or
+      `stop_common_gracefully` when in-flight effects must finish.
 - [ ] `status` delegates to `ReactionBase::get_status`.
 - [ ] `enqueue_query_result` accepts events for processing. Most
       reactions do this by delegating to

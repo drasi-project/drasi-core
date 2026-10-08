@@ -223,23 +223,15 @@ impl ScopedGraph {
             return Ok(());
         }
         let control = self.published_control().await?;
-        let revision = control.desired_snapshot().revision;
-        let request = control.clone();
-        let quiesced = self
-            .drive(async move {
-                Ok(request
-                    .quiesce_components(revision, GraphSelection::All)
-                    .await?)
-            })
-            .await;
+        let members = control
+            .observed()
+            .components
+            .iter()
+            .map(|(id, node)| (id.clone(), node.generation))
+            .collect();
         let report = self
-            .drive(async move {
-                Ok(control
-                    .stop_components(revision, GraphSelection::All)
-                    .await?)
-            })
+            .drive(async move { Ok(control.stop_members(members).await?) })
             .await?;
-        quiesced?;
         if report.summary != super::v1::OperationSummary::Completed {
             anyhow::bail!("nested graph stop failed: {:?}", report.components);
         }
@@ -313,6 +305,8 @@ mod tests {
         starts: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
         running: Arc<AtomicUsize>,
+        start_gate: Option<Arc<tokio::sync::Notify>>,
+        fail_run: Option<Arc<tokio::sync::Notify>>,
         stop_gate: Option<Arc<tokio::sync::Notify>>,
     }
 
@@ -329,6 +323,9 @@ mod tests {
         }
         async fn start(&mut self) -> anyhow::Result<()> {
             self.starts.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.start_gate {
+                gate.notified().await;
+            }
             Ok(())
         }
         async fn stop(&mut self) -> anyhow::Result<()> {
@@ -344,7 +341,30 @@ mod tests {
         async fn run(&mut self) -> anyhow::Result<()> {
             self.running.fetch_add(1, Ordering::SeqCst);
             let _running = Running(self.running.clone());
+            if let Some(gate) = &self.fail_run {
+                gate.notified().await;
+                anyhow::bail!("injected processing failure");
+            }
             std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl EnvelopeSource for Service {
+        async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+            self.run().await?;
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl EnvelopeSink for Service {
+        fn completion(&self) -> SinkCompletion {
+            SinkCompletion::Handled
+        }
+
+        async fn handle(&mut self, _: InputEnvelope) -> anyhow::Result<()> {
+            anyhow::bail!("the failure fixture must not emit data")
         }
     }
 
@@ -363,6 +383,8 @@ mod tests {
                 starts,
                 stops,
                 running,
+                start_gate: None,
+                fail_run: None,
                 stop_gate: None,
             }))
             .build()
@@ -508,6 +530,8 @@ mod tests {
                 starts: Arc::new(AtomicUsize::new(0)),
                 stops: stops.clone(),
                 running: running.clone(),
+                start_gate: None,
+                fail_run: None,
                 stop_gate: Some(stop_gate.clone()),
             }))
             .build()
@@ -535,5 +559,167 @@ mod tests {
         assert!(scope.disposed);
         assert_eq!(running.load(Ordering::SeqCst), 0);
         assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    async fn stop_during_startup() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let graph = ComputationGraph::builder("nested")
+            .service(Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(
+                    ComponentId::try_new("service").unwrap(),
+                    vec![],
+                )
+                .unwrap(),
+                starts: starts.clone(),
+                stops: stops.clone(),
+                running: running.clone(),
+                start_gate: Some(Arc::new(tokio::sync::Notify::new())),
+                fail_run: None,
+                stop_gate: None,
+            }))
+            .build()
+            .unwrap();
+        let mut scope = ScopedGraph::new(graph, Arc::from("instance"));
+        let control = scope.ready().await.unwrap();
+        let activation = tokio::spawn(async move {
+            control
+                .start_components(GraphRevision(1), GraphSelection::All)
+                .await
+        });
+        wait_running(&starts, 1).await;
+        tokio::time::timeout(Duration::from_secs(2), scope.stop())
+            .await
+            .expect("stop must cancel unfinished startup")
+            .unwrap();
+        let report = activation.await.unwrap().unwrap();
+        assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+        assert!(matches!(
+            report.components[&ComponentId::try_new("service").unwrap()],
+            StartOutcome::StartFailed(_)
+        ));
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        scope.shutdown().await.unwrap();
+    }
+
+    async fn stop_during_failure_cleanup() {
+        let stops = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let failure = Arc::new(tokio::sync::Notify::new());
+        let stop_gate = Arc::new(tokio::sync::Notify::new());
+        let schema = SchemaDescriptor::try_new(
+            SchemaId::try_new("test.failure").unwrap(),
+            SchemaVersion::try_new(1).unwrap(),
+            "test",
+            bytes::Bytes::from_static(b"failure-test"),
+        )
+        .unwrap();
+        let from = Endpoint::new(
+            ComponentId::try_new("source").unwrap(),
+            PortId::try_new("out").unwrap(),
+        );
+        let to = Endpoint::new(
+            ComponentId::try_new("sink").unwrap(),
+            PortId::try_new("in").unwrap(),
+        );
+        let edge = EdgeDefinition::new(from.clone(), to.clone());
+        let graph = ComputationGraph::builder("nested")
+            .source(Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(
+                    from.component.clone(),
+                    vec![PortDescriptor::new(
+                        from.port.clone(),
+                        PortDirection::Output,
+                        schema.clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .unwrap(),
+                starts: Arc::new(AtomicUsize::new(0)),
+                stops: Arc::new(AtomicUsize::new(0)),
+                running: running.clone(),
+                start_gate: None,
+                fail_run: Some(failure.clone()),
+                stop_gate: None,
+            }))
+            .sink(Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(
+                    to.component.clone(),
+                    vec![PortDescriptor::new(
+                        to.port,
+                        PortDirection::Input,
+                        schema,
+                        PipeRequirements::default(),
+                    )],
+                )
+                .unwrap(),
+                starts: Arc::new(AtomicUsize::new(0)),
+                stops: stops.clone(),
+                running: Arc::new(AtomicUsize::new(0)),
+                start_gate: None,
+                fail_run: None,
+                stop_gate: Some(stop_gate.clone()),
+            }))
+            .bind_stream(from, StreamId::try_new("source/out").unwrap())
+            .connect(edge.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
+            .relationship_policy(
+                edge,
+                RelationshipPolicy {
+                    propagate_failure: true,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+        let mut scope = ScopedGraph::new(graph, Arc::from("instance"));
+        let control = scope.ready().await.unwrap();
+        control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        wait_running(&running, 1).await;
+        failure.notify_one();
+        wait_running(&stops, 1).await;
+        {
+            let stop = scope.stop();
+            tokio::pin!(stop);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut stop)
+                    .await
+                    .is_err(),
+                "stop must wait for the existing cleanup owner"
+            );
+            assert_eq!(stops.load(Ordering::SeqCst), 1);
+            stop_gate.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), stop)
+                .await
+                .expect("stop must finish after the existing cleanup completes")
+                .unwrap();
+        }
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        scope.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_during_startup_current_thread() {
+        stop_during_startup().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_during_startup_multi_thread() {
+        stop_during_startup().await;
+    }
+
+    #[tokio::test]
+    async fn stop_during_failure_cleanup_current_thread() {
+        stop_during_failure_cleanup().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_during_failure_cleanup_multi_thread() {
+        stop_during_failure_cleanup().await;
     }
 }

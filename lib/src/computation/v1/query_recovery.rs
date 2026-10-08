@@ -14,6 +14,9 @@
 
 use futures::StreamExt;
 
+use super::super::query_bootstrap::{
+    validate_bootstrap_state, BootstrapState, QueryBootstrapState, BOOTSTRAP_STATE,
+};
 use super::*;
 
 #[derive(Serialize, Deserialize)]
@@ -27,6 +30,9 @@ pub(super) struct ResetMarker {
 
 impl ContinuousQueryTransformer {
     pub(super) async fn deprovision_state(&mut self) -> anyhow::Result<()> {
+        if let Some(bootstrap) = &self.bootstrap {
+            bootstrap.stop().await?;
+        }
         if self.query.is_none() {
             self.build().await?;
         }
@@ -57,7 +63,7 @@ impl ContinuousQueryTransformer {
                 .await?;
         }
         query.shutdown().await?;
-        self.query = None;
+        self.release_query()?;
         self.pending_output.clear();
         self.results
             .state
@@ -108,7 +114,9 @@ impl ContinuousQueryTransformer {
         }
         self.publish_source_progress(false).await?;
         if let Some(provider) = self.bootstrap.clone() {
-            let preparation = provider.prepare().await?;
+            let preparation = provider
+                .prepare_with_state(&QueryBootstrapState(self.query()?))
+                .await?;
             if preparation != super::super::BootstrapPreparation::Ready {
                 if preparation == super::super::BootstrapPreparation::RefreshVolatile
                     && self.provider.is_volatile()
@@ -116,7 +124,11 @@ impl ContinuousQueryTransformer {
                 {
                     self.reset_for_bootstrap().await?;
                     self.publish_source_progress(false).await?;
-                    if provider.prepare().await? != super::super::BootstrapPreparation::Ready {
+                    if provider
+                        .prepare_with_state(&QueryBootstrapState(self.query()?))
+                        .await?
+                        != super::super::BootstrapPreparation::Ready
+                    {
                         return Err(QueryRecoveryError::SourceResetRequired.into());
                     }
                 } else {
@@ -135,6 +147,16 @@ impl ContinuousQueryTransformer {
             anyhow::bail!(
                 "AutoReset requires a declared bootstrap provider; no data is deleted without one"
             );
+        }
+        if self.output_persistent
+            && !self
+                .load_delivery_bindings()
+                .await?
+                .0
+                .destinations()
+                .is_empty()
+        {
+            return Err(super::super::OutputBindingError::ResetRequiresUnboundDestinations.into());
         }
         let query = self.query()?;
         let resources = query.resources();
@@ -172,7 +194,7 @@ impl ContinuousQueryTransformer {
             .ok_or_else(|| anyhow::anyhow!("query reset generation exhausted"))?;
         if self.provider.is_volatile() {
             query.shutdown().await?;
-            self.query = None;
+            self.release_query()?;
             self.build().await?;
             self.results
                 .state
@@ -231,6 +253,7 @@ impl ContinuousQueryTransformer {
                 .await?;
         }
         let config = self.definition.configuration_bytes(&self.execution)?;
+        let bootstrap_state = QueryBootstrapState(query).read().await?;
         query
             .resource_transaction(|| async {
                 crate::indexes::check_clear(
@@ -265,6 +288,11 @@ impl ContinuousQueryTransformer {
                 }
                 if let Some(checkpoint) = resources.checkpoint_store() {
                     checkpoint.clear_checkpoints().await?;
+                    if let Some(state) = &bootstrap_state {
+                        checkpoint
+                            .stage_checkpoint(BOOTSTRAP_STATE, 1, Some(state))
+                            .await?;
+                    }
                     checkpoint
                         .stage_checkpoint(CONFIGURATION, 1, Some(&config))
                         .await?;
@@ -332,7 +360,9 @@ impl ContinuousQueryTransformer {
                 })
                 .await?;
         }
-        let mut snapshot = provider.snapshot().await?;
+        let mut snapshot = provider
+            .snapshot_with_state(&QueryBootstrapState(query))
+            .await?;
         validate_watermarks(&snapshot.watermarks)?;
         let bootstrap_stream = StreamId::try_new(format!(
             "{}/bootstrap/{}",
@@ -417,6 +447,15 @@ impl ContinuousQueryTransformer {
             .watermarks
             .extend(provider.complete_snapshot().await?);
         validate_watermarks(&snapshot.watermarks)?;
+        let completion_state = provider.completion_state()?;
+        if let Some(state) = &completion_state {
+            validate_bootstrap_state(state)?;
+            query.resources().atomic_result_transaction()?;
+            anyhow::ensure!(
+                query.resources().checkpoint_store().is_some(),
+                "bootstrap handover completion requires a checkpoint store"
+            );
+        }
         let watermarks: Vec<_> = snapshot
             .watermarks
             .into_iter()
@@ -444,6 +483,11 @@ impl ContinuousQueryTransformer {
                             .await?;
                     }
                     checkpoint.stage_checkpoint(BOOTSTRAP, 1, None).await?;
+                    if let Some(state) = &completion_state {
+                        checkpoint
+                            .stage_checkpoint(BOOTSTRAP_STATE, 1, Some(state))
+                            .await?;
+                    }
                     checkpoint
                         .stage_result_sequence(self.definition.id.as_str(), sequence)
                         .await?;

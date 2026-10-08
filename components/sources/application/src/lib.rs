@@ -636,7 +636,7 @@ impl Source for ApplicationSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            let prune_handle = tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -659,8 +659,9 @@ impl Source for ApplicationSource {
                         }
                     }
                 }
-            });
-            *self.prune_task.write().await = Some(prune_handle);
+            })
+            .await
+            .with_context(|| format!("Application source '{}' WAL pruner registration", self.base.id))?;
         }
 
         Ok(())
@@ -676,34 +677,27 @@ impl Source for ApplicationSource {
             )
             .await;
 
-        let tasks = [
-            self.prune_task.write().await.take(),
-            self.base.task_handle.write().await.take(),
-        ];
-        for task in tasks.iter().flatten() {
+        if let Some(task) = self.base.task_handle.read().await.as_ref() {
             task.abort();
         }
-        let mut failures = Vec::new();
-        for task in tasks.into_iter().flatten() {
-            match task.await {
-                Ok(()) => {}
-                Err(error) if error.is_cancelled() => {}
-                Err(error) => failures.push(error.to_string()),
-            }
-        }
-        anyhow::ensure!(
-            failures.is_empty(),
-            "application source task cleanup failed: {}",
-            failures.join("; ")
-        );
-
+        drasi_lib::context::workers::cancel_owned_worker(
+            &mut *self.prune_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Application source '{}' WAL pruning cleanup", self.base.id))?;
+        drasi_lib::context::workers::join_owned_worker(
+            &mut *self.base.task_handle.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Application source '{}' dispatch cleanup", self.base.id))?;
         self.base
             .set_status(
                 ComponentStatus::Stopped,
                 Some("Application source stopped".to_string()),
             )
             .await;
-
         Ok(())
     }
 

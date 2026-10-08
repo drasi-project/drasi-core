@@ -5,6 +5,10 @@
 //! definitions only: no Source/Reaction/Base/adapter object is constructed here.
 
 mod config;
+pub mod delivery;
+pub mod durable;
+mod durable_grpc;
+mod durable_http;
 mod grpc;
 mod http;
 mod ingress;
@@ -14,11 +18,14 @@ pub use config::{FailurePolicy, GrpcSinkConfig, HttpSinkConfig, OutputFormat, So
 pub mod proto {
     pub use drasi_reaction_grpc::proto::drasi_v1 as reaction;
     pub use drasi_source_grpc::proto as source;
+    pub mod admission {
+        tonic::include_proto!("drasi.admission.v1");
+    }
 }
 
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigField, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    CreatedComponent, Factory, FactoryMetadata, NativeAdmission, PluginDefinition,
 };
 use drasi_lib::computation::v1::{
     ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
@@ -57,6 +64,9 @@ enum Kind {
 }
 struct NetworkFactory(Kind);
 impl Factory for NetworkFactory {
+    fn supports_source_admission(&self) -> bool {
+        matches!(self.0, Kind::HttpSource | Kind::GrpcSource)
+    }
     fn metadata(&self) -> FactoryMetadata {
         use ConfigType::*;
         let source = matches!(self.0, Kind::HttpSource | Kind::GrpcSource);
@@ -151,19 +161,33 @@ impl Factory for NetworkFactory {
     fn create(
         &self,
         request: &CreateRequest,
-        _: ControlSender,
+        control: ControlSender,
     ) -> anyhow::Result<CreatedComponent> {
+        self.create_with_admission(request, control, None)
+    }
+    fn create_with_admission(
+        &self,
+        request: &CreateRequest,
+        _: ControlSender,
+        admission: Option<NativeAdmission>,
+    ) -> anyhow::Result<CreatedComponent> {
+        anyhow::ensure!(
+            admission.is_none() || self.supports_source_admission(),
+            "native sinks cannot use source admission"
+        );
         let descriptor = self.metadata().descriptor(request.id.clone())?;
         Ok(match self.0 {
             Kind::HttpSource => Component::Source(Box::new(http::HttpSource::new(
                 descriptor,
                 SourceConfig::parse(request.configuration.clone(), false)?,
                 request.scope.as_ref(),
+                admission,
             )?)),
             Kind::GrpcSource => Component::Source(Box::new(grpc::GrpcSource::new(
                 descriptor,
                 SourceConfig::parse(request.configuration.clone(), true)?,
                 request.scope.as_ref(),
+                admission,
             )?)),
             Kind::HttpSink => Component::Sink(Box::new(http::HttpSink::new(
                 descriptor,

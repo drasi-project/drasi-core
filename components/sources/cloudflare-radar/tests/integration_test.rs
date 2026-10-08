@@ -251,7 +251,7 @@ async fn test_cloudflare_radar_hijack_changes() -> Result<()> {
     })
     .await?;
 
-    core.stop().await?;
+    core.shutdown().await?;
     drop(container);
     Ok(())
 }

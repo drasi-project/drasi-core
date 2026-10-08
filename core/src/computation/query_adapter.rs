@@ -107,6 +107,11 @@ impl ComputationQuery {
         self.transaction.resources()
     }
 
+    /// Observe this actual execution owner without extending its storage lifetime.
+    pub fn retirement_owner(&self) -> Weak<ComputationTransaction> {
+        Arc::downgrade(&self.transaction)
+    }
+
     /// Run graph-owned metadata/reset staging under the same serialized resource
     /// transaction and cancellation/recovery rules as evaluation.
     pub async fn resource_transaction<F, Fut>(&self, operation: F) -> Result<()>
@@ -138,6 +143,10 @@ impl ComputationQuery {
         self.transaction.recovery_required()
     }
 
+    pub fn shares_transaction_group(&self, transaction: &ComputationTransaction) -> bool {
+        self.transaction.shares_transaction_group(transaction)
+    }
+
     /// Await provider-registered work before retiring this query's resources.
     /// This seals the constructed query; it is not a restart or a rollback claim.
     pub async fn shutdown(&self) -> Result<()> {
@@ -164,6 +173,16 @@ impl ComputationQuery {
         input: Vec<SourceChange>,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
         Ok(self.inner.evaluate_changes(input).await?)
+    }
+
+    async fn evaluate_source_transaction(
+        &self,
+        input: Vec<SourceChange>,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>> {
+        let results = self.evaluate_source_changes(input).await?;
+        Ok(super::query_results::transaction_results(results)
+            .map_err(IndexError::other)?
+            .into())
     }
 
     pub async fn process_source_change(
@@ -237,6 +256,85 @@ impl ComputationQuery {
             .await
     }
 
+    pub async fn process_source_changes_with_transaction_group<F, Fut>(
+        &self,
+        changes: Vec<SourceChange>,
+        transaction: &AtomicResultTransaction,
+        pre_commit_hook: F,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>>
+    where
+        F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
+        Fut: Future<
+                Output = std::result::Result<
+                    Vec<Box<dyn super::TransactionGroupMutation>>,
+                    IndexError,
+                >,
+            > + Send,
+    {
+        self.validate_transaction(transaction)?;
+        self.transaction
+            .run_with_mutations(async {
+                let results: Arc<[QueryPartEvaluationContext]> =
+                    self.evaluate_source_changes(changes).await?.into();
+                let mutations = pre_commit_hook(results.clone()).await?;
+                Ok((results, mutations))
+            })
+            .await
+    }
+
+    /// Stage only the final row changes of one complete source transaction.
+    ///
+    /// The caller owns source framing, identity, size/time admission limits and
+    /// acknowledgement. This method does not infer completeness from a vector.
+    /// Ordinary batch methods retain their per-change results and fast path.
+    /// Incompatible storage is rejected before middleware or evaluation runs.
+    pub async fn process_source_transaction_with_result_hook<F, Fut>(
+        &self,
+        changes: Vec<SourceChange>,
+        transaction: &AtomicResultTransaction,
+        pre_commit_hook: F,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>>
+    where
+        F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
+        Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
+    {
+        self.validate_transaction(transaction)?;
+        self.in_operation(async {
+            let results = self.evaluate_source_transaction(changes).await?;
+            pre_commit_hook(results.clone()).await?;
+            Ok(results)
+        })
+        .await
+    }
+
+    /// The complete-source-transaction counterpart of
+    /// [`Self::process_source_changes_with_transaction_group`].
+    /// Final results and participating journal mutations share the same commit.
+    pub async fn process_source_transaction_with_transaction_group<F, Fut>(
+        &self,
+        changes: Vec<SourceChange>,
+        transaction: &AtomicResultTransaction,
+        pre_commit_hook: F,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>>
+    where
+        F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
+        Fut: Future<
+                Output = std::result::Result<
+                    Vec<Box<dyn super::TransactionGroupMutation>>,
+                    IndexError,
+                >,
+            > + Send,
+    {
+        self.validate_transaction(transaction)?;
+        self.transaction
+            .run_with_mutations(async {
+                let results = self.evaluate_source_transaction(changes).await?;
+                let mutations = pre_commit_hook(results.clone()).await?;
+                Ok((results, mutations))
+            })
+            .await
+    }
+
     pub async fn process_due_futures(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
         self.process_due_futures_with_non_atomic_result_hook(|_| async { Ok(()) })
             .await
@@ -253,23 +351,55 @@ impl ComputationQuery {
         Fut: Future<Output = std::result::Result<(), IndexError>> + Send,
     {
         self.in_operation(async {
-            let Some(future_ref) = self.inner.future_queue().pop().await? else {
+            let Some(results) = self.evaluate_due_future().await? else {
                 return Ok(None);
             };
-            let source_id = future_ref.element_ref.source_id.clone();
-            let results = Arc::new(ComputationFutureResult {
-                results: self
-                    .evaluate_source_change(SourceChange::Future {
-                        future_ref: future_ref.clone(),
-                    })
-                    .await?,
-                source_id,
-                future: future_ref,
-            });
             pre_commit_hook(results.clone()).await?;
             Ok(Some(results))
         })
         .await
+    }
+
+    async fn evaluate_due_future(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
+        let Some(future_ref) = self.inner.future_queue().pop().await? else {
+            return Ok(None);
+        };
+        let source_id = future_ref.element_ref.source_id.clone();
+        Ok(Some(Arc::new(ComputationFutureResult {
+            results: self
+                .evaluate_source_change(SourceChange::Future {
+                    future_ref: future_ref.clone(),
+                })
+                .await?,
+            source_id,
+            future: future_ref,
+        })))
+    }
+
+    pub async fn process_due_futures_with_transaction_group<F, Fut>(
+        &self,
+        transaction: &AtomicResultTransaction,
+        pre_commit_hook: F,
+    ) -> Result<Option<Arc<ComputationFutureResult>>>
+    where
+        F: FnOnce(Arc<ComputationFutureResult>) -> Fut + Send,
+        Fut: Future<
+                Output = std::result::Result<
+                    Vec<Box<dyn super::TransactionGroupMutation>>,
+                    IndexError,
+                >,
+            > + Send,
+    {
+        self.validate_transaction(transaction)?;
+        self.transaction
+            .run_with_mutations(async {
+                let Some(results) = self.evaluate_due_future().await? else {
+                    return Ok((None, Vec::new()));
+                };
+                let mutations = pre_commit_hook(results.clone()).await?;
+                Ok((Some(results), mutations))
+            })
+            .await
     }
 
     pub async fn process_due_futures_with_result_hook<F, Fut>(

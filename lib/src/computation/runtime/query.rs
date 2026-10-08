@@ -513,7 +513,7 @@ impl RuntimeComponent for QueryInstance {
             .owner
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("native runtime is gone"))?;
-        let (_, volatile) = owner
+        let (_, volatile, _) = owner
             .config
             .index_factory
             .computation_backend(self.config.storage_backend.as_ref())?;
@@ -645,7 +645,7 @@ impl RuntimeComponent for QueryInstance {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("native runtime is gone"))?;
         let factory = owner.config.index_factory.clone();
-        let (backend, volatile) =
+        let (backend, volatile, _) =
             factory.computation_backend(self.config.storage_backend.as_ref())?;
         if volatile {
             self.deleted.store(true, Ordering::Release);
@@ -734,9 +734,9 @@ impl RuntimeComponent for QueryInstance {
                 .await;
                 if let Err(error) = clear {
                     if let Err(rollback) = indexes.set.session_control.rollback() {
-                        return Err(IndexError::other(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("index cleanup failed: {error}; rollback failed: {rollback}"),
+                        return Err(IndexError::other(crate::error::OperationFailures::new(
+                            "index cleanup and rollback failed",
+                            vec![error.into(), rollback.into()],
                         )));
                     }
                     return Err(error);

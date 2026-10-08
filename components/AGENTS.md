@@ -5,11 +5,12 @@ All Drasi plugins (sources, bootstrappers, reactions, indexes, identity, secret 
 ## The plugin contract (discovery is convention-driven)
 - Existing ABI plugins follow drasi-{source|reaction|bootstrap|identity|secret-store}-<kind>. Native graph plugins declare `[package.metadata.drasi-plugin]` with `abi-family = "computation"`, an explicit `abi-version`, and `kind`. Both declare `dynamic-plugin` and crate-type ["lib","cdylib"]. Verify discovery with `cargo run -p xtask -- list-plugins`; native metadata is validated rather than inferred from the old category list.
 - `export_plugin!` must stay gated behind the `dynamic-plugin` feature (prevents duplicate FFI symbols in static builds)
-- The existing Source/Reaction plugin ABI is versioned by `FFI_SDK_VERSION` (plugin-sdk/src/ffi/metadata.rs); bump it when changing that family's layouts or wire formats. Native ComputationGraph plugins use their independently versioned computation-plugin-abi contract. Changes to a shared layout require updating every affected ABI family; adding a native-only interface must not change the existing 0.15 contract.
+- The existing Source/Reaction plugin ABI is versioned by `FFI_SDK_VERSION` (plugin-sdk/src/ffi/metadata.rs); bump it when changing that family's layouts or wire formats. Current legacy ABI is 0.17, with explicit 0.16 fast-mode compatibility; preserve the 0.16 state-store prefix and never infer new recovery support from loading compatibility. Native ComputationGraph plugins use their independently versioned computation-plugin-abi contract. Changes to a shared layout require updating every affected ABI family; adding a native-only interface must not change the legacy contract.
 - Event payloads cross the FFI boundary only as serialized MessagePack - never as repr(Rust) pointers
 - ffi-primitives must stay dependency-free (std only)
 - Indexes, state stores, and WALs are NOT dynamic plugins - they link statically (wiring rules: see lib/AGENTS.md)
 - Native libraries are process-pinned and expose only implemented ABI capabilities. Never pass Rust futures, trait objects, Arc/Bytes ownership or borrowed TransactionContext pointers across the new boundary. Transaction participants use the revocable host mailbox and have no commit operation.
+- Select optional consumer wrappers before exporting an operation future, so ordinary native operations do not retain consumer state or gain an extra boxed future. Rebuild the actual cdylib when qualifying Host changes; path dependencies alone do not update it.
 - .tsp files inside plugin src/ directories are wire-format documentation, not codegen inputs - there is no codegen step to find, and they should not be deleted
 
 ## Writing or changing a plugin

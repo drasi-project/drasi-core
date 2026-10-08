@@ -148,6 +148,13 @@ impl PluginRegistry {
         );
         let mut factories = self.computation_factory_registry()?;
         plugin.register_factories(&mut factories)?;
+        let existing = self.computation_bootstrap_factories()?;
+        for factory in plugin.bootstrap_factories() {
+            anyhow::ensure!(
+                !existing.contains_key(&factory.metadata().implementation),
+                "native bootstrap factory is already registered"
+            );
+        }
         let kinds = plugin
             .factories()
             .iter()
@@ -178,6 +185,55 @@ impl PluginRegistry {
             plugin.register_factories(&mut registry)?;
         }
         Ok(registry)
+    }
+
+    pub fn computation_bootstrap_metadata(
+        &self,
+    ) -> Vec<crate::computation::BootstrapFactoryMetadata> {
+        self.computation_plugins
+            .values()
+            .flat_map(|plugin| {
+                plugin
+                    .bootstrap_factories()
+                    .iter()
+                    .map(|factory| factory.metadata().clone())
+            })
+            .collect()
+    }
+
+    pub fn computation_consumer_metadata(
+        &self,
+    ) -> Vec<crate::computation::NativeConsumerFactoryMetadata> {
+        self.computation_plugins
+            .values()
+            .flat_map(|plugin| {
+                plugin.factories().iter().filter_map(|factory| {
+                    factory.consumer_mode().map(|mode| {
+                        crate::computation::NativeConsumerFactoryMetadata {
+                            implementation: factory.metadata().implementation.clone(),
+                            mode,
+                        }
+                    })
+                })
+            })
+            .collect()
+    }
+
+    pub fn computation_bootstrap_factories(
+        &self,
+    ) -> anyhow::Result<crate::computation::NativeBootstrapFactories> {
+        let mut factories = crate::computation::NativeBootstrapFactories::new();
+        for plugin in self.computation_plugins.values() {
+            for factory in plugin.bootstrap_factories() {
+                anyhow::ensure!(
+                    factories
+                        .insert(factory.metadata().implementation.clone(), factory.clone())
+                        .is_none(),
+                    "duplicate native bootstrap factory"
+                );
+            }
+        }
+        Ok(factories)
     }
 
     pub fn transactional_transformer_registry(

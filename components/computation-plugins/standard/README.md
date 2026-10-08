@@ -1,7 +1,8 @@
 # Standard native ComputationGraph plugin
 
 `drasi-computation-standard` supplies real graph components through native ABI
-**1.0.0**, independently of the unchanged Source/Reaction/Bootstrap ABI **0.15.0**.
+**1.0.0**, independently of the Source/Reaction/Bootstrap ABI **0.17.0**
+(with 0.16 fast-mode compatibility).
 The package uses the workspace version; that version is not its ABI version.
 Plugin identity is `drasi-computation-standard`, implementation versions are `"1"`,
 and configuration versions are `1`.
@@ -91,6 +92,12 @@ For two steps with `add=2,multiply=1,counter_property="first_count"` and
 commit and recovery. A retry of committed input may redeliver retained output
 without rerunning either step.
 
+When that host container uses `SharedStorageGroup` and participating QoS pipes,
+both steps' state and the outgoing journal entries share its actual commit.
+Journal acknowledgements still follow consumer handling separately. Existing
+native ABI 1.0 participants need no new capability or rebuild for this host-owned
+arrangement; it does not make standalone arithmetic persistent.
+
 The component supports serialized state `get/put/remove`, element
 `get/put/remove`, and host-authoritative `derive` through the native C operations.
 The Rust `TransactionContext`, trait objects, futures, `Arc` and `Bytes` never
@@ -125,6 +132,11 @@ while data is pending, cancellation, and real RocksDB-backed transaction state
 isolation, error rollback, cancellation rollback and committed replay. A complete
 durable graph additionally roundtrips host-owned RocksDB/retained-store recipes
 and reconstructs its native participants and sink.
+Shared-storage cases interrupt the actual commit before and after it takes effect,
+both by cancellation and abrupt child-process exit. Reconstruction retries the
+same input with one committed count per step and one acceptance in each of two
+output journals. The required crash parent checks both child exits explicitly;
+its ignored helper is not a skipped recovery scenario.
 
 Native libraries are process-pinned. Query-role snapshot/outbox hosting, source
 recovery-progress handles, native resource injection, in-place reconfiguration

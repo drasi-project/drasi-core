@@ -310,6 +310,10 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
         false // RocksDB is persistent
     }
 
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        drasi_core::interface::StorageDurability::LOCAL_PROCESS_RESTART
+    }
+
     fn supports_atomic_query_output(&self) -> bool {
         true
     }

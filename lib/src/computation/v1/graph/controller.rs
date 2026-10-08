@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
+    task::Poll,
 };
 
 use chrono::Utc;
@@ -51,6 +52,7 @@ pub(super) struct InstanceSlot {
     value: Mutex<Option<Instance>>,
     configuration: Mutex<super::CapturedComponentConfiguration>,
     query_api: Mutex<Option<Arc<crate::computation::v1::QueryApi>>>,
+    recovery: Mutex<crate::computation::v1::ComponentRecovery>,
 }
 
 struct Instance {
@@ -81,11 +83,13 @@ impl InstanceSlot {
     ) -> Arc<Self> {
         let configuration = component.capture_configuration();
         let query_api = component.query_api();
+        let recovery = component.recovery_contract();
         Arc::new(Self {
             id,
             generation,
             configuration: Mutex::new(configuration),
             query_api: Mutex::new(query_api),
+            recovery: Mutex::new(recovery),
             value: Mutex::new(Some(Instance {
                 component,
                 sequences: BTreeMap::new(),
@@ -114,6 +118,20 @@ impl InstanceSlot {
         }
     }
 
+    pub(super) fn recovery_contract(
+        &self,
+    ) -> GraphResult<crate::computation::v1::ComponentRecovery> {
+        self.recovery
+            .lock()
+            .map(|contract| contract.clone())
+            .map_err(|error| {
+                topology(format!(
+                    "recovery contract for {} is poisoned: {error}",
+                    self.id
+                ))
+            })
+    }
+
     pub(super) fn query_api(&self) -> Option<std::sync::Weak<crate::computation::v1::QueryApi>> {
         self.query_api
             .lock()
@@ -123,6 +141,13 @@ impl InstanceSlot {
             })
             .as_ref()
             .map(Arc::downgrade)
+    }
+
+    pub(super) fn is_constructed(self: &Arc<Self>) -> GraphResult<bool> {
+        Ok(!matches!(
+            self.take()?.component,
+            Component::Deferred { .. } | Component::Unresolved(_)
+        ))
     }
 
     fn take(self: &Arc<Self>) -> GraphResult<InstanceLease> {
@@ -145,7 +170,21 @@ struct InstanceLease {
 }
 
 impl InstanceLease {
+    fn refresh_recovery(&self) -> GraphResult<crate::computation::v1::ComponentRecovery> {
+        let contract = self.component.recovery_contract();
+        *self.slot.recovery.lock().map_err(|error| {
+            topology(format!(
+                "recovery contract for {} is poisoned: {error}",
+                self.slot.id
+            ))
+        })? = contract.clone();
+        Ok(contract)
+    }
+
     fn refresh_configuration(&self) {
+        if let Err(error) = self.refresh_recovery() {
+            log::error!("Cannot publish recovery contract: {error}");
+        }
         *self.slot.query_api.lock().unwrap_or_else(|error| {
             log::error!("Query API publication is poisoned: {}", self.slot.id);
             error.into_inner()
@@ -208,6 +247,13 @@ impl Drop for InstanceLease {
 }
 
 pub(super) enum Command {
+    RetiredResources(oneshot::Sender<BTreeSet<super::ResourceId>>),
+    FreezeRecovery {
+        resources: BTreeSet<super::ResourceId>,
+        components: BTreeSet<ComponentId>,
+        allow_processing_failure: bool,
+        reply: oneshot::Sender<GraphResult<super::RecoveryFreeze>>,
+    },
     AutoStart,
     Add {
         addition: super::ComponentAddition,
@@ -299,6 +345,10 @@ pub(super) enum Command {
         changes: Vec<reconcile::DesiredMutation>,
         reply: oneshot::Sender<GraphResult<reconcile::ReconciliationPreview>>,
     },
+    RecoveryReport {
+        requirement: crate::computation::v1::RecoveryRequirement,
+        reply: oneshot::Sender<GraphResult<crate::computation::v1::RecoveryPathReport>>,
+    },
     Reconcile {
         preview: reconcile::ReconciliationPreview,
         bindings: super::TopologyBindings,
@@ -335,7 +385,102 @@ pub(super) enum Command {
     },
 }
 
+const COMMAND_CAPACITY: usize = 64;
+
+#[derive(Clone)]
+pub(super) struct CommandSender {
+    regular: mpsc::Sender<Command>,
+    construction: mpsc::Sender<Command>,
+}
+
+pub(super) struct CommandReceiver {
+    regular: mpsc::Receiver<Command>,
+    construction: mpsc::Receiver<Command>,
+    construction_first: bool,
+}
+
+pub(super) fn command_channel() -> (CommandSender, CommandReceiver) {
+    let (regular_tx, regular) = mpsc::channel(COMMAND_CAPACITY);
+    let (construction_tx, construction) = mpsc::channel(COMMAND_CAPACITY);
+    (
+        CommandSender {
+            regular: regular_tx,
+            construction: construction_tx,
+        },
+        CommandReceiver {
+            regular,
+            construction,
+            construction_first: false,
+        },
+    )
+}
+
+impl CommandSender {
+    fn channel(&self, command: &Command) -> &mpsc::Sender<Command> {
+        match command {
+            Command::Add { .. } | Command::HandleStop { .. } => &self.construction,
+            _ => &self.regular,
+        }
+    }
+
+    pub(super) async fn send(
+        &self,
+        command: Command,
+    ) -> Result<(), mpsc::error::SendError<Command>> {
+        self.channel(&command).send(command).await
+    }
+
+    pub(super) fn try_send(&self, command: Command) -> Result<(), mpsc::error::TrySendError<()>> {
+        self.channel(&command)
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => mpsc::error::TrySendError::Full(()),
+                mpsc::error::TrySendError::Closed(_) => mpsc::error::TrySendError::Closed(()),
+            })
+    }
+
+    pub(super) async fn closed(&self) {
+        self.regular.closed().await;
+    }
+}
+
+impl CommandReceiver {
+    fn recv(&mut self) -> impl std::future::Future<Output = Option<Command>> + '_ {
+        // Alternate ready queues without another select state machine on every
+        // data-plane wake of the shared controller task.
+        futures::future::poll_fn(move |cx| {
+            let (first, second) = if self.construction_first {
+                (&mut self.construction, &mut self.regular)
+            } else {
+                (&mut self.regular, &mut self.construction)
+            };
+            let first_closed = match first.poll_recv(cx) {
+                Poll::Ready(Some(command)) => {
+                    self.construction_first = !self.construction_first;
+                    return Poll::Ready(Some(command));
+                }
+                Poll::Ready(None) => true,
+                Poll::Pending => false,
+            };
+            match second.poll_recv(cx) {
+                Poll::Ready(Some(command)) => Poll::Ready(Some(command)),
+                Poll::Ready(None) if first_closed => Poll::Ready(None),
+                _ => Poll::Pending,
+            }
+        })
+    }
+
+    // Mutations wait in their bounded channel, not an unbounded side queue.
+    // Independent additions and generation-fenced stops remain serviceable.
+    async fn recv_during_construction(&mut self) -> Option<Command> {
+        self.construction.recv().await
+    }
+}
+
 fn configuration_access(graph: &ComputationGraph, management_access: bool) -> GraphResult<()> {
+    if graph.retirement_active() {
+        return Err(GraphError::OperationInProgress);
+    }
     if !management_access
         && graph
             .management_protected
@@ -370,6 +515,46 @@ fn addition_id(pending: &Option<super::ComponentAddition>) -> &ComponentId {
 }
 
 impl GraphControl {
+    pub(crate) async fn retired_resources(&self) -> GraphResult<BTreeSet<super::ResourceId>> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::RetiredResources(reply))
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)
+    }
+
+    pub(crate) async fn freeze_recovery(
+        &self,
+        resources: BTreeSet<super::ResourceId>,
+        components: BTreeSet<ComponentId>,
+        allow_processing_failure: bool,
+    ) -> GraphResult<super::RecoveryFreeze> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::FreezeRecovery {
+                resources,
+                components,
+                allow_processing_failure,
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        result.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
+    pub async fn recovery_report(
+        &self,
+        requirement: crate::computation::v1::RecoveryRequirement,
+    ) -> GraphResult<crate::computation::v1::RecoveryPathReport> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(Command::RecoveryReport { requirement, reply })
+            .await
+            .map_err(|_| GraphError::ControllerClosed)?;
+        response.await.map_err(|_| GraphError::ControllerClosed)?
+    }
+
     pub(crate) async fn start_members(
         &self,
         members: BTreeMap<ComponentId, ComponentGeneration>,
@@ -733,6 +918,7 @@ fn failure(error: GraphError, phase: FailurePhase) -> ComponentFailure {
                 | GraphError::Emission { .. }
                 | GraphError::Topology { .. }
                 | GraphError::Validation { .. }
+                | GraphError::Recovery(_)
         ) {
             FailureDisposition::Terminal
         } else {
@@ -1034,6 +1220,19 @@ async fn deploy(
                 sender: provided.pipe.sender(),
                 progress: progress.clone(),
                 multicast: provider.multicast_subscription().map(|(group, _)| group),
+                admission_channel: super::admission_channel(
+                    provider.as_ref(),
+                    &graph.resource_handles,
+                )?,
+                destination: super::output_destination(
+                    &edge.definition,
+                    &edge.pipe,
+                    &graph.resource_handles,
+                )
+                .map_err(|error| GraphError::Pipe {
+                    edge: edge_index,
+                    source: crate::computation::v1::PipeError::Backend(error),
+                })?,
             });
             graph.components[to].take()?.inputs.push(Incoming {
                 edge: edge_index,
@@ -1422,6 +1621,9 @@ impl Operations {
     }
 
     fn advance_additions(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
+        if graph.retirement_active() {
+            return Ok(());
+        }
         let newly_ready: Vec<_> = graph
             .observed()
             .components
@@ -1531,6 +1733,16 @@ impl Operations {
         operation: Operation,
     ) -> GraphResult<()> {
         let slot = &graph.components[index];
+        let recovery = if matches!(operation, Operation::Start | Operation::Process) {
+            graph.validate_recovery_activation(&slot.id)
+        } else {
+            Ok(None)
+        };
+        let transitive_recovery = if matches!(operation, Operation::Start | Operation::Process) {
+            graph.transitive_source_recovery(&slot.id)?
+        } else {
+            false
+        };
         if operation == Operation::Start {
             graph.peers.reset_ready(&slot.id, slot.generation)?;
         }
@@ -1549,6 +1761,7 @@ impl Operations {
         let resources = graph.resource_handles.clone();
         let scope = graph.execution_scope.clone();
         let graph_id = graph.snapshot.id.clone();
+        let admission_snapshot = graph.snapshot.clone();
         let downstream: Vec<_> = graph
             .snapshot
             .edges
@@ -1656,17 +1869,116 @@ impl Operations {
                     })
                 }
                 Operation::Start => {
+                    let requirement = recovery?;
+                    let admission_before = lease.component.recovery_contract();
+                    let expected = if requirement.is_some() {
+                        Some(lease.slot.recovery_contract()?)
+                    } else {
+                        None
+                    };
                     check_descriptor(&lease.component, &node)?;
-                    super::validate_source_progress(&lease.component, &graph_id, &downstream)?;
+                    super::validate_source_progress(
+                        &lease.component,
+                        &graph_id,
+                        &downstream,
+                        transitive_recovery,
+                    )?;
+                    if let Component::Source(source) = &lease.component {
+                        if let Some(admission) = source.admission() {
+                            super::validate_admission(
+                                &admission,
+                                &node,
+                                &admission_snapshot,
+                                &resources,
+                                Some(&scope),
+                            )
+                            .map_err(|error| {
+                                component_error(&node, "validate admission", error.into())
+                            })?;
+                            if lease.outputs.is_empty()
+                                || lease.outputs.iter().any(|output| {
+                                    output.port != *admission.port()
+                                        || !output.admission_channel.as_ref().is_some_and(
+                                            |channel| Arc::ptr_eq(channel, admission.channel()),
+                                        )
+                                })
+                            {
+                                return Err(component_error(
+                                    &node,
+                                    "validate admission",
+                                    super::emission_error(
+                                        &node,
+                                        "source admission output is not bound",
+                                    )
+                                    .into(),
+                                ));
+                            }
+                        }
+                    }
                     lease.attempted = true;
                     lease
                         .component
                         .start()
                         .await
                         .map_err(|source| component_error(&node, "start", source))?;
+                    {
+                        let Instance {
+                            component, outputs, ..
+                        } = &mut *lease;
+                        super::bind_output_destinations(
+                            component,
+                            &node,
+                            outputs,
+                            &admission_snapshot,
+                            &resources,
+                        )
+                        .await?;
+                    }
+                    let actual = lease.refresh_recovery()?;
+                    if (admission_before.source_admission.is_some()
+                        || actual.source_admission.is_some())
+                        && admission_before != actual
+                    {
+                        return Err(component_error(
+                            &node,
+                            "validate admission",
+                            super::emission_error(
+                                &node,
+                                "source admission changed during activation",
+                            )
+                            .into(),
+                        ));
+                    }
+                    if let Some(admission) = &actual.source_admission {
+                        super::validate_admission(
+                            admission,
+                            &node,
+                            &admission_snapshot,
+                            &resources,
+                            Some(&scope),
+                        )
+                        .map_err(|error| {
+                            component_error(&node, "validate admission", error.into())
+                        })?;
+                    }
+                    if let Some(requirement) = requirement {
+                        if expected.as_ref() != Some(&actual) {
+                            return Err(GraphError::Recovery(crate::computation::v1::RecoveryValidationError {
+                                consumer: requirement.consumer,
+                                issues: vec![crate::computation::v1::RecoveryIssue {
+                                    participant: crate::computation::v1::RecoveryParticipant::Component(
+                                        node.descriptor.id().clone(),
+                                    ),
+                                    guarantee: *requirement.guarantees.iter().next().expect("validated requirement"),
+                                    reason: crate::computation::v1::RecoveryIncompatibility::ContractChangedDuringActivation,
+                                }],
+                            }));
+                        }
+                    }
                     check_descriptor(&lease.component, &node)
                 }
                 Operation::Process => {
+                    recovery?;
                     let Instance {
                         component,
                         sequences,
@@ -1674,19 +1986,31 @@ impl Operations {
                         outputs,
                         ..
                     } = &mut *lease;
-                    run_node(
+                    super::bind_output_destinations(
                         component,
                         &node,
-                        sequences,
-                        inputs,
                         outputs,
-                        &mut quiescence,
-                        super::SourceRouting {
-                            graph_id: &graph_id,
-                            downstream: &downstream,
-                        },
+                        &admission_snapshot,
+                        &resources,
                     )
-                    .await
+                    .await?;
+                    let budget = super::NodeWorkBudget::default();
+                    budget
+                        .run(run_node(
+                            component,
+                            &node,
+                            sequences,
+                            inputs,
+                            outputs,
+                            &mut quiescence,
+                            super::SourceRouting {
+                                graph_id: &graph_id,
+                                downstream: &downstream,
+                                transitive_recovery,
+                            },
+                            &budget,
+                        ))
+                        .await
                 }
                 Operation::Stop => {
                     if !lease.attempted {
@@ -1761,6 +2085,13 @@ impl Operations {
     }
 
     fn advance_start(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
+        if graph
+            .retirement
+            .as_ref()
+            .is_some_and(|state| state.active() && !state.retired())
+        {
+            return Ok(());
+        }
         let Some(mut group) = self.starting.take() else {
             return Ok(());
         };
@@ -1772,7 +2103,9 @@ impl Operations {
             let id = node.descriptor.id();
             let observed = graph.observed();
             let current = &observed.components[id];
-            let outcome = if current.realization != RealizationState::Created {
+            let outcome = if graph.component_retired(id) {
+                Some(StartOutcome::NotRequested)
+            } else if current.realization != RealizationState::Created {
                 Some(StartOutcome::NotCreated)
             } else if !group.force
                 && (graph.deferred_activation.contains(id)
@@ -1813,6 +2146,14 @@ impl Operations {
                 });
                 self.launch(graph, index, Operation::Process)?;
                 Some(StartOutcome::AlreadyRunning)
+            } else if self.active.get(&index).is_some_and(|active| {
+                active.operation == Operation::Start
+                    || (active.operation == Operation::Process
+                        && current.lifecycle == ComponentLifecycle::Starting)
+            }) {
+                // Join an existing activation rather than treating it as a blocker.
+                // The report still waits for Start to finish; readiness is separate.
+                Some(StartOutcome::Started)
             } else if self.active.contains_key(&index)
                 || self.exhausted.contains(&index)
                 || (current.lifecycle == ComponentLifecycle::Failed
@@ -2473,7 +2814,7 @@ async fn settle_pending_stop(
     loop {
         operations.advance_start(graph)?;
         operations.advance_stop(graph)?;
-        if operations.stopping.is_none() {
+        if operations.stopping.is_none() && operations.propagated_stop.is_empty() {
             return Ok(());
         }
         tokio::select! {
@@ -2510,7 +2851,7 @@ fn member_indices(
 pub(super) async fn run(
     graph: &mut ComputationGraph,
     cancel: &mut watch::Receiver<bool>,
-    mut commands: mpsc::Receiver<Command>,
+    mut commands: CommandReceiver,
     auto_start: bool,
 ) -> GraphResult<()> {
     if *cancel.borrow() {
@@ -2518,7 +2859,6 @@ pub(super) async fn run(
     }
     let mut controls = deploy(graph, cancel).await?;
     let mut operations = Operations::default();
-    let mut deferred_commands = VecDeque::new();
     for index in graph.order.clone() {
         operations.attach_control(graph, index)?;
     }
@@ -2530,6 +2870,10 @@ pub(super) async fn run(
         graph.state.send_replace(GraphState::Ready);
     }
     loop {
+        tokio::task::consume_budget().await;
+        if *cancel.borrow() {
+            return Err(GraphError::Cancelled);
+        }
         operations.advance_additions(graph)?;
         operations.advance_start(graph)?;
         operations.advance_stop(graph)?;
@@ -2553,9 +2897,8 @@ pub(super) async fn run(
             return Ok(());
         }
         tokio::select! {
-            biased;
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
-            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() && !graph.retirement_active() => {
                 if let Some(completion) = completion {
                     operations.complete_control(graph, completion);
                 }
@@ -2568,12 +2911,27 @@ pub(super) async fn run(
                     operations.complete(graph, completion, &controls)?;
                 }
             }
-            command = async {
-                match deferred_commands.pop_front() {
-                    Some(command) => Some(command),
-                    None => commands.recv().await,
+            command = commands.recv() => match command {
+                Some(Command::RetiredResources(reply)) => {
+                    let resources = graph.retirement.as_ref().filter(|state| state.retired())
+                        .map(|state| state.resources.keys().filter(|id| graph.resource_retired(id)).cloned().collect()).unwrap_or_default();
+                    let _ = reply.send(resources);
                 }
-            } => match command {
+                Some(Command::FreezeRecovery { resources, components, allow_processing_failure, reply }) => {
+                    let result = if graph.retirement_active()
+                        || !operations.active.is_empty()
+                        || !operations.futures.is_empty()
+                        || operations.starting.is_some()
+                        || operations.stopping.is_some()
+                        || !operations.propagated_stop.is_empty()
+                        || !operations.pending_auto_start.is_empty()
+                    {
+                        Err(GraphError::OperationInProgress)
+                    } else {
+                        super::RecoveryFreeze::capture(graph, &resources, &components, allow_processing_failure)
+                    };
+                    let _ = reply.send(result);
+                }
                 Some(Command::ReadinessPolicy { component, generation, required, management_access, reply }) => {
                     let result = (|| {
                         component_configuration_access(graph, management_access, &component)?;
@@ -2680,6 +3038,9 @@ pub(super) async fn run(
                 }
                 Some(Command::ReconcileComponents { previous, desired, bindings, reply }) => {
                     let prepared = (|| {
+                        if graph.retirement.as_ref().is_some_and(|state| state.active() && !state.retired()) {
+                            return Err(GraphError::OperationInProgress);
+                        }
                         let current = graph.snapshot.select(GraphSelection::All)?;
                         let target = crate::management::compose_definition(current.clone(), &previous, &desired)
                             .map_err(|error| topology(format!("{error:#}")))?;
@@ -2688,6 +3049,13 @@ pub(super) async fn run(
                             || !bindings.resource_constructors.is_empty()
                         {
                             changes.push(reconcile::DesiredMutation::SetTopology(target));
+                        }
+                        if graph.retirement.as_ref().is_some_and(|state| state.retired()) {
+                            for node in &desired.components {
+                                if graph.component_retired(node.descriptor.id()) {
+                                    changes.push(reconcile::DesiredMutation::ReplaceComponent(node.clone()));
+                                }
+                            }
                         }
                         let observed = graph.observed();
                         for node in &desired.components {
@@ -2701,7 +3069,7 @@ pub(super) async fn run(
                         else { reconcile::preview(graph, changes).map(Some) }
                     })();
                     let result = match prepared {
-                        Ok(Some(preview)) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands, &mut deferred_commands).await,
+                        Ok(Some(preview)) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands).await,
                         Ok(None) => Ok(reconcile::ReconciliationReport {
                             revision: graph.snapshot.revision,
                             summary: OperationSummary::Completed,
@@ -2713,6 +3081,9 @@ pub(super) async fn run(
                         }),
                         Err(error) => Err(error),
                     };
+                    if result.as_ref().is_ok_and(|report| report.committed) {
+                        graph.complete_retirement();
+                    }
                     let cancelled = matches!(&result, Err(GraphError::Cancelled));
                     let _ = reply.send(result);
                     if cancelled { return Err(GraphError::Cancelled); }
@@ -2739,7 +3110,7 @@ pub(super) async fn run(
                         Ok(preview)
                     })();
                     let result = match prepared {
-                        Ok(preview) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, batch.bindings, &mut commands, &mut deferred_commands).await,
+                        Ok(preview) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, batch.bindings, &mut commands).await,
                         Err(error) => Err(error),
                     };
                     let cancelled = matches!(&result, Err(GraphError::Cancelled));
@@ -2765,6 +3136,32 @@ pub(super) async fn run(
                         if !management_access && protected(old) != protected(&connections) {
                             Err(topology("connection configuration is managed by DrasiLib"))
                         } else { Ok(()) }
+                    }).and_then(|_| {
+                        if subscriptions {
+                            for (from, _) in &connections {
+                                if let Some(index) = graph.ids.get(from) {
+                                    if graph.components[*index].recovery_contract()?.source_admission.is_some() {
+                                        return Err(topology("source admission cannot publish through an untracked subscription"));
+                                    }
+                                }
+                            }
+                        }
+                        if subscriptions && !graph.snapshot.recovery_requirements.is_empty() {
+                            let old: BTreeSet<_> = old.iter().cloned().collect();
+                            let new: BTreeSet<_> = connections.iter().cloned().collect();
+                            let changed: Vec<_> = old.symmetric_difference(&new).collect();
+                            if !changed.is_empty() {
+                                let mut candidate = graph.snapshot.clone();
+                                candidate.subscriptions = connections.clone().into();
+                                for requirement in &candidate.recovery_requirements {
+                                    let report = graph.recovery_report_in(&candidate, requirement)?;
+                                    if changed.iter().any(|(_, to)| report.participants.contains(to)) {
+                                        report.validate()?;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
                     });
                     let result = if let Err(error) = permission {
                         Err(error)
@@ -2805,7 +3202,7 @@ pub(super) async fn run(
                         .filter(|index| graph.components[**index].generation == generation)
                         .copied().ok_or(GraphError::StaleGeneration)
                         .and_then(|index| {
-                            if operations.starting.is_some() || operations.stopping.is_some() {
+                            if graph.retirement_active() || operations.starting.is_some() || operations.stopping.is_some() {
                                 Err(GraphError::OperationInProgress)
                             } else {
                                 Ok(index)
@@ -2821,7 +3218,7 @@ pub(super) async fn run(
                 }
                 Some(Command::StartMembers { members, reply }) => {
                     let selected = member_indices(graph, &members).and_then(|selected| {
-                        if operations.starting.is_some() || operations.stopping.is_some() { Err(GraphError::OperationInProgress) }
+                        if graph.retirement_active() || operations.starting.is_some() || operations.stopping.is_some() { Err(GraphError::OperationInProgress) }
                         else { Ok(selected) }
                     });
                     match selected {
@@ -2869,7 +3266,7 @@ pub(super) async fn run(
                             return Err(topology("state removal requires an explicitly removed member"));
                         }
                         preview.deprovision = deprovision;
-                        reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands, &mut deferred_commands).await
+                        reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands).await
                     }.await;
                     let cancelled = matches!(&result, Err(GraphError::Cancelled));
                     let _ = reply.send(result);
@@ -2879,6 +3276,9 @@ pub(super) async fn run(
                     let result = check_revision(graph, revision).and_then(|_| reconcile::preview(graph, changes));
                     let _ = reply.send(result);
                 }
+                Some(Command::RecoveryReport { requirement, reply }) => {
+                    let _ = reply.send(graph.recovery_report(&requirement));
+                }
                 Some(Command::Reconcile { preview, bindings, management_access, reply }) => {
                     let permission = configuration_access(graph, management_access).and_then(|_| {
                         if !management_access {
@@ -2887,7 +3287,7 @@ pub(super) async fn run(
                         Ok(())
                     });
                     let result = match permission {
-                        Ok(()) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands, &mut deferred_commands).await,
+                        Ok(()) => reconcile::execute(graph, &mut operations, &mut controls, cancel, preview, bindings, &mut commands).await,
                         Err(error) => Err(error),
                     };
                     let cancelled = matches!(&result, Err(GraphError::Cancelled));
@@ -2896,7 +3296,7 @@ pub(super) async fn run(
                 }
                 Some(Command::Start { revision, selection, force, reply }) => {
                     let valid = check_revision(graph, revision).and_then(|_| {
-                        if operations.starting.is_some() || operations.stopping.is_some() {
+                        if graph.retirement_active() || operations.starting.is_some() || operations.stopping.is_some() {
                             Err(GraphError::OperationInProgress)
                         } else { select(graph, &selection) }
                     });
@@ -3099,7 +3499,12 @@ pub(super) fn needs_cleanup(graph: &ComputationGraph) -> GraphResult<bool> {
 
 pub(super) async fn dispose_resources(graph: &mut ComputationGraph) -> GraphResult<()> {
     let mut failures = Vec::new();
-    for (id, specification) in &graph.snapshot.resources {
+    let order = super::resources::cleanup_order(
+        graph.snapshot.resources.values(),
+        &graph.snapshot.resource_dependencies,
+    )?;
+    for id in &order {
+        let specification = &graph.snapshot.resources[id];
         if specification.ownership == ResourceOwnership::Borrowed {
             continue;
         }
@@ -3114,7 +3519,10 @@ pub(super) async fn dispose_resources(graph: &mut ComputationGraph) -> GraphResu
             state.resources.get_mut(id).expect("resource").realization =
                 ResourceRealization::CleanupRequired;
         });
-        let result = tokio::time::timeout(graph.cleanup_timeout, resource.shutdown()).await;
+        let result = match super::resources::ensure_released_dependents(graph, id) {
+            Ok(()) => tokio::time::timeout(graph.cleanup_timeout, resource.shutdown()).await,
+            Err(error) => Ok(Err(anyhow::Error::new(error))),
+        };
         match result {
             Ok(Ok(())) => {
                 graph.resource_handles.remove(id);
@@ -3155,5 +3563,168 @@ pub(super) async fn dispose_resources(graph: &mut ComputationGraph) -> GraphResu
             primary: None,
             errors: failures,
         })
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::computation::v1::{
+        ComponentDescriptor, ComponentRecovery, ComputationComponent, EnvelopeSource,
+        GraphChangeCodec, OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection,
+        RecoveryGuarantee, RecoveryRequirement, RecoveryScope,
+    };
+
+    #[tokio::test]
+    async fn ready_command_queues_alternate_without_starvation() {
+        let (sender, mut receiver) = command_channel();
+        for _ in 0..COMMAND_CAPACITY {
+            sender.try_send(Command::AutoStart).unwrap();
+            let (reply, _response) = oneshot::channel();
+            sender
+                .send(Command::HandleStop {
+                    component: ComponentId::try_new("pending").unwrap(),
+                    generation: ComponentGeneration(1),
+                    reply,
+                })
+                .await
+                .unwrap();
+        }
+        for _ in 0..COMMAND_CAPACITY {
+            assert!(matches!(receiver.recv().await, Some(Command::AutoStart)));
+            assert!(matches!(
+                receiver.recv().await,
+                Some(Command::HandleStop { .. })
+            ));
+        }
+        assert!(receiver.recv().now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_one_command_queue_keeps_the_other_receivable() {
+        for close_regular in [false, true] {
+            let (sender, mut receiver) = command_channel();
+            let (remaining, closed) = if close_regular {
+                (sender.construction, sender.regular)
+            } else {
+                (sender.regular, sender.construction)
+            };
+            drop(closed);
+            assert!(receiver.recv().now_or_never().is_none());
+            remaining.send(Command::AutoStart).await.unwrap();
+            assert!(matches!(receiver.recv().await, Some(Command::AutoStart)));
+            drop(remaining);
+            assert!(receiver.recv().await.is_none());
+        }
+    }
+
+    struct AdmittedSource(ComponentDescriptor);
+
+    #[async_trait::async_trait]
+    impl ComputationComponent for AdmittedSource {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.0
+        }
+        fn recovery_contract(&self) -> ComponentRecovery {
+            ComponentRecovery::admitted(drasi_core::interface::StorageDurability::VOLATILE)
+        }
+        async fn start(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EnvelopeSource for AdmittedSource {
+        async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+            std::future::pending().await
+        }
+    }
+
+    #[test]
+    fn recovery_inspection_and_activation_ignore_unrelated_poisoned_contracts() {
+        let source = |name| {
+            Box::new(AdmittedSource(
+                ComponentDescriptor::try_new(
+                    ComponentId::try_new(name).unwrap(),
+                    vec![PortDescriptor::new(
+                        crate::computation::v1::PortId::try_new("out").unwrap(),
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )
+                .unwrap(),
+            ))
+        };
+        let selected = ComponentId::try_new("selected").unwrap();
+        let unrelated = ComponentId::try_new("unrelated").unwrap();
+        let request = |consumer| RecoveryRequirement {
+            consumer,
+            scope: RecoveryScope::MemoryLifetime,
+            guarantees: [RecoveryGuarantee::Acceptance].into(),
+        };
+        let mut graph = ComputationGraph::builder("inspection-isolation")
+            .source(source("selected"))
+            .source(source("unrelated"))
+            .for_additions()
+            .require_recovery(request(selected.clone()))
+            .build()
+            .unwrap();
+        let slot = graph.components[graph.ids[&unrelated]].clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = slot.recovery.lock().unwrap();
+            panic!("injected unrelated metadata poison");
+        })
+        .join()
+        .is_err());
+        assert!(graph
+            .recovery_report(&request(selected.clone()))
+            .unwrap()
+            .satisfied());
+        assert!(graph.recovery_report(&request(unrelated.clone())).is_err());
+        graph.snapshot.recovery_requirements = vec![request(unrelated)];
+        assert!(graph
+            .validate_recovery_activation(&selected)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn construction_does_not_remove_backpressure_or_block_handle_stop() {
+        let (sender, mut receiver) = command_channel();
+        for _ in 0..COMMAND_CAPACITY {
+            sender.try_send(Command::AutoStart).unwrap();
+        }
+        assert!(matches!(
+            sender.try_send(Command::AutoStart),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        let send = sender.send(Command::AutoStart);
+        tokio::pin!(send);
+        assert!(futures::poll!(&mut send).is_pending());
+        assert!(receiver.recv_during_construction().now_or_never().is_none());
+        let (reply, _response) = oneshot::channel();
+        sender
+            .send(Command::HandleStop {
+                component: ComponentId::try_new("pending").unwrap(),
+                generation: ComponentGeneration(1),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            receiver.recv_during_construction().await,
+            Some(Command::HandleStop { .. })
+        ));
+        assert!(futures::poll!(&mut send).is_pending());
+        assert!(matches!(receiver.recv().await, Some(Command::AutoStart)));
+        send.await.unwrap();
+        for _ in 0..COMMAND_CAPACITY {
+            assert!(matches!(receiver.recv().await, Some(Command::AutoStart)));
+        }
+        assert!(receiver.recv().now_or_never().is_none());
     }
 }

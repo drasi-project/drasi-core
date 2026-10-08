@@ -18,7 +18,9 @@ use async_trait::async_trait;
 
 use crate::interface::{CheckpointStore, IndexError, IndexSet, LiveResultsWriter, OutboxWriter};
 
-use super::{AtomicResultTransaction, ComputationQueryError, Result, TransactionDomain};
+use super::{
+    AtomicResultTransaction, ComputationQueryError, Result, StorageDurability, TransactionDomain,
+};
 
 /// A constructed resource and its explicit, optional transaction participation.
 /// This does not extend the legacy writer/plugin traits.
@@ -64,6 +66,8 @@ pub struct ComputationIndexes {
     live_results: Option<ComputationResource<dyn LiveResultsWriter>>,
     identity: Arc<()>,
     cleanup: Option<Arc<dyn ComputationResourceCleanup>>,
+    durability: StorageDurability,
+    pub(super) group_session: Option<Arc<super::transaction_group::GroupSession>>,
 }
 
 impl ComputationIndexes {
@@ -88,7 +92,61 @@ impl ComputationIndexes {
             live_results,
             identity: Arc::new(()),
             cleanup: None,
+            durability: StorageDurability::UNKNOWN,
+            group_session: None,
         })
+    }
+
+    /// Declare the commit boundary of this constructed bundle. This does not
+    /// establish atomic participation; `atomic_result_transaction` checks that.
+    pub fn with_durability(mut self, durability: StorageDurability) -> Self {
+        self.durability = durability;
+        self
+    }
+
+    pub fn durability(&self) -> StorageDurability {
+        self.durability
+    }
+
+    pub(super) fn for_group_member(
+        &self,
+        session: Arc<super::transaction_group::GroupSession>,
+        journal: Option<&str>,
+    ) -> Result<Self> {
+        self.atomic_result_transaction()?;
+        let control: Arc<dyn crate::interface::SessionControl> = session.clone();
+        let domain = TransactionDomain::new(control.clone());
+        let mut resources = Self::try_new(
+            IndexSet {
+                element_index: self.set.element_index.clone(),
+                archive_index: self.set.archive_index.clone(),
+                result_index: self.set.result_index.clone(),
+                future_queue: self.set.future_queue.clone(),
+                session_control: control,
+            },
+            Some(domain.clone()),
+            Some(ComputationResource::participating(
+                self.checkpoint_store().expect("atomic checkpoint").clone(),
+                &domain,
+            )),
+            Some(ComputationResource::participating(
+                Arc::new(super::group_outbox::GroupOutbox::new(
+                    self.outbox_writer().expect("atomic outbox").clone(),
+                    journal,
+                )),
+                &domain,
+            )),
+            Some(ComputationResource::participating(
+                self.live_results_writer()
+                    .expect("atomic projection")
+                    .clone(),
+                &domain,
+            )),
+        )?
+        .with_cleanup(session.clone())
+        .with_durability(self.durability);
+        resources.group_session = Some(session);
+        Ok(resources)
     }
 
     pub fn with_cleanup(mut self, cleanup: Arc<dyn ComputationResourceCleanup>) -> Self {
@@ -112,6 +170,7 @@ impl ComputationIndexes {
     pub fn with_fallback_checkpoint(mut self, store: Arc<dyn CheckpointStore>) -> Self {
         if self.checkpoint.is_none() {
             self.checkpoint = Some(ComputationResource::independent(store));
+            self.durability = self.durability.intersection(StorageDurability::UNKNOWN);
         }
         self
     }
@@ -168,6 +227,25 @@ pub trait ComputationIndexProvider: Send + Sync {
     ) -> std::result::Result<ComputationIndexes, IndexError>;
 
     fn is_volatile(&self) -> bool;
+
+    /// The actual prerequisite of a namespace-only wrapper. This is a declared
+    /// ownership link, never a matching path or a shared transaction guarantee.
+    fn provider_dependency(&self) -> Option<&Arc<dyn ComputationIndexProvider>> {
+        None
+    }
+
+    /// Actual shared-session owner, when the provider exposes grouped resources.
+    fn transaction_group(&self) -> Option<&super::ComputationTransactionGroup> {
+        None
+    }
+
+    fn durability(&self) -> StorageDurability {
+        if self.is_volatile() {
+            StorageDurability::VOLATILE
+        } else {
+            StorageDurability::UNKNOWN
+        }
+    }
 }
 
 /// Explicit ownership of provider work that can outlive a cancelled await.
@@ -213,6 +291,7 @@ impl ComputationIndexProvider for InMemoryComputationProvider {
             None,
             None,
         )
+        .map(|indexes| indexes.with_durability(StorageDurability::VOLATILE))
         .map_err(IndexError::other)
     }
     fn is_volatile(&self) -> bool {

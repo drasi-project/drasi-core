@@ -31,6 +31,8 @@ pub mod connection;
 pub mod descriptor;
 pub mod grpc;
 pub mod helpers;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod proto;
 mod runner_adaptive;
 mod runner_fixed;

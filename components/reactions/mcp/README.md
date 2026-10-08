@@ -135,11 +135,32 @@ Notifications use MCP JSON-RPC format:
 
 ## Integration Test
 
-Run the integration test (ignored by default):
+Run the ordinary integration and lifecycle tests:
 
 ```bash
-cargo test -p drasi-reaction-mcp -- --ignored --nocapture
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test -p drasi-reaction-mcp --lib --tests
 ```
+
+## Lifecycle
+
+`start()` binds the listener before reporting `Running`; the bound-port handle
+is populated before start returns and cleared after successful stop. Bind
+failures retain their I/O cause and do not start workers.
+
+Await `stop()` before restarting. Server and processing workers are owned before
+spawning. Stop closes live streams, drains HTTP requests, clears sessions and
+subscription indexes, and joins processing before publishing `Stopped`.
+Cancellation or a five-second server-drain timeout retains ownership; retry
+`stop()` to complete cleanup. The server is not aborted while it owns unfinished
+requests, and even cancelled session cleanup after worker exit blocks restart.
+
+Disconnect closes the session channel synchronously and wakes the existing
+owned processing worker to remove closed sessions. It does not spawn cleanup
+tasks or add another worker. Closed sessions cannot recreate subscriptions while
+cleanup is pending. Current query results retain their existing in-memory
+behavior; these changes do not add durable notifications or client handling
+acknowledgements. Full session queues still disconnect, and template failures
+still log and skip.
 
 ## Limitations
 

@@ -467,7 +467,7 @@ async fn handle_socket(
     let subscriptions = Arc::new(RwLock::new(allowed_query_ids.clone()));
 
     let subscriptions_for_send = Arc::clone(&subscriptions);
-    let mut send_task = tokio::spawn(async move {
+    let send = async move {
         loop {
             let hub_message = match hub_receiver.recv().await {
                 Ok(message) => message,
@@ -501,10 +501,10 @@ async fn handle_socket(
                 break;
             }
         }
-    });
+    };
 
     let subscriptions_for_receive = Arc::clone(&subscriptions);
-    let mut receive_task = tokio::spawn(async move {
+    let receive = async move {
         while let Some(message_result) = receiver.next().await {
             let message = match message_result {
                 Ok(message) => message,
@@ -538,17 +538,13 @@ async fn handle_socket(
                 _ => {}
             }
         }
-    });
+    };
 
     tokio::select! {
-        _ = &mut send_task => receive_task.abort(),
-        _ = &mut receive_task => send_task.abort(),
-        // Server shutdown: terminate both tasks so the connection closes and the
-        // axum graceful-shutdown can complete promptly.
-        _ = shutdown_rx.wait_for(|signalled| *signalled) => {
-            send_task.abort();
-            receive_task.abort();
-        }
+        biased;
+        _ = shutdown_rx.wait_for(|signalled| *signalled) => {}
+        _ = send => {}
+        _ = receive => {}
     }
 }
 

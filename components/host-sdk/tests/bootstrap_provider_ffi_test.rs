@@ -480,6 +480,8 @@ async fn releasing_receivers_cancels_provider() {
         FfiStr::from_str("probe-request"),
         FfiStr::from_str("probe-server"),
         FfiStr::from_str("probe-src"),
+        FfiStr::from_str("null"),
+        FfiStr::from_str("{}"),
     );
     assert!(!stream_ptr.is_null());
     let stream = unsafe { *Box::from_raw(stream_ptr) };
@@ -541,6 +543,8 @@ async fn null_label_arrays_are_treated_as_empty() {
         FfiStr::from_str("probe-request"),
         FfiStr::from_str("probe-server"),
         FfiStr::from_str("probe-src"),
+        FfiStr::from_str("null"),
+        FfiStr::from_str("{}"),
     );
     assert!(!stream_ptr.is_null());
     let stream = unsafe { *Box::from_raw(stream_ptr) };
@@ -570,6 +574,167 @@ async fn null_label_arrays_are_treated_as_empty() {
     assert_eq!(drain.await.unwrap(), N);
 
     (vtable.drop_fn)(vtable.state);
+}
+
+struct ArgumentProvider {
+    settings: Option<drasi_lib::config::SourceSubscriptionSettings>,
+    properties: std::collections::HashMap<String, serde_json::Value>,
+    released: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for ArgumentProvider {
+    fn drop(&mut self) {
+        if let Some(released) = self.released.take() {
+            let _ = released.send(());
+        }
+    }
+}
+
+#[async_trait]
+impl BootstrapProvider for ArgumentProvider {
+    async fn bootstrap(
+        &self,
+        request: BootstrapRequest,
+        context: &BootstrapContext,
+        _events: BootstrapEventSender,
+        settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+    ) -> anyhow::Result<BootstrapResult> {
+        anyhow::ensure!(request.query_id == req().query_id, "query ID changed");
+        anyhow::ensure!(request.request_id == req().request_id, "request ID changed");
+        anyhow::ensure!(request.node_labels == req().node_labels, "labels changed");
+        anyhow::ensure!(context.server_id == ctx().server_id, "server ID changed");
+        anyhow::ensure!(context.source_id == ctx().source_id, "source ID changed");
+        anyhow::ensure!(
+            settings == self.settings.as_ref(),
+            "subscription settings changed"
+        );
+        anyhow::ensure!(
+            context.properties() == &self.properties,
+            "runtime properties changed"
+        );
+        Ok(BootstrapResult::default())
+    }
+}
+
+async fn arguments_and_ownership_through_both_proxies() {
+    use drasi_lib::config::SourceSubscriptionSettings;
+    for settings in [
+        None,
+        Some(SourceSubscriptionSettings {
+            source_id: "probe-src".into(),
+            enable_bootstrap: false,
+            query_id: "probe-query".into(),
+            nodes: ["Probe".into(), "Second".into()].into(),
+            relations: ["CONNECTS".into()].into(),
+            resume_from: Some(bytes::Bytes::from_static(&[0, 255, 17])),
+            resume_sequence: Some(0),
+            request_position_handle: true,
+        }),
+        Some(SourceSubscriptionSettings {
+            source_id: "probe-src".into(),
+            enable_bootstrap: true,
+            query_id: "probe-query".into(),
+            nodes: Default::default(),
+            relations: Default::default(),
+            resume_from: None,
+            resume_sequence: None,
+            request_position_handle: false,
+        }),
+    ] {
+        let properties = std::collections::HashMap::from([
+            (
+                "snapshot".into(),
+                serde_json::json!({"partition": [1, 2], "boundary": "0/ABC"}),
+            ),
+            ("filter".into(), serde_json::json!(null)),
+        ]);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let inner = BootstrapProviderProxy::new(
+            build_bootstrap_provider_vtable(
+                Box::new(ArgumentProvider {
+                    settings: settings.clone(),
+                    properties: properties.clone(),
+                    released: Some(release_tx),
+                }),
+                noop_executor,
+            ),
+            None,
+        );
+        let proxy = FfiBootstrapProviderProxy::new(build_bootstrap_provider_vtable(
+            Box::new(inner),
+            noop_executor,
+        ));
+        let context =
+            BootstrapContext::with_properties(ctx().server_id, ctx().source_id, properties);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let result = proxy
+            .bootstrap(req(), &context, tx, settings.as_ref())
+            .await
+            .expect("bootstrap succeeds through both FFI proxies");
+        assert_eq!(result.event_count, 0);
+        assert!(rx.recv().await.is_none());
+        drop(proxy);
+        tokio::time::timeout(Duration::from_secs(5), release_rx)
+            .await
+            .expect("bootstrap ownership leaked")
+            .expect("release notification lost");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bootstrap_arguments_and_ownership_current_thread() {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        arguments_and_ownership_through_both_proxies(),
+    )
+    .await
+    .expect("bootstrap arguments deadlocked");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrap_arguments_and_ownership_multi_thread() {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        arguments_and_ownership_through_both_proxies(),
+    )
+    .await
+    .expect("bootstrap arguments deadlocked");
+}
+
+#[tokio::test]
+async fn malformed_bootstrap_arguments_fail_instead_of_using_defaults() {
+    for (settings, properties, expected) in [
+        ("{", "{}", "invalid bootstrap settings"),
+        ("null", "[]", "invalid bootstrap properties"),
+    ] {
+        let vtable = build_bootstrap_provider_vtable(Box::new(PanickingProvider), noop_executor);
+        let stream = (vtable.bootstrap_fn)(
+            vtable.state,
+            FfiStr::from_str("query"),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            FfiStr::from_str("request"),
+            FfiStr::from_str("server"),
+            FfiStr::from_str("source"),
+            FfiStr::from_str(settings),
+            FfiStr::from_str(properties),
+        );
+        assert!(!stream.is_null());
+        let stream = unsafe { *Box::from_raw(stream) };
+        let consumer = BootstrapStreamConsumer::new(unsafe { *Box::from_raw(stream.events) });
+        let (result, _guard) = wrap_result_receiver(unsafe { *Box::from_raw(stream.result) });
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        assert_eq!(consumer.forward_into(&tx).await, 0);
+        assert!(result
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains(expected));
+        (vtable.drop_fn)(vtable.state);
+    }
 }
 
 /// A provider that panics before producing a result must surface as the

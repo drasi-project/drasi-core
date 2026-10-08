@@ -167,9 +167,14 @@ impl ComputationIndexProvider for LegacyIndexProviderAdapter {
             live,
         )
         .map_err(IndexError::other)?;
-        Ok(indexes.with_cleanup(work))
+        Ok(indexes
+            .with_cleanup(work)
+            .with_durability(self.provider.durability()))
     }
     fn is_volatile(&self) -> bool {
         self.provider.is_volatile()
+    }
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        self.provider.durability()
     }
 }

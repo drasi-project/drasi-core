@@ -21,6 +21,7 @@ use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
@@ -34,6 +35,7 @@ use crate::SqsReactionBuilder;
 pub struct SqsReaction {
     base: ReactionBase,
     config: SqsReactionConfig,
+    cleanup_required: Mutex<bool>,
 }
 
 impl SqsReaction {
@@ -51,6 +53,7 @@ impl SqsReaction {
         Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         }
     }
 
@@ -66,6 +69,7 @@ impl SqsReaction {
         Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         }
     }
 
@@ -83,6 +87,7 @@ impl SqsReaction {
         Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         }
     }
 
@@ -333,9 +338,14 @@ impl Reaction for SqsReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.base.processing_task.read().await.is_some() {
+            return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         log_component_start("SQS Reaction", &self.base.id);
         info!(
-            "[{}] SQS reaction started for queue: {}",
+            "[{}] SQS reaction starting for queue: {}",
             self.base.id, self.config.queue_url
         );
 
@@ -353,15 +363,7 @@ impl Reaction for SqsReaction {
             )
             .await;
 
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("SQS reaction started".to_string()),
-            )
-            .await;
-
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
-        let status_handle = self.base.status_handle();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
         let queue_url = self.config.queue_url.clone();
@@ -370,7 +372,8 @@ impl Reaction for SqsReaction {
         let routes = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
 
-        // Initialize AWS client eagerly so credential/endpoint errors surface immediately.
+        // Construct before readiness; credentials and queue access are still
+        // validated by actual requests, not by SDK configuration loading.
         let mut loader = aws_config::from_env();
         if let Some(endpoint) = &self.config.endpoint_url {
             loader = loader.endpoint_url(endpoint);
@@ -387,16 +390,11 @@ impl Reaction for SqsReaction {
         let shared_config = loader.load().await;
         let client = Client::new(&shared_config);
 
-        let processing_task = tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
             let mut handlebars = Handlebars::new();
             Self::register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
-                    info!("[{reaction_id}] SQS reaction not running, breaking loop");
-                    break;
-                }
-
                 let query_result_arc = tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
@@ -501,13 +499,21 @@ impl Reaction for SqsReaction {
             }
 
             info!("[{reaction_id}] SQS processing loop exited");
-        });
-        self.base.set_processing_task(processing_task).await;
+        })
+        .await?;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("SQS reaction started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await?;
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
+        self.base.stop_common_gracefully().await?;
 
         self.base
             .set_status(
@@ -515,6 +521,7 @@ impl Reaction for SqsReaction {
                 Some("SQS reaction stopped successfully".to_string()),
             )
             .await;
+        *cleanup_required = false;
         Ok(())
     }
 
@@ -526,6 +533,10 @@ impl Reaction for SqsReaction {
         self.base.enqueue_query_result(result).await
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

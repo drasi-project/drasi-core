@@ -1684,22 +1684,23 @@ impl SourceBase {
             let _ = tx.send(());
         }
 
-        // Wait for task to complete
-        if let Some(mut handle) = self.task_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
-                Ok(Ok(())) => {
+        {
+            let mut task = self.task_handle.write().await;
+            match crate::context::workers::join_owned_worker(
+                &mut task,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(error).context(format!("Source '{}' worker cleanup", self.id))
+            })? {
+                crate::context::workers::WorkerCompletion::Completed(()) => {
                     info!("Source '{}' task completed successfully", self.id);
                 }
-                Ok(Err(e)) => {
-                    error!("Source '{}' task panicked: {}", self.id, e);
+                crate::context::workers::WorkerCompletion::Cancelled => {
+                    warn!("Source '{}' cancelled task has been joined", self.id);
                 }
-                Err(_) => {
-                    warn!(
-                        "Source '{}' task did not complete within timeout, aborting",
-                        self.id
-                    );
-                    handle.abort();
-                }
+                crate::context::workers::WorkerCompletion::Absent => {}
             }
         }
 
@@ -1711,10 +1712,7 @@ impl SourceBase {
         //
         // Broadcast mode keeps a single persistent dispatcher that hands
         // out receivers; channel mode creates one dispatcher per subscriber.
-        if self.dispatch_mode == DispatchMode::Channel {
-            let mut dispatchers = self.dispatchers.write().await;
-            dispatchers.clear();
-        }
+        self.clear_dispatchers().await;
 
         self.set_status(
             ComponentStatus::Stopped,
@@ -3307,8 +3305,8 @@ mod tests {
             "high-water mark should be set after first dispatch"
         );
 
-        // Stop: clear dispatchers — the stale [0x30] mark for index 0 must go.
-        base.clear_dispatchers().await;
+        // Stop: the stale [0x30] mark for index 0 must go with its dispatcher.
+        base.stop_common().await.unwrap();
         assert!(
             base.subscriber_resume_positions.read().await.is_empty(),
             "clear_dispatchers must reset per-subscriber position filter state"

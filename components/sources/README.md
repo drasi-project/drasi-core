@@ -486,7 +486,7 @@ impl Source for MySource {
         let label = self.config.label.clone();
         let interval_ms = self.config.interval_ms;
 
-        let task = tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.task_handle, async move {
             let mut ticker = interval(Duration::from_millis(interval_ms));
             let mut value = 0_i64;
 
@@ -512,9 +512,7 @@ impl Source for MySource {
                     }
                 }
             }
-        });
-
-        self.base.set_task_handle(task).await;
+        }).await?;
         Ok(())
     }
 
@@ -651,8 +649,8 @@ Typical Source lifecycle:
 4. **Subscribe** — queries call `subscribe(settings)` and receive event channels.
 5. **Stream** — source dispatches live `SourceEventWrapper` values with required
     sequence numbers through `SourceBase`.
-6. **Stop** — signal tasks, wait briefly, abort if necessary, clear stale
-   channel-mode dispatchers.
+6. **Stop** — signal and join tasks, returning an error if cleanup remains
+   incomplete; then clear stale channel-mode dispatchers.
 7. **Deprovision** — optional permanent cleanup when a source is deleted with
    cleanup enabled.
 
@@ -936,9 +934,9 @@ Begin ingestion. This usually means:
 1. validate runtime dependencies from `SourceRuntimeContext`
 2. connect to the external system
 3. register WAL or upstream cursors if needed
-4. spawn one or more tasks
-5. store task and shutdown handles in `SourceBase`
-6. set `ComponentStatus::Running`
+4. install shutdown signals and register owned worker slots before spawning
+5. finish protocol-specific readiness, including binding any listener
+6. publish `ComponentStatus::Running` without overwriting a worker failure
 
 Do not block forever inside `start()`. Spawn long-running work and return after
 startup succeeds.
@@ -947,7 +945,31 @@ startup succeeds.
 
 Stop ingestion and clean up local resources. Use `SourceBase::stop_common()` if
 your source stores a `oneshot::Sender<()>` and task handle in `SourceBase`.
-Sources with custom stop logic MUST call `clear_dispatchers()` for channel mode.
+Sources with custom task slots MUST join those workers before calling
+`stop_common()`, which also clears channel dispatchers and subscriber position
+filters. Custom lifecycle calls must be serialized.
+Use `context::workers::spawn_owned_worker` to acquire a vacant task slot before
+spawning, rather than spawning and then awaiting `set_task_handle`. A finished
+but unjoined worker still owns its slot. Custom cleanup should use
+`join_owned_worker` or `cancel_owned_worker` without taking the handle out first.
+Cancellation preserves the handle; timeout requests abort and returns a typed
+error with joining still required. Do not report `Stopped` or start replacement
+work until cleanup succeeds.
+
+Use `join_owned_worker_gracefully` instead when aborting would abandon an
+in-flight request/state operation or destroy a child-drain boundary. Its timeout
+retains the worker without aborting it. Keep an explicit cleanup-required guard
+until all base/resource cleanup finishes: cancellation can happen after the
+worker handle has been joined but before dispatchers are cleared. Cloudflare
+Radar, Open511 and HERE Traffic demonstrate this polling pattern. Restart must
+also reset persistent shutdown signals and create fresh receivers.
+
+Register blocking work with `spawn_owned_blocking_worker`, rather than moving an
+untracked thread handle into a stop-time join task. SQLite keeps database, HTTP
+and dispatcher owners separately: it drains admitted requests before closing the
+database, then joins queued event dispatch before base cleanup. Its transaction
+and HTTP handles stay bound to the accepting worker so late continuations cannot
+operate on a replacement connection.
 
 #### `status` — **MUST**
 
@@ -1659,9 +1681,9 @@ is always the same:
 2. **Bind the port, and report `Running` only after the bind succeeds.** On bind
    failure, set `ComponentStatus::Error` and return `Err` so the failure surfaces
    at startup instead of as a silently dead source.
-3. Spawn the accept loop with `self.base.clone_shared()`; store the shutdown
-   sender with `set_shutdown_tx` and the task handle with `set_task_handle` so
-   `stop_common()` tears it down.
+3. Spawn the accept loop with `self.base.clone_shared()` using
+   `context::workers::spawn_owned_worker(&self.base.task_handle, future)`;
+   store the shutdown sender with `set_shutdown_tx` so `stop_common()` joins it.
 4. For each accepted request: authenticate/validate (your concern), map the
    payload to a `SourceChange` (your concern), then — Drasi's concern —
    `wal.append(...)` if durable and `base.dispatch_source_change(change)`.
@@ -1926,7 +1948,7 @@ impl Source for FeedSource {
         let source_id = self.base.get_id().to_string();
         let label = self.config.label.clone();
 
-        let task = tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.task_handle, async move {
             base.set_status(ComponentStatus::Running, Some("listening".into()))
                 .await;
             loop {
@@ -1951,8 +1973,7 @@ impl Source for FeedSource {
             }
             // Drain: persist the final cursor on graceful shutdown.
             save_counter(&base, "events_ingested", ingested).await;
-        });
-        self.base.set_task_handle(task).await;
+        }).await?;
         Ok(())
     }
 

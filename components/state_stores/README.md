@@ -39,6 +39,9 @@ The `StateStoreProvider` trait defines the interface for all state store impleme
 ```rust
 #[async_trait]
 pub trait StateStoreProvider: Send + Sync {
+    // Successful-write survival; undeclared providers return UNKNOWN.
+    fn durability(&self) -> StorageDurability { StorageDurability::UNKNOWN }
+
     // Single-key operations
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>>;
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()>;
@@ -76,7 +79,16 @@ pub trait StateStoreProvider: Send + Sync {
 | `list_keys` | Get all keys in a store partition. |
 | `store_exists` | Check if a store has any data. |
 | `key_count` | Count keys in a store partition. |
-| `sync` | Force durability. No-op for memory provider. |
+| `sync` | Flush pending provider work. A successful no-op is not evidence of crash survival. |
+| `durability` | Describe survival of successful writes across process restart, power loss, and loss of local storage. |
+
+`StorageDurability` is available from `drasi_lib::state_store`. The memory
+provider declares no crash survival. Redb explicitly commits mutations with
+`redb::Durability::Immediate` and declares process-restart and power-loss survival,
+assuming the filesystem and device honor sync requests. It does not recover from
+permanent loss of its local database. Custom providers default to unknown;
+`is_durable()` alone does not establish a specific failure guarantee. Existing
+FFI proxies do not yet forward these descriptions and remain unknown.
 
 ### Partitioning with StoreId
 

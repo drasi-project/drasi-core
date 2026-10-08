@@ -22,6 +22,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{error, info};
 use reqwest::Client;
+use tokio::sync::Mutex;
 
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
@@ -40,6 +41,7 @@ use crate::HttpReactionBuilder;
 pub struct HttpReaction {
     pub(crate) base: ReactionBase,
     pub(crate) config: HttpReactionConfig,
+    cleanup_required: Mutex<bool>,
 }
 
 impl HttpReaction {
@@ -60,6 +62,7 @@ impl HttpReaction {
         Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         }
     }
 
@@ -81,6 +84,7 @@ impl HttpReaction {
         Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         }
     }
 
@@ -142,6 +146,11 @@ impl Reaction for HttpReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.base.processing_task.read().await.is_some() {
+            return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         log_component_start("HTTP Reaction", &self.base.id);
 
         let mode = if self.config.adaptive.is_some() {
@@ -196,33 +205,36 @@ impl Reaction for HttpReaction {
         let base = self.base.clone_shared();
         let config = self.config.clone();
 
-        let handle = if let Some(adaptive_cfg) = self.config.adaptive.as_ref() {
-            let runtime_adaptive = to_runtime_adaptive(adaptive_cfg);
-            tokio::spawn(run_adaptive_loop(
-                reaction_name,
-                base,
-                config,
-                runtime_adaptive,
-                client,
-                shutdown_rx,
-                checkpoint_state,
-                policy,
-            ))
-        } else {
-            let handlebars = build_handlebars();
-            tokio::spawn(run_standard_loop(
-                reaction_name,
-                base,
-                config,
-                client,
-                handlebars,
-                shutdown_rx,
-                checkpoint_state,
-                policy,
-            ))
-        };
-
-        self.base.set_processing_task(handle).await;
+        let runtime_adaptive = self.config.adaptive.as_ref().map(to_runtime_adaptive);
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            if let Some(runtime_adaptive) = runtime_adaptive {
+                run_adaptive_loop(
+                    reaction_name,
+                    base,
+                    config,
+                    runtime_adaptive,
+                    client,
+                    shutdown_rx,
+                    checkpoint_state,
+                    policy,
+                )
+                .await;
+            } else {
+                let handlebars = build_handlebars();
+                run_standard_loop(
+                    reaction_name,
+                    base,
+                    config,
+                    client,
+                    handlebars,
+                    shutdown_rx,
+                    checkpoint_state,
+                    policy,
+                )
+                .await;
+            }
+        })
+        .await?;
         self.base
             .set_status(
                 ComponentStatus::Running,
@@ -233,7 +245,11 @@ impl Reaction for HttpReaction {
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
+        self.base.stop_common_gracefully().await?;
+        *cleanup_required = false;
+        Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {

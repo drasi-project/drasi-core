@@ -442,10 +442,27 @@ impl ReactionBase {
     ///
     /// This method handles:
     /// 1. Sending shutdown signal to processing task (for graceful termination)
-    /// 2. Aborting all subscription forwarder tasks
-    /// 3. Waiting for or aborting the processing task
+    /// 2. Aborting and joining all subscription forwarder tasks
+    /// 3. Joining the processing task, retaining ownership on cancellation/timeout
     /// 4. Draining the priority queue
     pub async fn stop_common(&self) -> Result<()> {
+        self.stop_common_with_policy(false).await
+    }
+
+    /// Stops without aborting a processor that must finish in-flight effects.
+    ///
+    /// Timeout and cancellation retain ownership. Callers must prevent restart
+    /// until this method and any additional component cleanup have succeeded.
+    pub async fn stop_common_gracefully(&self) -> Result<()> {
+        self.set_status(
+            ComponentStatus::Stopping,
+            Some(format!("Stopping reaction '{}'", self.id)),
+        )
+        .await;
+        self.stop_common_with_policy(true).await
+    }
+
+    async fn stop_common_with_policy(&self, graceful: bool) -> Result<()> {
         info!("Stopping reaction: {}", self.id);
 
         // Send shutdown signal to processing task (if it's using tokio::select!)
@@ -453,36 +470,41 @@ impl ReactionBase {
             let _ = tx.send(());
         }
 
-        // Abort all subscription forwarder tasks
-        let mut subscription_tasks = self.subscription_tasks.write().await;
-        for task in subscription_tasks.drain(..) {
-            task.abort();
+        {
+            let mut subscription_tasks = self.subscription_tasks.write().await;
+            crate::context::workers::cancel_owned_workers(
+                &mut subscription_tasks,
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(error).context(format!(
+                    "Reaction '{}' subscription worker cleanup",
+                    self.id
+                ))
+            })?;
         }
-        drop(subscription_tasks);
-
-        // Wait for the processing task to complete (with timeout), or abort it
-        let mut processing_task = self.processing_task.write().await;
-        if let Some(mut task) = processing_task.take() {
-            // Give the task a short time to respond to the shutdown signal
-            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
-                Ok(Ok(())) => {
+        {
+            let mut task = self.processing_task.write().await;
+            let timeout = std::time::Duration::from_secs(2);
+            let completion = if graceful {
+                crate::context::workers::join_owned_worker_gracefully(&mut task, timeout).await
+            } else {
+                crate::context::workers::join_owned_worker(&mut task, timeout).await
+            };
+            match completion.map_err(|error| {
+                anyhow::Error::new(error)
+                    .context(format!("Reaction '{}' processing worker cleanup", self.id))
+            })? {
+                crate::context::workers::WorkerCompletion::Completed(()) => {
                     debug!("[{}] Processing task completed gracefully", self.id);
                 }
-                Ok(Err(e)) => {
-                    // Task was aborted or panicked
-                    debug!("[{}] Processing task ended: {}", self.id, e);
+                crate::context::workers::WorkerCompletion::Cancelled => {
+                    warn!("[{}] Cancelled processing task has been joined", self.id);
                 }
-                Err(_) => {
-                    // Timeout - task didn't respond to shutdown signal
-                    warn!(
-                        "[{}] Processing task did not respond to shutdown signal within timeout, aborting",
-                        self.id
-                    );
-                    task.abort();
-                }
+                crate::context::workers::WorkerCompletion::Absent => {}
             }
         }
-        drop(processing_task);
 
         // Drain the priority queue
         let drained_events = self.priority_queue.drain().await;
@@ -927,6 +949,59 @@ mod tests {
             shutdown_received.load(Ordering::SeqCst),
             "Processing task should have received shutdown signal"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn graceful_stop_retains_a_submitted_blocking_operation() -> Result<()> {
+        use crate::context::workers::{spawn_owned_worker, WorkerCleanupError};
+
+        let base = ReactionBase::new(ReactionBaseParams::new("blocking-effect", vec![]));
+        base.set_status(ComponentStatus::Running, None).await;
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        spawn_owned_worker(&base.processing_task, {
+            let completed = completed.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    started.send(()).expect("blocking operation started");
+                    let _ = blocked.recv();
+                    completed.store(true, Ordering::SeqCst);
+                })
+                .await
+                .expect("submitted operation joined");
+            }
+        })
+        .await?;
+        ready.await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), base.stop_common_gracefully(),)
+                .await
+                .is_err()
+        );
+        let error = base.stop_common_gracefully().await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WorkerCleanupError>(),
+            Some(WorkerCleanupError::TimedOut { .. })
+        ));
+        tokio::task::yield_now().await;
+        assert!(!base
+            .processing_task
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        assert!(!completed.load(Ordering::SeqCst));
+        assert_eq!(base.get_status().await, ComponentStatus::Stopping);
+
+        release.send(())?;
+        base.stop_common_gracefully().await?;
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(base.processing_task.read().await.is_none());
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+        base.stop_common_gracefully().await?;
+        Ok(())
     }
 
     #[tokio::test]

@@ -16,6 +16,51 @@
 
 use drasi_core::models::ElementValue;
 
+/// Native identity shared by initial loading and live changes; legacy IDs are unchanged.
+pub fn transaction_element_id(
+    database: &str,
+    table: &str,
+    parts: &[(String, ElementValue)],
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !database.is_empty() && !table.is_empty() && !parts.is_empty(),
+        "incomplete MySQL key"
+    );
+    let mut sorted = std::collections::BTreeMap::new();
+    for (column, value) in parts {
+        anyhow::ensure!(!column.is_empty(), "empty MySQL key column");
+        match value {
+            ElementValue::Null | ElementValue::Object(_) => {
+                anyhow::bail!("unsupported MySQL key value")
+            }
+            ElementValue::Float(value) => {
+                anyhow::ensure!(value.is_finite(), "non-finite MySQL key")
+            }
+            ElementValue::List(values) => anyhow::ensure!(
+                values
+                    .iter()
+                    .all(|value| matches!(value, ElementValue::Integer(0..=255))),
+                "MySQL binary keys require bytes"
+            ),
+            _ => {}
+        }
+        let value = match value {
+            ElementValue::Float(value) if value.0 == 0.0 => {
+                std::borrow::Cow::Owned(ElementValue::Float(0.0.into()))
+            }
+            value => std::borrow::Cow::Borrowed(value),
+        };
+        anyhow::ensure!(
+            sorted.insert(column, value).is_none(),
+            "duplicate MySQL key column"
+        );
+    }
+    Ok(format!(
+        "mysql:v1:{}",
+        serde_json::to_string(&(database, table, sorted))?
+    ))
+}
+
 /// Formats an `ElementValue` into a string suitable for use as part of an element ID key.
 pub fn format_value_for_key(value: &ElementValue) -> String {
     match value {
@@ -49,6 +94,39 @@ pub fn quote_identifier(value: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn native_keys_preserve_types_column_boundaries_and_order() -> anyhow::Result<()> {
+        let key = |parts: &[(String, ElementValue)]| transaction_element_id("db", "rows", parts);
+        let first = [
+            ("a".into(), ElementValue::String("x_y".into())),
+            ("b".into(), ElementValue::String("z".into())),
+        ];
+        let second = [
+            ("a".into(), ElementValue::String("x".into())),
+            ("b".into(), ElementValue::String("y_z".into())),
+        ];
+        assert_ne!(key(&first)?, key(&second)?);
+        assert_eq!(key(&first)?, key(&[first[1].clone(), first[0].clone()])?);
+        assert_ne!(
+            key(&[("a".into(), ElementValue::Integer(1))])?,
+            key(&[("a".into(), ElementValue::String("1".into()))])?
+        );
+        assert_ne!(
+            key(&[(
+                "a".into(),
+                ElementValue::List(vec![ElementValue::Integer(255)])
+            )])?,
+            key(&[("a".into(), ElementValue::String("255".into()))])?
+        );
+        assert!(key(&[("a".into(), ElementValue::Null)]).is_err());
+        assert!(key(&[first[0].clone(), first[0].clone()]).is_err());
+        assert_eq!(
+            key(&[("a".into(), ElementValue::Float((-0.0).into()))])?,
+            key(&[("a".into(), ElementValue::Float(0.0.into()))])?
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_format_value_for_key_null() {

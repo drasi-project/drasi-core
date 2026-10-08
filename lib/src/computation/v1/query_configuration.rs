@@ -32,6 +32,8 @@ pub struct QueryExecutionSettings {
     pub middleware: Vec<SourceMiddlewareConfig>,
     #[serde(default)]
     pub sources: Vec<SourceSubscriptionConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transactions: Option<super::SourceTransactionLimits>,
 }
 
 pub struct QueryMiddlewareResource(pub Arc<MiddlewareTypeRegistry>);
@@ -67,6 +69,7 @@ impl QueryExecutionSettings {
             joins: config.joins.clone().unwrap_or_default(),
             middleware: config.middleware.clone(),
             sources: config.sources.clone(),
+            source_transactions: None,
         }
     }
 
@@ -81,7 +84,10 @@ impl QueryExecutionSettings {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.joins.is_empty() && self.middleware.is_empty() && self.sources.is_empty()
+        self.joins.is_empty()
+            && self.middleware.is_empty()
+            && self.sources.is_empty()
+            && self.source_transactions.is_none()
     }
 
     pub(super) fn validate(&self, registry: Option<&MiddlewareTypeRegistry>) -> anyhow::Result<()> {

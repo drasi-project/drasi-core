@@ -32,6 +32,11 @@ pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
+pub mod bootstrap;
+pub mod consumer;
+pub mod recovery;
+pub mod services;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {

@@ -54,11 +54,13 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
-drasi-index-rocksdb = { workspace = true }
+drasi-source-sqlite = { path = "../sources/sqlite" }
+drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }
 tempfile = "3"
 libloading = "0.8"
 rmp-serde = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
@@ -67,3 +69,9 @@ serial_test = "3"
 im = "15"
 tokio-stream = "0.1"
 async-stream = "0.3"
+
+[[example]]
+name = "native_recovery"
+path = "tests/fixtures/native_recovery.rs"
+crate-type = ["cdylib"]
+test = false

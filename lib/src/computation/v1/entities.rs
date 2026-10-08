@@ -310,7 +310,7 @@ impl GraphEntity {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GraphEntityLinkKind {
-    /// A declared, observed component-provider, configuration or pipe resource dependency.
+    /// A declared resource, component-provider, configuration or pipe dependency.
     UsesResource,
     /// A host adapter refers to the actual component in an owning graph scope.
     UsesComponent,
@@ -494,6 +494,15 @@ impl ComputationTopology {
                     observed: observed.resources.get(id).cloned(),
                 }),
             );
+        }
+        for (id, dependencies) in &desired.resource_dependencies {
+            for dependency in dependencies.keys() {
+                topology.links.insert(GraphEntityLink {
+                    from: GraphEntityId::Resource(id.clone()),
+                    to: GraphEntityId::Resource(dependency.clone()),
+                    kind: GraphEntityLinkKind::UsesResource,
+                });
+            }
         }
         let mut families = BTreeMap::<Arc<str>, PluginFamilyEntity>::new();
         for (identity, dependent_components) in plugins {

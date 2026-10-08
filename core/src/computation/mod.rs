@@ -24,24 +24,35 @@
 //! [`ComputationTransaction`] provides the same serialized transaction and
 //! cancellation boundary for stateful components that do not run a query.
 
+mod group_outbox;
 mod indexes;
 mod io_scope;
 pub(crate) mod operation;
 mod query_adapter;
+mod query_results;
 mod scoped_index;
 pub use io_scope::{
     BlockingFailures as ComputationIoFailures, BlockingScope as ComputationIoScope,
 };
-pub use operation::ComputationTransaction;
+pub use operation::{ComputationTransaction, ComputationTransactionRetirement};
 pub use scoped_index::ScopedIndex;
 mod transaction;
+mod transaction_group;
 
+pub use crate::interface::{
+    DurabilityRequirementError, FailureMode, FailureSurvival, StorageDurability,
+};
 pub use indexes::{
     ComputationIndexProvider, ComputationIndexes, ComputationResource, ComputationResourceCleanup,
     InMemoryComputationProvider,
 };
 pub use query_adapter::ComputationQuery;
+pub use query_results::TransactionResultError;
 pub use transaction::{AtomicResultTransaction, TransactionDomain};
+pub use transaction_group::{
+    ComputationTransactionGroup, TransactionGroupContext, TransactionGroupError,
+    TransactionGroupMutation, TransactionGroupRetirement,
+};
 
 use crate::{
     evaluation::EvaluationError,

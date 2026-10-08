@@ -15,6 +15,181 @@
 use super::*;
 use crate::computation::v1::{ObservedResource, ResourceOwnership, ResourceRealization};
 
+pub(super) fn construction_order<'a>(
+    specifications: impl IntoIterator<Item = &'a ResourceSpecification>,
+    dependencies: &BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
+) -> GraphResult<Vec<ResourceId>> {
+    dependency_order(specifications, dependencies, false)
+}
+
+pub(super) fn cleanup_order<'a>(
+    specifications: impl IntoIterator<Item = &'a ResourceSpecification>,
+    dependencies: &BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
+) -> GraphResult<Vec<ResourceId>> {
+    dependency_order(specifications, dependencies, true)
+}
+
+fn dependency_order<'a>(
+    specifications: impl IntoIterator<Item = &'a ResourceSpecification>,
+    dependencies: &BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
+    cleanup: bool,
+) -> GraphResult<Vec<ResourceId>> {
+    let mut declarations = BTreeMap::new();
+    for specification in specifications {
+        if declarations
+            .insert(specification.id.clone(), specification)
+            .is_some()
+        {
+            return Err(topology("duplicate resource specification"));
+        }
+    }
+    let specifications = declarations;
+    let mut remaining: BTreeMap<_, usize> =
+        specifications.keys().map(|id| (id.clone(), 0)).collect();
+    let mut dependents = BTreeMap::<ResourceId, Vec<ResourceId>>::new();
+    for (id, required) in dependencies {
+        let resource = specifications
+            .get(id)
+            .ok_or_else(|| topology(format!("undeclared dependent resource {id}")))?;
+        for (dependency, role) in required {
+            let parent = specifications.get(dependency).ok_or_else(|| {
+                topology(format!(
+                    "resource {id} requires undeclared resource {dependency}"
+                ))
+            })?;
+            if parent.role != *role {
+                return Err(topology(format!(
+                    "resource {id} dependency {dependency} has the wrong role"
+                )));
+            }
+            if resource.ownership == ResourceOwnership::Borrowed
+                && parent.ownership == ResourceOwnership::Graph
+            {
+                return Err(topology(
+                    "a borrowed resource cannot retain a graph-owned dependency",
+                ));
+            }
+            let (first, next) = if cleanup {
+                (id, dependency)
+            } else {
+                (dependency, id)
+            };
+            *remaining.get_mut(next).expect("declared resource") += 1;
+            dependents
+                .entry(first.clone())
+                .or_default()
+                .push(next.clone());
+        }
+    }
+    let mut ready: BTreeSet<_> = remaining
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut order = Vec::with_capacity(specifications.len());
+    while let Some(id) = ready.pop_first() {
+        for dependent in dependents.get(&id).into_iter().flatten() {
+            let count = remaining.get_mut(dependent).expect("declared dependent");
+            *count -= 1;
+            if *count == 0 {
+                ready.insert(dependent.clone());
+            }
+        }
+        order.push(id);
+    }
+    if order.len() != specifications.len() {
+        return Err(topology("resource dependency cycle"));
+    }
+    Ok(order)
+}
+
+pub(super) fn include_dependents(
+    dependencies: &BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
+    selected: &mut BTreeSet<ResourceId>,
+) {
+    loop {
+        let before = selected.len();
+        for (id, required) in dependencies {
+            if required
+                .keys()
+                .any(|dependency| selected.contains(dependency))
+            {
+                selected.insert(id.clone());
+            }
+        }
+        if selected.len() == before {
+            break;
+        }
+    }
+}
+
+pub(super) fn include_dependencies(
+    dependencies: &BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
+    selected: &mut BTreeSet<ResourceId>,
+) {
+    loop {
+        let before = selected.len();
+        let required: Vec<_> = selected
+            .iter()
+            .flat_map(|id| {
+                dependencies
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|values| values.keys().cloned())
+            })
+            .collect();
+        selected.extend(required);
+        if selected.len() == before {
+            break;
+        }
+    }
+}
+
+pub(super) fn ensure_released_dependents(
+    graph: &ComputationGraph,
+    id: &ResourceId,
+) -> GraphResult<()> {
+    if let Some((dependent, _)) =
+        graph
+            .snapshot
+            .resource_dependencies
+            .iter()
+            .find(|(dependent, required)| {
+                required.contains_key(id)
+                    && (graph.resource_handles.contains_key(*dependent)
+                        || graph.pending_resource_cleanup.contains_key(*dependent))
+            })
+    {
+        return Err(GraphError::ResourceCleanup {
+            resource: id.clone(),
+            source: anyhow::anyhow!("dependent resource {dependent} has not released ownership"),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_constructed_dependencies(
+    dependencies: &BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
+    handles: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<()> {
+    for (id, required) in dependencies {
+        if !handles.contains_key(id) {
+            continue;
+        }
+        for (dependency, role) in required {
+            if !handles
+                .get(dependency)
+                .is_some_and(|handle| handle.role() == *role)
+            {
+                return Err(topology(format!(
+                    "constructed resource {id} requires an available {dependency} binding"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl GraphControl {
     /// Queue a complete snapshot of the resources used by a component generation.
     ///
@@ -226,8 +401,11 @@ pub(super) fn observe(
                     ))
             })
             && !graph.snapshot.edges.iter().any(|edge| edge.resources.contains_key(&id))
+            && !graph.snapshot.resource_dependencies.values().any(|dependencies| dependencies.contains_key(&id))
         {
             graph.snapshot.resources.remove(&id);
+            graph.snapshot.resource_configurations.remove(&id);
+            graph.snapshot.resource_dependencies.remove(&id);
             graph.resource_handles.remove(&id);
             released.push(id);
         }

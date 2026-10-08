@@ -23,6 +23,7 @@ use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::num::NonZeroUsize;
 use uuid::Uuid;
 
 use super::types::{
@@ -38,6 +39,13 @@ const PGOUTPUT_VERSION: u32 = 1;
 pub struct PgOutputDecoder {
     relations: HashMap<u32, RelationInfo>,
     current_transaction: Option<TransactionInfo>,
+    strict: Option<StrictDecoding>,
+}
+
+struct StrictDecoding {
+    max_relation_bytes: NonZeroUsize,
+    relation_bytes: usize,
+    failed: bool,
 }
 
 impl Default for PgOutputDecoder {
@@ -51,16 +59,51 @@ impl PgOutputDecoder {
         Self {
             relations: HashMap::new(),
             current_transaction: None,
+            strict: None,
+        }
+    }
+
+    /// Complete pgoutput v1 frames only. Errors permanently fence this decoder.
+    pub(crate) fn strict(max_relation_bytes: NonZeroUsize) -> Self {
+        Self {
+            strict: Some(StrictDecoding {
+                max_relation_bytes,
+                relation_bytes: 0,
+                failed: false,
+            }),
+            ..Self::new()
         }
     }
 
     pub fn decode_message(&mut self, data: &[u8]) -> Result<Option<WalMessage>> {
+        if self.strict.as_ref().is_some_and(|state| state.failed) {
+            return Err(anyhow!(
+                "pgoutput decoder requires reconstruction after failure"
+            ));
+        }
+        let result = self.decode_inner(data);
+        if result.is_err() {
+            if let Some(state) = &mut self.strict {
+                state.failed = true;
+            }
+        }
+        result
+    }
+
+    fn decode_inner(&mut self, data: &[u8]) -> Result<Option<WalMessage>> {
         if data.is_empty() {
+            anyhow::ensure!(self.strict.is_none(), "empty pgoutput frame");
             return Ok(None);
         }
 
         let msg_type = data[0];
         let payload = &data[1..];
+        if self.strict.is_some() && matches!(msg_type, b'I' | b'U' | b'D') {
+            anyhow::ensure!(
+                self.current_transaction.is_some(),
+                "pgoutput row outside a transaction"
+            );
+        }
 
         match msg_type {
             b'B' => self.decode_begin(payload),
@@ -71,9 +114,13 @@ impl PgOutputDecoder {
             b'I' => self.decode_insert(payload),
             b'U' => self.decode_update(payload),
             b'D' => self.decode_delete(payload),
-            b'T' => self.decode_truncate(payload),
-            b'M' => self.decode_message_logical(payload),
+            b'T' if self.strict.is_none() => self.decode_truncate(payload),
+            b'M' if self.strict.is_none() => self.decode_message_logical(payload),
             _ => {
+                anyhow::ensure!(
+                    self.strict.is_none(),
+                    "unsupported pgoutput message type: 0x{msg_type:02x}"
+                );
                 warn!("Unknown pgoutput message type: 0x{msg_type:02x}");
                 Ok(None)
             }
@@ -81,6 +128,10 @@ impl PgOutputDecoder {
     }
 
     fn decode_begin(&mut self, data: &[u8]) -> Result<Option<WalMessage>> {
+        anyhow::ensure!(
+            self.strict.is_none() || self.current_transaction.is_none(),
+            "nested pgoutput transaction"
+        );
         let mut cursor = Cursor::new(data);
 
         let final_lsn = cursor.read_u64::<BigEndian>()?;
@@ -89,6 +140,7 @@ impl PgOutputDecoder {
 
         // Convert PostgreSQL timestamp to DateTime
         let timestamp = postgres_epoch_to_datetime(commit_timestamp)?;
+        self.finish_message(&cursor)?;
 
         let transaction = TransactionInfo {
             xid,
@@ -105,12 +157,26 @@ impl PgOutputDecoder {
     fn decode_commit(&mut self, data: &[u8]) -> Result<Option<WalMessage>> {
         let mut cursor = Cursor::new(data);
 
-        let _flags = cursor.read_u8()?;
+        let flags = cursor.read_u8()?;
         let commit_lsn = cursor.read_u64::<BigEndian>()?;
-        let _end_lsn = cursor.read_u64::<BigEndian>()?;
+        let end_lsn = cursor.read_u64::<BigEndian>()?;
         let commit_timestamp = cursor.read_i64::<BigEndian>()?;
 
         let timestamp = postgres_epoch_to_datetime(commit_timestamp)?;
+        self.finish_message(&cursor)?;
+        if self.strict.is_some() {
+            let begun = self
+                .current_transaction
+                .as_ref()
+                .ok_or_else(|| anyhow!("pgoutput Commit without Begin"))?;
+            anyhow::ensure!(
+                flags == 0
+                    && end_lsn > commit_lsn
+                    && begun.commit_lsn == commit_lsn
+                    && begun.commit_timestamp == timestamp,
+                "pgoutput Commit does not match its Begin"
+            );
+        }
 
         let transaction = TransactionInfo {
             xid: self
@@ -128,8 +194,13 @@ impl PgOutputDecoder {
         Ok(Some(WalMessage::Commit(transaction)))
     }
 
-    fn decode_origin(&mut self, _data: &[u8]) -> Result<Option<WalMessage>> {
-        // Origin messages are informational, we can skip them for now
+    fn decode_origin(&mut self, data: &[u8]) -> Result<Option<WalMessage>> {
+        if self.strict.is_some() {
+            let mut cursor = Cursor::new(data);
+            cursor.read_u64::<BigEndian>()?;
+            read_cstring(&mut cursor)?;
+            self.finish_message(&cursor)?;
+        }
         Ok(None)
     }
 
@@ -145,16 +216,21 @@ impl PgOutputDecoder {
             b'f' => ReplicaIdentity::Full,
             b'i' => ReplicaIdentity::Index,
             other => {
+                anyhow::ensure!(self.strict.is_none(), "unknown replica identity: {other}");
                 warn!("Unknown replica identity: {}", other as char);
                 ReplicaIdentity::Default
             }
         };
 
         let column_count = cursor.read_u16::<BigEndian>()?;
+        if self.strict.is_some() {
+            anyhow::ensure!(column_count <= 1600, "invalid PostgreSQL column count");
+        }
         let mut columns = Vec::with_capacity(column_count as usize);
 
         for _ in 0..column_count {
             let flags = cursor.read_u8()?;
+            anyhow::ensure!(self.strict.is_none() || flags <= 1, "unknown column flags");
             let is_key = (flags & 1) != 0;
             let column_name = read_cstring(&mut cursor)?;
             let type_oid = cursor.read_u32::<BigEndian>()?;
@@ -184,12 +260,32 @@ impl PgOutputDecoder {
             relation.columns.len()
         );
 
+        self.finish_message(&cursor)?;
+        if let Some(state) = &mut self.strict {
+            let old = self.relations.get(&relation_id).map_or(0, relation_size);
+            let next = state
+                .relation_bytes
+                .checked_sub(old)
+                .and_then(|bytes| bytes.checked_add(relation_size(&relation)))
+                .ok_or_else(|| anyhow!("pgoutput relation metadata size overflow"))?;
+            anyhow::ensure!(
+                next <= state.max_relation_bytes.get(),
+                "pgoutput relation metadata exceeds configured byte limit"
+            );
+            state.relation_bytes = next;
+        }
         self.relations.insert(relation_id, relation.clone());
         Ok(Some(WalMessage::Relation(relation)))
     }
 
-    fn decode_type(&mut self, _data: &[u8]) -> Result<Option<WalMessage>> {
-        // Type messages describe custom types, we'll handle them later if needed
+    fn decode_type(&mut self, data: &[u8]) -> Result<Option<WalMessage>> {
+        if self.strict.is_some() {
+            let mut cursor = Cursor::new(data);
+            cursor.read_u32::<BigEndian>()?;
+            read_cstring(&mut cursor)?;
+            read_cstring(&mut cursor)?;
+            self.finish_message(&cursor)?;
+        }
         Ok(None)
     }
 
@@ -222,6 +318,7 @@ impl PgOutputDecoder {
             relation.columns.len()
         );
         let tuple = self.decode_tuple_data(&mut cursor, &relation.columns)?;
+        self.finish_message(&cursor)?;
 
         debug!(
             "Insert: relation={}, columns={}",
@@ -264,6 +361,7 @@ impl PgOutputDecoder {
             }
         }
 
+        self.finish_message(&cursor)?;
         debug!(
             "Update: relation={}, has_old={}",
             relation.name,
@@ -294,6 +392,7 @@ impl PgOutputDecoder {
             .ok_or_else(|| anyhow!("Unknown relation ID: {relation_id}"))?;
 
         let old_tuple = self.decode_tuple_data(&mut cursor, &relation.columns)?;
+        self.finish_message(&cursor)?;
 
         debug!("Delete: relation={}", relation.name);
         Ok(Some(WalMessage::Delete {
@@ -335,6 +434,7 @@ impl PgOutputDecoder {
         debug!("Decoding {column_count} columns");
 
         if column_count != columns.len() {
+            anyhow::ensure!(self.strict.is_none(), "pgoutput column count mismatch");
             warn!(
                 "Column count mismatch: expected {}, got {}",
                 columns.len(),
@@ -386,8 +486,13 @@ impl PgOutputDecoder {
                     );
                     // Never abort the whole tuple for one bad column — degrade that
                     // column and keep emitting the change (#669).
-                    match self.decode_column_value(&data, column.type_oid) {
+                    match if self.strict.is_some() {
+                        decode_text_to_postgres_value(std::str::from_utf8(&data)?, column.type_oid)
+                    } else {
+                        self.decode_column_value(&data, column.type_oid)
+                    } {
                         Ok(v) => v,
+                        Err(e) if self.strict.is_some() => return Err(e),
                         Err(e) => {
                             warn!(
                                 "Failed to decode column {} (oid={}): {e}; falling back to text/Null",
@@ -413,6 +518,14 @@ impl PgOutputDecoder {
         }
 
         Ok(values)
+    }
+
+    fn finish_message(&self, cursor: &Cursor<&[u8]>) -> Result<()> {
+        anyhow::ensure!(
+            self.strict.is_none() || cursor.position() == cursor.get_ref().len() as u64,
+            "trailing bytes in pgoutput message"
+        );
+        Ok(())
     }
 
     fn decode_column_value(&self, data: &[u8], type_oid: Oid) -> Result<PostgresValue> {
@@ -726,6 +839,17 @@ impl PgOutputDecoder {
     }
 }
 
+fn relation_size(relation: &RelationInfo) -> usize {
+    std::mem::size_of::<RelationInfo>()
+        + relation.namespace.len()
+        + relation.name.len()
+        + relation
+            .columns
+            .iter()
+            .map(|column| std::mem::size_of::<ColumnInfo>() + column.name.len())
+            .sum::<usize>()
+}
+
 fn read_cstring(cursor: &mut Cursor<&[u8]>) -> Result<String> {
     let mut buffer = Vec::new();
     loop {
@@ -735,17 +859,16 @@ fn read_cstring(cursor: &mut Cursor<&[u8]>) -> Result<String> {
         }
         buffer.push(byte);
     }
-    Ok(String::from_utf8_lossy(&buffer).to_string())
+    Ok(String::from_utf8(buffer)?)
 }
 
 fn postgres_epoch_to_datetime(micros: i64) -> Result<DateTime<Utc>> {
     // PostgreSQL epoch is 2000-01-01 00:00:00
     const POSTGRES_EPOCH: i64 = 946684800000000; // microseconds since Unix epoch
-    let unix_micros = micros + POSTGRES_EPOCH;
-    let secs = unix_micros / 1_000_000;
-    let nanos = ((unix_micros % 1_000_000) * 1000) as u32;
-
-    DateTime::from_timestamp(secs, nanos).ok_or_else(|| anyhow!("Invalid timestamp"))
+    let unix_micros = micros
+        .checked_add(POSTGRES_EPOCH)
+        .ok_or_else(|| anyhow!("PostgreSQL timestamp overflow"))?;
+    DateTime::from_timestamp_micros(unix_micros).ok_or_else(|| anyhow!("Invalid timestamp"))
 }
 
 fn postgres_epoch_to_naive_datetime(micros: i64) -> Result<NaiveDateTime> {

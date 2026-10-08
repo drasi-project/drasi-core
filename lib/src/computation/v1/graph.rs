@@ -32,9 +32,12 @@ mod configuration;
 mod controller;
 pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
 pub use configuration::{CapturedComponentConfiguration, GraphConfigurationSnapshot};
+mod recovery;
 mod registry;
 mod resources;
+mod retirement;
 pub(crate) use registry::GraphRegistrySnapshot;
+pub(crate) use retirement::RecoveryFreeze;
 mod specification;
 mod topology;
 pub use controller::reconcile::{DesiredMutation, ReconciliationPreview, ReconciliationReport};
@@ -61,6 +64,8 @@ pub enum GraphError {
     Contract(#[from] ContractError),
     #[error(transparent)]
     Control(#[from] super::ControlError),
+    #[error(transparent)]
+    Recovery(#[from] super::RecoveryValidationError),
     #[error("component {component} validation failed: {source}")]
     Validation {
         component: ComponentId,
@@ -353,6 +358,7 @@ pub struct GraphSnapshot {
     pub nodes: Arc<[NodeSnapshot]>,
     pub edges: Arc<[EdgeSnapshot]>,
     pub requirements: PipeRequirements,
+    pub recovery_requirements: Vec<super::RecoveryRequirement>,
     pub lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
     pub specifications: BTreeMap<ComponentId, ComponentSpecification>,
     pub external_bindings: BTreeMap<ComponentId, Arc<str>>,
@@ -360,6 +366,7 @@ pub struct GraphSnapshot {
     /// Host-supplied construction recipes. These are privileged configuration,
     /// not properties inferred from arbitrary provider objects.
     pub resource_configurations: BTreeMap<ResourceId, serde_json::Value>,
+    pub resource_dependencies: BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
     pub unbound_relationships: Arc<[DesiredRelationship]>,
     /// Host-declared control-only adjacency.
     pub control_connections: Arc<[(ComponentId, ComponentId)]>,
@@ -416,6 +423,38 @@ enum Component {
 }
 
 impl Component {
+    fn recovery_contract(&self) -> super::ComponentRecovery {
+        match self {
+            Self::Source(component) => {
+                let mut contract = if let Some(admission) = component.admission() {
+                    let mut contract =
+                        super::ComponentRecovery::admitted(admission.channel().durability())
+                            .replay_to_durable_delivery();
+                    contract.source_admission = Some(admission);
+                    contract
+                } else {
+                    component.recovery_contract()
+                };
+                contract.replay_progress = component.recovery_progress();
+                contract
+            }
+            Self::Transformer(component) | Self::Query(component) => {
+                let mut contract = component.recovery_contract();
+                if matches!(
+                    contract.processing,
+                    super::recovery::ProcessingRecovery::Stateless
+                ) && component.wakeup_source().is_some()
+                {
+                    contract.processing = super::recovery::ProcessingRecovery::StatelessWithWakeup;
+                }
+                contract
+            }
+            Self::Sink(component) => component.recovery_contract(),
+            Self::Service(component) => component.recovery_contract(),
+            Self::Deferred { .. } | Self::Unresolved(_) => super::ComponentRecovery::default(),
+        }
+    }
+
     fn query_api(&self) -> Option<Arc<super::QueryApi>> {
         match self {
             Self::Source(component) => component.query_api(),
@@ -562,11 +601,13 @@ pub struct ComputationGraphBuilder {
     edges: Vec<(EdgeDefinition, Box<dyn PipeProvider>)>,
     streams: Vec<(Endpoint, StreamId)>,
     requirements: PipeRequirements,
+    recovery_requirements: Vec<super::RecoveryRequirement>,
     cleanup_timeout: Duration,
     lifecycle_policies: BTreeMap<ComponentId, LifecyclePolicy>,
     relationship_policies: BTreeMap<EdgeDefinition, RelationshipPolicy>,
     resources: BTreeMap<ResourceId, ResourceSpecification>,
     resource_configurations: BTreeMap<ResourceId, serde_json::Value>,
+    resource_dependencies: BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
     resource_handles: BTreeMap<ResourceId, ResourceHandle>,
     input_merge: BTreeMap<ComponentId, InputMergePolicy>,
     unbound_relationships: Vec<DesiredRelationship>,
@@ -575,6 +616,11 @@ pub struct ComputationGraphBuilder {
 }
 
 impl ComputationGraphBuilder {
+    pub fn require_recovery(mut self, requirement: super::RecoveryRequirement) -> Self {
+        self.recovery_requirements.push(requirement);
+        self
+    }
+
     /// Build component declarations and bindings without starting their execution.
     pub fn build_components(self) -> GraphResult<super::ComponentBatch> {
         self.build()?.into_component_batch()
@@ -647,6 +693,25 @@ impl ComputationGraphBuilder {
         Ok(self)
     }
 
+    /// Retain the dependency until the dependent resource has finished cleanup.
+    pub fn resource_dependency(
+        mut self,
+        resource: ResourceId,
+        dependency: ResourceId,
+        role: ResourceRole,
+    ) -> GraphResult<Self> {
+        if self
+            .resource_dependencies
+            .entry(resource)
+            .or_default()
+            .insert(dependency, role)
+            .is_some()
+        {
+            return Err(topology("duplicate resource dependency"));
+        }
+        Ok(self)
+    }
+
     pub fn source(mut self, source: Box<dyn EnvelopeSource>) -> Self {
         self.components.push(Component::Source(source));
         self
@@ -711,6 +776,11 @@ impl ComputationGraphBuilder {
 
     pub fn build(self) -> GraphResult<ComputationGraph> {
         validate_identifier("graph", &self.id)?;
+        resources::construction_order(self.resources.values(), &self.resource_dependencies)?;
+        resources::validate_constructed_dependencies(
+            &self.resource_dependencies,
+            &self.resource_handles,
+        )?;
         if self
             .resource_configurations
             .keys()
@@ -734,6 +804,7 @@ impl ComputationGraphBuilder {
         }
         let mut ids = BTreeMap::new();
         let mut nodes = Vec::new();
+        let mut transitive_sources = Vec::new();
         for (id, handle) in &self.resource_handles {
             let declaration = self
                 .resources
@@ -750,7 +821,20 @@ impl ComputationGraphBuilder {
                 .filter(|(edge, _)| &edge.from.component == component.descriptor().id())
                 .map(|(edge, _)| edge.to.component.clone())
                 .collect();
-            validate_source_progress(component, &self.id, &downstream)?;
+            let transitive = !self.recovery_requirements.is_empty()
+                && matches!(component, Component::Source(source)
+                if source.recovery_progress().is_some_and(|progress| {
+                    downstream.iter().any(|id| id != progress.component_id())
+                        && self.recovery_requirements.iter().any(|requirement| {
+                            requirement.guarantees.iter().any(|guarantee| {
+                                *guarantee != super::RecoveryGuarantee::Acceptance
+                            })
+                        })
+                }));
+            validate_source_progress(component, &self.id, &downstream, transitive)?;
+            if transitive {
+                transitive_sources.push(component.descriptor().id().clone());
+            }
             if let Component::Deferred {
                 specification,
                 factory,
@@ -974,6 +1058,7 @@ impl ComputationGraphBuilder {
             nodes: nodes.clone().into(),
             edges: edges.into(),
             requirements: self.requirements,
+            recovery_requirements: self.recovery_requirements,
             lifecycle_policies,
             specifications: self
                 .components
@@ -1005,6 +1090,7 @@ impl ComputationGraphBuilder {
                 .collect(),
             resources: self.resources,
             resource_configurations: self.resource_configurations,
+            resource_dependencies: self.resource_dependencies,
             unbound_relationships: self.unbound_relationships.into(),
             control_connections: Arc::from([]),
             subscriptions: Arc::from([]),
@@ -1013,6 +1099,11 @@ impl ComputationGraphBuilder {
             component_plugins: BTreeMap::new(),
             allow_incomplete: self.allow_empty,
         };
+        for (component, node) in self.components.iter().zip(&nodes) {
+            if let Some(admission) = component.recovery_contract().source_admission {
+                validate_admission(&admission, node, &snapshot, &self.resource_handles, None)?;
+            }
+        }
         let observed = controller::initial_observations(&snapshot);
         let factories = self
             .components
@@ -1053,7 +1144,7 @@ impl ComputationGraphBuilder {
                 .collect(),
         )))
         .0;
-        Ok(ComputationGraph {
+        let graph = ComputationGraph {
             execution_scope: snapshot.id.clone(),
             inspector: super::ComputationInspector::new(&snapshot, Arc::new(observed.clone())),
             next_edge: snapshot.edges.len(),
@@ -1088,7 +1179,19 @@ impl ComputationGraphBuilder {
             deferred_activation: BTreeSet::new(),
             reported_resources: BTreeMap::new(),
             management_protected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })
+            retirement: None,
+        };
+        if !graph.snapshot.allow_incomplete {
+            graph.validate_recovery(true)?;
+        }
+        for id in transitive_sources {
+            if !graph.transitive_source_recovery(&id)? {
+                return Err(topology(
+                    "source progress requires a validated path to its owner",
+                ));
+            }
+        }
+        Ok(graph)
     }
 }
 
@@ -1157,7 +1260,7 @@ fn resolve<'a>(
 pub struct GraphControl {
     cancel: watch::Sender<bool>,
     state: watch::Receiver<GraphState>,
-    commands: mpsc::Sender<controller::Command>,
+    commands: controller::CommandSender,
     observed: watch::Receiver<Arc<ObservedGraph>>,
     desired: watch::Receiver<Arc<GraphSnapshot>>,
     inspector: super::ComputationInspector,
@@ -1260,6 +1363,7 @@ pub struct ComputationGraph {
     protected_resources: BTreeSet<ResourceId>,
     reported_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
+    retirement: Option<Arc<retirement::RetirementState>>,
 }
 
 impl ComputationGraph {
@@ -1316,11 +1420,13 @@ impl ComputationGraph {
             edges: Vec::new(),
             streams: Vec::new(),
             requirements: PipeRequirements::default(),
+            recovery_requirements: Vec::new(),
             cleanup_timeout: Duration::from_secs(5),
             lifecycle_policies: BTreeMap::new(),
             relationship_policies: BTreeMap::new(),
             resources: BTreeMap::new(),
             resource_configurations: BTreeMap::new(),
+            resource_dependencies: BTreeMap::new(),
             resource_handles: BTreeMap::new(),
             input_merge: BTreeMap::new(),
             unbound_relationships: Vec::new(),
@@ -1337,6 +1443,108 @@ impl ComputationGraph {
 
     pub fn snapshot(&self) -> &GraphSnapshot {
         &self.snapshot
+    }
+
+    /// Assess the actual constructed participants, including ordinary data
+    /// subscriptions. This does not enable recovery or change processing.
+    pub fn recovery_report(
+        &self,
+        requirement: &super::RecoveryRequirement,
+    ) -> GraphResult<super::RecoveryPathReport> {
+        self.recovery_report_in(&self.snapshot, requirement)
+    }
+
+    fn recovery_report_in(
+        &self,
+        snapshot: &GraphSnapshot,
+        requirement: &super::RecoveryRequirement,
+    ) -> GraphResult<super::RecoveryPathReport> {
+        let participants =
+            recovery::participants(&requirement.consumer, snapshot.data_connections());
+        let contracts = participants
+            .iter()
+            .filter_map(|id| self.ids.get(id).map(|index| (id, index)))
+            .map(|(id, index)| {
+                self.components[*index]
+                    .recovery_contract()
+                    .map(|contract| (id.clone(), contract))
+            })
+            .collect::<GraphResult<BTreeMap<_, _>>>()?;
+        Ok(recovery::assess(
+            snapshot,
+            &self.resource_handles,
+            &contracts,
+            requirement,
+        ))
+    }
+
+    fn validate_recovery(&self, allow_unconstructed: bool) -> GraphResult<()> {
+        for requirement in &self.snapshot.recovery_requirements {
+            if requirement.guarantees.is_empty() || !self.ids.contains_key(&requirement.consumer) {
+                return Err(topology(
+                    "recovery assertion requires a known consumer and at least one guarantee",
+                ));
+            }
+            let report = self.recovery_report(requirement)?;
+            let mut pending = false;
+            if allow_unconstructed {
+                for id in &report.participants {
+                    if let Some(index) = self.ids.get(id) {
+                        pending |= !self.components[*index].is_constructed()?;
+                    }
+                }
+            }
+            if pending {
+                continue;
+            }
+            report.validate()?;
+        }
+        Ok(())
+    }
+
+    fn validate_recovery_activation(
+        &self,
+        component: &ComponentId,
+    ) -> GraphResult<Option<super::RecoveryRequirement>> {
+        let mut selected = None;
+        for requirement in &self.snapshot.recovery_requirements {
+            if !recovery::participants(&requirement.consumer, self.snapshot.data_connections())
+                .contains(component)
+            {
+                continue;
+            }
+            self.recovery_report(requirement)?.validate()?;
+            selected = Some(requirement.clone());
+        }
+        Ok(selected)
+    }
+
+    fn transitive_source_recovery(&self, component: &ComponentId) -> GraphResult<bool> {
+        if self.snapshot.recovery_requirements.is_empty() {
+            return Ok(false);
+        }
+        let contract = self.components[self.ids[component]].recovery_contract()?;
+        let Some(progress) = &contract.replay_progress else {
+            return Ok(false);
+        };
+        if contract.replay_until.as_ref() != Some(progress.component_id()) {
+            return Ok(false);
+        }
+        for requirement in &self.snapshot.recovery_requirements {
+            if requirement
+                .guarantees
+                .iter()
+                .any(|guarantee| *guarantee != super::RecoveryGuarantee::Acceptance)
+            {
+                let report = self.recovery_report(requirement)?;
+                if report.participants.contains(component)
+                    && report.participants.contains(progress.component_id())
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub fn configuration_snapshot(&self) -> GraphResult<GraphConfigurationSnapshot> {
@@ -1391,7 +1599,7 @@ impl ComputationGraph {
         registry::publish(self);
         self.peers = super::ControlPlane::new(64)?;
         let (cancel, cancellation) = watch::channel(false);
-        let (commands, receiver) = mpsc::channel(64);
+        let (commands, receiver) = controller::command_channel();
         let control = GraphControl {
             cancel,
             state: self.state.subscribe(),
@@ -1482,7 +1690,7 @@ impl ComputationGraph {
     async fn execute(
         &mut self,
         mut cancel: watch::Receiver<bool>,
-        commands: mpsc::Receiver<controller::Command>,
+        commands: controller::CommandReceiver,
         auto_start: bool,
     ) -> GraphResult<()> {
         let result = controller::run(self, &mut cancel, commands, auto_start).await;
@@ -1583,6 +1791,155 @@ struct Outgoing {
     sender: Arc<dyn EnvelopeSender>,
     progress: Arc<FlowProgress>,
     multicast: Option<ResourceId>,
+    admission_channel: Option<Arc<super::QosChannel>>,
+    destination: Option<Arc<super::OutputDestination>>,
+}
+
+fn output_destination(
+    edge: &EdgeDefinition,
+    pipe: &DesiredPipe,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> anyhow::Result<Option<Arc<super::OutputDestination>>> {
+    let DesiredPipe::Qos(config) = pipe else {
+        return Ok(None);
+    };
+    let channel = resources
+        .get(&config.resource)
+        .ok_or_else(|| anyhow::anyhow!("output channel resource is missing"))?
+        .get::<super::QosChannel>()?;
+    let Some(journal) = channel.output_journal_identity() else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(super::OutputDestination {
+        output: edge.from.port.clone(),
+        consumer: edge.to.component.clone(),
+        input: edge.to.port.clone(),
+        journal,
+        subscriber: config.subscriber.clone(),
+    })))
+}
+
+fn validate_output_bindings(
+    state: &super::output_bindings::OutputBindingState,
+    node: &NodeSnapshot,
+    edges: &[EdgeSnapshot],
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<()> {
+    if edges.iter().any(|edge| {
+        &edge.definition.from.component == node.descriptor.id()
+            && matches!(&edge.pipe, DesiredPipe::Qos(config) if !resources.contains_key(&config.resource))
+    }) {
+        return state.validate_unresolved()
+            .map_err(|error| component_error(node, "validate unresolved output destinations", error.into()));
+    }
+    let bindings = output_bindings(node, edges, resources)?;
+    state
+        .validate(&bindings)
+        .map_err(|error| component_error(node, "validate output destinations", error.into()))
+}
+
+fn output_bindings(
+    node: &NodeSnapshot,
+    edges: &[EdgeSnapshot],
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<super::OutputBindings> {
+    let result = (|| {
+        let destinations = edges
+            .iter()
+            .filter(|edge| &edge.definition.from.component == node.descriptor.id())
+            .filter_map(|edge| {
+                output_destination(&edge.definition, &edge.pipe, resources).transpose()
+            })
+            .take(super::output_bindings::MAX_DESTINATIONS + 1)
+            .map(|destination| destination.map(|destination| (*destination).clone()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut bindings = super::OutputBindings::try_new(destinations)?;
+        for edge in edges
+            .iter()
+            .filter(|edge| &edge.definition.from.component == node.descriptor.id())
+        {
+            if let DesiredPipe::Qos(config) = &edge.pipe {
+                let channel = resources
+                    .get(&config.resource)
+                    .ok_or_else(|| anyhow::anyhow!("output channel resource is missing"))?
+                    .get::<super::QosChannel>()?;
+                bindings.attach_shared(&edge.definition.from.port, &channel)?;
+            }
+        }
+        Ok(bindings)
+    })();
+    result.map_err(|error| component_error(node, "validate output destinations", error))
+}
+
+async fn bind_output_destinations(
+    component: &mut Component,
+    node: &NodeSnapshot,
+    outputs: &[Outgoing],
+    snapshot: &GraphSnapshot,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<()> {
+    if component.recovery_contract().output_bindings.is_none() {
+        if outputs.iter().any(|output| {
+            output
+                .admission_channel
+                .as_ref()
+                .is_some_and(|channel| channel.is_shared())
+        }) {
+            return Err(topology(
+                "shared QoS output requires a producer with transactional destination tracking",
+            ));
+        }
+        return Ok(());
+    }
+    let mut bindings = super::OutputBindings::try_new(
+        outputs
+            .iter()
+            .filter_map(|output| output.destination.as_deref().cloned()),
+    )
+    .map_err(|error| component_error(node, "bind output destinations", error.into()))?;
+    for output in outputs {
+        if let Some(channel) = &output.admission_channel {
+            bindings
+                .attach_shared(&output.port, channel)
+                .map_err(|error| component_error(node, "bind shared output", error.into()))?;
+        }
+    }
+    if bindings != output_bindings(node, &snapshot.edges, resources)? {
+        return Err(component_error(
+            node,
+            "bind output destinations",
+            super::OutputBindingError::Invalid("a required output destination is not bound".into())
+                .into(),
+        ));
+    }
+    match component {
+        Component::Transformer(transformer) | Component::Query(transformer) => transformer
+            .bind_output_destinations(&bindings)
+            .await
+            .map_err(|error| component_error(node, "bind output destinations", error)),
+        _ => Err(topology(
+            "output destination tracking requires a transformer",
+        )),
+    }
+}
+
+fn admission_channel(
+    provider: &dyn PipeProvider,
+    resources: &BTreeMap<ResourceId, super::ResourceHandle>,
+) -> GraphResult<Option<Arc<super::QosChannel>>> {
+    let Some(DesiredPipe::Qos(config)) = provider.specification() else {
+        return Ok(None);
+    };
+    let resource = resources
+        .get(&config.resource)
+        .ok_or_else(|| topology("QoS admission resource is missing"))?;
+    resource
+        .get::<super::QosChannel>()
+        .map(Some)
+        .map_err(|source| GraphError::ResourceCreation {
+            resource: config.resource,
+            source: source.into(),
+        })
 }
 
 #[derive(Default)]
@@ -1691,18 +2048,84 @@ fn validate_source_progress(
     component: &Component,
     graph_id: &str,
     downstream: &[ComponentId],
+    transitive: bool,
 ) -> GraphResult<()> {
     let Component::Source(source) = component else {
         return Ok(());
     };
+    if source.admission().is_some() && source.recovery_progress().is_some() {
+        return Err(topology(
+            "source admission cannot also own a separate replay boundary",
+        ));
+    }
     if let Some(progress) = source.recovery_progress() {
         if progress.graph_id() != graph_id
-            || downstream.iter().any(|id| id != progress.component_id())
+            || !transitive && downstream.iter().any(|id| id != progress.component_id())
         {
             return Err(topology(
                 "source recovery progress must belong to its immediate consumer on every branch",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_admission(
+    admission: &super::SourceAdmission,
+    node: &NodeSnapshot,
+    snapshot: &GraphSnapshot,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+    scope: Option<&str>,
+) -> GraphResult<()> {
+    if admission.component_id() != node.descriptor.id()
+        || admission.identity().graph_id() != snapshot.id.as_ref()
+        || scope.is_some_and(|scope| scope != admission.identity().construction_scope())
+        || node
+            .descriptor
+            .ports()
+            .iter()
+            .any(|port| port.direction() == PortDirection::Output && port.id() != admission.port())
+        || snapshot
+            .subscriptions
+            .iter()
+            .any(|(from, _)| from == node.descriptor.id())
+        || snapshot
+            .unbound_relationships
+            .iter()
+            .any(|edge| &edge.definition.from.component == node.descriptor.id())
+    {
+        return Err(emission_error(
+            node,
+            "source admission identity or publication boundary mismatch",
+        ));
+    }
+    let mut outputs = snapshot
+        .edges
+        .iter()
+        .filter(|edge| &edge.definition.from.component == node.descriptor.id())
+        .peekable();
+    if outputs.peek().is_none() && snapshot.allow_incomplete && scope.is_none() {
+        return Ok(());
+    }
+    if outputs.peek().is_none()
+        || node.output_streams.get(admission.port()) != Some(admission.identity().stream())
+        || outputs.any(|edge| {
+            let DesiredPipe::Qos(config) = &edge.pipe else {
+                return true;
+            };
+            edge.definition.from.port != *admission.port()
+                || config.gap_policy != super::ReplayGapPolicy::Strict
+                || !admission.channel().matches_definition(config)
+                || !resources
+                    .get(&config.resource)
+                    .and_then(|handle| handle.get::<super::QosChannel>().ok())
+                    .is_some_and(|channel| Arc::ptr_eq(&channel, admission.channel()))
+        })
+    {
+        return Err(emission_error(
+            node,
+            "source admission requires its actual outgoing QoS channel on every branch",
+        ));
     }
     Ok(())
 }
@@ -1721,6 +2144,96 @@ fn event_time_selection(
 struct SourceRouting<'a> {
     graph_id: &'a str,
     downstream: &'a [ComponentId],
+    transitive_recovery: bool,
+}
+
+// Bound synchronous work per poll without adding periodic yields to nodes that
+// already suspended for I/O. Nodes share their controller's Tokio task budget.
+#[derive(Default)]
+struct NodeWorkBudget(std::sync::atomic::AtomicU8);
+
+impl NodeWorkBudget {
+    fn checkpoint(&self) -> Option<impl Future<Output = ()>> {
+        let work = self.0.load(Ordering::Relaxed) + 1;
+        if work < 64 {
+            self.0.store(work, Ordering::Relaxed);
+            return None;
+        }
+        self.0.store(0, Ordering::Relaxed);
+        let mut yielded = false;
+        Some(futures::future::poll_fn(move |cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                // Requeue this node, not the whole controller's Tokio task.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }))
+    }
+
+    async fn run<T>(&self, work: impl Future<Output = T>) -> T {
+        futures::pin_mut!(work);
+        futures::future::poll_fn(|cx| {
+            let result = work.as_mut().poll(cx);
+            if result.is_pending() {
+                self.0.store(0, Ordering::Relaxed);
+            }
+            result
+        })
+        .await
+    }
+}
+
+async fn run_admitted_source(
+    component: &Component,
+    node: &NodeSnapshot,
+    sequences: &mut BTreeMap<PortId, u64>,
+    outputs: &[Outgoing],
+    quiesce: &mut watch::Receiver<bool>,
+    budget: &NodeWorkBudget,
+    admission: Arc<super::SourceAdmission>,
+) -> GraphResult<()> {
+    if admission.component_id() != node.descriptor.id()
+        || node.output_streams.get(admission.port())
+            != Some(&admission.channel().definition().stream)
+        || outputs.is_empty()
+        || outputs.iter().any(|output| {
+            output.port != *admission.port()
+                || !output
+                    .admission_channel
+                    .as_ref()
+                    .is_some_and(|channel| Arc::ptr_eq(channel, admission.channel()))
+        })
+    {
+        return Err(emission_error(
+            node,
+            "source admission requires its actual outgoing QoS channel on every branch",
+        ));
+    }
+    let mut lease = admission
+        .bind()
+        .map_err(|error| component_error(node, "bind admission", error.into()))?;
+    loop {
+        if let Some(yield_node) = budget.checkpoint() {
+            yield_node.await;
+        }
+        check_descriptor(component, node)?;
+        let mut pending = sequences.clone();
+        let accepted = tokio::select! {
+            biased;
+            _ = cancelled(quiesce) => return Ok(()),
+            result = lease.process(|envelope| {
+                validate_emissions(node, &mut pending, &[OutputEnvelope {
+                    port: admission.port().clone(), envelope: envelope.clone(),
+                }]).map_err(Into::into)
+            }) => result.map_err(|error| component_error(node, "admit", error.into()))?,
+        };
+        if accepted {
+            *sequences = pending;
+        }
+    }
 }
 
 async fn run_node(
@@ -1731,8 +2244,14 @@ async fn run_node(
     outputs: &[Outgoing],
     quiesce: &mut watch::Receiver<bool>,
     routing: SourceRouting<'_>,
+    budget: &NodeWorkBudget,
 ) -> GraphResult<()> {
-    validate_source_progress(component, routing.graph_id, routing.downstream)?;
+    validate_source_progress(
+        component,
+        routing.graph_id,
+        routing.downstream,
+        routing.transitive_recovery,
+    )?;
     if let Component::Service(service) = component {
         tokio::select! {
             biased;
@@ -1760,7 +2279,19 @@ async fn run_node(
         .map(receive)
         .collect();
     let mut ready: Vec<&mut Incoming> = Vec::new();
+    if let Component::Source(source) = component {
+        if let Some(admission) = source.admission() {
+            // Keep the opt-in journal future out of every fast node's state.
+            return Box::pin(run_admitted_source(
+                component, node, sequences, outputs, quiesce, budget, admission,
+            ))
+            .await;
+        }
+    }
     'processing: loop {
+        if let Some(yield_node) = budget.checkpoint() {
+            yield_node.await;
+        }
         if *quiesce.borrow() {
             return Ok(());
         }
@@ -1921,6 +2452,8 @@ async fn run_node(
         loop {
             check_descriptor(component, node)?;
             validate_emissions(node, sequences, &emissions)?;
+            // The input/continuation already paid for its first forward.
+            let mut first_branch = true;
             for emission in &emissions {
                 if !outputs.iter().any(|output| output.port == emission.port) {
                     return Err(emission_error(
@@ -1931,6 +2464,11 @@ async fn run_node(
                 let mut multicast = BTreeSet::new();
                 let mut accepted_branches = 0;
                 for output in outputs.iter().filter(|output| output.port == emission.port) {
+                    if first_branch {
+                        first_branch = false;
+                    } else if let Some(yield_node) = budget.checkpoint() {
+                        yield_node.await;
+                    }
                     if output
                         .multicast
                         .as_ref()
@@ -1972,6 +2510,9 @@ async fn run_node(
                 Component::Transformer(transformer) | Component::Query(transformer)
                     if transformer.has_pending_emissions() =>
                 {
+                    if let Some(yield_node) = budget.checkpoint() {
+                        yield_node.await;
+                    }
                     Some(tokio::select! {
                         biased;
                         _ = cancelled(quiesce) => return Ok(()),
@@ -2051,6 +2592,90 @@ pub fn emission_id(stream: &StreamId, sequence: u64) -> super::Result<EnvelopeId
         stream.as_str(),
         bytes::Bytes::copy_from_slice(&sequence.to_be_bytes()),
     )
+}
+
+#[cfg(test)]
+mod work_budget_tests {
+    use super::NodeWorkBudget;
+    use std::{
+        future::Future,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        task::{Context, Wake, Waker},
+    };
+
+    #[derive(Default)]
+    struct NodeWake(AtomicUsize);
+
+    impl Wake for NodeWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn unexhausted_work_does_not_construct_a_yield_future() {
+        let budget = NodeWorkBudget::default();
+        for _ in 0..63 {
+            assert!(budget.checkpoint().is_none());
+        }
+        assert!(budget.checkpoint().is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_work_requeues_the_node_without_a_runtime_turn() {
+        let budget = NodeWorkBudget::default();
+        let work = budget.run(async {
+            for _ in 0..64 {
+                if let Some(yield_node) = budget.checkpoint() {
+                    yield_node.await;
+                }
+            }
+        });
+        tokio::pin!(work);
+        let wake = Arc::new(NodeWake::default());
+        let waker = Waker::from(wake.clone());
+        let mut context = Context::from_waker(&waker);
+        assert!(work.as_mut().poll(&mut context).is_pending());
+        assert_eq!(wake.0.load(Ordering::Relaxed), 1);
+        assert!(work.as_mut().poll(&mut context).is_ready());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_work_still_yields_at_the_per_poll_limit() {
+        let budget = NodeWorkBudget::default();
+        let work = budget.run(async {
+            for _ in 0..128 {
+                if let Some(yield_node) = budget.checkpoint() {
+                    yield_node.await;
+                }
+            }
+        });
+        tokio::pin!(work);
+        assert!(futures::poll!(&mut work).is_pending());
+        assert!(futures::poll!(&mut work).is_pending());
+        assert!(futures::poll!(&mut work).is_ready());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn suspended_work_does_not_accumulate_artificial_yields() {
+        let budget = NodeWorkBudget::default();
+        let work = budget.run(async {
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+                if let Some(yield_node) = budget.checkpoint() {
+                    yield_node.await;
+                }
+            }
+        });
+        tokio::pin!(work);
+        for _ in 0..128 {
+            assert!(futures::poll!(&mut work).is_pending());
+        }
+        assert!(futures::poll!(&mut work).is_ready());
+    }
 }
 
 #[cfg(test)]

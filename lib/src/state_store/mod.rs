@@ -54,6 +54,7 @@
 //! ```
 
 use async_trait::async_trait;
+pub use drasi_core::interface::StorageDurability;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -147,6 +148,12 @@ pub type StateStoreResult<T> = Result<T, StateStoreError>;
 /// ```
 #[async_trait]
 pub trait StateStoreProvider: Send + Sync {
+    /// Survival promised after a successful write. Unknown is not durable
+    /// evidence, and `sync()` returning success does not override this declaration.
+    fn durability(&self) -> StorageDurability {
+        StorageDurability::UNKNOWN
+    }
+
     /// Get a single value by key from a store partition.
     ///
     /// # Arguments
@@ -161,7 +168,7 @@ pub trait StateStoreProvider: Send + Sync {
 
     /// Set a single value by key in a store partition.
     ///
-    /// The state must be persisted before this method returns.
+    /// A successful write meets this provider's declared durability boundary.
     ///
     /// # Arguments
     /// * `store_id` - The partition identifier (typically the plugin ID)
@@ -217,7 +224,7 @@ pub trait StateStoreProvider: Send + Sync {
 
     /// Set multiple key-value pairs in a store partition.
     ///
-    /// All values must be persisted before this method returns.
+    /// Every successful write meets this provider's declared durability boundary.
     ///
     /// # Arguments
     /// * `store_id` - The partition identifier (typically the plugin ID)
@@ -350,6 +357,10 @@ impl MemoryStateStoreProvider {
 
 #[async_trait]
 impl StateStoreProvider for MemoryStateStoreProvider {
+    fn durability(&self) -> StorageDurability {
+        StorageDurability::VOLATILE
+    }
+
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
         let stores = self.stores.read().await;
         Ok(stores

@@ -42,29 +42,36 @@ pub struct ComputationInfo {
 /// keep it alive while retrying `cleanup()`.
 pub struct ComputationCleanupError {
     cause: DrasiError,
-    detail: String,
+    cleanup_error: Option<DrasiError>,
     owner: RejectedComputations,
 }
 impl ComputationCleanupError {
     pub fn cause(&self) -> &DrasiError {
         &self.cause
     }
+    pub fn cleanup_error(&self) -> &DrasiError {
+        self.cleanup_error.as_ref().unwrap_or(&self.cause)
+    }
     pub async fn cleanup(&self) -> Result<()> {
         let mut failures = Vec::new();
         if let DrasiError::Internal(cause) = &self.cause {
             if let Some(nested) = cause.downcast_ref::<Self>() {
                 if let Err(error) = Box::pin(nested.cleanup()).await {
-                    failures.push(error.to_string());
+                    failures.push(error.into());
                 }
             }
         }
         if let Err(error) = self.owner.shutdown().await {
-            failures.push(error.to_string());
+            failures.push(error.into());
         }
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(operation("registration", "cleanup", failures.join("; ")))
+            Err(operation_cause(
+                "registration",
+                "cleanup",
+                crate::error::OperationFailures::new("registration cleanup failed", failures),
+            ))
         }
     }
 }
@@ -72,7 +79,7 @@ impl std::fmt::Debug for ComputationCleanupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComputationCleanupError")
             .field("cause", &self.cause)
-            .field("cleanup_error", &self.detail)
+            .field("cleanup_error", self.cleanup_error())
             .finish_non_exhaustive()
     }
 }
@@ -81,7 +88,8 @@ impl std::fmt::Display for ComputationCleanupError {
         write!(
             f,
             "{}; cleanup remains owned and retryable: {}",
-            self.cause, self.detail
+            self.cause,
+            self.cleanup_error()
         )
     }
 }
@@ -115,18 +123,22 @@ impl RejectedComputations {
                         })?
                         .take();
                 }
-                Err(error) => failures.push(error.to_string()),
+                Err(error) => failures.push(error.into()),
             }
         }
         for batch in &self.batches {
             if let Err(error) = batch.cleanup().await {
-                failures.push(error.to_string());
+                failures.push(error.into());
             }
         }
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(operation("registration", "cleanup", failures.join("; ")))
+            Err(operation_cause(
+                "registration",
+                "cleanup",
+                crate::error::OperationFailures::new("registration cleanup failed", failures),
+            ))
         }
     }
 }
@@ -144,7 +156,22 @@ impl Drop for RejectedComputations {
 enum DriverState {
     Initializing,
     Running,
-    Finished(Option<Arc<str>>),
+    Finished(Option<DriverFailure>),
+}
+
+#[derive(Clone, Debug)]
+struct DriverFailure(Arc<anyhow::Error>);
+
+impl std::fmt::Display for DriverFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for DriverFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref().as_ref())
+    }
 }
 
 pub(super) struct GraphSlot(pub(super) Mutex<Option<ComputationGraph>>);
@@ -247,7 +274,7 @@ impl Entry {
             }
             .await;
             publish_state.send_replace(DriverState::Finished(
-                outcome.err().map(|error| Arc::from(format!("{error:#}"))),
+                outcome.err().map(|error| DriverFailure(Arc::new(error))),
             ));
         });
         Arc::new(Self {
@@ -267,7 +294,7 @@ impl Entry {
         state
             .wait_for(|state| !matches!(state, DriverState::Initializing))
             .await
-            .map_err(|error| operation(&self.id, "deploy", error))?;
+            .map_err(|error| operation_cause(&self.id, "deploy", error))?;
         if self.control.get().is_none() {
             return Err(operation(
                 &self.id,
@@ -308,7 +335,7 @@ impl Entry {
         let joined = if let Some(handle) = task.task.as_mut() {
             let result = handle.await;
             task.task.take();
-            result.map_err(|error| operation(&self.id, "join", error))
+            result.map_err(|error| operation_cause(&self.id, "join", error))
         } else {
             Ok(())
         };
@@ -318,16 +345,16 @@ impl Entry {
         let mut graph = self
             .graph
             .take()
-            .map_err(|error| operation(&self.id, "shutdown", error))?;
+            .map_err(|error| operation_cause(&self.id, "shutdown", error))?;
         graph
             .dispose()
             .await
-            .map_err(|error| operation(&self.id, "dispose", error))?;
+            .map_err(|error| operation_cause(&self.id, "dispose", error))?;
         graph.graph.take();
         self.disposed.store(true, Ordering::Release);
         joined?;
         if let DriverState::Finished(Some(error)) = &*self.driver.borrow() {
-            return Err(operation(&self.id, "shutdown", error));
+            return Err(operation_cause(&self.id, "shutdown", error.clone()));
         }
         Ok(())
     }
@@ -352,6 +379,11 @@ impl Drop for Entry {
 
 fn operation(id: &str, action: &str, error: impl std::fmt::Display) -> DrasiError {
     DrasiError::operation_failed("computation", id, action, error.to_string())
+}
+
+fn operation_cause(id: &str, action: &str, error: impl Into<anyhow::Error>) -> DrasiError {
+    let error = error.into();
+    operation(id, action, &error).with_cause(error)
 }
 
 /// An instance-owned graph handle. The underlying controller remains the only
@@ -381,7 +413,9 @@ impl ComputationHandle {
     pub fn info(&self) -> ComputationInfo {
         let control = self.control();
         let driver_error = match &*self.entry.driver.borrow() {
-            DriverState::Finished(error) => error.clone(),
+            DriverState::Finished(error) => {
+                error.as_ref().map(|error| Arc::from(error.to_string()))
+            }
             _ => None,
         };
         ComputationInfo {
@@ -395,7 +429,7 @@ impl ComputationHandle {
         self.control()
             .deployment_report()
             .await
-            .map_err(|error| operation(self.id(), "deploy", error))
+            .map_err(|error| operation_cause(self.id(), "deploy", error))
     }
     pub async fn start(&self) -> Result<StartReport> {
         if *self.entry.cancel.borrow() {
@@ -419,23 +453,23 @@ impl ComputationHandle {
                     vec![DesiredMutation::Restart(GraphSelection::Exact(exhausted))],
                 )
                 .await
-                .map_err(|error| operation(self.id(), "preview restart", error))?;
+                .map_err(|error| operation_cause(self.id(), "preview restart", error))?;
             let result = control
                 .reconcile(preview, TopologyBindings::default())
                 .await
-                .map_err(|error| operation(self.id(), "restart", error))?;
+                .map_err(|error| operation_cause(self.id(), "restart", error))?;
             if result.summary != OperationSummary::Completed {
-                return Err(operation(
+                return Err(operation_cause(
                     self.id(),
                     "restart",
-                    "one or more components failed; inspect graph observations",
+                    super::v1::LifecycleReportError::Reconciliation(result),
                 ));
             }
         }
         control
             .start_components(control.desired_snapshot().revision, GraphSelection::All)
             .await
-            .map_err(|error| operation(self.id(), "start", error))
+            .map_err(|error| operation_cause(self.id(), "start", error))
     }
     pub(crate) async fn shutdown(&self) -> Result<()> {
         self.entry.shutdown(&[]).await
@@ -510,7 +544,7 @@ async fn dispose_rejected(
         Ok(()) => error,
         Err(cleanup) => DrasiError::Internal(anyhow::Error::new(ComputationCleanupError {
             cause: error,
-            detail: cleanup.to_string(),
+            cleanup_error: Some(cleanup),
             owner,
         })),
     }
@@ -522,18 +556,18 @@ pub(crate) async fn reject_components(
 ) -> DrasiError {
     match batch.cleanup().await {
         Ok(()) => error,
-        Err(cleanup) => components_cleanup_error(batch, error, cleanup.to_string()),
+        Err(cleanup) => components_cleanup_error(batch, error, Some(cleanup)),
     }
 }
 
 pub(crate) fn components_cleanup_error(
     batch: Arc<PendingComponents>,
     cause: DrasiError,
-    detail: String,
+    cleanup_error: Option<DrasiError>,
 ) -> DrasiError {
     DrasiError::Internal(anyhow::Error::new(ComputationCleanupError {
         cause,
-        detail,
+        cleanup_error,
         owner: RejectedComputations {
             core: Mutex::new(None),
             batches: vec![batch],
@@ -702,11 +736,11 @@ impl PendingComponents {
                 {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
-                        failures.push(format!("{id}: {error:#}"));
+                        failures.push(error.context(id.to_string()));
                         continue;
                     }
                     Err(error) => {
-                        failures.push(format!("{id}: {error}"));
+                        failures.push(anyhow::Error::new(error).context(id.to_string()));
                         continue;
                     }
                 }
@@ -714,7 +748,11 @@ impl PendingComponents {
             resources.remove(&id);
         }
         if !failures.is_empty() {
-            return Err(operation("components", "cleanup", failures.join("; ")));
+            return Err(operation_cause(
+                "components",
+                "cleanup",
+                crate::error::OperationFailures::new("component cleanup failed", failures),
+            ));
         }
         self.value.lock().await.take();
         self.done.store(true, Ordering::Release);
@@ -727,5 +765,33 @@ impl Drop for PendingComponents {
         if !self.resources.get_mut().is_empty() {
             log::warn!("Component batch dropped before awaited resource cleanup completed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn driver_watch_retains_graph_and_provider_causes_across_clones() {
+        let error = GraphError::ResourceCleanup {
+            resource: ResourceId::try_new("state").unwrap(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied").into(),
+        };
+        let state = DriverState::Finished(Some(DriverFailure(Arc::new(error.into()))));
+        let retained = state.clone();
+        drop(state);
+        let DriverState::Finished(Some(cause)) = retained else {
+            panic!("driver failure was lost");
+        };
+        let error = operation_cause("instance", "shutdown", cause);
+        assert!(matches!(
+            error.downcast_ref::<GraphError>(),
+            Some(GraphError::ResourceCleanup { .. })
+        ));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 }

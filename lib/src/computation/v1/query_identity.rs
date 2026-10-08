@@ -144,6 +144,20 @@ impl QueryRecoveryIdentity {
         Self::optional_from_envelope(envelope)?.ok_or(QueryIdentityError::Missing)
     }
 
+    pub(crate) fn from_query_output(envelope: &ChangeEnvelope) -> Result<Self, QueryIdentityError> {
+        let identity = Self::from_envelope(envelope)?;
+        let immediate = envelope
+            .annotations()
+            .entries()
+            .take_while(|entry| entry.key() != super::query_codec::QUERY_METADATA)
+            .find(|entry| entry.key() == IDENTITY)
+            .ok_or(QueryIdentityError::Missing)?;
+        if immediate.contributor() != identity.query_id() {
+            return Err(QueryIdentityError::Mismatch);
+        }
+        Ok(identity)
+    }
+
     pub(crate) fn optional_from_envelope(
         envelope: &ChangeEnvelope,
     ) -> Result<Option<Self>, QueryIdentityError> {

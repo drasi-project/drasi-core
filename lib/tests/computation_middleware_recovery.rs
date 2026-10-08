@@ -440,6 +440,65 @@ async fn pending_commit_is_replayed_before_a_new_live_input_and_survives_clean_r
 }
 
 #[tokio::test]
+async fn output_bindings_requeue_middleware_handoff_and_survive_both_providers() {
+    for backend in [Backend::Computation, Backend::Plugin] {
+        let directory = scratch();
+        let provider = provider(directory.path(), backend);
+        let probe = Arc::new(ProbeState::default());
+        let registry = registry(probe.clone());
+        let bindings = OutputBindings::try_new([OutputDestination {
+            output: PortId::try_new("out").unwrap(),
+            consumer: id("sink"),
+            input: PortId::try_new("in").unwrap(),
+            journal: uuid::Uuid::from_u128(1),
+            subscriber: "sink".into(),
+        }])
+        .unwrap();
+        let mut middleware = open(provider.clone(), registry.clone(), definition(), 2).await;
+        middleware
+            .bind_output_destinations(&bindings)
+            .await
+            .unwrap();
+        let output = middleware
+            .transform(input(event(
+                "source",
+                1,
+                1,
+                change(1, &["a"], false),
+                false,
+            )))
+            .await
+            .unwrap();
+        let calls = probe.calls.load(Ordering::SeqCst);
+        middleware
+            .bind_output_destinations(&bindings)
+            .await
+            .unwrap();
+        assert!(middleware.has_pending_emissions());
+        let replay = middleware.on_wakeup().await.unwrap();
+        assert_eq!(logical(&replay[0].envelope), 1);
+        assert_ne!(output[0].envelope.id(), replay[0].envelope.id());
+        assert_eq!(probe.calls.load(Ordering::SeqCst), calls);
+        middleware.stop().await.unwrap();
+        drop(middleware);
+        let mut middleware = open(provider, registry, definition(), 2).await;
+        middleware
+            .bind_output_destinations(&bindings)
+            .await
+            .unwrap();
+        let replay = middleware.on_wakeup().await.unwrap();
+        assert_eq!(logical(&replay[0].envelope), 1);
+        assert_eq!(probe.calls.load(Ordering::SeqCst), calls);
+        middleware.delivery_completed(&replay).await.unwrap();
+        middleware
+            .bind_output_destinations(&OutputBindings::default())
+            .await
+            .unwrap();
+        middleware.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn retention_full_never_evicts_unconfirmed_output_and_can_retry_after_confirmation() {
     let directory = scratch();
     let provider = provider(directory.path(), Backend::Computation);

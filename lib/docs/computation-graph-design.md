@@ -2,6 +2,7 @@
 
 [Usage](computation-graph-usage.md) |
 [Configuration](computation-graph-configuration.md) |
+[Schemas, ports, and pipes](computation-graph-schemas-ports-pipes.md) |
 [Implementation reference](computation-graph-reference.md)
 
 ComputationGraph manages components and moves changes between them inside a

@@ -19,7 +19,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use log::{debug, error, info, warn};
 use reqwest::Client;
@@ -47,8 +46,7 @@ pub(crate) struct BatchItem {
     pub is_terminal: bool,
 }
 
-/// Run the adaptive (coalesced) processing loop. Spawns an internal
-/// batcher task that lives for the lifetime of this loop.
+/// Run forwarding and batching concurrently inside the owned processor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_adaptive_loop(
     reaction_name: String,
@@ -73,8 +71,7 @@ pub(crate) async fn run_adaptive_loop(
         runtime_adaptive.max_batch_size
     );
 
-    // Spawn batcher task. It owns the rx and exits when batch_tx is dropped.
-    let mut batcher_handle = {
+    let batcher = {
         let reaction_name = reaction_name.clone();
         let client = client.clone();
         let config = config.clone();
@@ -82,7 +79,7 @@ pub(crate) async fn run_adaptive_loop(
         let base = base.clone_shared();
         let errored = errored.clone();
         let mut checkpoints = checkpoints;
-        tokio::spawn(async move {
+        async move {
             let mut batcher = AdaptiveBatcher::new(batch_rx, runtime_adaptive);
             let mut total_batches = 0u64;
             let mut total_results = 0u64;
@@ -174,85 +171,74 @@ pub(crate) async fn run_adaptive_loop(
             info!(
                 "[{reaction_name}] HTTP adaptive batcher stopped - Total batches: {total_batches}, Total results: {total_results}"
             );
-        })
+        }
     };
 
     // Render templates once, off the delivery path; the batcher then only
     // coalesces already-rendered items.
     let handlebars = build_handlebars();
 
-    // Main: pull from priority queue, render each item, forward to batcher
-    loop {
-        let query_result_arc = tokio::select! {
-            biased;
-            _ = &mut shutdown_rx => {
-                debug!("[{reaction_name}] Received shutdown signal, exiting adaptive loop");
-                break;
-            }
-            // The batcher dropping its receiver (e.g. a fail-stop) closes this
-            // sender; break promptly instead of blocking on the next dequeue.
-            _ = batch_tx.closed() => {
-                debug!("[{reaction_name}] Batcher exited; exiting adaptive loop");
-                break;
-            }
-            result = base.priority_queue.dequeue() => result,
-        };
-        let query_result = query_result_arc.as_ref();
-
-        if query_result.results.is_empty() {
-            continue;
-        }
-
-        let query_id = &query_result.query_id;
-        let seq = query_result.sequence;
-
-        // Convert this QueryResult's diffs into rendered batch items up-front
-        // (dropping Noops). The batcher unit is one rendered item, so
-        // adaptive_max_batch_size caps the number of payload items in each
-        // BatchEnvelope. The last emitted item is flagged terminal so the
-        // checkpoint only advances once the whole result has been acked.
-        let notifications: Vec<DefaultChangeNotification> = query_result
-            .results
-            .iter()
-            .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d))
-            .collect();
-        let last_idx = notifications.len().saturating_sub(1);
-
-        let mut batcher_closed = false;
-        for (i, notification) in notifications.iter().enumerate() {
-            let payload = render_batch_item(&handlebars, &config, notification, &reaction_name);
-            let item = BatchItem {
-                payload,
-                query_id: query_id.clone(),
-                sequence: seq,
-                is_terminal: i == last_idx,
+    let forward = async {
+        // Main: pull from priority queue, render each item, forward to batcher
+        loop {
+            let query_result_arc = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    debug!("[{reaction_name}] Received shutdown signal, exiting adaptive loop");
+                    break;
+                }
+                // The batcher dropping its receiver (e.g. a fail-stop) closes this
+                // sender; break promptly instead of blocking on the next dequeue.
+                _ = batch_tx.closed() => {
+                    debug!("[{reaction_name}] Batcher exited; exiting adaptive loop");
+                    break;
+                }
+                result = base.priority_queue.dequeue() => result,
             };
-            if batch_tx.send(item).await.is_err() {
-                error!("[{reaction_name}] Failed to send to batch channel — batcher exited");
-                batcher_closed = true;
+            let query_result = query_result_arc.as_ref();
+
+            if query_result.results.is_empty() {
+                continue;
+            }
+
+            let query_id = &query_result.query_id;
+            let seq = query_result.sequence;
+
+            // Convert this QueryResult's diffs into rendered batch items up-front
+            // (dropping Noops). The batcher unit is one rendered item, so
+            // adaptive_max_batch_size caps the number of payload items in each
+            // BatchEnvelope. The last emitted item is flagged terminal so the
+            // checkpoint only advances once the whole result has been acked.
+            let notifications: Vec<DefaultChangeNotification> = query_result
+                .results
+                .iter()
+                .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d))
+                .collect();
+            let last_idx = notifications.len().saturating_sub(1);
+
+            let mut batcher_closed = false;
+            for (i, notification) in notifications.iter().enumerate() {
+                let payload = render_batch_item(&handlebars, &config, notification, &reaction_name);
+                let item = BatchItem {
+                    payload,
+                    query_id: query_id.clone(),
+                    sequence: seq,
+                    is_terminal: i == last_idx,
+                };
+                if batch_tx.send(item).await.is_err() {
+                    error!("[{reaction_name}] Failed to send to batch channel — batcher exited");
+                    batcher_closed = true;
+                    break;
+                }
+            }
+            if batcher_closed {
                 break;
             }
         }
-        if batcher_closed {
-            break;
-        }
-    }
 
-    drop(batch_tx);
-    match tokio::time::timeout(Duration::from_millis(1500), &mut batcher_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            warn!("[{reaction_name}] Adaptive batcher task ended unexpectedly: {e}");
-        }
-        Err(_) => {
-            warn!(
-                "[{reaction_name}] Adaptive batcher did not finish within the 1.5 s shutdown window — \
-                 aborting in-flight delivery"
-            );
-            batcher_handle.abort();
-            let _ = batcher_handle.await;
-        }
-    }
+        drop(batch_tx);
+    };
+    tokio::join!(forward, batcher);
 
     // Preserve the `Error` status set by a fail-stopping batcher.
     if errored.load(Ordering::SeqCst) {

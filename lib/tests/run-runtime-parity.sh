@@ -37,7 +37,7 @@ fi
 
 python3 lib/tests/runtime_parity/check_requirements.py || exit 1
 
-for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk garnet-backends; do
+for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
     package=drasi-lib
     inventory=lib/tests/runtime_parity/original-cases.tsv
     mappings=lib/tests/runtime_parity/case-mappings.tsv
@@ -64,17 +64,123 @@ for profile in default no-default-features extra-capabilities integration plugin
             package=drasi-plugin-sdk
             inventory=/dev/null
             mappings=/dev/null
-            sources=(components/plugin-sdk/tests/computation_factories.rs)
-            targets=(--test computation_factories)
+            sources=(lib components/plugin-sdk/tests/computation_factories.rs)
+            targets=(--lib --test computation_factories)
             features+=(--no-default-features --features computation)
             ;;
         host-sdk)
             package=drasi-host-sdk
             inventory=/dev/null
             mappings=/dev/null
-            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs)
-            targets=(--lib --test integration_test --test native_computation_pipeline)
+            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
+            targets=(--lib --test integration_test --test native_computation_pipeline --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
             test_arguments+=(--test-threads=1)
+            ;;
+        configuration-store)
+            package=drasi-state-store-redb
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib)
+            targets=(--lib)
+            features+=(--features configuration)
+            ;;
+        postgres-delivery)
+            package=drasi-reaction-storedproc-postgres
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(components/reactions/storedproc-postgres/tests/delivery.rs)
+            targets=(--test delivery)
+            test_arguments+=(--test-threads=1)
+            ;;
+        postgres-transactions)
+            package=drasi-source-postgres
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib components/sources/postgres/tests/native_transactions.rs)
+            targets=(--lib --test native_transactions)
+            test_arguments+=(--test-threads=1)
+            ;;
+        dashboard-lifecycle)
+            package=drasi-reaction-dashboard
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib components/reactions/dashboard/tests/integration_tests.rs)
+            targets=(--lib --test integration_tests)
+            test_arguments+=(--test-threads=1)
+            ;;
+        sse-lifecycle)
+            package=drasi-reaction-sse
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib components/reactions/sse/tests/integration_tests.rs components/reactions/sse/tests/recovery_e2e.rs)
+            targets=(--lib --test integration_tests --test recovery_e2e)
+            test_arguments+=(--test-threads=1)
+            ;;
+        mcp-lifecycle)
+            package=drasi-reaction-mcp
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib components/reactions/mcp/tests/integration_test.rs)
+            targets=(--lib --test integration_test)
+            test_arguments+=(--test-threads=1)
+            ;;
+        cloudflare-radar-lifecycle|open511-lifecycle|here-traffic-lifecycle|sqlite-lifecycle|mysql-lifecycle)
+            source="${profile%-lifecycle}"
+            package="drasi-source-$source"
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib "components/sources/$source/tests/integration_test.rs")
+            targets=(--lib --test integration_test)
+            test_arguments+=(--include-ignored --test-threads=1)
+            if [[ "$source" == sqlite ]]; then
+                sources+=(components/sources/sqlite/tests/native.rs)
+                targets+=(--test native)
+            fi
+            ;;
+        file-lifecycle)
+            package=drasi-reaction-file
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib components/reactions/file/tests/integration_test.rs)
+            targets=(--lib --test integration_test)
+            test_arguments+=(--test-threads=1)
+            ;;
+        http-lifecycle|grpc-lifecycle|application-lifecycle|aws-sqs-lifecycle|loki-lifecycle)
+            reaction="${profile%-lifecycle}"
+            package="drasi-reaction-$reaction"
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib "components/reactions/$reaction/tests/"*.rs)
+            targets=(--lib --tests)
+            test_arguments+=(--test-threads=1)
+            if [[ "$reaction" == aws-sqs || "$reaction" == loki ]]; then
+                test_arguments+=(--include-ignored)
+            fi
+            ;;
+        log-lifecycle|profiler-lifecycle)
+            reaction="${profile%-lifecycle}"
+            package="drasi-reaction-$reaction"
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib "components/reactions/$reaction/tests/recovery_e2e.rs")
+            targets=(--lib --test recovery_e2e)
+            test_arguments+=(--test-threads=1)
+            ;;
+        core-transactions)
+            package=drasi-core
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib)
+            targets=(--lib)
+            features+=(--features computation)
+            ;;
+        rocksdb-backends)
+            package=drasi-index-rocksdb
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib components/indexes/rocksdb/tests/computation_result_transactions.rs)
+            targets=(--lib --test computation_result_transactions)
+            features+=(--features computation)
             ;;
         garnet-backends)
             package=drasi-index-garnet
@@ -185,7 +291,7 @@ for profile in default no-default-features extra-capabilities integration plugin
             binary="${source##*/}"
             binary="${binary%.rs}"
             case "$binary" in
-                computation_query_faults|computation_transaction_transformer|computation_pipeline_parity|computation_middleware_recovery)
+                computation_query_faults|computation_transaction_transformer|computation_source_transactions|computation_pipeline_parity|computation_middleware_recovery)
                     [[ "$profile" == extra-capabilities ]] || continue
                     ;;
             esac

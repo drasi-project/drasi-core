@@ -67,6 +67,87 @@ Both modes use the same plugin source code — the `export_plugin!` macro genera
 | `drasi-lib` | `drasi-core/lib/` | Core processing: hosts the query engine and defines the channel event types that are the FFI wire payloads — no FFI code itself |
 | `drasi-core` | `drasi-core/core/` | Engine and core data model — its types cross FFI only inside serialized payloads |
 
+Native computation ABI 1.0 also has an optional service-v1 entry point; its base
+tables and strict metadata stay frozen. New hosts retain genuine old native
+binaries for fast mode. Negotiated single-output sources may bind the host's
+actual outgoing QoS admission service, with immutable identity, bounded requests,
+typed uncertain outcomes and independent listener-failure reporting. Neither an
+arbitrary store nor a Rust graph object crosses that interface. Native HTTP/gRPC
+adopts this path; legacy shared admission is still pending. See the
+[native SDK contract](computation-plugin-sdk/README.md#optional-graph-owned-source-admission).
+
+The independent recovery-v1 extension now supplies bounded, read-only source
+progress and cancellation-safe subscriptions. Plugins receive no local owner
+object or mutation operation; the host retains the actual query/middleware
+resource for graph recovery assertions and revokes the service before replacement.
+Production database plugin registration remains separate. See the
+[progress contract](computation-plugin-sdk/README.md#optional-read-only-source-progress).
+
+Native bootstrap-v1 separately negotiates query-owned provider factories, bounded
+snapshot polling and borrowed initialization-state requests. It reuses the host's
+revocable request mailbox and existing plugin I/O drivers, with no new executor or
+component role. The query retains final commit and cleanup ownership. See the
+[bootstrap contract](computation-plugin-sdk/README.md#optional-query-owned-bootstrap).
+
+Native consumer-v1 negotiates external or transactional handled consumers. The
+Host retains the existing delivery runner, progress, retries and storage ownership;
+the plugin sees a bounded batch and stable operation keys, plus a borrowed state
+capability for transactional handlers. A graph-owned `NativeConsumerResource`
+binds the provider/options without exposing Rust storage handles across the ABI.
+See the [consumer contract](computation-plugin-sdk/README.md#optional-host-owned-consumer-completion).
+
+Managed native consumer retirement uses the Host's existing delivery runner and
+unchanged awaited storage shutdown. Only a validated, completely handled ledger
+from a healthy owner supplies drain evidence; successful stop alone does not.
+A held lifecycle excludes reopening until configuration is resolved, without
+retaining indexes in inspection snapshots. Native bootstrap retirement similarly
+holds its existing call gate after successful stop. Acceptance or abandonment
+revokes the old provider; terminal shutdown can revoke a held lease, and later
+rejection cannot reopen it. These are Host/framework services, not new ABI calls.
+Revision-bound, durable loss authorization can abandon a completely removed
+domain's pending obligations, including a partial consumer after actual successful
+cleanup. It neither deletes stored data nor bypasses cleanup or transaction-owner
+health checks; production plugin migration is not part of this service.
+
+## Lifecycle observations
+
+Graph-provided `ComponentUpdateSender` handles use a bounded, coalescing mailbox.
+A burst of callbacks cannot hide readiness, the first unobserved failure, or the
+latest status. At most three observations are pending; this is not a history of
+every transition. The host callback does not block, poll, or spawn forwarding
+tasks. Closing or replacing the observer revokes its old callback handles.
+Plugins must still stop and join their workers: coalescing does not make late
+callbacks from an unjoined worker safe across a restart of that same instance.
+After failed initialization, a status handle can replace its closed observer;
+keeping the old one would silently disconnect the retried instance. A live
+observer is not replaced.
+
+The ABI 0.17 SDK catches source/reaction initialization panics, waits for the
+initializer to finish unwinding, and reports the original failure through the
+lifecycle callback. That instance permanently rejects initialization, activation,
+subscriptions and bootstrap/delivery work. Stop and deprovision remain available
+for cleanup; successful cleanup does not make the damaged instance reusable.
+Graph-owned reconstruction factories run only after cleanup succeeds. Without a
+factory, the owner must replace the instance explicitly. Rejected initialization
+still releases newly transferred context resources.
+
+This applies to both concrete and boxed SDK wrappers, not to arbitrary panics in
+every foreign function. ABI 0.16 loading compatibility does not retrofit these
+new SDK protections into old binaries. Pending legacy lifecycle calls still
+block their caller; broader cancellation and worker ownership remain unfinished.
+
+The shared Rust `context::workers` helpers reserve ownership before spawning and
+join in place. Cancellation and timeout retain unjoined handles; abort is only a
+request, not proof of exit. Source, query and reaction base cleanup now uses this
+contract. Custom listener, pruning and heartbeat tasks still require explicit
+adoption; the helpers do not discover or fence arbitrary plugin-owned work.
+
+`ComponentUpdateSender` is now a Rust wrapper rather than an MPSC type alias.
+Runtime-context and status-handle constructors accept ordinary MPSC senders too;
+those retain their original queue/backpressure semantics. Explicit context struct
+literals use `update_tx: sender.into()`. Lifecycle callback layouts and payloads
+are unchanged by this wrapper; no new FFI fields or recovery RPCs are added.
+
 ## Plugin Types
 
 Drasi supports three types of plugins:
@@ -130,15 +211,43 @@ pub extern "C" fn drasi_plugin_init() -> *mut FfiPluginRegistration
 
 | Field | Check | Severity | Rationale |
 |-------|-------|----------|-----------|
-| `sdk_version` | Major.minor match | **REJECT** | `#[repr(C)]` layout changes are breaking |
+| `sdk_version` | Explicit ABI allowlist: 0.16.x / 0.17.x | **REJECT** | Only the documented compatible prefix may cross versions |
 | `target_triple` | Exact match | **REJECT** | Cannot load x86_64 `.so` on aarch64 |
 | `plugin_version` | Log only | **INFO** | Plugin's own version — no compatibility constraint |
 
-The current SDK contract is `0.15.0`: serialized source events must include a
-sequence number. Source subscriptions also preserve an explicit request to replay
-from sequence zero. Hosts reject older SDK versions rather than losing these
-recovery fields. Rebuild local plugins from the same checkout as the host after
-upgrading; a plugin's package version is separate from this contract.
+The current SDK contract is `0.17.0`. State-store key listing returns an explicit
+success/error result; a failed lookup cannot look like an empty store. Bootstrap
+calls forward subscription settings and runtime context properties through both
+proxies. Source sequences, including an explicit replay request from zero, remain
+preserved. Hosts reject missing/null metadata and incompatible SDK versions before
+initialization. ABI 0.16 plugins remain loadable for existing fast-mode behavior;
+rebuild to use the new state-store declaration and ownership contract. A plugin's
+package/registry SDK release version is separate from this FFI contract.
+
+| Host ABI | Plugin ABI | Supported |
+|---|---|---|
+| Legacy 0.17.x | Legacy 0.17.x, same target | Yes |
+| Legacy 0.17.x | Legacy 0.16.x, same target | Existing behavior; no new recovery services |
+| Legacy 0.16.x | Legacy 0.17.x | No; upgrade host first |
+| Legacy 0.17.x | Legacy 0.15.x or older, unknown future ABI | No |
+| Legacy 0.17.x | Missing/null/malformed metadata or wrong target | No |
+| Native computation 1.0.0 | Native computation 1.0.0 | Unchanged; independently versioned |
+
+ABI 0.17 appends a fixed-size versioned durability callback after the ABI 0.16
+`StateStoreVtable` prefix. It reports the actual provider's process-restart,
+power-loss and storage-loss declarations. Unsupported/failed descriptions return
+an error; the infallible Rust trait logs that failure and returns `Unknown`,
+which cannot satisfy a recovery assertion. The final 0.17 proxy releases its
+transferred table and provider; 0.16 proxies retain their original persistent
+pointer lifetime. No per-message recovery fields are added.
+Storage evidence alone does not establish replay, transaction participation,
+handled delivery or once-only external effects. Legacy plugin paths still cannot
+satisfy whole-path recovery assertions without the shared recovery services.
+
+Bootstrap settings/properties are JSON, bounded by the SDK payload limit.
+Malformed values return a failed bootstrap, not defaults. The bootstrap sequence
+counter is still provider-local across FFI; this does not establish gap-free
+snapshot/live handover or a shared sequence allocator.
 
 ## FFI Boundary Design
 
@@ -469,7 +578,7 @@ The `cdylib` approach eliminates all of these constraints. Each plugin is fully 
 
 ### Can plugins use different tokio versions?
 
-Yes. Each cdylib plugin statically links its own tokio. Nothing that crosses the boundary depends on tokio's layout: payloads are serialized, and the `#[repr(C)]` envelopes and vtables have a stable layout whose compatibility is checked at load time via `FFI_SDK_VERSION` (a plugin that does not export metadata skips the check with only a warning; see `loader.rs`).
+Yes. Each cdylib plugin statically links its own tokio. Nothing that crosses the boundary depends on tokio's layout: payloads are serialized, and the `#[repr(C)]` envelopes and vtables have a stable layout whose compatibility is checked at load time via `FFI_SDK_VERSION`. Missing or null metadata is rejected; see `loader.rs`.
 
 ### What happens if a plugin panics?
 

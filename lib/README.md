@@ -48,6 +48,8 @@ Start with the guide for your task:
 | Guide | What it covers |
 |---|---|
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
+| [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
+| [Opt-in resilience and recovery plan](docs/computation-graph-reliability-plan.md) | Proposed phased work for shared recovery services, pipe/provider activation, and a fast path without added recovery machinery |
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
@@ -1140,7 +1142,23 @@ match core.get_source_status("unknown").await {
 | `InvalidState { message }` | Operation not valid in current state |
 | `Validation { message }` | Input validation failed |
 | `OperationFailed { component_type, component_id, operation, reason }` | Runtime operation failed |
-| `Internal(anyhow::Error)` | Unexpected internal error |
+| `Internal(anyhow::Error)` | Internal error or a public classification carrying its original cause |
+
+**Cause-preserving errors:** operation, state and configuration conversions now
+retain their underlying errors in the existing `Internal` variant. Match
+`error.classification()` rather than the outer variant to handle their public
+category. Existing enum variants and fields are unchanged; direct pattern matches
+still compile, but must adopt this accessor to recognize these wrapped errors.
+Simple structured errors, such as an unknown component, remain usable directly.
+
+Use `error.downcast_ref::<T>()` to inspect a graph, provider or worker error instead
+of parsing its message. `error::OperationFailures::failures()` exposes every error
+from a multi-component operation; `computation::v1::LifecycleReportError` retains
+the complete start, stop or reconciliation report. Their standard source chain
+follows only the primary failure. `ComputationCleanupError::cleanup_error()` keeps
+the failed cleanup separate from the original rejection, while its owner remains
+available for an explicit cleanup retry. None of these errors implies rollback or
+makes retrying an external effect safe.
 
 ---
 

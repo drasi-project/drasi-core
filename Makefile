@@ -56,6 +56,7 @@ build-test-plugins:
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
 	cargo build --lib -p drasi-computation-standard --features drasi-computation-standard/dynamic-plugin
+	cargo build -p drasi-host-sdk --example native_recovery
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
 	@for ext in dylib so dll; do \

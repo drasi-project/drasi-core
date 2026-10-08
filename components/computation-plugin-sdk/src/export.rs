@@ -3,8 +3,8 @@
 
 use drasi_lib::computation::v1::{
     BinaryEnvelopeCodec, ComputationComponent, ComputationService, EnvelopeSink, EnvelopeSource,
-    PluginIdentity, PortDirection, Record, RecordImage, RecordReference, Schema, Transformer,
-    WakeupSource,
+    PluginIdentity, PortDirection, Record, RecordImage, RecordReference, Schema,
+    SourceProgressReader, Transformer, WakeupSource,
 };
 use std::{
     ffi::c_void,
@@ -27,6 +27,36 @@ use crate::{
 /// standalone and transactional construction use this same immutable contract.
 pub trait Factory: Send + Sync + 'static {
     fn metadata(&self) -> FactoryMetadata;
+    fn consumer_mode(&self) -> Option<crate::ConsumerMode> {
+        None
+    }
+    fn supports_source_progress(&self) -> bool {
+        false
+    }
+    fn create_with_progress(
+        &self,
+        request: &CreateRequest,
+        control: ControlSender,
+        progress: crate::NativeSourceProgress,
+    ) -> anyhow::Result<CreatedComponent> {
+        let _ = (request, control, progress);
+        anyhow::bail!("factory does not implement source progress")
+    }
+    fn supports_source_admission(&self) -> bool {
+        false
+    }
+    fn create_with_admission(
+        &self,
+        request: &CreateRequest,
+        control: ControlSender,
+        admission: Option<crate::NativeAdmission>,
+    ) -> anyhow::Result<CreatedComponent> {
+        anyhow::ensure!(
+            admission.is_none(),
+            "factory does not implement source admission"
+        );
+        self.create(request, control)
+    }
     fn create(
         &self,
         request: &CreateRequest,
@@ -39,6 +69,8 @@ pub enum Component {
     Transformer(Box<dyn Transformer>),
     Transactional(Box<dyn TransactionalComponent>),
     Sink(Box<dyn EnvelopeSink>),
+    Consumer(Box<dyn crate::NativeConsumer>),
+    TransactionalConsumer(Box<dyn crate::NativeTransactionalConsumer>),
     Service(Box<dyn ComputationService>),
 }
 impl Component {
@@ -48,6 +80,8 @@ impl Component {
             Self::Transformer(value) => value.as_ref(),
             Self::Transactional(value) => value.as_ref(),
             Self::Sink(value) => value.as_ref(),
+            Self::Consumer(value) => value.as_ref(),
+            Self::TransactionalConsumer(value) => value.as_ref(),
             Self::Service(value) => value.as_ref(),
         }
     }
@@ -57,6 +91,8 @@ impl Component {
             Self::Transformer(value) => value.as_mut(),
             Self::Transactional(value) => value.as_mut(),
             Self::Sink(value) => value.as_mut(),
+            Self::Consumer(value) => value.as_mut(),
+            Self::TransactionalConsumer(value) => value.as_mut(),
             Self::Service(value) => value.as_mut(),
         }
     }
@@ -93,6 +129,8 @@ pub struct PluginDefinition {
     metadata: PluginMetadata,
     factories: Vec<Arc<dyn Factory>>,
     schemas: Vec<Arc<Schema>>,
+    bootstrap_factories: Vec<Arc<dyn crate::BootstrapFactory>>,
+    bootstrap_metadata: Vec<crate::BootstrapFactoryMetadata>,
 }
 impl PluginDefinition {
     pub fn new(
@@ -135,7 +173,43 @@ impl PluginDefinition {
             metadata,
             factories,
             schemas,
+            bootstrap_factories: Vec::new(),
+            bootstrap_metadata: Vec::new(),
         })
+    }
+    pub fn with_bootstrap_factories(
+        mut self,
+        factories: Vec<Arc<dyn crate::BootstrapFactory>>,
+    ) -> anyhow::Result<Self> {
+        let mut identities = std::collections::BTreeSet::new();
+        let metadata = factories
+            .iter()
+            .map(|factory| {
+                let mut metadata = factory.metadata();
+                anyhow::ensure!(
+                    metadata
+                        .implementation
+                        .plugin
+                        .as_ref()
+                        .is_none_or(|p| p == &self.metadata.plugin),
+                    "bootstrap factory declared conflicting plugin provenance"
+                );
+                metadata.implementation.plugin = Some(self.metadata.plugin.clone());
+                metadata.validate(&self.metadata.plugin)?;
+                anyhow::ensure!(
+                    identities.insert((
+                        metadata.implementation.name.clone(),
+                        metadata.implementation.version.clone()
+                    )),
+                    "duplicate bootstrap factory"
+                );
+                Ok(metadata)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        crate::bootstrap::encode(&metadata)?;
+        self.bootstrap_factories = factories;
+        self.bootstrap_metadata = metadata;
+        Ok(self)
     }
 }
 
@@ -175,6 +249,18 @@ impl ExportedPlugin {
     }
     pub fn metadata(&self) -> *const abi::Metadata {
         &self.metadata
+    }
+    pub fn services(&self) -> *const abi::services::PluginServicesV1 {
+        &PLUGIN_SERVICES
+    }
+    pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
+        &PLUGIN_RECOVERY
+    }
+    pub fn bootstrap(&self) -> *const abi::bootstrap::PluginBootstrapV1 {
+        &PLUGIN_BOOTSTRAP
+    }
+    pub fn consumer(&self) -> *const abi::consumer::PluginConsumerV1 {
+        &PLUGIN_CONSUMER
     }
     /// # Safety
     /// out must be a writable, unowned PluginHandle. The caller must release the
@@ -217,6 +303,288 @@ static PLUGIN_VTABLE: abi::PluginVTable = abi::PluginVTable {
     factory: Some(get_factory),
     validate_record: Some(validate_record),
 };
+
+static PLUGIN_SERVICES: abi::services::PluginServicesV1 = abi::services::PluginServicesV1 {
+    header: Header::new::<abi::services::PluginServicesV1>(),
+    version: abi::services::VERSION,
+    reserved: 0,
+    factory: Some(factory_services),
+    create: Some(create_component_with_admission),
+};
+
+static PLUGIN_RECOVERY: abi::recovery::PluginRecoveryV1 = abi::recovery::PluginRecoveryV1 {
+    header: Header::new::<abi::recovery::PluginRecoveryV1>(),
+    version: abi::recovery::VERSION,
+    reserved: 0,
+    factory: Some(factory_recovery),
+    create: Some(create_component_with_progress),
+    inspect: Some(inspect_recovery),
+};
+
+static PLUGIN_BOOTSTRAP: abi::bootstrap::PluginBootstrapV1 = abi::bootstrap::PluginBootstrapV1 {
+    header: Header::new::<abi::bootstrap::PluginBootstrapV1>(),
+    version: abi::bootstrap::VERSION,
+    reserved: 0,
+    factories: Some(bootstrap_factories),
+    create: Some(create_bootstrap),
+};
+
+static PLUGIN_CONSUMER: abi::consumer::PluginConsumerV1 = abi::consumer::PluginConsumerV1 {
+    header: Header::new::<abi::consumer::PluginConsumerV1>(),
+    version: abi::consumer::VERSION,
+    reserved: 0,
+    factory: Some(factory_consumer),
+    create: Some(create_component_with_consumer),
+    inspect: Some(inspect_consumer),
+    begin: Some(begin_consumer),
+    end_batch: Some(end_consumer_batch),
+};
+unsafe extern "C" fn factory_consumer(state: *mut c_void, index: u32) -> Reply {
+    transport::reply_boundary(|| {
+        let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let factory = plugin
+            .definition
+            .factories
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native consumer factory"))?;
+        let mode = factory.consumer_mode();
+        let metadata = &plugin.definition.metadata.factories[index as usize];
+        if let Some(mode) = mode {
+            mode.validate_factory(metadata).map_err(Failure::from)?;
+        }
+        wire::encode(&crate::consumer::FactoryConsumer {
+            version: abi::consumer::VERSION,
+            mode,
+        })
+        .map_err(Failure::from)
+    })
+}
+unsafe extern "C" fn inspect_consumer(raw: *mut c_void) -> Reply {
+    transport::reply_boundary(|| {
+        let instance = unsafe { state_ref::<Arc<Instance>>(raw)? };
+        wire::encode(&crate::consumer::FactoryConsumer {
+            version: abi::consumer::VERSION,
+            mode: instance.consumer.as_ref().map(|state| state.mode),
+        })
+        .map_err(Failure::from)
+    })
+}
+unsafe extern "C" fn end_consumer_batch(raw: *mut c_void, generation: u64) -> Status {
+    transport::status_boundary(|| {
+        let instance = unsafe { state_ref::<Arc<Instance>>(raw)? };
+        instance
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                Failure::new(abi::status::BUSY, "native consumer operation still active")
+            })?;
+        let _guard = BusyGuard(instance.clone());
+        instance
+            .consumer
+            .as_ref()
+            .ok_or_else(|| Failure::protocol("consumer service not bound"))?
+            .end_batch(generation)
+            .map_err(Failure::from)
+    })
+}
+unsafe extern "C" fn begin_consumer(
+    raw: *mut c_void,
+    code: u32,
+    input: BorrowedBytes,
+    transaction: *const abi::Transaction,
+    out: *mut abi::OperationHandle,
+) -> Status {
+    transport::status_boundary(|| {
+        require_output(out)?;
+        let instance = unsafe { state_ref::<Arc<Instance>>(raw)? }.clone();
+        let state = instance
+            .consumer
+            .as_ref()
+            .ok_or_else(|| Failure::protocol("consumer service not bound"))?;
+        if !instance.running.load(Ordering::Acquire)
+            || !(abi::consumer::BEGIN_BATCH..=abi::consumer::HANDLE).contains(&code)
+            || (!transaction.is_null()
+                && (code != abi::consumer::HANDLE
+                    || state.mode != crate::ConsumerMode::Transactional))
+            || (code == abi::consumer::HANDLE
+                && state.mode == crate::ConsumerMode::Transactional
+                && transaction.is_null())
+        {
+            return Err(Failure::protocol(
+                "invalid native consumer operation or transaction",
+            ));
+        }
+        let limit = if code == abi::consumer::BEGIN_BATCH {
+            abi::MAX_MESSAGE_BYTES
+        } else {
+            abi::consumer::MAX_CONTROL_BYTES
+        };
+        let input = unsafe { transport::borrowed_bytes(input, limit)? }.to_vec();
+        let transaction = if transaction.is_null() {
+            None
+        } else {
+            Some(unsafe { RetainedTransaction::new(transaction)? })
+        };
+        instance
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                Failure::new(
+                    abi::status::BUSY,
+                    "native consumer operation already active",
+                )
+            })?;
+        let guard = BusyGuard(instance.clone());
+        let runtime = io_runtime()?;
+        let operation = transport::export_operation(
+            async move {
+                let _guard = guard;
+                let state = instance.consumer.as_ref().expect("validated");
+                state.check_ready()?;
+                if !instance.running.load(Ordering::Acquire) {
+                    return Err(Failure::closed());
+                }
+                state
+                    .run(async {
+                        if code == abi::consumer::BEGIN_BATCH {
+                            return state
+                                .begin_batch(&input, &instance.codec, &instance.metadata.descriptor)
+                                .map_err(Failure::from);
+                        }
+                        let context = transaction.as_ref().map(|transaction| {
+                            NativeTransactionContext::new(
+                                instance.metadata.descriptor.id(),
+                                transaction,
+                                &instance.codec,
+                            )
+                        });
+                        let mut component = instance.component.lock().await;
+                        state.handle(&mut component, &input, context.as_ref()).await
+                    })
+                    .await
+            },
+            Some(runtime),
+        );
+        unsafe { transport::write_out(out, operation) }
+    })
+}
+
+unsafe extern "C" fn bootstrap_factories(state: *mut c_void) -> Reply {
+    transport::reply_boundary(|| {
+        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        crate::bootstrap::encode(&state.definition.bootstrap_metadata).map_err(Failure::from)
+    })
+}
+unsafe extern "C" fn create_bootstrap(
+    state: *mut c_void,
+    index: u32,
+    input: BorrowedBytes,
+    progress: *const abi::recovery::SourceProgressV1,
+    out: *mut abi::bootstrap::BootstrapHandle,
+) -> Status {
+    transport::status_boundary(|| {
+        require_output(out)?;
+        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let metadata = state
+            .definition
+            .bootstrap_metadata
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native bootstrap factory"))?;
+        let request: CreateRequest = crate::bootstrap::decode(unsafe {
+            transport::borrowed_bytes(input, abi::bootstrap::MAX_CONTROL_BYTES)?
+        })
+        .map_err(Failure::from)?;
+        metadata.validate_request(&request).map_err(Failure::from)?;
+        if metadata.source_progress == progress.is_null() {
+            return Err(Failure::protocol(
+                "native bootstrap source progress binding mismatch",
+            ));
+        }
+        let progress = if progress.is_null() {
+            None
+        } else {
+            let progress = unsafe { crate::NativeSourceProgress::from_borrowed(progress) }
+                .map_err(Failure::from)?;
+            let scope = request
+                .scope
+                .as_ref()
+                .ok_or_else(|| Failure::protocol("bootstrap progress requires graph scope"))?;
+            if progress.reader().graph_id() != scope.graph_id {
+                return Err(Failure::protocol("bootstrap progress graph scope mismatch"));
+            }
+            Some(progress)
+        };
+        let reader = progress.as_ref().map(crate::NativeSourceProgress::reader);
+        let provider = state.definition.bootstrap_factories[index as usize]
+            .create(&request, progress)
+            .map_err(Failure::from)?;
+        let declared = provider.recovery_reader();
+        if !match (&reader, &declared) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => expected.same_owner(actual),
+            _ => false,
+        } {
+            return Err(Failure::protocol(
+                "bootstrap did not preserve its bound progress reader",
+            ));
+        }
+        unsafe {
+            transport::write_out(
+                out,
+                crate::bootstrap::export_provider(provider, state.codec.clone(), reader),
+            )
+        }
+    })
+}
+
+unsafe extern "C" fn factory_recovery(state: *mut c_void, index: u32) -> Reply {
+    transport::reply_boundary(|| {
+        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let factory = state
+            .definition
+            .factories
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native recovery factory"))?;
+        let source_progress = factory.supports_source_progress();
+        if source_progress
+            && state.definition.metadata.factories[index as usize].role
+                != drasi_lib::computation::v1::ComponentRole::Source
+        {
+            return Err(Failure::protocol("source progress requires a source"));
+        }
+        crate::progress::encode(&crate::progress::FactoryRecovery {
+            version: abi::recovery::VERSION,
+            source_progress,
+        })
+        .map_err(Failure::from)
+    })
+}
+
+unsafe extern "C" fn factory_services(state: *mut c_void, index: u32) -> Reply {
+    transport::reply_boundary(|| {
+        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let factory = state
+            .definition
+            .factories
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native service factory"))?;
+        let source_admission = factory.supports_source_admission();
+        let metadata = &state.definition.metadata.factories[index as usize];
+        if source_admission
+            && (metadata.role != drasi_lib::computation::v1::ComponentRole::Source
+                || metadata.ports.len() != 1)
+        {
+            return Err(Failure::protocol(
+                "admission requires a single-output source",
+            ));
+        }
+        wire::encode(&crate::admission::FactoryServices {
+            version: abi::services::VERSION,
+            source_admission,
+        })
+        .map_err(Failure::from)
+    })
+}
 unsafe extern "C" fn release_plugin(state: *mut c_void) {
     transport::drop_boundary(|| unsafe { drop(Box::from_raw(state.cast::<Arc<PluginState>>())) });
 }
@@ -315,11 +683,90 @@ struct Instance {
     wakeup: Option<Arc<dyn WakeupSource>>,
     busy: AtomicBool,
     running: AtomicBool,
+    admission: bool,
+    progress: Option<SourceProgressReader>,
+    recovery: Option<crate::progress::InstanceRecovery>,
+    consumer: Option<Box<crate::consumer::ConsumerState>>,
+}
+
+fn source_recovery(
+    component: &Component,
+    progress: &SourceProgressReader,
+) -> anyhow::Result<crate::progress::InstanceRecovery> {
+    let Component::Source(source) = component else {
+        anyhow::bail!("source progress requires a source");
+    };
+    anyhow::ensure!(
+        source.recovery_progress().is_none()
+            && source
+                .recovery_reader()
+                .is_some_and(|reader| reader.same_owner(progress)),
+        "native source must use its actual negotiated progress reader"
+    );
+    let contract = source.recovery_contract();
+    let retention = match contract.replay_retention() {
+        Some((retention, consumer)) => {
+            anyhow::ensure!(
+                consumer == progress.component_id(),
+                "native replay retention names a different progress owner"
+            );
+            Some(retention)
+        }
+        None => None,
+    };
+    Ok(crate::progress::InstanceRecovery {
+        version: abi::recovery::VERSION,
+        retention,
+    })
 }
 
 unsafe extern "C" fn create_component(
     state: *mut c_void,
     input: BorrowedBytes,
+    out: *mut abi::ComponentHandle,
+) -> Status {
+    unsafe {
+        create_component_with_services(state, input, std::ptr::null(), std::ptr::null(), false, out)
+    }
+}
+
+unsafe extern "C" fn create_component_with_admission(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    admission: *const abi::services::SourceAdmissionV1,
+    out: *mut abi::ComponentHandle,
+) -> Status {
+    unsafe { create_component_with_services(state, input, admission, std::ptr::null(), false, out) }
+}
+
+unsafe extern "C" fn create_component_with_progress(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    progress: *const abi::recovery::SourceProgressV1,
+    out: *mut abi::ComponentHandle,
+) -> Status {
+    if progress.is_null() {
+        return transport::status_result(Err(Failure::protocol("missing source progress")));
+    }
+    unsafe { create_component_with_services(state, input, std::ptr::null(), progress, false, out) }
+}
+
+unsafe extern "C" fn create_component_with_consumer(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    out: *mut abi::ComponentHandle,
+) -> Status {
+    unsafe {
+        create_component_with_services(state, input, std::ptr::null(), std::ptr::null(), true, out)
+    }
+}
+
+unsafe fn create_component_with_services(
+    state: *mut c_void,
+    input: BorrowedBytes,
+    admission: *const abi::services::SourceAdmissionV1,
+    progress: *const abi::recovery::SourceProgressV1,
+    consumer_bound: bool,
     out: *mut abi::ComponentHandle,
 ) -> Status {
     transport::status_boundary(|| {
@@ -337,15 +784,75 @@ unsafe extern "C" fn create_component(
             );
             metadata.configuration.validate(&request.configuration)?;
             let control = ControlSender::default();
-            let created =
-                state.plugin.definition.factories[state.index].create(&request, control.clone())?;
+            let factory = &state.plugin.definition.factories[state.index];
+            let consumer_mode = factory.consumer_mode();
+            anyhow::ensure!(
+                consumer_bound == consumer_mode.is_some(),
+                "native consumer requires its negotiated host-owned delivery service"
+            );
+            anyhow::ensure!(
+                !consumer_bound || (admission.is_null() && progress.is_null()),
+                "native consumer cannot bind source admission or progress"
+            );
+            if let Some(mode) = consumer_mode {
+                mode.validate_factory(metadata)?;
+            }
+            anyhow::ensure!(
+                admission.is_null()
+                    || (factory.supports_source_admission()
+                        && metadata.role == drasi_lib::computation::v1::ComponentRole::Source
+                        && metadata.ports.len() == 1),
+                "unsupported native source admission"
+            );
+            let service = if admission.is_null() {
+                None
+            } else {
+                Some(unsafe {
+                    crate::NativeAdmission::from_borrowed(admission, state.plugin.codec.clone())?
+                })
+            };
+            let (created, progress) = if progress.is_null() {
+                (
+                    factory.create_with_admission(&request, control.clone(), service)?,
+                    None,
+                )
+            } else {
+                anyhow::ensure!(
+                    admission.is_null()
+                        && factory.supports_source_progress()
+                        && metadata.role == drasi_lib::computation::v1::ComponentRole::Source,
+                    "unsupported native source progress binding"
+                );
+                let capability = unsafe { crate::NativeSourceProgress::from_borrowed(progress)? };
+                let reader = capability.reader();
+                anyhow::ensure!(
+                    request
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.graph_id == reader.graph_id())
+                        && &request.id != reader.component_id(),
+                    "native progress belongs to a different graph or to the source itself"
+                );
+                (
+                    factory.create_with_progress(&request, control.clone(), capability)?,
+                    Some(reader),
+                )
+            };
             let component = created.component;
             metadata.validate_instance(component.base().descriptor(), &request.id)?;
             let role = match &component {
                 Component::Source(source) => {
                     anyhow::ensure!(
                         source.recovery_progress().is_none(),
-                        "native source recovery capability is not implemented"
+                        "Rust source progress owners cannot cross the native ABI"
+                    );
+                    anyhow::ensure!(
+                        progress.is_some() || source.recovery_reader().is_none(),
+                        "native source progress requires its negotiated recovery service"
+                    );
+                    anyhow::ensure!(
+                        source.admission().is_none(),
+                        "Rust source admission handles cannot cross native ABI 1.0"
                     );
                     drasi_lib::computation::v1::ComponentRole::Source
                 }
@@ -360,11 +867,23 @@ unsafe extern "C" fn create_component(
                     );
                     drasi_lib::computation::v1::ComponentRole::Sink
                 }
+                Component::Consumer(_) | Component::TransactionalConsumer(_) => {
+                    drasi_lib::computation::v1::ComponentRole::Sink
+                }
                 Component::Service(_) => drasi_lib::computation::v1::ComponentRole::Service,
             };
             anyhow::ensure!(
                 metadata.role == role,
                 "native factory returned the wrong component role"
+            );
+            let actual_mode = match &component {
+                Component::Consumer(_) => Some(crate::ConsumerMode::External),
+                Component::TransactionalConsumer(_) => Some(crate::ConsumerMode::Transactional),
+                _ => None,
+            };
+            anyhow::ensure!(
+                actual_mode == consumer_mode,
+                "native consumer mode differs from factory declaration"
             );
             anyhow::ensure!(
                 metadata.capabilities.transactional
@@ -418,6 +937,20 @@ unsafe extern "C" fn create_component(
             metadata
                 .configuration
                 .validate(&component.base().configuration()?)?;
+            let recovery = progress
+                .as_ref()
+                .map(|progress| source_recovery(&component, progress))
+                .transpose()?;
+            let consumer = consumer_mode
+                .map(|mode| {
+                    crate::consumer::ConsumerState::new(
+                        mode,
+                        &request,
+                        &state.plugin.definition.schemas,
+                    )
+                    .map(Box::new)
+                })
+                .transpose()?;
             Ok(Arc::new(Instance {
                 metadata: InstanceMetadata {
                     descriptor: metadata.descriptor(request.id)?,
@@ -431,6 +964,10 @@ unsafe extern "C" fn create_component(
                 wakeup,
                 busy: AtomicBool::new(false),
                 running: AtomicBool::new(false),
+                admission: !admission.is_null(),
+                progress,
+                recovery,
+                consumer,
             }))
         };
         let instance = create().map_err(Failure::from)?;
@@ -463,6 +1000,15 @@ unsafe extern "C" fn inspect_component(state: *mut c_void) -> Reply {
         serde_json::to_vec(&instance.metadata)
             .map_err(anyhow::Error::from)
             .map_err(Failure::from)
+    })
+}
+unsafe extern "C" fn inspect_recovery(state: *mut c_void) -> Reply {
+    transport::reply_boundary(|| {
+        let instance = unsafe { state_ref::<Arc<Instance>>(state)? };
+        let recovery = instance.recovery.as_ref().ok_or_else(|| {
+            Failure::new(abi::status::UNSUPPORTED, "source progress is not bound")
+        })?;
+        crate::progress::encode(recovery).map_err(Failure::from)
     })
 }
 unsafe extern "C" fn configuration(state: *mut c_void) -> Reply {
@@ -498,7 +1044,7 @@ unsafe extern "C" fn bind_control(state: *mut c_void, control: *const abi::Contr
     })
 }
 
-fn io_runtime() -> Result<Arc<tokio::runtime::Runtime>, Failure> {
+pub(crate) fn io_runtime() -> Result<Arc<tokio::runtime::Runtime>, Failure> {
     // Each binary owns its own I/O drivers. Only the host polls component work.
     // The static retains the runtime alongside the process-pinned plugin code.
     static RUNTIME: OnceLock<Result<Arc<tokio::runtime::Runtime>, String>> = OnceLock::new();
@@ -547,7 +1093,10 @@ unsafe extern "C" fn begin(
         use abi::operation::*;
         let allowed = match code {
             START | STOP => true,
-            NEXT => instance.factory.role == drasi_lib::computation::v1::ComponentRole::Source,
+            NEXT => {
+                instance.factory.role == drasi_lib::computation::v1::ComponentRole::Source
+                    && !instance.admission
+            }
             TRANSFORM | DELIVERY_COMPLETED => {
                 instance.factory.role == drasi_lib::computation::v1::ComponentRole::Transformer
             }
@@ -583,15 +1132,33 @@ unsafe extern "C" fn begin(
             Some(BusyGuard(instance.clone()))
         };
         let runtime = io_runtime()?;
-        let operation = transport::export_operation(
-            async move {
-                let _guard = guard;
-                execute(instance, code, input, transaction)
-                    .await
-                    .map_err(Failure::from)
-            },
-            Some(runtime),
-        );
+        // Select before boxing so ordinary operations retain no consumer future.
+        let operation = if instance.consumer.is_some() {
+            transport::export_operation(
+                async move {
+                    let _guard = guard;
+                    let consumer = instance.consumer.as_ref().expect("checked consumer");
+                    consumer
+                        .run(async {
+                            execute(instance.clone(), code, input, transaction)
+                                .await
+                                .map_err(Failure::from)
+                        })
+                        .await
+                },
+                Some(runtime),
+            )
+        } else {
+            transport::export_operation(
+                async move {
+                    let _guard = guard;
+                    execute(instance, code, input, transaction)
+                        .await
+                        .map_err(Failure::from)
+                },
+                Some(runtime),
+            )
+        };
         unsafe { transport::write_out(out, operation) }
     })
 }
@@ -635,16 +1202,34 @@ async fn execute(
     }
     match code {
         START => {
+            if let Some(consumer) = &instance.consumer {
+                consumer.check_ready()?;
+            }
             anyhow::ensure!(
                 !instance.running.load(Ordering::Acquire),
                 "native component already started"
             );
+            if let Some(progress) = &instance.progress {
+                anyhow::ensure!(
+                    Some(source_recovery(&component, progress)?) == instance.recovery,
+                    "native source changed its negotiated recovery contract"
+                );
+            }
             component.base_mut().start().await?;
             instance.running.store(true, Ordering::Release);
+            if let Some(progress) = &instance.progress {
+                anyhow::ensure!(
+                    Some(source_recovery(&component, progress)?) == instance.recovery,
+                    "native source changed its recovery contract during activation"
+                );
+            }
         }
         STOP => {
             instance.running.store(false, Ordering::Release);
             component.base_mut().stop().await?;
+            if let Some(consumer) = &instance.consumer {
+                consumer.clear()?;
+            }
         }
         NEXT => {
             let Component::Source(source) = &mut *component else {
@@ -725,7 +1310,9 @@ async fn execute(
         }
         HANDLE | SNAPSHOT => {
             let Component::Sink(sink) = &mut *component else {
-                unreachable!("validated role")
+                anyhow::bail!(
+                    "native consumer operations require their negotiated delivery service"
+                );
             };
             let input = wire::decode::<wire::Envelope>(&input)?.into_input(&instance.codec)?;
             wire::check_port(

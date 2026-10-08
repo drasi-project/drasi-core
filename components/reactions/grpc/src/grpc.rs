@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::info;
+use tokio::sync::Mutex;
 
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
@@ -38,6 +39,7 @@ use crate::runner_fixed::{self, FixedRunnerParams};
 pub struct GrpcReaction {
     pub(crate) base: ReactionBase,
     config: GrpcReactionConfig,
+    cleanup_required: Mutex<bool>,
 }
 
 impl GrpcReaction {
@@ -56,6 +58,7 @@ impl GrpcReaction {
         Ok(Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         })
     }
 
@@ -72,6 +75,7 @@ impl GrpcReaction {
         Ok(Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         })
     }
 
@@ -93,6 +97,7 @@ impl GrpcReaction {
         Self {
             base: ReactionBase::new(params),
             config,
+            cleanup_required: Mutex::new(false),
         }
     }
 
@@ -136,6 +141,11 @@ impl Reaction for GrpcReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.base.processing_task.read().await.is_some() {
+            return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         log_component_start("gRPC Reaction", &self.base.id);
         info!(
             "[{}] gRPC reaction starting - sending to endpoint: {} (mode: {})",
@@ -182,38 +192,40 @@ impl Reaction for GrpcReaction {
         let base = self.base.clone_shared();
         let config = self.config.clone();
 
-        let handle = match &self.config.batching {
-            BatchingConfig::Fixed {
-                batch_size,
-                batch_flush_timeout_ms,
-            } => {
-                let params = FixedRunnerParams {
-                    reaction_name,
-                    batch_size: *batch_size,
-                    batch_flush_timeout_ms: *batch_flush_timeout_ms,
-                    base,
-                    config,
-                    shutdown_rx,
-                    checkpoints,
-                    policy,
-                };
-                tokio::spawn(async move { runner_fixed::run(params).await })
+        let batching = self.config.batching.clone();
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            match batching {
+                BatchingConfig::Fixed {
+                    batch_size,
+                    batch_flush_timeout_ms,
+                } => {
+                    let params = FixedRunnerParams {
+                        reaction_name,
+                        batch_size,
+                        batch_flush_timeout_ms,
+                        base,
+                        config,
+                        shutdown_rx,
+                        checkpoints,
+                        policy,
+                    };
+                    runner_fixed::run(params).await;
+                }
+                adaptive @ BatchingConfig::Adaptive { .. } => {
+                    let params = AdaptiveRunnerParams {
+                        reaction_name,
+                        adaptive: adaptive.as_adaptive_config().unwrap_or_default(),
+                        base,
+                        config,
+                        shutdown_rx,
+                        checkpoints,
+                        policy,
+                    };
+                    runner_adaptive::run(params).await;
+                }
             }
-            adaptive @ BatchingConfig::Adaptive { .. } => {
-                let params = AdaptiveRunnerParams {
-                    reaction_name,
-                    adaptive: adaptive.as_adaptive_config().unwrap_or_default(),
-                    base,
-                    config,
-                    shutdown_rx,
-                    checkpoints,
-                    policy,
-                };
-                tokio::spawn(async move { runner_adaptive::run(params).await })
-            }
-        };
-
-        self.base.set_processing_task(handle).await;
+        })
+        .await?;
 
         self.base
             .set_status(
@@ -225,7 +237,11 @@ impl Reaction for GrpcReaction {
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
+        self.base.stop_common_gracefully().await?;
+        *cleanup_required = false;
+        Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {

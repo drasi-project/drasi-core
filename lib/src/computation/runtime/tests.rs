@@ -110,6 +110,10 @@ struct NativeServiceFactory {
     index_providers: Vec<Arc<dyn drasi_core::interface::IndexBackendPlugin>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("injected native creation failure")]
+struct NativeCreationFailure;
+
 #[async_trait]
 impl ComponentFactory for NativeServiceFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
@@ -125,9 +129,7 @@ impl ComponentFactory for NativeServiceFactory {
         if context.specification.configuration.get("fail")
             == Some(&ConfigurationValue::Literal(true.into()))
         {
-            return Err(ComponentCreationError::terminal(anyhow::anyhow!(
-                "injected native creation failure"
-            )));
+            return Err(ComponentCreationError::terminal(NativeCreationFailure));
         }
         if !self.index_providers.is_empty() {
             let provided = context
@@ -179,6 +181,7 @@ impl EnvelopeSource for UnboundNativeSource {
 #[derive(Default)]
 struct SourceControl {
     resource_observers: StdMutex<Vec<Arc<dyn crate::context::ComponentResourceObserver>>>,
+    updates: StdMutex<Option<crate::channels::ComponentUpdateSender>>,
     initializations: AtomicUsize,
     auto_start: AtomicBool,
     starts: AtomicUsize,
@@ -806,6 +809,7 @@ impl Source for ControlledSource {
                 .push(observer.clone());
         }
         let updates = context.update_tx.clone();
+        *self.control.updates.lock().unwrap() = Some(updates.clone());
         self.inner.initialize(context).await;
         if self.control.fail_initialize.load(Ordering::Acquire) {
             updates
@@ -1418,6 +1422,7 @@ async fn missing_dependencies_fail_on_nodes_and_can_be_retried_when_available() 
 async fn creation_retry_reuses_the_owned_source_and_never_retries_in_a_loop() {
     let core = builder().build().await.unwrap();
     let (source, control) = ControlledSource::new("source");
+    let reporter = source.inner.status_handle();
     control.fail_initialize.store(true, Ordering::Release);
     let handle = core.add_source_with_handle(source).await.unwrap();
     assert_creation_failed(&core, &handle, "injected initialization failure").await;
@@ -1448,7 +1453,84 @@ async fn creation_retry_reuses_the_owned_source_and_never_retries_in_a_loop() {
             .control,
         &control
     ));
+    let mut events = core.subscribe_all_component_events();
+    reporter
+        .set_status(
+            ComponentStatus::Error,
+            Some("failure after reinitialization".into()),
+        )
+        .await;
+    crate::test_helpers::wait_for_component_status(
+        &mut events,
+        "source",
+        ComponentStatus::Error,
+        Duration::from_secs(2),
+    )
+    .await;
     core.shutdown().await.unwrap();
+}
+
+async fn explicit_start_joins_pending_source_readiness() {
+    let core = builder().build().await.unwrap();
+    core.start().await.unwrap();
+    let (source, control) = ControlledSource::new("source");
+    let reporter = source.inner.status_handle();
+    control.auto_start.store(true, Ordering::Release);
+    control.starting_only.store(true, Ordering::Release);
+    let mut events = core.subscribe_all_component_events();
+    let handle = core.add_source_with_handle(source).await.unwrap();
+    handle.wait_created().await.unwrap();
+    crate::test_helpers::wait_for_component_status(
+        &mut events,
+        "source",
+        ComponentStatus::Starting,
+        Duration::from_secs(2),
+    )
+    .await;
+    let graph = core.computation_runtime.as_ref().control().unwrap();
+    let id = ComponentId::try_new("source").unwrap();
+    let mut observed = graph.subscribe_observed();
+    drop(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            observed.wait_for(|state| {
+                state
+                    .startup
+                    .as_ref()
+                    .is_some_and(|report| report.components.contains_key(&id))
+            }),
+        )
+        .await
+        .expect("automatic activation report")
+        .expect("graph observation remains open"),
+    );
+    let generation = graph.observed().components[&id].generation;
+    let report = tokio::time::timeout(
+        Duration::from_secs(2),
+        graph.start_members([(id, generation)].into_iter().collect()),
+    )
+    .await
+    .expect("joining an activation must not wait for readiness")
+    .expect("an existing activation is not a blocked dependency");
+    assert_eq!(report.summary, OperationSummary::Completed);
+    assert_eq!(control.starts.load(Ordering::Acquire), 1);
+    assert_eq!(
+        core.get_source_status("source").await.unwrap(),
+        ComponentStatus::Starting
+    );
+    reporter.set_status(ComponentStatus::Running, None).await;
+    handle.wait_started().await.unwrap();
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_start_joins_pending_source_readiness_current_thread() {
+    explicit_start_joins_pending_source_readiness().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_start_joins_pending_source_readiness_multi_thread() {
+    explicit_start_joins_pending_source_readiness().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1641,6 +1723,10 @@ async fn duplicate_additions_are_rejected_without_replacing_the_declared_node() 
 }
 
 fn rejected_addition(error: crate::DrasiError) -> GraphError {
+    assert!(matches!(
+        error.classification(),
+        crate::DrasiError::OperationFailed { operation, .. } if operation == "add"
+    ));
     let crate::DrasiError::Internal(error) = error else {
         panic!("ownership-bearing rejection must preserve its original error");
     };
@@ -2643,6 +2729,13 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         message.contains("injected native creation failure"),
         "{message}"
     );
+    let failures = error
+        .downcast_ref::<crate::error::OperationFailures>()
+        .unwrap();
+    assert_eq!(failures.failures().len(), 2);
+    assert!(failures.failures().iter().any(|error| error
+        .chain()
+        .any(|cause| { cause.downcast_ref::<NativeCreationFailure>().is_some() })));
     assert_eq!(
         blocked.observed().unwrap().realization,
         RealizationState::Blocked
@@ -3192,11 +3285,103 @@ async fn idle_reaction_observes_plugin_failure_and_awaits_stop() {
     core.shutdown().await.unwrap();
 }
 
+fn flood_lifecycle_callback(sender: &crate::channels::ComponentUpdateSender, id: &str) {
+    for _ in 0..10_000 {
+        sender
+            .try_send(ComponentUpdate::Status {
+                component_id: id.into(),
+                status: ComponentStatus::Starting,
+                message: None,
+            })
+            .unwrap();
+    }
+    for status in [ComponentStatus::Running, ComponentStatus::Error, ComponentStatus::Stopped] {
+        sender
+            .try_send(ComponentUpdate::Status {
+                component_id: id.into(),
+                status,
+                message: Some("failure after full callback queue".into()),
+            })
+            .unwrap();
+    }
+}
+
+async fn source_callback_flood() {
+    let (source, control) = ControlledSource::new("source");
+    let local_status = source.inner.status_handle();
+    let core = builder().with_source(source).build().await.unwrap();
+    core.start_source("source").await.unwrap();
+    let mut events = core.subscribe_all_component_events();
+    let updates = control.updates.lock().unwrap().clone().unwrap();
+    flood_lifecycle_callback(&updates, "source");
+    local_status
+        .set_status(ComponentStatus::Stopped, None)
+        .await;
+    crate::test_helpers::wait_for_component_status(
+        &mut events,
+        "source",
+        ComponentStatus::Error,
+        Duration::from_secs(3),
+    )
+    .await;
+    core.shutdown().await.unwrap();
+    assert_eq!(control.stops.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn source_callback_flood_current_thread() {
+    source_callback_flood().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_callback_flood_multi_thread() {
+    source_callback_flood().await;
+}
+
+async fn reaction_callback_flood() {
+    let (reaction, control, _) = ControlledReaction::new("reaction", &["query"]);
+    let core = builder()
+        .with_query(config("query", None))
+        .with_reaction(reaction)
+        .build()
+        .await
+        .unwrap();
+    core.start_query("query").await.unwrap();
+    core.start_reaction("reaction").await.unwrap();
+    let mut events = core.subscribe_all_component_events();
+    let updates = control.updates.lock().unwrap().clone().unwrap();
+    flood_lifecycle_callback(&updates, "reaction");
+    crate::test_helpers::wait_for_component_status(
+        &mut events,
+        "reaction",
+        ComponentStatus::Error,
+        Duration::from_secs(3),
+    )
+    .await;
+    core.shutdown().await.unwrap();
+    assert_eq!(control.stops.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn reaction_callback_flood_current_thread() {
+    reaction_callback_flood().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reaction_callback_flood_multi_thread() {
+    reaction_callback_flood().await;
+}
+
 #[tokio::test]
 async fn cancelled_replacement_caller_still_selects_the_committed_instance() {
     let (old, old_control) = ControlledSource::new("source");
     let core = Arc::new(builder().with_source(old).build().await.unwrap());
     let old_handle = component_handle(&core, "source", "source").await;
+    let old_record = core
+        .computation_runtime
+        .record("source", "source")
+        .await
+        .unwrap();
     let (new, new_control) = ControlledSource::new("source");
     new_control
         .pending_initialize
@@ -3214,6 +3399,10 @@ async fn cancelled_replacement_caller_still_selects_the_committed_instance() {
     assert!(update.await.unwrap_err().is_cancelled());
     new_control.release.notify_one();
     let runtime = core.computation_runtime.as_ref();
+    assert!(matches!(
+        runtime.control_for(&old_record),
+        Err(error) if matches!(error.downcast_ref::<GraphError>(), Some(GraphError::StaleGeneration))
+    ));
     replacement.wait_created().await.unwrap();
     let current = core.source_instance("source").await.unwrap();
     assert!(Arc::ptr_eq(

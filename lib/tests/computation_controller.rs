@@ -161,6 +161,306 @@ macro_rules! both_tokio_flavors {
     };
 }
 
+struct ReadySource {
+    descriptor: ComponentDescriptor,
+    produced: Arc<AtomicUsize>,
+    limit: usize,
+}
+
+#[async_trait]
+impl ComputationComponent for ReadySource {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for ReadySource {
+    async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        let sequence = self.produced.load(Ordering::SeqCst);
+        if sequence == self.limit {
+            return Ok(None);
+        }
+        self.produced.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(output(root("source", sequence as u64, &[1]))))
+    }
+}
+
+struct ProgressSink {
+    descriptor: ComponentDescriptor,
+    produced: Arc<AtomicUsize>,
+    first_seen: Arc<AtomicUsize>,
+    received: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ComputationComponent for ProgressSink {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSink for ProgressSink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, _: InputEnvelope) -> anyhow::Result<()> {
+        if self.received.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first_seen
+                .store(self.produced.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+async fn ready_source_fairness() {
+    const EVENTS: usize = 4096;
+    let produced = Arc::new(AtomicUsize::new(0));
+    let first_seen = Arc::new(AtomicUsize::new(0));
+    let received = Arc::new(AtomicUsize::new(0));
+    let mut graph = ComputationGraph::builder("ready-source-fairness")
+        .source(Box::new(ReadySource {
+            descriptor: descriptor("source", &[], &["out"]),
+            produced: produced.clone(),
+            limit: EVENTS,
+        }))
+        .sink(Box::new(ProgressSink {
+            descriptor: descriptor("sink", &["in"], &[]),
+            produced,
+            first_seen: first_seen.clone(),
+            received: received.clone(),
+        }))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BroadcastPipeConfig {
+                capacity: EVENTS,
+                lag_policy: BroadcastLagPolicy::Report,
+            }),
+        )
+        .build()
+        .unwrap();
+    graph.start().unwrap().await.unwrap();
+    assert_eq!(received.load(Ordering::SeqCst), EVENTS);
+    assert!(
+        (1..=64).contains(&first_seen.load(Ordering::SeqCst)),
+        "a synchronously ready source must yield within one work budget"
+    );
+}
+
+both_tokio_flavors!(ready_source_work_budget, ready_source_fairness);
+
+struct BurstPipe(AuditedBoundedPipe);
+
+impl PipeProvider for BurstPipe {
+    fn capabilities(&self) -> std::result::Result<PipeCapabilities, PipeError> {
+        BoundedPipeConfig { capacity: 4096 }.capabilities()
+    }
+
+    fn create(&self) -> std::result::Result<ProvidedPipe, PipeError> {
+        self.0.create_with_capacity(4096)
+    }
+}
+
+async fn ready_output_burst_fairness() {
+    const EVENTS: usize = 4096;
+    let sends = Arc::new(AtomicUsize::new(0));
+    let first_seen = Arc::new(AtomicUsize::new(0));
+    let received = Arc::new(AtomicUsize::new(0));
+    let mut graph = ComputationGraph::builder("ready-output-burst")
+        .source(Box::new(FiniteSource::new(
+            "source",
+            vec![output(root("source", 1, &[1]))],
+        )))
+        .transformer(Box::new(NativeTransform::new("transform", |_| {
+            Ok((1..=EVENTS)
+                .map(|sequence| output(root("transform", sequence as u64, &[1])))
+                .collect())
+        })))
+        .sink(Box::new(ProgressSink {
+            descriptor: descriptor("sink", &["in"], &[]),
+            produced: sends.clone(),
+            first_seen: first_seen.clone(),
+            received: received.clone(),
+        }))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(endpoint("transform", "out"), stream("transform"))
+        .connect(
+            edge("source", "transform"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("transform", "sink"),
+            Box::new(BurstPipe(AuditedBoundedPipe { sends })),
+        )
+        .build()
+        .unwrap();
+    graph.start().unwrap().await.unwrap();
+    assert_eq!(received.load(Ordering::SeqCst), EVENTS);
+    assert!(
+        (1..=64).contains(&first_seen.load(Ordering::SeqCst)),
+        "a large output batch must yield within one work budget"
+    );
+}
+
+both_tokio_flavors!(ready_output_burst_work_budget, ready_output_burst_fairness);
+
+async fn stop_ready_source() {
+    const EVENTS: usize = 4096;
+    let produced = Arc::new(AtomicUsize::new(0));
+    let mut graph = ComputationGraph::builder("stop-ready-source")
+        .source(Box::new(ReadySource {
+            descriptor: descriptor("source", &[], &["out"]),
+            produced: produced.clone(),
+            limit: EVENTS,
+        }))
+        .sink(Box::new(ProgressSink {
+            descriptor: descriptor("sink", &["in"], &[]),
+            produced: produced.clone(),
+            first_seen: Arc::new(AtomicUsize::new(0)),
+            received: Arc::new(AtomicUsize::new(0)),
+        }))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BroadcastPipeConfig {
+                capacity: EVENTS,
+                lag_policy: BroadcastLagPolicy::Report,
+            }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        while produced.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let report = control
+            .stop_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        assert_eq!(report.summary, OperationSummary::Completed);
+        assert!(
+            produced.load(Ordering::SeqCst) < EVENTS,
+            "stop waited for source exhaustion"
+        );
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+}
+
+both_tokio_flavors!(ready_source_control_commands, stop_ready_source);
+
+struct ContinuingTransformer {
+    descriptor: ComponentDescriptor,
+    remaining: usize,
+    progressed: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ComputationComponent for ContinuingTransformer {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Transformer for ContinuingTransformer {
+    async fn transform(&mut self, _: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.remaining = 4096;
+        Ok(vec![])
+    }
+    fn has_pending_emissions(&self) -> bool {
+        self.remaining > 0
+    }
+    async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.remaining -= 1;
+        self.progressed.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![])
+    }
+}
+
+async fn stop_ready_continuation() {
+    let progressed = Arc::new(AtomicUsize::new(0));
+    let mut graph = ComputationGraph::builder("stop-ready-continuation")
+        .source(Box::new(FiniteSource::new(
+            "source",
+            vec![output(root("source", 1, &[1]))],
+        )))
+        .transformer(Box::new(ContinuingTransformer {
+            descriptor: descriptor("transform", &["in"], &["out"]),
+            remaining: 0,
+            progressed: progressed.clone(),
+        }))
+        .sink(Box::new(CollectSink::new(
+            "sink",
+            &["in"],
+            Default::default(),
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(endpoint("transform", "out"), stream("transform"))
+        .connect(
+            edge("source", "transform"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("transform", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        control
+            .start_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        while progressed.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let report = control
+            .stop_components(GraphRevision(1), GraphSelection::All)
+            .await
+            .unwrap();
+        assert_eq!(report.summary, OperationSummary::Completed);
+        assert!(
+            progressed.load(Ordering::SeqCst) < 4096,
+            "continuations starved control"
+        );
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+}
+
+both_tokio_flavors!(ready_continuation_control_commands, stop_ready_continuation);
+
 async fn independent_activation() {
     let source_calls = Arc::new(Calls::default());
     source_calls.failures.store(1, Ordering::SeqCst);

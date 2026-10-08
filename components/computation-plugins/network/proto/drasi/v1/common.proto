@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package drasi.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Element reference that uniquely identifies an element
+message ElementReference {
+    string source_id = 1;
+    string element_id = 2;
+}
+
+// Metadata for an element
+message ElementMetadata {
+    ElementReference reference = 1;
+    repeated string labels = 2;
+    uint64 effective_from = 3; // Unix timestamp in nanoseconds
+}
+
+// Node element
+message Node {
+    ElementMetadata metadata = 1;
+    google.protobuf.Struct properties = 2;
+}
+
+// Relation element
+message Relation {
+    ElementMetadata metadata = 1;
+    ElementReference in_node = 2;
+    ElementReference out_node = 3;
+    google.protobuf.Struct properties = 4;
+}
+
+// Element can be either a Node or a Relation
+message Element {
+    oneof element {
+        Node node = 1;
+        Relation relation = 2;
+    }
+}
+
+// Source change types
+enum ChangeType {
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    CHANGE_TYPE_INSERT = 1;
+    CHANGE_TYPE_UPDATE = 2;
+    CHANGE_TYPE_DELETE = 3;
+}
+
+// Source change event
+message SourceChange {
+    ChangeType type = 1;
+    oneof change {
+        Element element = 2; // For insert/update
+        ElementMetadata metadata = 3; // For delete
+    }
+    google.protobuf.Timestamp timestamp = 4;
+    string source_id = 5;
+}
+
+// Query result item
+message QueryResultItem {
+    string type = 1; // "ADD", "UPDATE", "DELETE"
+    google.protobuf.Struct data = 2;
+    google.protobuf.Struct before = 3; // For UPDATE
+    google.protobuf.Struct after = 4; // For UPDATE
+}
+
+// Query result batch
+message QueryResult {
+    string query_id = 1;
+    repeated QueryResultItem results = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+// Bootstrap request
+message BootstrapRequest {
+    string query_id = 1;
+    repeated string node_labels = 2;
+    repeated string relation_labels = 3;
+}
+
+// Bootstrap response
+message BootstrapResponse {
+    repeated Element elements = 1;
+    uint32 total_count = 2;
+}

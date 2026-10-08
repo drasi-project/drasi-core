@@ -185,7 +185,7 @@ async fn init_source_with_wal(
         .initialize(SourceRuntimeContext {
             instance_id: "test-instance".to_string(),
             source_id: source_id.to_string(),
-            update_tx,
+            update_tx: update_tx.into(),
             state_store: None,
             identity_provider: None,
             wal_provider: Some(wal),

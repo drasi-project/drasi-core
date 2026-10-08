@@ -22,8 +22,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use drasi_core::computation::ComputationIndexes;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Notify};
 
 use super::{ChangeEnvelope, EnvelopeCodec, PipeError, ResourceCleanup};
 
@@ -45,6 +46,13 @@ pub struct StoredEnvelope {
 pub trait RetainedEnvelopeStore: ResourceCleanup + Send + Sync {
     fn capacity(&self) -> NonZeroUsize;
     fn durable(&self) -> bool;
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        if self.durable() {
+            drasi_core::computation::StorageDurability::UNKNOWN
+        } else {
+            drasi_core::computation::StorageDurability::VOLATILE
+        }
+    }
     fn retention_policy(&self) -> RetentionPolicy;
     fn acquire_generation(&self) -> Result<u64, PipeError>;
     fn revoke_generation(&self, generation: u64);
@@ -248,17 +256,25 @@ impl ResourceCleanup for MemoryEnvelopeStore {
 
 /// Durable envelope storage over a complete computation index/output bundle.
 /// The store exclusively owns this bundle's journal and consumer checkpoint.
+/// Committed bytes and progress are loaded once and updated only after commit.
+/// A smaller reopened capacity retains old obligations until they can be pruned.
 pub struct IndexedEnvelopeStore {
     indexes: ComputationIndexes,
     codec: Arc<EnvelopeCodec>,
     key: String,
     capacity: NonZeroUsize,
     policy: RetentionPolicy,
-    lock: Mutex<()>,
+    lock: Mutex<Option<IndexedState>>,
     generation: AtomicU64,
     epoch: AtomicU64,
     fenced: AtomicBool,
     notify: Notify,
+}
+
+struct IndexedState {
+    entries: BTreeMap<u64, Bytes>,
+    head: u64,
+    progress: u64,
 }
 
 impl IndexedEnvelopeStore {
@@ -293,7 +309,7 @@ impl IndexedEnvelopeStore {
             key,
             capacity,
             policy,
-            lock: Mutex::new(()),
+            lock: Mutex::new(None),
             generation: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             fenced: AtomicBool::new(false),
@@ -315,16 +331,70 @@ impl IndexedEnvelopeStore {
         format!("computation-pipe-consumer:{}", self.key)
     }
 
-    async fn checkpoint(&self) -> Result<u64, PipeError> {
-        Ok(self
+    async fn load(&self) -> Result<IndexedState, PipeError> {
+        let checkpoints = self
             .indexes
             .checkpoint_store()
-            .expect("validated checkpoint")
+            .expect("validated checkpoint");
+        let progress = checkpoints
             .read_checkpoint(&self.consumer_key())
             .await
             .map_err(|error| PipeError::Backend(error.into()))?
             .map(|checkpoint| checkpoint.sequence)
-            .unwrap_or(0))
+            .unwrap_or(0);
+        let head = checkpoints
+            .read_result_sequence(&self.key)
+            .await
+            .map_err(|error| PipeError::Backend(error.into()))?
+            .unwrap_or(0);
+        let records = self
+            .indexes
+            .outbox_writer()
+            .expect("validated outbox")
+            .read_from(&self.key, 0)
+            .await
+            .map_err(|error| PipeError::Backend(error.into()))?;
+        let mut entries = BTreeMap::new();
+        let mut previous: Option<u64> = None;
+        for (position, bytes) in records {
+            if position == 0 || previous.is_some_and(|value| value.checked_add(1) != Some(position))
+            {
+                return Err(PipeError::Backend(anyhow::anyhow!(
+                    "retained journal positions are not consecutive"
+                )));
+            }
+            self.codec
+                .decode(&bytes)
+                .map_err(|error| PipeError::Backend(error.into()))?;
+            entries.insert(position, Bytes::from(bytes));
+            previous = Some(position);
+        }
+        if previous.unwrap_or(0) != head || progress > head {
+            return Err(PipeError::Backend(anyhow::anyhow!(
+                "retained journal head or consumer progress is inconsistent"
+            )));
+        }
+        Ok(IndexedState {
+            entries,
+            head,
+            progress,
+        })
+    }
+
+    async fn lock_state(
+        &self,
+        generation: u64,
+    ) -> Result<MappedMutexGuard<'_, IndexedState>, PipeError> {
+        let mut state = self.lock.lock().await;
+        self.check()?;
+        check_generation(&self.generation, generation)?;
+        if state.is_none() {
+            *state = Some(self.load().await?);
+        }
+        check_generation(&self.generation, generation)?;
+        Ok(MutexGuard::map(state, |state| {
+            state.as_mut().expect("loaded retained state")
+        }))
     }
 }
 
@@ -352,6 +422,9 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
     }
     fn durable(&self) -> bool {
         true
+    }
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        self.indexes.durability()
     }
     fn retention_policy(&self) -> RetentionPolicy {
         self.policy
@@ -385,36 +458,27 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .codec
             .encode(envelope)
             .map_err(|error| PipeError::Backend(error.into()))?;
-        let _lock = self.lock.lock().await;
-        self.check()?;
-        check_generation(&self.generation, generation)?;
+        let mut state = self.lock_state(generation).await?;
         let checkpoint = self
             .indexes
             .checkpoint_store()
             .expect("validated checkpoint");
         let outbox = self.indexes.outbox_writer().expect("validated outbox");
-        let entries = outbox
-            .read_from(&self.key, 0)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?;
-        let remove = entries
+        let remove = state
+            .entries
             .len()
             .saturating_add(1)
             .saturating_sub(self.capacity.get());
         if remove > 0 && self.policy == RetentionPolicy::Backpressure {
-            let last_removed = entries.get(remove - 1).ok_or_else(|| {
+            let last_removed = state.entries.keys().nth(remove - 1).ok_or_else(|| {
                 PipeError::Backend(anyhow::anyhow!("invalid retained capacity accounting"))
             })?;
-            if last_removed.0 > self.checkpoint().await? {
+            if *last_removed > state.progress {
                 return Err(PipeError::CapacityExhausted);
             }
         }
-        let head = checkpoint
-            .read_result_sequence(&self.key)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?
-            .unwrap_or(0);
-        let position = head
+        let position = state
+            .head
             .checked_add(1)
             .ok_or_else(|| PipeError::Backend(anyhow::anyhow!("retained position exhausted")))?;
         let mut fence = WriteFence {
@@ -456,23 +520,19 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
                 source: anyhow::anyhow!("pipe generation revoked during durable commit"),
             });
         }
+        for _ in 0..remove {
+            state.entries.pop_first();
+        }
+        state.entries.insert(position, bytes);
+        state.head = position;
         fence.complete = true;
         self.notify.notify_waiters();
         Ok(position)
     }
 
     async fn next(&self, generation: u64, after: u64) -> Result<Option<StoredEnvelope>, PipeError> {
-        let _lock = self.lock.lock().await;
-        self.check()?;
-        check_generation(&self.generation, generation)?;
-        let entries = self
-            .indexes
-            .outbox_writer()
-            .expect("validated outbox")
-            .read_from(&self.key, 0)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?;
-        if let Some((oldest, _)) = entries.first() {
+        let state = self.lock_state(generation).await?;
+        if let Some((oldest, _)) = state.entries.first_key_value() {
             if after < oldest.saturating_sub(1) {
                 return Err(PipeError::PositionUnavailable {
                     requested: after,
@@ -480,15 +540,19 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
                 });
             }
         }
-        entries
-            .into_iter()
-            .find(|(position, _)| *position > after)
+        let Some(start) = after.checked_add(1) else {
+            return Ok(None);
+        };
+        state
+            .entries
+            .range(start..)
+            .next()
             .map(|(position, bytes)| {
                 Ok(StoredEnvelope {
-                    position,
+                    position: *position,
                     envelope: self
                         .codec
-                        .decode(&bytes)
+                        .decode(bytes)
                         .map_err(|error| PipeError::Backend(error.into()))?,
                 })
             })
@@ -496,27 +560,16 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
     }
 
     async fn progress(&self, generation: u64) -> Result<u64, PipeError> {
-        let _lock = self.lock.lock().await;
-        self.check()?;
-        check_generation(&self.generation, generation)?;
-        self.checkpoint().await
+        Ok(self.lock_state(generation).await?.progress)
     }
 
     async fn acknowledge(&self, generation: u64, position: u64) -> Result<(), PipeError> {
-        let _lock = self.lock.lock().await;
-        self.check()?;
-        check_generation(&self.generation, generation)?;
+        let mut state = self.lock_state(generation).await?;
         let checkpoint = self
             .indexes
             .checkpoint_store()
             .expect("validated checkpoint");
-        let current = self.checkpoint().await?;
-        let head = checkpoint
-            .read_result_sequence(&self.key)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?
-            .unwrap_or(0);
-        if position < current || position > head {
+        if position < state.progress || position > state.head {
             return Err(PipeError::Backend(anyhow::anyhow!(
                 "invalid retained acknowledgement position"
             )));
@@ -549,6 +602,7 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
                 source: anyhow::anyhow!("pipe generation revoked during acknowledgement commit"),
             });
         }
+        state.progress = position;
         fence.complete = true;
         self.notify.notify_waiters();
         Ok(())
@@ -558,7 +612,7 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
 #[async_trait]
 impl ResourceCleanup for IndexedEnvelopeStore {
     async fn shutdown(&self) -> anyhow::Result<()> {
-        let _lock = self.lock.try_lock().map_err(|_| {
+        let mut state = self.lock.try_lock().map_err(|_| {
             anyhow::anyhow!("cancel or await retained store operations before shutdown")
         })?;
         self.fenced.store(true, Ordering::Release);
@@ -569,6 +623,7 @@ impl ResourceCleanup for IndexedEnvelopeStore {
             cleanup.shutdown().await?;
         }
         self.indexes.indexes().session_control.rollback()?;
+        *state = None;
         Ok(())
     }
 }
@@ -576,6 +631,20 @@ impl ResourceCleanup for IndexedEnvelopeStore {
 #[cfg(test)]
 mod foundation_tests {
     use super::*;
+
+    #[test]
+    fn a_retained_memory_journal_does_not_promise_restart_survival() {
+        use drasi_core::interface::{FailureMode, StorageDurability};
+        let store = MemoryEnvelopeStore::new(
+            NonZeroUsize::new(1).expect("capacity"),
+            RetentionPolicy::Backpressure,
+        );
+        assert_eq!(store.durability(), StorageDurability::VOLATILE);
+        assert!(store
+            .durability()
+            .require(FailureMode::ProcessRestart)
+            .is_err());
+    }
 
     #[tokio::test]
     async fn memory_journal_counters_and_progress_cannot_wrap_or_regress() {

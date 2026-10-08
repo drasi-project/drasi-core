@@ -626,65 +626,52 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     Some((v.major as u32, v.minor as u32, v.patch as u32))
 }
 
+fn supported_legacy_abi(version: &str) -> bool {
+    semver::Version::parse(version)
+        .ok()
+        .is_some_and(|version| version.major == 0 && matches!(version.minor, 16 | 17))
+}
+
 /// Validate plugin metadata against the host SDK version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
-/// For cdylib plugins, we check major.minor compatibility (patch differences are OK).
+/// ABI 0.17 and the explicitly compatible ABI 0.16 prefix are supported.
+/// Patch differences are allowed; arbitrary older/newer contracts are not.
 ///
-/// On success returns the plugin's reported `sdk_version` string (if metadata
-/// was present), so callers can gate access to ABI fields introduced in a
-/// later SDK revision.
+/// Metadata is mandatory: an unknown ABI cannot safely use the current vtables.
+/// On success returns the plugin's reported `sdk_version` string.
 fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option<String>> {
     let meta_fn = unsafe {
         match lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata") {
             Ok(f) => f,
             Err(_) => {
-                log::warn!(
-                    "Plugin '{}' does not export drasi_plugin_metadata — skipping version check",
+                anyhow::bail!(
+                    "Plugin '{}' does not export drasi_plugin_metadata; rebuild it with the current SDK",
                     path.display()
                 );
-                return Ok(None);
             }
         }
     };
 
     let meta_ptr = unsafe { meta_fn() };
     if meta_ptr.is_null() {
-        log::warn!(
-            "Plugin '{}' returned null metadata — skipping version check",
+        anyhow::bail!(
+            "Plugin '{}' returned null metadata; cannot establish ABI compatibility",
             path.display()
         );
-        return Ok(None);
     }
 
     let meta = unsafe { &*meta_ptr };
     let plugin_sdk_version = unsafe { meta.sdk_version.to_string() };
     let host_sdk_version = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
 
-    // Check major.minor compatibility
-    let plugin_parts: Vec<&str> = plugin_sdk_version.split('.').collect();
-    let host_parts: Vec<&str> = host_sdk_version.split('.').collect();
-
-    let plugin_major_minor = format!(
-        "{}.{}",
-        plugin_parts.first().unwrap_or(&"0"),
-        plugin_parts.get(1).unwrap_or(&"0")
-    );
-    let host_major_minor = format!(
-        "{}.{}",
-        host_parts.first().unwrap_or(&"0"),
-        host_parts.get(1).unwrap_or(&"0")
-    );
-
-    if plugin_major_minor != host_major_minor {
+    if !supported_legacy_abi(&plugin_sdk_version) {
         anyhow::bail!(
             "Plugin '{}' SDK version mismatch: plugin={}, host={}. \
-             Major.minor versions must match ({} != {}).",
+             Supported legacy contracts are 0.16.x and 0.17.x; older or unknown ABIs require an upgrade.",
             path.display(),
             plugin_sdk_version,
             host_sdk_version,
-            plugin_major_minor,
-            host_major_minor,
         );
     }
 
@@ -941,6 +928,102 @@ pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn only_current_and_explicitly_compatible_legacy_abis_are_accepted() {
+        assert!(supported_legacy_abi(drasi_plugin_sdk::ffi::FFI_SDK_VERSION));
+        for version in ["0.16.0", "0.16.99", "0.17.0", "0.17.3"] {
+            assert!(supported_legacy_abi(version), "{version}");
+        }
+        for version in [
+            "0.15.0",
+            "0.18.0",
+            "1.0.0",
+            "0.16",
+            "0.16.invalid",
+            "4294967296.16.0",
+        ] {
+            assert!(!supported_legacy_abi(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn incompatible_or_missing_metadata_is_rejected_before_initialization() {
+        fn metadata(version: &str, target: &str) -> String {
+            format!(
+                r#"
+                #[repr(C)]
+                #[derive(Clone, Copy)]
+                struct Str {{ ptr: *const u8, len: usize }}
+                unsafe impl Sync for Str {{}}
+                const fn text(s: &'static str) -> Str {{ Str {{ ptr: s.as_ptr(), len: s.len() }} }}
+                static METADATA: [Str; 7] = [
+                    text({version:?}), text("0"), text("0"), text("0"),
+                    text({target:?}), text("test"), text("test")
+                ];
+                #[no_mangle]
+                pub extern "C" fn drasi_plugin_metadata() -> *const u8 {{
+                    METADATA.as_ptr().cast()
+                }}
+                "#
+            )
+        }
+        let target = drasi_plugin_sdk::ffi::TARGET_TRIPLE;
+        for (name, source, expected) in [
+            (
+                "missing",
+                "pub fn fixture() {}".to_string(),
+                "does not export drasi_plugin_metadata",
+            ),
+            (
+                "null",
+                "#[no_mangle] pub extern \"C\" fn drasi_plugin_metadata() -> *const u8 { std::ptr::null() }".to_string(),
+                "returned null metadata",
+            ),
+            (
+                "old",
+                metadata("0.15.0", target),
+                "SDK version mismatch",
+            ),
+            ("future", metadata("0.18.0", target), "SDK version mismatch"),
+            ("malformed", metadata("0.16.invalid", target), "SDK version mismatch"),
+            ("oversized", metadata("4294967296.16.0", target), "SDK version mismatch"),
+            ("wrong_target", metadata("0.16.0", "incompatible-target"), "target mismatch"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("fixture.rs");
+            let output = dir.path().join(format!(
+                "{}fixture{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            ));
+            // Any accidental initialization aborts the test process.
+            fs::write(
+                &input,
+                format!("{source}\n#[no_mangle] pub extern \"C\" fn drasi_plugin_init() -> *mut u8 {{ std::process::abort() }}"),
+            )
+            .unwrap();
+            let build = std::process::Command::new(
+                std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()),
+            )
+            .args(["--crate-type", "cdylib", "--edition", "2021", "-o"])
+            .arg(&output)
+            .arg(&input)
+            .output()
+            .unwrap();
+            assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+            let error = load_plugin_from_path(
+                &output,
+                std::ptr::null_mut(),
+                crate::callbacks::default_log_callback_fn(),
+                std::ptr::null_mut(),
+                crate::callbacks::default_lifecycle_callback_fn(),
+            )
+            .err()
+            .expect("unsafe ABI must be rejected");
+            assert!(error.to_string().contains(expected), "{name}: {error:#}");
+        }
+    }
 
     /// Create a temp dir with the given filenames (empty files).
     fn setup_temp_dir(files: &[&str]) -> tempfile::TempDir {

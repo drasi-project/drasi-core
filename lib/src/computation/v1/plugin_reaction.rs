@@ -743,7 +743,7 @@ impl ReactionPluginHost {
             life.replace_on_start = false;
         }
         let reaction = self.initialize_locked(&mut life).await?;
-        self.observations.reset().await;
+        self.observations.reset().await?;
         let mut heads = BTreeMap::new();
         for query_id in &self.query_ids {
             let query = self

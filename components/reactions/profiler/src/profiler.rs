@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use log::info;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
@@ -364,6 +364,7 @@ use super::ProfilerReactionBuilder;
 /// ProfilerReaction collects and analyzes profiling data
 pub struct ProfilerReaction {
     base: ReactionBase,
+    cleanup_required: Mutex<bool>,
     config: ProfilerReactionConfig,
     stats: Arc<RwLock<ProfilingStats>>,
     report_interval_secs: u64,
@@ -415,6 +416,7 @@ impl ProfilerReaction {
         }
         Self {
             base: ReactionBase::new(params),
+            cleanup_required: Mutex::new(false),
             config,
             stats: Arc::new(RwLock::new(ProfilingStats::new(window_size))),
             report_interval_secs,
@@ -475,6 +477,11 @@ impl Reaction for ProfilerReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.base.processing_task.read().await.is_some() {
+            return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         log_component_start("Reaction", &self.base.id);
 
         // Transition to Starting
@@ -482,14 +489,6 @@ impl Reaction for ProfilerReaction {
             .set_status(
                 ComponentStatus::Starting,
                 Some("Starting profiler reaction".to_string()),
-            )
-            .await;
-
-        // Transition to Running
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("Profiler reaction started".to_string()),
             )
             .await;
 
@@ -505,61 +504,91 @@ impl Reaction for ProfilerReaction {
         let stats = self.stats.clone();
         let report_interval = self.report_interval_secs;
         let priority_queue = self.base.priority_queue.clone();
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
-        let processing_task = tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
             let mut report_timer =
                 tokio::time::interval(tokio::time::Duration::from_secs(report_interval));
             report_timer.tick().await; // Skip first immediate tick
 
             loop {
-                tokio::select! {
-                    query_result = priority_queue.dequeue() => {
-                        // Extract and store profiling data
-                        if let Some(profiling) = query_result.profiling.clone() {
-                            stats.write().await.add_sample(profiling);
+                let query_result = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => break,
+                    result = async {
+                        tokio::select! {
+                            result = priority_queue.dequeue() => Some(result),
+                            _ = report_timer.tick() => None,
                         }
+                    } => result,
+                };
+                if let Some(query_result) = query_result {
+                    if let Some(profiling) = query_result.profiling.clone() {
+                        stats.write().await.add_sample(profiling);
                     }
-                    _ = report_timer.tick() => {
-                        // Generate periodic report
-                        let stats_guard = stats.read().await;
+                } else {
+                    let stats_guard = stats.read().await;
 
-                        if stats_guard.count == 0 {
-                            info!("[{reaction_name}] No profiling data collected yet");
-                            continue;
-                        }
-
-                        info!("[{reaction_name}] ========== Profiling Report ==========");
-
-                        let source_to_query = stats_guard.get_source_to_query_stats();
-                        info!("[{}] {}", reaction_name, Self::format_stats("Source→Query", &source_to_query));
-
-                        let query_processing = stats_guard.get_query_processing_stats();
-                        info!("[{}] {}", reaction_name, Self::format_stats("Query Processing", &query_processing));
-
-                        let query_to_reaction = stats_guard.get_query_to_reaction_stats();
-                        info!("[{}] {}", reaction_name, Self::format_stats("Query→Reaction", &query_to_reaction));
-
-                        let reaction_processing = stats_guard.get_reaction_processing_stats();
-                        info!("[{}] {}", reaction_name, Self::format_stats("Reaction Processing", &reaction_processing));
-
-                        let total = stats_guard.get_total_latency_stats();
-                        info!("[{}] {}", reaction_name, Self::format_stats("Total End-to-End", &total));
-
-                        info!("[{reaction_name}] ======================================");
+                    if stats_guard.count == 0 {
+                        info!("[{reaction_name}] No profiling data collected yet");
+                        continue;
                     }
+
+                    info!("[{reaction_name}] ========== Profiling Report ==========");
+
+                    let source_to_query = stats_guard.get_source_to_query_stats();
+                    info!(
+                        "[{}] {}",
+                        reaction_name,
+                        Self::format_stats("Source→Query", &source_to_query)
+                    );
+
+                    let query_processing = stats_guard.get_query_processing_stats();
+                    info!(
+                        "[{}] {}",
+                        reaction_name,
+                        Self::format_stats("Query Processing", &query_processing)
+                    );
+
+                    let query_to_reaction = stats_guard.get_query_to_reaction_stats();
+                    info!(
+                        "[{}] {}",
+                        reaction_name,
+                        Self::format_stats("Query→Reaction", &query_to_reaction)
+                    );
+
+                    let reaction_processing = stats_guard.get_reaction_processing_stats();
+                    info!(
+                        "[{}] {}",
+                        reaction_name,
+                        Self::format_stats("Reaction Processing", &reaction_processing)
+                    );
+
+                    let total = stats_guard.get_total_latency_stats();
+                    info!(
+                        "[{}] {}",
+                        reaction_name,
+                        Self::format_stats("Total End-to-End", &total)
+                    );
+
+                    info!("[{reaction_name}] ======================================");
                 }
             }
-        });
-
-        // Store the processing task handle
-        self.base.set_processing_task(processing_task).await;
-
+        })
+        .await?;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Profiler reaction started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        // Use ReactionBase common stop functionality
-        self.base.stop_common().await?;
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
+        self.base.stop_common_gracefully().await?;
 
         // Transition to Stopped
         self.base
@@ -568,7 +597,7 @@ impl Reaction for ProfilerReaction {
                 Some("Profiler reaction stopped".to_string()),
             )
             .await;
-
+        *cleanup_required = false;
         Ok(())
     }
 

@@ -24,12 +24,15 @@ use axum::{
 use log::{debug, error, info};
 use rust_embed::Embed;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::ComponentStatus;
+use drasi_lib::context::workers::{
+    cancel_owned_worker, join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned,
+    WorkerCompletion,
+};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
@@ -52,9 +55,10 @@ pub struct DashboardReaction {
     config: DashboardReactionConfig,
     websocket_hub: WebSocketHub,
     snapshot_store: QuerySnapshotStore,
-    task_handles: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    lifecycle: tokio::sync::Mutex<()>,
+    heartbeat_task: tokio::sync::RwLock<Option<JoinHandle<()>>>,
     /// Handle for the running axum HTTP/WebSocket server task.
-    server_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    server_handle: tokio::sync::RwLock<Option<JoinHandle<std::io::Result<()>>>>,
     /// Signals the HTTP/WebSocket server to shut down gracefully. `true` means
     /// "shut down now": the axum server stops accepting and closes idle
     /// keep-alive connections, and WebSocket handlers terminate.
@@ -95,8 +99,9 @@ impl DashboardReaction {
             config,
             websocket_hub: WebSocketHub::new(WEBSOCKET_BROADCAST_CAPACITY),
             snapshot_store: QuerySnapshotStore::new(),
-            task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            server_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            lifecycle: tokio::sync::Mutex::new(()),
+            heartbeat_task: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             predefined_dashboards,
         }
@@ -171,6 +176,14 @@ impl Reaction for DashboardReaction {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.server_handle.read().await.is_some()
+            || self.heartbeat_task.read().await.is_some()
+            || self.base.processing_task.read().await.is_some()
+            || self.shutdown_tx.receiver_count() != 0
+        {
+            return Err(WorkerAlreadyOwned.into());
+        }
         log_component_start("Dashboard Reaction", &self.base.id);
 
         self.base
@@ -286,7 +299,7 @@ impl Reaction for DashboardReaction {
         let priority_queue = self.base.priority_queue.clone();
         let websocket_hub = self.websocket_hub.clone();
         let snapshot_store = self.snapshot_store.clone();
-        let processing_handle = tokio::spawn(async move {
+        spawn_owned_worker(&self.base.processing_task, async move {
             info!("[{reaction_id}] dashboard processing task started");
 
             loop {
@@ -309,14 +322,14 @@ impl Reaction for DashboardReaction {
             }
 
             info!("[{reaction_id}] dashboard processing task ended");
-        });
-        self.base.set_processing_task(processing_handle).await;
+        })
+        .await?;
 
         let heartbeat_interval_ms = self.config.heartbeat_interval_ms;
         let heartbeat_hub = self.websocket_hub.clone();
         let heartbeat_status_handle = self.base.status_handle();
         let heartbeat_reaction_id = self.base.id.clone();
-        let heartbeat_handle = tokio::spawn(async move {
+        spawn_owned_worker(&self.heartbeat_task, async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
             loop {
                 ticker.tick().await;
@@ -329,8 +342,8 @@ impl Reaction for DashboardReaction {
                 }
                 heartbeat_hub.broadcast_heartbeat(chrono::Utc::now().timestamp_millis());
             }
-        });
-        self.task_handles.lock().await.push(heartbeat_handle);
+        })
+        .await?;
 
         let api_state = ApiState::new(
             self.base.id.clone(),
@@ -344,10 +357,10 @@ impl Reaction for DashboardReaction {
         let server_status_handle = self.base.status_handle();
         // Reset the shutdown flag for this run (supports stop/start cycles) and
         // derive receivers for the server and per-connection WebSocket handlers.
-        let _ = self.shutdown_tx.send(false);
+        self.shutdown_tx.send_replace(false);
         let mut server_shutdown_rx = self.shutdown_tx.subscribe();
         let ws_shutdown_rx = self.shutdown_tx.subscribe();
-        let server_handle = tokio::spawn(async move {
+        spawn_owned_worker(&self.server_handle, async move {
             let cors = CorsLayer::new()
                 .allow_origin(tower_http::cors::AllowOrigin::exact(
                     format!("http://{host}:{port}")
@@ -395,7 +408,8 @@ impl Reaction for DashboardReaction {
                 // is dropped (treated as shutdown).
                 let _ = server_shutdown_rx.wait_for(|signalled| *signalled).await;
             });
-            if let Err(err) = server.await {
+            let result = server.await;
+            if let Err(err) = &result {
                 error!("dashboard server error: {err}");
                 server_status_handle
                     .set_status(
@@ -404,43 +418,35 @@ impl Reaction for DashboardReaction {
                     )
                     .await;
             }
-        });
-        *self.server_handle.lock().await = Some(server_handle);
+            result
+        })
+        .await?;
 
         Ok(())
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        self.base.stop_common().await?;
-
-        // Signal the HTTP/WebSocket server to shut down gracefully. This stops
-        // accepting new connections AND closes idle keep-alive connections and
-        // active WebSockets, so a browser tab pointed at the old server can't
-        // reuse a pooled connection on refresh (otherwise the new reaction is
-        // shadowed by orphaned connection tasks from the old one).
-        let _ = self.shutdown_tx.send(true);
-
-        // Give the server a bounded window to drain and close connections, then
-        // abort it as a fallback if graceful shutdown stalls.
-        if let Some(mut handle) = self.server_handle.lock().await.take() {
-            if tokio::time::timeout(Duration::from_secs(5), &mut handle)
-                .await
-                .is_err()
-            {
-                debug!(
-                    "[{}] dashboard server did not shut down within timeout; aborting",
-                    self.base.id
-                );
-                handle.abort();
-            }
+        let _lifecycle = self.lifecycle.lock().await;
+        self.shutdown_tx.send_replace(true);
+        cancel_owned_worker(
+            &mut *self.heartbeat_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Dashboard '{}' heartbeat cleanup", self.base.id))?;
+        if let WorkerCompletion::Completed(result) = join_owned_worker_gracefully(
+            &mut *self.server_handle.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Dashboard '{}' server cleanup", self.base.id))?
+        {
+            result.with_context(|| format!("Dashboard '{}' server failed", self.base.id))?;
         }
-
-        let mut task_handles = self.task_handles.lock().await;
-        for handle in task_handles.drain(..) {
-            handle.abort();
-        }
-
-        Ok(())
+        tokio::time::timeout(Duration::from_secs(5), self.shutdown_tx.closed())
+            .await
+            .with_context(|| format!("Dashboard '{}' connection cleanup", self.base.id))?;
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -456,5 +462,162 @@ impl Reaction for DashboardReaction {
 
     async fn deprovision(&self) -> anyhow::Result<()> {
         self.base.deprovision_common().await
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use drasi_lib::context::workers::WorkerCleanupError;
+    use futures::StreamExt;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_dashboard_cleanup_retains_workers_and_blocks_restart() -> anyhow::Result<()>
+    {
+        let dashboard = DashboardReaction::builder("cancelled")
+            .with_port(0)
+            .build()?;
+        let release = Arc::new(Notify::new());
+        let drain = release.clone();
+        spawn_owned_worker(&dashboard.server_handle, async move {
+            drain.notified().await;
+            Ok(())
+        })
+        .await?;
+        {
+            let stop = dashboard.stop();
+            tokio::pin!(stop);
+            tokio::select! {
+                result = &mut stop => panic!("server must remain owned: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+        assert!(dashboard.server_handle.read().await.is_some());
+        assert!(dashboard
+            .start()
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkerAlreadyOwned>()
+            .is_some());
+        release.notify_one();
+        dashboard.stop().await?;
+        assert!(dashboard.server_handle.read().await.is_none());
+        dashboard.start().await?;
+        dashboard.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_join_preserves_server_errors_and_panics() -> anyhow::Result<()> {
+        for panic in [false, true] {
+            let dashboard = DashboardReaction::builder("failed").with_port(0).build()?;
+            spawn_owned_worker(&dashboard.server_handle, async move {
+                assert!(!panic, "injected dashboard server panic");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "injected server failure",
+                ))
+            })
+            .await?;
+            let error = dashboard.stop().await.unwrap_err();
+            if panic {
+                assert!(
+                    matches!(error.downcast_ref(), Some(WorkerCleanupError::Join(error)) if error.is_panic())
+                );
+            } else {
+                assert_eq!(
+                    error
+                        .downcast_ref::<std::io::Error>()
+                        .expect("I/O cause")
+                        .kind(),
+                    std::io::ErrorKind::ConnectionReset
+                );
+            }
+            assert!(dashboard.server_handle.read().await.is_none());
+            dashboard.stop().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_dashboard_connection_drain_blocks_restart_without_a_server_handle(
+    ) -> anyhow::Result<()> {
+        let dashboard = DashboardReaction::builder("connection")
+            .with_port(0)
+            .build()?;
+        let connection = dashboard.shutdown_tx.subscribe();
+        {
+            let stop = dashboard.stop();
+            tokio::pin!(stop);
+            tokio::select! {
+                result = &mut stop => panic!("connection must drain first: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+        }
+        assert!(dashboard.server_handle.read().await.is_none());
+        assert!(dashboard
+            .start()
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkerAlreadyOwned>()
+            .is_some());
+        drop(connection);
+        dashboard.stop().await?;
+        dashboard.start().await?;
+        dashboard.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_restarts_after_every_http_and_websocket_owner_exits() -> anyhow::Result<()> {
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = reservation.local_addr()?.port();
+        drop(reservation);
+        let dashboard = DashboardReaction::builder("restart")
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_query("query")
+            .with_heartbeat_interval_ms(10)
+            .build()?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()?;
+        for _ in 0..3 {
+            dashboard.start().await?;
+            assert_eq!(
+                client
+                    .get(format!("http://127.0.0.1:{port}/"))
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::OK
+            );
+            let (mut socket, _) =
+                tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws")).await?;
+            let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await?
+                .expect("active websocket")?;
+            assert!(message.is_text());
+            dashboard.stop().await?;
+            assert!(dashboard.server_handle.read().await.is_none());
+            assert!(dashboard.heartbeat_task.read().await.is_none());
+            assert!(dashboard.base.processing_task.read().await.is_none());
+            assert_eq!(dashboard.shutdown_tx.receiver_count(), 0);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(message) = socket.next().await {
+                    match message {
+                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            })
+            .await?;
+            let rebound = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+            drop(rebound);
+        }
+        Ok(())
     }
 }

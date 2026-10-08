@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use drasi_computation_plugin_sdk::Scope;
+use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use drasi_lib::computation::v1::{
     ComponentDescriptor, ComputationComponent, EnvelopeSink, EnvelopeSource, InputEnvelope,
     OutputEnvelope, SinkCompletion,
@@ -31,8 +31,11 @@ impl HttpSource {
         descriptor: ComponentDescriptor,
         config: SourceConfig,
         scope: Option<&Scope>,
+        admission: Option<NativeAdmission>,
     ) -> Result<Self> {
-        Ok(Self(SourceRuntime::new(descriptor, config, scope)?))
+        Ok(Self(SourceRuntime::new(
+            descriptor, config, scope, admission,
+        )?))
     }
 }
 #[async_trait]
@@ -112,6 +115,13 @@ async fn submit_events(
     source: String,
     events: Vec<HttpSourceChange>,
 ) -> Response {
+    if ingress.durable().is_some() {
+        return failure(
+            StatusCode::CONFLICT,
+            "durable source requires /admission/v1 endpoints",
+            0,
+        );
+    }
     if source != ingress.config.source_id {
         return failure(StatusCode::BAD_REQUEST, "source ID mismatch", 0);
     }
@@ -140,7 +150,7 @@ async fn health(State(ingress): State<Arc<Ingress>>) -> Response {
     }
     Json(
         serde_json::json!({"status":"healthy","service":"http-source","features":["batch-endpoint"],
-        "volatile":true}),
+        "volatile":ingress.durable().is_none()}),
     )
     .into_response()
 }
@@ -181,6 +191,7 @@ async fn serve(listener: TcpListener, ingress: Arc<Ingress>) -> Result<()> {
         .route("/sources/:source/events", post(submit))
         .route("/sources/:source/events/batch", post(batch))
         .route("/health", get(health))
+        .merge(crate::durable_http::routes())
         .layer(DefaultBodyLimit::max(ingress.config.max_message_bytes))
         .layer(middleware::from_fn_with_state(
             ingress.clone(),

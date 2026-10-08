@@ -44,7 +44,7 @@
 //! ```
 
 use anyhow::Result;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -220,22 +220,24 @@ impl QueryBase {
             let _ = tx.send(());
         }
 
-        // Wait for task to complete
-        if let Some(mut handle) = self.task_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
-                Ok(Ok(())) => {
+        {
+            let mut task = self.task_handle.write().await;
+            match crate::context::workers::join_owned_worker(
+                &mut task,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(error)
+                    .context(format!("Query '{}' worker cleanup", self.config.id))
+            })? {
+                crate::context::workers::WorkerCompletion::Completed(()) => {
                     info!("Query '{}' task completed successfully", self.config.id);
                 }
-                Ok(Err(e)) => {
-                    error!("Query '{}' task panicked: {}", self.config.id, e);
+                crate::context::workers::WorkerCompletion::Cancelled => {
+                    warn!("Query '{}' cancelled task has been joined", self.config.id);
                 }
-                Err(_) => {
-                    warn!(
-                        "Query '{}' task did not complete within timeout, aborting",
-                        self.config.id
-                    );
-                    handle.abort();
-                }
+                crate::context::workers::WorkerCompletion::Absent => {}
             }
         }
 

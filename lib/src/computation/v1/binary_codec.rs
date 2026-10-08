@@ -151,6 +151,7 @@ struct LimitedBuffer {
 }
 
 impl Write for LimitedBuffer {
+    #[inline]
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             self.exceeded = true;
@@ -166,6 +167,11 @@ impl Write for LimitedBuffer {
         Ok(bytes.len())
     }
 
+    #[inline]
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.write(bytes).map(|_| ())
+    }
+
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
@@ -173,6 +179,7 @@ impl Write for LimitedBuffer {
 
 /// Encode a single named MessagePack value without growing past its byte limit.
 #[doc(hidden)]
+#[inline]
 pub fn encode_bounded_messagepack<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>> {
     let mut output = LimitedBuffer {
         bytes: Vec::new(),
@@ -620,6 +627,24 @@ mod tests {
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
+
+    #[test]
+    fn bounded_bulk_writes_preserve_exact_limits_without_partial_writes() {
+        let mut buffer = LimitedBuffer {
+            bytes: Vec::new(),
+            limit: 3,
+            exceeded: false,
+        };
+        buffer.write_all(&[1, 2]).unwrap();
+        assert!(buffer.write_all(&[3, 4]).is_err());
+        assert_eq!(buffer.bytes, [1, 2]);
+        assert!(buffer.exceeded);
+        buffer.write_all(&[3]).unwrap();
+        buffer.write_all(&[]).unwrap();
+        assert_eq!(buffer.bytes, [1, 2, 3]);
+        assert!(buffer.write_all(&[4]).is_err());
+        assert_eq!(buffer.bytes, [1, 2, 3]);
+    }
 
     fn codec(limit: usize) -> BinaryEnvelopeCodec {
         let mut codec = BinaryEnvelopeCodec::new(NonZeroUsize::new(limit).unwrap());

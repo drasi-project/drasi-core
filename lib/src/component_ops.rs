@@ -41,8 +41,8 @@ use anyhow::Result as AnyhowResult;
 /// Maps `anyhow::Error` from manager operations to `DrasiError`.
 ///
 /// This function converts internal errors to structured `DrasiError` variants
-/// at the public API boundary. It uses the `OperationFailed` variant which
-/// includes full context about the component and operation.
+/// at the public API boundary. It retains the cause with an `OperationFailed`
+/// classification containing the component and operation.
 ///
 /// # Arguments
 ///
@@ -69,13 +69,15 @@ pub fn map_component_error<T>(
 ) -> crate::error::Result<T> {
     result.map_err(|e| {
         DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
+            .with_cause(e)
     })
 }
 
 /// Maps `anyhow::Error` to `DrasiError` for state-related errors.
 ///
 /// This is used for operations where state validation is the primary concern
-/// (e.g., checking if dependencies are ready). It uses the `InvalidState` variant.
+/// (e.g., checking if dependencies are ready). It retains the cause with an
+/// `InvalidState` classification.
 ///
 /// # Arguments
 ///
@@ -91,7 +93,7 @@ pub fn map_state_error<T>(
     _component_type: &str,
     _component_id: &str,
 ) -> crate::error::Result<T> {
-    result.map_err(|e| DrasiError::invalid_state(e.to_string()))
+    result.map_err(|e| DrasiError::invalid_state(e.to_string()).with_cause(e))
 }
 
 // ============================================================================
@@ -118,7 +120,7 @@ mod tests {
         assert!(mapped.is_err());
 
         let err = mapped.unwrap_err();
-        match err {
+        match err.classification() {
             DrasiError::OperationFailed {
                 component_type,
                 component_id,
@@ -149,11 +151,67 @@ mod tests {
         assert!(mapped.is_err());
 
         let err = mapped.unwrap_err();
-        match err {
+        match err.classification() {
             DrasiError::InvalidState { message } => {
                 assert!(message.contains("already running"));
             }
             _ => panic!("Expected InvalidState variant"),
         }
+    }
+
+    #[test]
+    fn component_and_state_mapping_preserve_provider_causes() {
+        for state in [false, true] {
+            let cause = anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "provider rejected write",
+            ))
+            .context("flushing progress");
+            let result: AnyhowResult<()> = Err(cause);
+            let error = if state {
+                map_state_error(result, "source", "input")
+            } else {
+                map_component_error(result, "source", "input", "stop")
+            }
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn component_mapping_preserves_graph_and_worker_cleanup_causes() {
+        use crate::computation::v1::{ComponentId, GraphError};
+        use crate::context::workers::WorkerCleanupError;
+
+        let cause = GraphError::Component {
+            component: ComponentId::try_new("input").unwrap(),
+            operation: "stop",
+            source: anyhow::Error::new(WorkerCleanupError::TimedOut {
+                timeout: std::time::Duration::from_secs(5),
+            })
+            .context("joining listener"),
+        };
+        let error = map_component_error::<()>(
+            Err(anyhow::Error::new(cause).context("stopping graph")),
+            "source",
+            "input",
+            "stop",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<GraphError>(),
+            Some(GraphError::Component {
+                operation: "stop",
+                ..
+            })
+        ));
+        assert!(matches!(
+            error.downcast_ref::<WorkerCleanupError>(),
+            Some(WorkerCleanupError::TimedOut { timeout })
+                if *timeout == std::time::Duration::from_secs(5)
+        ));
     }
 }

@@ -253,6 +253,26 @@ RETURN h.desktop AS desktopPct,
 | Domain rankings | **Diff-based** | Current rank set compared to previous; supports insert, update, delete |
 | DNS summaries | **Per-domain hash** | Each domain's top-locations response is hashed independently |
 
+## Stop and Restart
+
+The source owns its polling worker before it can run. Stop signals shutdown and
+waits up to five seconds for the current request and state work to finish,
+without aborting it. A timeout or cancelled stop retains ownership and blocks
+restart; call stop again to finish cleanup. Fatal worker errors and panics remain
+errors, not successful stops. Completed cleanup clears old channel subscribers
+and their position filters before another run.
+
+The lifecycle tests use a held local HTTP request and repeated restart cycles.
+The Docker-backed integration also exercises bootstrap and live change delivery:
+
+```bash
+cargo test -p drasi-source-cloudflare-radar --lib --test integration_test -- --include-ignored
+```
+
+These ownership guarantees do not make polling checkpoints, query processing and
+external effects one transaction. Existing polling/retry and state fallback
+policies are unchanged.
+
 ## Limitations
 
 - **Polling only** — Cloudflare Radar has no streaming or webhook API.

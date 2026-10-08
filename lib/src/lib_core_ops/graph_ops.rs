@@ -126,7 +126,7 @@ impl DrasiLib {
     /// ```
     pub async fn can_remove_component(&self, id: &str) -> Result<()> {
         let id = crate::computation::v1::ComponentId::try_new(id)
-            .map_err(|error| crate::DrasiError::validation(error.to_string()))?;
+            .map_err(|error| crate::DrasiError::validation(error.to_string()).with_cause(error))?;
         let dependents = self
             .computation_control()?
             .desired_snapshot()

@@ -16,7 +16,6 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc as StdArc;
 use std::time::Duration;
 
@@ -30,7 +29,7 @@ use mysql_common::binlog::events::{
 };
 use mysql_common::packets::Sid;
 use mysql_common::uuid::Uuid;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
@@ -51,7 +50,7 @@ pub struct ReplicationStream {
     current_binlog_position: u32,
     current_gtid: Option<String>,
     current_event_timestamp: u64,
-    shutdown: StdArc<AtomicBool>,
+    shutdown: watch::Receiver<bool>,
     subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
 }
 
@@ -72,7 +71,7 @@ impl ReplicationStream {
         config: MySqlSourceConfig,
         source_id: String,
         base: SourceBase,
-        shutdown: StdArc<AtomicBool>,
+        shutdown: watch::Receiver<bool>,
         subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
     ) -> Self {
         let decoder = MySqlDecoder::new(source_id.clone(), &config.table_keys);
@@ -104,24 +103,33 @@ impl ReplicationStream {
 
         // Wait for at least one subscriber before starting the binlog stream.
         // This ensures we don't miss events dispatched while no queries are subscribed.
-        self.base.wait_for_subscribers().await;
+        let mut shutdown = self.shutdown.clone();
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stopped| *stopped) => return Ok(()),
+            _ = self.base.wait_for_subscribers() => {}
+        }
 
         let mut attempts = 0u32;
 
         loop {
-            if self.shutdown.load(Ordering::Relaxed) {
+            if self.stopping() {
                 info!("Shutdown requested for source {}", self.source_id);
                 return Ok(());
             }
 
-            let start_position = self.determine_start_position().await?;
+            let start_position = tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stopped| *stopped) => return Ok(()),
+                result = self.determine_start_position() => result?,
+            };
 
             match self.run_replication_loop(start_position).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    if self.shutdown.load(Ordering::Relaxed) {
+                    if self.stopping() {
                         info!("Shutdown during replication for source {}", self.source_id);
-                        return Ok(());
+                        return Err(e);
                     }
 
                     attempts += 1;
@@ -131,9 +139,9 @@ impl ReplicationStream {
                              for source {}: {e}",
                             self.source_id
                         );
-                        return Err(anyhow!(
-                            "Replication failed after {MAX_RECONNECT_ATTEMPTS} attempts: {e}"
-                        ));
+                        return Err(e.context(format!(
+                            "Replication failed after {MAX_RECONNECT_ATTEMPTS} attempts"
+                        )));
                     }
 
                     let delay = std::cmp::min(
@@ -145,10 +153,18 @@ impl ReplicationStream {
                          reconnecting in {delay}s: {e}",
                         self.source_id
                     );
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.wait_for(|stopped| *stopped) => return Ok(()),
+                        _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                    }
                 }
             }
         }
+    }
+
+    fn stopping(&self) -> bool {
+        *self.shutdown.borrow() || self.shutdown.has_changed().is_err()
     }
 
     async fn run_replication_loop(&mut self, start_position: StartPosition) -> Result<()> {
@@ -160,29 +176,41 @@ impl ReplicationStream {
 
         let mut stream = self.connect_binlog_stream(&start_position).await?;
 
-        loop {
-            if self.shutdown.load(Ordering::Relaxed) {
+        let mut shutdown = self.shutdown.clone();
+        let result = loop {
+            if self.stopping() {
                 info!("Shutdown requested for source {}", self.source_id);
-                Self::close_stream(stream).await;
-                return Ok(());
+                break Ok(());
             }
 
-            match stream.next().await {
+            let event = tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stopped| *stopped) => break Ok(()),
+                event = stream.next() => event,
+            };
+            match event {
                 Some(Ok(event)) => {
-                    self.process_event(&stream, &event).await?;
+                    if let Err(error) = self.process_event(&stream, &event).await {
+                        break Err(error);
+                    }
                 }
                 Some(Err(err)) => {
-                    Self::close_stream(stream).await;
-                    return Err(anyhow!("Error reading binlog event: {err}"));
+                    break Err(anyhow::Error::new(err).context("Error reading binlog event"));
                 }
                 None => {
-                    Self::close_stream(stream).await;
-                    if self.shutdown.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    return Err(anyhow!("Binlog replication stream ended unexpectedly"));
+                    break Err(anyhow!("Binlog replication stream ended unexpectedly"));
                 }
             }
+        };
+        let cleanup = stream.close().await.context("Closing MySQL binlog stream");
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(drasi_lib::error::OperationFailures::new(
+                "MySQL replication and connection cleanup failed",
+                vec![error, cleanup],
+            )
+            .into()),
         }
     }
 
@@ -203,11 +231,28 @@ impl ReplicationStream {
         let mut conn = connect_with_ssl_mode(build_opts, self.config.ssl_mode)
             .await
             .context("Failed to connect to MySQL for binlog replication")?;
-        self.configure_heartbeat(&mut conn).await?;
-
-        let resolved = self
-            .resolve_start_position(&mut conn, start_position)
-            .await?;
+        let setup = async {
+            self.configure_heartbeat(&mut conn).await?;
+            self.resolve_start_position(&mut conn, start_position).await
+        }
+        .await;
+        let resolved = match setup {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return match conn.disconnect().await {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(drasi_lib::error::OperationFailures::new(
+                        "MySQL replication setup and connection cleanup failed",
+                        vec![
+                            error,
+                            anyhow::Error::new(cleanup)
+                                .context("Disconnecting MySQL setup connection"),
+                        ],
+                    )
+                    .into()),
+                };
+            }
+        };
         self.current_binlog_file = resolved.filename.clone();
         self.current_binlog_position = resolved.state_position;
 
@@ -552,12 +597,6 @@ impl ReplicationStream {
             std::cmp::Ordering::Equal => a.binlog_position < b.binlog_position,
         }
     }
-
-    async fn close_stream(stream: BinlogStream) {
-        if let Err(err) = stream.close().await {
-            debug!("Failed to close MySQL binlog stream cleanly: {err}");
-        }
-    }
 }
 
 fn parse_gtid_set(gtid: &str) -> Result<Vec<Sid<'static>>> {
@@ -621,7 +660,7 @@ mod tests {
             config,
             source_id.to_string(),
             base,
-            StdArc::new(AtomicBool::new(false)),
+            watch::channel(false).1,
             StdArc::new(RwLock::new(HashMap::new())),
         )
     }

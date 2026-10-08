@@ -103,7 +103,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
         .filter(|t| t.has_renderable_templates())
         .map(|_| TemplateEngine::new());
 
-    let mut batcher_handle = tokio::spawn(async move {
+    let batcher = async move {
         let mut checkpoints = checkpoints;
         let mut batcher = AdaptiveBatcher::new(batch_rx, runtime_cfg);
         let mut client: Option<ReactionServiceClient<Channel>> = None;
@@ -262,93 +262,79 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
         info!(
             "[{batcher_name}] Adaptive batcher task completed - Successful: {successful_sends}, Failed: {failed_sends}"
         );
-    });
+    };
 
     let priority_queue = base.priority_queue.clone();
     let cfg_for_loop = config;
     let engine_for_loop = template_engine;
 
-    loop {
-        let query_result = tokio::select! {
-            biased;
-            _ = &mut shutdown_rx => {
-                debug!("[{reaction_name}] Received shutdown signal, exiting adaptive processing loop");
-                break;
-            }
-            // The batcher dropping its receiver (e.g. a fail-stop) closes this
-            // sender; break promptly instead of blocking on the next dequeue.
-            _ = batch_tx.closed() => {
-                debug!("[{reaction_name}] Batcher exited; exiting adaptive processing loop");
-                break;
-            }
-            result = priority_queue.dequeue() => result,
-        };
-
-        if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
-            info!(
-                "[{reaction_name}] Reaction status changed to non-running, exiting adaptive loop"
-            );
-            return;
-        }
-
-        if query_result.results.is_empty() {
-            debug!("[{reaction_name}] Received empty result set from query");
-            continue;
-        }
-
-        let query_id = query_result.query_id.clone();
-        let seq = query_result.sequence;
-
-        let emission = QueryEmissionContext {
-            query_id: &query_id,
-            sequence: seq,
-            timestamp: query_result.timestamp,
-            metadata: &query_result.metadata,
-        };
-
-        // Build all items first so the last one can be flagged terminal; the
-        // checkpoint only advances once a result's terminal item is acked.
-        let mut built_items: Vec<(BatchKey, ProtoQueryResultItem)> = Vec::new();
-        for diff in &query_result.results {
-            if matches!(diff, drasi_lib::channels::ResultDiff::Noop) {
-                debug!("[{reaction_name}] Ignoring noop result");
-                continue;
-            }
-            let Some(built) =
-                build_proto_item(&cfg_for_loop, engine_for_loop.as_ref(), &emission, diff)
-            else {
-                continue;
+    let forward = async {
+        loop {
+            let query_result = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    debug!("[{reaction_name}] Received shutdown signal, exiting adaptive processing loop");
+                    break;
+                }
+                // The batcher dropping its receiver (e.g. a fail-stop) closes this
+                // sender; break promptly instead of blocking on the next dequeue.
+                _ = batch_tx.closed() => {
+                    debug!("[{reaction_name}] Batcher exited; exiting adaptive processing loop");
+                    break;
+                }
+                result = priority_queue.dequeue() => result,
             };
-            let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);
-            let key = BatchKey::new(query_id.clone(), effective_metadata);
-            built_items.push((key, built.item));
-        }
 
-        let last_idx = built_items.len().saturating_sub(1);
-        for (i, (key, item)) in built_items.into_iter().enumerate() {
-            let is_terminal = i == last_idx;
-            if batch_tx.send((key, item, is_terminal)).await.is_err() {
-                let msg = "failed to send item to adaptive batcher".to_string();
-                error!("[{reaction_name}] {msg}");
-                status_handle
-                    .set_status(ComponentStatus::Error, Some(msg))
-                    .await;
-                return;
+            if query_result.results.is_empty() {
+                debug!("[{reaction_name}] Received empty result set from query");
+                continue;
+            }
+
+            let query_id = query_result.query_id.clone();
+            let seq = query_result.sequence;
+
+            let emission = QueryEmissionContext {
+                query_id: &query_id,
+                sequence: seq,
+                timestamp: query_result.timestamp,
+                metadata: &query_result.metadata,
+            };
+
+            // Build all items first so the last one can be flagged terminal; the
+            // checkpoint only advances once a result's terminal item is acked.
+            let mut built_items: Vec<(BatchKey, ProtoQueryResultItem)> = Vec::new();
+            for diff in &query_result.results {
+                if matches!(diff, drasi_lib::channels::ResultDiff::Noop) {
+                    debug!("[{reaction_name}] Ignoring noop result");
+                    continue;
+                }
+                let Some(built) =
+                    build_proto_item(&cfg_for_loop, engine_for_loop.as_ref(), &emission, diff)
+                else {
+                    continue;
+                };
+                let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);
+                let key = BatchKey::new(query_id.clone(), effective_metadata);
+                built_items.push((key, built.item));
+            }
+
+            let last_idx = built_items.len().saturating_sub(1);
+            for (i, (key, item)) in built_items.into_iter().enumerate() {
+                let is_terminal = i == last_idx;
+                if batch_tx.send((key, item, is_terminal)).await.is_err() {
+                    let msg = "failed to send item to adaptive batcher".to_string();
+                    error!("[{reaction_name}] {msg}");
+                    status_handle
+                        .set_status(ComponentStatus::Error, Some(msg))
+                        .await;
+                    return;
+                }
             }
         }
-    }
 
-    drop(batch_tx);
-    if tokio::time::timeout(Duration::from_millis(1500), &mut batcher_handle)
-        .await
-        .is_err()
-    {
-        warn!(
-            "[{reaction_name}] Adaptive batcher did not finish within the shutdown window — \
-             in-flight batch abandoned"
-        );
-        batcher_handle.abort();
-    }
+        drop(batch_tx);
+    };
+    tokio::join!(forward, batcher);
 
     // Preserve the `Error` status set by a fail-stopping batcher.
     if errored.load(Ordering::SeqCst) {

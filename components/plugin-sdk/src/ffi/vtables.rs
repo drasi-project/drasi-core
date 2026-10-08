@@ -291,8 +291,9 @@ pub struct FfiRuntimeContext {
     pub component_id: FfiStr,
     /// Nullable — not all plugins need state store.
     ///
-    /// **Lifetime: persistent.** The plugin retains this pointer for the component's
-    /// lifetime; neither side frees the vtable struct.
+    /// **Lifetime: transferred.** ABI 0.17 plugins own the host-allocated vtable
+    /// and release it and its state on the final proxy drop. ABI 0.16 plugins
+    /// retain the original persistent-pointer behavior.
     pub state_store: *const StateStoreVtable,
     /// Per-instance log callback (nullable — falls back to global if null).
     pub log_callback: Option<super::callbacks::LogCallbackFn>,
@@ -541,7 +542,7 @@ drasi_ffi_primitives::ffi_vtable! {
         /// Returns a heap-allocated FfiBootstrapStream (caller must free via
         /// Box::from_raw and consume both receivers), or null if the bootstrap
         /// could not be started.
-        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr) -> *mut FfiBootstrapStream,
+        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr, settings_json: FfiStr, properties_json: FfiStr) -> *mut FfiBootstrapStream,
     }
 }
 
@@ -663,12 +664,24 @@ pub struct StateStoreVtable {
     ) -> i64,
     // Store-level operations
     pub clear_store_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> i64,
-    pub list_keys_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiStringArray,
+    /// On success initializes `out_keys`; on failure leaves it untouched.
+    /// The caller owns the returned strings and array only after success.
+    pub list_keys_fn: extern "C" fn(
+        state: *mut c_void,
+        store_id: FfiStr,
+        out_keys: *mut FfiStringArray,
+    ) -> FfiResult,
     pub store_exists_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiResult,
     pub key_count_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> i64,
     pub sync_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
     // Cleanup
     pub drop_fn: extern "C" fn(state: *mut c_void),
+    /// ABI 0.17 suffix; the preceding ABI 0.16 layout is unchanged.
+    /// Initializes `out` only on success. Called only when durability is requested.
+    pub durability_fn: extern "C" fn(
+        state: *mut c_void,
+        out: *mut super::durability::FfiStorageDurability,
+    ) -> FfiResult,
 }
 
 unsafe impl Send for StateStoreVtable {}

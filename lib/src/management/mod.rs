@@ -6,6 +6,10 @@
 
 mod store;
 pub use store::*;
+mod transitions;
+pub use transitions::{
+    validate_recovery_resource_changes, RecoveryRetirementAuthorization, RecoveryTransitionRequired,
+};
 mod runtime;
 pub(crate) use runtime::Management;
 
@@ -26,12 +30,17 @@ use crate::computation::v1::{
 pub struct DesiredInstance {
     pub version: u32,
     pub topology: DesiredTopology,
+    /// A revision-bound, persisted authorization to abandon a removed domain's
+    /// pending obligations. This neither deletes nor resets its stored data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement: Option<RecoveryRetirementAuthorization>,
 }
 
 impl Default for DesiredInstance {
     fn default() -> Self {
         Self {
             version: 1,
+            retirement: None,
             topology: crate::computation::v1::ComputationGraph::empty(
                 crate::computation::components::INSTANCE_GRAPH_ID,
             )
@@ -40,6 +49,8 @@ impl Default for DesiredInstance {
             .select(crate::computation::v1::GraphSelection::All)
             .expect("empty component definition"),
         }
+        .normalized()
+        .expect("empty managed component definition")
     }
 }
 
@@ -49,7 +60,17 @@ impl From<DesiredTopology> for DesiredInstance {
         Self {
             version: 1,
             topology,
+            retirement: None,
         }
+    }
+}
+
+impl DesiredInstance {
+    /// Validate reconstructibility and canonicalize declaration ordering without
+    /// invoking factories or providers. Hosts seeding a configuration store must
+    /// use the same form as ordinary desired-state acceptance.
+    pub fn normalized(self) -> anyhow::Result<Self> {
+        runtime::normalize(self)
     }
 }
 
@@ -61,6 +82,18 @@ impl From<DesiredTopology> for DesiredInstance {
 /// released if the resolver fails or its future is dropped.
 #[async_trait]
 pub trait ManagementResourceResolver: Send + Sync {
+    /// Pure pre-acceptance validation, including when old resources could not be
+    /// reconstructed. Resolvers offering persistent processing services must
+    /// protect their recovery domains; wrappers must forward this policy.
+    /// Never assume that a missing live handle means storage is empty.
+    fn validate_transition(
+        &self,
+        _previous: &DesiredTopology,
+        _desired: &DesiredTopology,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn resolve(
         &self,
         instance_id: &str,
@@ -68,6 +101,40 @@ pub trait ManagementResourceResolver: Send + Sync {
         specification: &ResourceSpecification,
         configuration: &serde_json::Value,
     ) -> anyhow::Result<ResourceHandle>;
+
+    async fn resolve_with_dependencies(
+        &self,
+        instance_id: &str,
+        graph_id: &str,
+        specification: &ResourceSpecification,
+        configuration: &serde_json::Value,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<ResourceHandle> {
+        anyhow::ensure!(
+            dependencies.is_empty(),
+            "resource resolver does not support dependencies"
+        );
+        self.resolve(instance_id, graph_id, specification, configuration)
+            .await
+    }
+}
+
+/// Bind a recipe without acquiring its storage. The graph constructs it after
+/// dependencies exist and previous owners have completed cleanup.
+pub fn resource_constructor(
+    resolver: Arc<dyn ManagementResourceResolver>,
+    instance_id: impl Into<String>,
+    graph_id: impl Into<String>,
+    specification: ResourceSpecification,
+    configuration: serde_json::Value,
+) -> Arc<dyn crate::computation::v1::ResourceConstructor> {
+    Arc::new(runtime::ManagedResource {
+        resolver,
+        instance_id: instance_id.into(),
+        graph_id: graph_id.into(),
+        specification,
+        configuration,
+    })
 }
 
 #[derive(Default)]
@@ -125,6 +192,16 @@ impl ManagementStatus {
 }
 
 impl crate::DrasiLib {
+    /// Whether the instance accepts revisioned desired definitions.
+    pub fn has_managed_configuration(&self) -> bool {
+        self.management.get().is_some()
+    }
+
+    /// Whether accepted configuration is backed by an external durable store.
+    pub fn configuration_is_persistent(&self) -> bool {
+        self.management.get().is_some_and(Management::persistent)
+    }
+
     fn management(&self) -> crate::Result<&Management> {
         self.management.get().ok_or_else(|| crate::DrasiError::invalid_state(
                 "management is not configured; supply ManagementOptions or a component factory registry",

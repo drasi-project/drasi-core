@@ -341,7 +341,12 @@ This is an **ingress** source. There is no upstream poller, so there is no recon
 | `Error` | Bind failed, or the accept loop died |
 | `Stopped` | `stop()` finished; listeners closed |
 
-`stop()` signals the gRPC/HTTP servers, aborts WAL prune, persists lifecycle state, and clears channel dispatchers via `SourceBase::stop_common()`.
+`stop()` signals the gRPC/HTTP servers, cancels and joins WAL pruning, and joins
+the receiver before persisting lifecycle state and clearing channel dispatchers.
+Listeners run as futures owned by that receiver, not detached tasks. A timeout
+or persistence failure returns an error; timeout retains the receiver handle
+until its exit is joined. This does not promise that a cancelled request's
+external storage effects have been rolled back.
 
 ## Limitations
 

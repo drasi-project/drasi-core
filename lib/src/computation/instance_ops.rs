@@ -89,6 +89,10 @@ impl DrasiLib {
                 None
             } else {
                 let mut snapshot = root.configuration_snapshot().map_err(anyhow::Error::from)?;
+                let mut native_resources: BTreeSet<_> = native_resources.into_iter().collect();
+                snapshot
+                    .topology
+                    .include_resource_dependencies(&mut native_resources);
                 snapshot.topology = root
                     .desired
                     .select(GraphSelection::Exact(native_ids.iter().cloned().collect()))
@@ -109,7 +113,13 @@ impl DrasiLib {
                         snapshot
                             .topology
                             .resource_configurations
-                            .insert(id, recipe.clone());
+                            .insert(id.clone(), recipe.clone());
+                    }
+                    if let Some(dependencies) = root.desired.resource_dependencies.get(&id) {
+                        snapshot
+                            .topology
+                            .resource_dependencies
+                            .insert(id, dependencies.clone());
                     }
                 }
                 snapshot
@@ -139,11 +149,12 @@ impl DrasiLib {
 
     pub fn computation_component(&self, id: &str) -> Result<super::v1::ComponentHandle> {
         let id = super::v1::ComponentId::try_new(id)
-            .map_err(|error| DrasiError::invalid_config(error.to_string()))?;
+            .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
         self.computation_control()?
             .component_handle(&id)
             .map_err(|error| {
                 DrasiError::operation_failed("component", id.as_str(), "get", error.to_string())
+                    .with_cause(error)
             })
     }
 
@@ -171,6 +182,7 @@ impl DrasiLib {
             .await
             .map_err(|error| {
                 DrasiError::operation_failed("query", id, "inspect_computation", error.to_string())
+                    .with_cause(error)
             })
     }
 
@@ -185,17 +197,10 @@ impl DrasiLib {
         if !self.is_running().await {
             addition.bindings.defer_activation = true;
         }
-        control
-            .add_component(addition)
-            .await
-            .map_err(|error| match error {
-                rejected @ super::v1::GraphError::AdditionRejected { .. } => {
-                    DrasiError::from(anyhow::Error::new(rejected))
-                }
-                error => {
-                    DrasiError::operation_failed("component", id.as_str(), "add", error.to_string())
-                }
-            })
+        control.add_component(addition).await.map_err(|error| {
+            DrasiError::operation_failed("component", id.as_str(), "add", error.to_string())
+                .with_cause(error)
+        })
     }
 
     pub async fn add_transformer_with_handle(
@@ -258,7 +263,7 @@ impl DrasiLib {
                 }
             })?;
         super::v1::ReactionPluginHost::borrowed(reaction, catalog)
-            .map_err(|error| DrasiError::invalid_config(error.to_string()))
+            .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))
     }
     pub fn computation_pipeline(&self) -> Result<super::v1::ComputationPipelineBuilder> {
         let services = self.computation_plugin_services()?;
@@ -271,32 +276,66 @@ impl DrasiLib {
             self.config.global_priority_queue_capacity.unwrap_or(10_000),
             self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
         )
-        .map_err(|error| DrasiError::invalid_config(error.to_string()))
+        .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))
     }
     pub(crate) async fn start_parallel_components(&self) -> anyhow::Result<()> {
         let runtime = &self.computation_runtime;
         let mut failures = Vec::new();
         if let Err(error) = runtime.start_kind("source").await {
-            failures.push(format!("sources: {error:#}"));
+            failures.push(error.context("sources"));
         }
         // Keep stop available if independent components start before a failure.
         *self.running.write().await = true;
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
-            anyhow::bail!("instance shutdown interrupted startup");
+            failures.push(
+                anyhow::Error::new(super::v1::GraphError::Cancelled)
+                    .context("instance shutdown interrupted startup"),
+            );
+            return Err(crate::error::OperationFailures::new(
+                "instance startup had failures",
+                failures,
+            )
+            .into());
         }
-        runtime.start_kind("query").await?;
+        if let Err(error) = runtime.start_kind("query").await {
+            failures.push(error.context("queries"));
+            return Err(crate::error::OperationFailures::new(
+                "instance startup had failures",
+                failures,
+            )
+            .into());
+        }
         if let Err(error) = runtime.start_native_components().await {
-            failures.push(format!("native components: {error:#}"));
+            failures.push(error.context("native components"));
         }
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
-            anyhow::bail!("instance shutdown interrupted startup");
+            failures.push(
+                anyhow::Error::new(super::v1::GraphError::Cancelled)
+                    .context("instance shutdown interrupted startup"),
+            );
+            return Err(crate::error::OperationFailures::new(
+                "instance startup had failures",
+                failures,
+            )
+            .into());
         }
-        runtime.subscriptions_complete().await?;
+        if let Err(error) = runtime.subscriptions_complete().await {
+            failures.push(error.context("completing subscriptions"));
+            return Err(crate::error::OperationFailures::new(
+                "instance startup had failures",
+                failures,
+            )
+            .into());
+        }
         if let Err(error) = runtime.start_kind("reaction").await {
-            failures.push(format!("reactions: {error:#}"));
+            failures.push(error.context("reactions"));
         }
         if !failures.is_empty() {
-            anyhow::bail!("instance startup had failures: {}", failures.join("; "));
+            return Err(crate::error::OperationFailures::new(
+                "instance startup had failures",
+                failures,
+            )
+            .into());
         }
         Ok(())
     }
@@ -320,7 +359,7 @@ impl DrasiLib {
     )> {
         self.computation_component(component_id)?;
         super::v1::ComponentId::try_new(component_id)
-            .map_err(|error| DrasiError::invalid_config(error.to_string()))?;
+            .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
         let key = crate::managers::ComponentLogKey::new(
             self.config.id.clone(),
             component_type,
@@ -384,9 +423,8 @@ impl DrasiLib {
         match result {
             Ok(report) => {
                 if let Err(error) = pending.cleanup().await {
-                    let detail = error.to_string();
                     return Err(super::instance::components_cleanup_error(
-                        pending, error, detail,
+                        pending, error, None,
                     ));
                 }
                 Ok(report)

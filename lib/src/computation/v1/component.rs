@@ -63,6 +63,12 @@ pub struct OutputEnvelope {
 #[async_trait]
 pub trait ComputationComponent: Send + Sync {
     fn descriptor(&self) -> &ComponentDescriptor;
+    /// Captured at construction, activation and reconfiguration, never per envelope.
+    /// Unknown is not a recovery guarantee. Implementations must identify their
+    /// actual admission, processing and publication boundary.
+    fn recovery_contract(&self) -> super::ComponentRecovery {
+        super::ComponentRecovery::default()
+    }
     /// Publish read-only query capabilities at construction/reconfiguration
     /// boundaries. Non-query components do not expose a query API.
     fn query_api(&self) -> Option<std::sync::Arc<super::QueryApi>> {
@@ -125,6 +131,18 @@ pub trait ComputationService: ComputationComponent {
 /// A producer beside legacy Source. Its descriptor has output ports only.
 #[async_trait]
 pub trait EnvelopeSource: ComputationComponent {
+    /// Read capability used by this source. External readers are not evidence
+    /// of a local owner; the host adapter must retain its actual bound resource.
+    fn recovery_reader(&self) -> Option<super::SourceProgressReader> {
+        self.recovery_progress().map(Into::into)
+    }
+    /// Delegate ingress to graph-validated publication into the actual outgoing
+    /// QoS journal. When present, the graph drives this handle instead of `next`.
+    /// Fast sources return None and retain their existing data path.
+    fn admission(&self) -> Option<std::sync::Arc<super::SourceAdmission>> {
+        None
+    }
+
     /// The immediate consumer whose committed input permits this source to
     /// resume/prune history. The host rejects routing through another component
     /// (or fanout to another boundary) while using this consumer's checkpoint.
@@ -139,6 +157,21 @@ pub trait EnvelopeSource: ComputationComponent {
 /// A stateful transformer with declared input and output ports.
 #[async_trait]
 pub trait Transformer: ComputationComponent {
+    /// Called after startup and before processing/replay, with the graph's actual
+    /// receipt-tracked destinations. Participating producers persist these using
+    /// their existing transaction and reject changes while output is unconfirmed.
+    /// The default does not claim durable destination tracking.
+    async fn bind_output_destinations(
+        &mut self,
+        bindings: &super::OutputBindings,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            bindings.destinations().is_empty(),
+            "this transformer does not support durable output destination tracking"
+        );
+        Ok(())
+    }
+
     /// Called only after every outgoing branch accepted every envelope in this
     /// batch. A transformer relying on durable acceptance must require it on its
     /// output ports. This is not downstream handling or external-effect completion.

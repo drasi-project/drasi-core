@@ -178,12 +178,14 @@ struct Recovered {
     retained: VecDeque<RetainedOutput>,
     checkpoints: BTreeMap<SourceProgressKey, SourceCheckpoint>,
     transport_sequences: BTreeMap<StreamId, u64>,
+    bindings: super::OutputBindings,
 }
 
 /// Shared commit/replay ownership for durable middleware and transactional sequences.
 /// Existing middleware journal keys and record encodings remain readable.
 pub(super) struct TransformStore {
-    pub transaction: ComputationTransaction,
+    pub transaction: Arc<ComputationTransaction>,
+    pub bindings: Arc<super::output_bindings::OutputBindingState>,
     options: DurableMiddlewareOptions,
     scope: String,
     id: ComponentId,
@@ -194,8 +196,13 @@ pub(super) struct TransformStore {
     state: Option<Recovered>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct TransformOperationError(#[source] anyhow::Error);
+
 fn index_error(error: anyhow::Error) -> IndexError {
-    IndexError::Other(error.into_boxed_dyn_error())
+    // A carrier keeps the original typed cause in the source chain.
+    IndexError::Other(Box::new(TransformOperationError(error)))
 }
 
 impl TransformStore {
@@ -274,7 +281,10 @@ impl TransformStore {
             codec.register_schema(schema)?;
         }
         Ok(Self {
-            transaction: ComputationTransaction::try_new(indexes)?,
+            transaction: Arc::new(ComputationTransaction::try_new(indexes)?),
+            bindings: super::output_bindings::OutputBindingState::new(Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )),
             options,
             scope,
             id,
@@ -329,6 +339,10 @@ impl TransformStore {
             .transaction
             .run(async { self.load().await.map_err(index_error).map_err(Into::into) })
             .await?;
+        self.bindings.publish(
+            recovered.bindings.clone(),
+            recovered.head > recovered.confirmed,
+        )?;
         self.state = Some(recovered);
         Ok(())
     }
@@ -338,6 +352,12 @@ impl TransformStore {
         let checkpoint = resources.checkpoint_store().expect("validated checkpoint");
         let outbox = resources.outbox_writer().expect("validated outbox");
         let saved = checkpoint.read_all_checkpoints().await?;
+        let bindings = super::OutputBindings::load(saved.get(super::output_bindings::CHECKPOINT))?;
+        bindings.validate_progress(
+            saved
+                .get(HEAD)
+                .and_then(|head| head.source_position.as_ref()),
+        )?;
         let entries = outbox.read_from(JOURNAL, 0).await?;
         let (identity, head, emission, confirmed) = if let Some(config) = saved.get(CONFIGURATION) {
             let config: Configuration = serde_json::from_slice(
@@ -361,7 +381,7 @@ impl TransformStore {
             let number = |key| -> anyhow::Result<u64> {
                 Ok(saved
                     .get(key)
-                    .filter(|checkpoint| checkpoint.source_position.is_none())
+                    .filter(|checkpoint| key == HEAD || checkpoint.source_position.is_none())
                     .ok_or_else(|| anyhow::anyhow!("missing middleware sequence marker"))?
                     .sequence)
             };
@@ -547,7 +567,8 @@ impl TransformStore {
                 );
             } else {
                 anyhow::ensure!(
-                    [CONFIGURATION, HEAD, EMISSION, CONFIRMED].contains(&key.as_str())
+                    [CONFIGURATION, HEAD, EMISSION, CONFIRMED, super::output_bindings::CHECKPOINT]
+                        .contains(&key.as_str())
                         || key
                             .strip_prefix(INPUT_OUTPUT_PREFIX)
                             .is_some_and(|input| saved.contains_key(input)),
@@ -563,7 +584,43 @@ impl TransformStore {
             retained,
             checkpoints,
             transport_sequences,
+            bindings,
         })
+    }
+
+    pub async fn bind_output_destinations(
+        &mut self,
+        bindings: &super::OutputBindings,
+    ) -> anyhow::Result<()> {
+        bindings.validate_transaction(&self.transaction)?;
+        let state = self.state()?;
+        let pending = state.head > state.confirmed;
+        let head = state.head;
+        state.bindings.validate_change(bindings, pending)?;
+        if &state.bindings == bindings {
+            self.state.as_mut().expect("recovered").bindings = bindings.clone();
+            return Ok(());
+        }
+        let bytes = bindings.encode()?;
+        let checkpoint = self
+            .transaction
+            .resources()
+            .checkpoint_store()
+            .expect("checkpoint");
+        self.transaction
+            .run(async {
+                checkpoint
+                    .stage_checkpoint(super::output_bindings::CHECKPOINT, 1, Some(&bytes))
+                    .await?;
+                checkpoint
+                    .stage_checkpoint(HEAD, head, bindings.fingerprint())
+                    .await?;
+                Ok(())
+            })
+            .await?;
+        self.state.as_mut().expect("recovered").bindings = bindings.clone();
+        self.bindings.publish(bindings.clone(), pending)?;
+        Ok(())
     }
 
     pub async fn replay(&mut self, logical_sequence: u64) -> anyhow::Result<ChangeEnvelope> {
@@ -780,66 +837,78 @@ impl TransformStore {
             return Err(MiddlewareRecoveryError::RetentionExhausted.into());
         }
         let elements = self.elements();
-        let envelope = self
-            .transaction
-            .run(async {
-                let prepared: anyhow::Result<ChangeEnvelope> = async {
-                    let mut envelope = transform(elements, emission).await?;
-                    super::data::validate_schema(
-                        self.output_schema.descriptor(),
-                        envelope.changes().schema(),
-                    )?;
-                    anyhow::ensure!(
-                        envelope.system().stream() == &self.output_stream
-                            && envelope.system().sequence() == emission
-                            && envelope.id() == &super::emission_id(&self.output_stream, emission)?,
-                        "transaction output does not match its reserved emission"
-                    );
-                    GraphProducerProgress::annotate(
-                        &mut envelope,
-                        &state.identity,
-                        logical_sequence,
-                    )?;
-                    let bytes = serde_json::to_vec(&JournalRecord {
-                        version: 1,
-                        input: receipt.clone(),
-                        envelope: self.codec.encode(&envelope)?.to_vec(),
-                    })?;
-                    self.transaction
-                        .resources()
-                        .outbox_writer()
-                        .expect("outbox")
-                        .append_and_trim(JOURNAL, logical_sequence, &bytes, retain_from)
-                        .await?;
-                    progress.stage(checkpoint.as_ref()).await?;
-                    if let Some(owner) = &query_owner {
-                        let bytes = Bytes::from(serde_json::to_vec(owner)?);
-                        checkpoint
-                            .stage_checkpoint(&owner_key, 1, Some(&bytes))
-                            .await?;
-                    }
+        let reservations = if state.bindings.has_shared() {
+            Some(state.bindings.reserve().await?)
+        } else {
+            None
+        };
+        let operation = async {
+            let prepared: anyhow::Result<ChangeEnvelope> = async {
+                let mut envelope = transform(elements, emission).await?;
+                super::data::validate_schema(
+                    self.output_schema.descriptor(),
+                    envelope.changes().schema(),
+                )?;
+                anyhow::ensure!(
+                    envelope.system().stream() == &self.output_stream
+                        && envelope.system().sequence() == emission
+                        && envelope.id() == &super::emission_id(&self.output_stream, emission)?,
+                    "transaction output does not match its reserved emission"
+                );
+                GraphProducerProgress::annotate(&mut envelope, &state.identity, logical_sequence)?;
+                let bytes = serde_json::to_vec(&JournalRecord {
+                    version: 1,
+                    input: receipt.clone(),
+                    envelope: self.codec.encode(&envelope)?.to_vec(),
+                })?;
+                self.transaction
+                    .resources()
+                    .outbox_writer()
+                    .expect("outbox")
+                    .append_and_trim(JOURNAL, logical_sequence, &bytes, retain_from)
+                    .await?;
+                progress.stage(checkpoint.as_ref()).await?;
+                if let Some(owner) = &query_owner {
+                    let bytes = Bytes::from(serde_json::to_vec(owner)?);
                     checkpoint
-                        .stage_checkpoint(
-                            &format!("{INPUT_OUTPUT_PREFIX}{}", progress.key),
-                            logical_sequence,
-                            None,
-                        )
+                        .stage_checkpoint(&owner_key, 1, Some(&bytes))
                         .await?;
-                    checkpoint
-                        .stage_checkpoint(HEAD, logical_sequence, None)
-                        .await?;
-                    checkpoint
-                        .stage_checkpoint(EMISSION, emission, None)
-                        .await?;
-                    Ok(envelope)
                 }
-                .await;
-                prepared.map_err(index_error).map_err(Into::into)
-            })
-            .await?;
+                checkpoint
+                    .stage_checkpoint(
+                        &format!("{INPUT_OUTPUT_PREFIX}{}", progress.key),
+                        logical_sequence,
+                        None,
+                    )
+                    .await?;
+                checkpoint
+                    .stage_checkpoint(HEAD, logical_sequence, state.bindings.fingerprint())
+                    .await?;
+                checkpoint
+                    .stage_checkpoint(EMISSION, emission, None)
+                    .await?;
+                Ok(envelope)
+            }
+            .await;
+            prepared.map_err(index_error).map_err(Into::into)
+        };
+        let envelope = if let Some(reservations) = reservations {
+            self.transaction
+                .run_with_mutations(async {
+                    let envelope = operation.await?;
+                    let mutations = reservations
+                        .mutations(Some(&envelope))
+                        .map_err(index_error)?;
+                    Ok((envelope, mutations))
+                })
+                .await?
+        } else {
+            self.transaction.run(operation).await?
+        };
         let state = self.state.as_mut().expect("recovered");
         state.head = logical_sequence;
         state.emission = emission;
+        self.bindings.pending(true);
         while state
             .retained
             .front()
@@ -896,6 +965,7 @@ impl TransformStore {
                 })
                 .await?;
             self.state.as_mut().expect("recovered").confirmed = confirmed;
+            self.bindings.pending(self.state()?.head > confirmed);
         }
         Ok(())
     }

@@ -28,15 +28,18 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 
 use drasi_lib::channels::{ComponentStatus, DispatchMode};
+use drasi_lib::context::workers::{
+    join_owned_worker_gracefully, spawn_owned_worker, WorkerAlreadyOwned,
+};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
@@ -54,9 +57,9 @@ pub struct HereTrafficSource {
     config: HereTrafficConfig,
     client: HereTrafficClient,
     state: Arc<Mutex<state::SourceState>>,
-    task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    task_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    cleanup_required: Mutex<bool>,
     shutdown_tx: watch::Sender<bool>,
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl HereTrafficSource {
@@ -112,15 +115,14 @@ impl HereTrafficSource {
 
         loop {
             tokio::select! {
+                biased;
+                _ = async { let _ = stop_signal.wait_for(|stopped| *stopped).await; } => {
+                    info!("[{source_id}] Stop signal received");
+                    break;
+                }
                 _ = interval.tick() => {
                     if let Err(e) = poll_and_dispatch(&base, &config, &client, &state).await {
                         error!("[{source_id}] Poll failed: {e}");
-                    }
-                }
-                _ = stop_signal.changed() => {
-                    if *stop_signal.borrow() {
-                        info!("[{source_id}] Stop signal received");
-                        break;
                     }
                 }
             }
@@ -198,9 +200,23 @@ impl Source for HereTrafficSource {
     }
 
     async fn start(&self) -> Result<()> {
-        if self.base.get_status().await == ComponentStatus::Running {
-            return Ok(());
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.task_handle.read().await.is_some() {
+            let stopping = *self.shutdown_tx.borrow();
+            if !stopping
+                && self.base.get_status().await == ComponentStatus::Running
+                && self
+                    .task_handle
+                    .read()
+                    .await
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+            {
+                return Ok(());
+            }
+            return Err(WorkerAlreadyOwned.into());
         }
+        *cleanup_required = true;
 
         self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting HERE Traffic source '{}'", self.base.id);
@@ -209,7 +225,8 @@ impl Source for HereTrafficSource {
         let config = self.config.clone();
         let client = self.client.clone();
         let state = Arc::clone(&self.state);
-        let stop_signal = self.shutdown_rx.clone();
+        self.shutdown_tx.send_replace(false);
+        let stop_signal = self.shutdown_tx.subscribe();
 
         let instance_id = self
             .base
@@ -226,39 +243,31 @@ impl Source for HereTrafficSource {
             component_type = "source"
         );
 
-        let handle = tokio::spawn(
+        self.base.set_status(ComponentStatus::Running, None).await;
+        spawn_owned_worker(
+            &self.task_handle,
             async move {
                 Self::run_loop(base, config, client, state, stop_signal).await;
             }
             .instrument(span),
-        );
-
-        *self.task_handle.write().await = Some(handle);
-        self.base.set_status(ComponentStatus::Running, None).await;
+        )
+        .await?;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        self.shutdown_tx.send_replace(true);
+        self.base.set_status(ComponentStatus::Stopping, None).await;
         info!("Stopping HERE Traffic source '{}'", self.base.id);
-        if let Err(e) = self.shutdown_tx.send(true) {
-            warn!("Failed to send shutdown signal: {e}");
-        }
-
-        if let Some(handle) = self.task_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
-                Ok(Ok(())) => {
-                    debug!("HERE Traffic source task stopped gracefully");
-                }
-                Ok(Err(e)) => {
-                    warn!("HERE Traffic source task panicked: {e}");
-                }
-                Err(_) => {
-                    warn!("HERE Traffic source task did not stop within timeout");
-                }
-            }
-        }
-
-        self.base.set_status(ComponentStatus::Stopped, None).await;
+        join_owned_worker_gracefully(
+            &mut *self.task_handle.write().await,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("HERE Traffic '{}' polling cleanup", self.base.id))?;
+        self.base.stop_common().await?;
+        *cleanup_required = false;
         Ok(())
     }
 
@@ -413,16 +422,16 @@ impl HereTrafficSourceBuilder {
         let base = SourceBase::new(params)?;
         let client =
             HereTrafficClient::new(self.config.auth.clone(), self.config.base_url.clone())?;
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, _) = watch::channel(false);
 
         Ok(HereTrafficSource {
             base,
             config: self.config,
             client,
             state: Arc::new(Mutex::new(state::SourceState::default())),
-            task_handle: Arc::new(RwLock::new(None)),
+            task_handle: RwLock::new(None),
+            cleanup_required: Mutex::new(false),
             shutdown_tx,
-            shutdown_rx,
         })
     }
 }

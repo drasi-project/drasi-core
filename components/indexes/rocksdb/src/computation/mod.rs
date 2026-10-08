@@ -137,11 +137,17 @@ impl ComputationIndexProvider for RocksDbComputationProvider {
             )),
         )
         .map_err(IndexError::other)?;
-        Ok(resources.with_cleanup(owner))
+        Ok(resources
+            .with_cleanup(owner)
+            .with_durability(self.durability()))
     }
 
     fn is_volatile(&self) -> bool {
         false
+    }
+
+    fn durability(&self) -> drasi_core::computation::StorageDurability {
+        drasi_core::computation::StorageDurability::LOCAL_PROCESS_RESTART
     }
 }
 

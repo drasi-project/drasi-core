@@ -91,6 +91,24 @@ replaced with `_`:
 This allows payload-derived filenames like `item_{{after.id}}.json` while
 preventing invalid or unsafe file names.
 
+## Stop and Restart
+
+The processing worker is owned before it can run. Stop signals shutdown and waits
+up to two seconds for that worker without aborting an in-flight file operation.
+A timeout or cancelled stop leaves cleanup pending and blocks restart until a
+later stop finishes. Cancelled startup and worker panics also require cleanup;
+only completed cleanup reports Stopped.
+
+This preserves the existing acceptance-only delivery contract. Enqueue is not
+confirmation that bytes were written, output errors retain their existing
+logged-error policy, and queued but not yet processed results are drained during
+successful cleanup. This is not exactly-once delivery or whole-transaction file
+publication.
+
+Lifecycle tests hold actual append/overwrite operations, cancel and time out
+stops, then verify exact completed output. Three restart cycles cover every write
+mode. All integrations permanently shut down their library instances.
+
 ## Running checks
 
 ```bash

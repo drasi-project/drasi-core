@@ -92,6 +92,129 @@ impl MySqlDecoder {
         Ok(SourceChange::Delete { metadata })
     }
 
+    pub(crate) fn native_element(
+        &self,
+        table: &TableMapEvent<'_>,
+        row: &BinlogRow,
+        keys: &[String],
+        timestamp: u64,
+        max_bytes: usize,
+    ) -> Result<Element> {
+        let database = std::str::from_utf8(table.database_name_raw())?;
+        let name = std::str::from_utf8(table.table_name_raw())?;
+        let contexts = strict_column_contexts(table, row.len())?;
+        let mut properties = ElementPropertyMap::new();
+        let mut parts = Vec::new();
+        for (index, column) in row.columns_ref().iter().enumerate() {
+            let name = std::str::from_utf8(column.name_ref())?;
+            anyhow::ensure!(!name.is_empty(), "native MySQL requires full column names");
+            let value = row
+                .as_ref(index)
+                .context("native MySQL requires complete row images")?;
+            let binary = column.character_set() == 63;
+            let mut value = strict_value(
+                value,
+                &contexts[index],
+                binary,
+                column
+                    .flags()
+                    .contains(mysql_common::constants::ColumnFlags::UNSIGNED_FLAG),
+                max_bytes,
+            )?;
+            if binary && contexts[index].col_type == Some(ColumnType::MYSQL_TYPE_STRING) {
+                if let ElementValue::List(bytes) = &mut value {
+                    let metadata = table
+                        .get_column_metadata(index)
+                        .context("missing BINARY width")?;
+                    let [kind, width] = metadata else {
+                        anyhow::bail!("invalid BINARY metadata");
+                    };
+                    anyhow::ensure!(
+                        *kind == ColumnType::MYSQL_TYPE_STRING as u8
+                            && bytes.len() <= usize::from(*width),
+                        "invalid MySQL BINARY width"
+                    );
+                    // The binlog omits trailing zero padding from fixed-width BINARY values.
+                    bytes.resize(usize::from(*width), ElementValue::Integer(0));
+                }
+            }
+            if keys.iter().any(|key| key == name) {
+                parts.push((name.to_string(), value.clone()));
+            }
+            properties.insert(name, value);
+        }
+        anyhow::ensure!(
+            parts.len() == keys.len(),
+            "native MySQL key columns are missing"
+        );
+        let identity = drasi_mysql_common::keys::transaction_element_id(database, name, &parts)?;
+        Ok(Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(&self.source_id, &identity),
+                labels: Arc::from([Arc::from(name)]),
+                effective_from: timestamp,
+            },
+            properties,
+        })
+    }
+
+    pub(crate) fn native_snapshot_element(
+        &self,
+        database: &str,
+        table: &str,
+        columns: &[mysql_common::packets::Column],
+        values: Vec<Value>,
+        key_columns: &[String],
+        max_bytes: usize,
+    ) -> Result<Element> {
+        use mysql_common::constants::ColumnFlags;
+        anyhow::ensure!(columns.len() == values.len(), "incomplete snapshot row");
+        let mut properties = ElementPropertyMap::new();
+        let mut keys = Vec::new();
+        for (column, value) in columns.iter().zip(values) {
+            let name = std::str::from_utf8(column.name_ref())?;
+            let context = ColumnContext {
+                col_type: Some(
+                    if column
+                        .flags()
+                        .intersects(ColumnFlags::ENUM_FLAG | ColumnFlags::SET_FLAG)
+                    {
+                        ColumnType::MYSQL_TYPE_VARCHAR
+                    } else {
+                        column.column_type()
+                    },
+                ),
+                fsp: Some(column.decimals()),
+                enum_labels: None,
+                set_labels: None,
+            };
+            let value = strict_value(
+                &BinlogValue::Value(value),
+                &context,
+                column.character_set() == 63,
+                column.flags().contains(ColumnFlags::UNSIGNED_FLAG),
+                max_bytes,
+            )?;
+            if key_columns.iter().any(|key| key == name) {
+                keys.push((name.to_string(), value.clone()));
+            }
+            properties.insert(name, value);
+        }
+        anyhow::ensure!(
+            keys.len() == key_columns.len(),
+            "snapshot key columns are missing"
+        );
+        let identity = drasi_mysql_common::keys::transaction_element_id(database, table, &keys)?;
+        Ok(Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(&self.source_id, &identity),
+                labels: Arc::from([Arc::from(table)]),
+                effective_from: Utc::now().timestamp_millis().try_into()?,
+            },
+            properties,
+        })
+    }
+
     fn row_to_element(
         &self,
         table: &TableMapEvent<'_>,
@@ -147,18 +270,15 @@ impl MySqlDecoder {
         }
 
         let element_id = format!("{}:{}", table_name, key_parts.join("_"));
-
         let metadata = ElementMetadata {
             reference: ElementReference::new(&self.source_id, &element_id),
             labels: Arc::from(vec![Arc::from(label)]),
             effective_from: Utc::now().timestamp_millis() as u64,
         };
-
         let element = Element::Node {
             metadata: metadata.clone(),
             properties,
         };
-
         Ok((element, metadata))
     }
 
@@ -172,7 +292,6 @@ impl MySqlDecoder {
         let value = row
             .as_ref(idx)
             .or_else(|| fallback_row.and_then(|fallback| fallback.as_ref(idx)));
-
         match value {
             None => Ok(ElementValue::Null),
             Some(value) => binlog_value_to_element_value(value, ctx),
@@ -193,6 +312,224 @@ impl MySqlDecoder {
             })
             .collect()
     }
+}
+
+fn strict_column_contexts(table: &TableMapEvent<'_>, count: usize) -> Result<Vec<ColumnContext>> {
+    for field in table.iter_optional_meta() {
+        match field? {
+            OptionalMetadataField::EnumStrValue(enums) => {
+                for entry in enums.iter_values() {
+                    for value in entry?.values() {
+                        std::str::from_utf8(value.value_raw())?;
+                    }
+                }
+            }
+            OptionalMetadataField::SetStrValue(sets) => {
+                for entry in sets.iter_values() {
+                    for value in entry?.values() {
+                        std::str::from_utf8(value.value_raw())?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for index in 0..count {
+        table
+            .get_column_type(index)?
+            .context("missing MySQL column type")?;
+    }
+    Ok(build_column_contexts(table, count))
+}
+
+fn strict_value(
+    value: &BinlogValue<'_>,
+    context: &ColumnContext,
+    binary: bool,
+    unsigned: bool,
+    max_bytes: usize,
+) -> Result<ElementValue> {
+    match value {
+        BinlogValue::Value(Value::Int(value))
+            if context.col_type == Some(ColumnType::MYSQL_TYPE_INT24) =>
+        {
+            anyhow::ensure!(
+                (if unsigned { 0 } else { -8_388_608 }..=16_777_215).contains(value),
+                "invalid MySQL MEDIUMINT"
+            );
+            // mysql_common 0.37 does not sign-extend its three-byte integer.
+            return Ok(ElementValue::Integer(if !unsigned && *value >= 8_388_608 {
+                *value - 16_777_216
+            } else {
+                *value
+            }));
+        }
+        BinlogValue::JsonDiff(_) => {
+            anyhow::bail!("partial MySQL JSON updates are unsupported")
+        }
+        BinlogValue::Jsonb(value) => {
+            let mut budget = max_bytes;
+            let json = strict_json(value, 0, &mut budget)?;
+            return Ok(ElementValue::String(serde_json::to_string(&json)?.into()));
+        }
+        BinlogValue::Value(Value::Float(value)) => {
+            anyhow::ensure!(value.is_finite(), "non-finite MySQL float")
+        }
+        BinlogValue::Value(Value::Double(value)) => {
+            anyhow::ensure!(value.is_finite(), "non-finite MySQL double")
+        }
+        BinlogValue::Value(Value::Bytes(bytes)) => {
+            if context.col_type == Some(ColumnType::MYSQL_TYPE_JSON) {
+                let value: serde_json::Value = serde_json::from_slice(bytes)?;
+                let mut budget = max_bytes;
+                validate_json_text(&value, 0, &mut budget)?;
+                return Ok(ElementValue::String(serde_json::to_string(&value)?.into()));
+            }
+            if matches!(context.col_type, Some(ColumnType::MYSQL_TYPE_SET)) {
+                let labels = context
+                    .set_labels
+                    .as_ref()
+                    .context("missing MySQL SET labels")?;
+                anyhow::ensure!(
+                    bytes.iter().enumerate().all(|(index, byte)| (0..8)
+                        .all(|bit| index * 8 + bit < labels.len() || byte & (1 << bit) == 0)),
+                    "MySQL SET references unknown labels"
+                );
+            } else if (binary || context.col_type == Some(ColumnType::MYSQL_TYPE_BIT))
+                && matches!(
+                    context.col_type,
+                    Some(
+                        ColumnType::MYSQL_TYPE_STRING
+                            | ColumnType::MYSQL_TYPE_VAR_STRING
+                            | ColumnType::MYSQL_TYPE_VARCHAR
+                            | ColumnType::MYSQL_TYPE_BLOB
+                            | ColumnType::MYSQL_TYPE_TINY_BLOB
+                            | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                            | ColumnType::MYSQL_TYPE_LONG_BLOB
+                            | ColumnType::MYSQL_TYPE_BIT
+                    )
+                )
+            {
+                return Ok(ElementValue::List(
+                    bytes
+                        .iter()
+                        .map(|byte| ElementValue::Integer((*byte).into()))
+                        .collect(),
+                ));
+            } else {
+                std::str::from_utf8(bytes)?;
+            }
+        }
+        _ => {}
+    }
+    if matches!(context.col_type, Some(ColumnType::MYSQL_TYPE_ENUM)) {
+        let labels = context
+            .enum_labels
+            .as_ref()
+            .context("missing MySQL ENUM labels")?;
+        let ordinal = match value {
+            BinlogValue::Value(Value::Int(value)) => u64::try_from(*value)?,
+            BinlogValue::Value(Value::UInt(value)) => *value,
+            BinlogValue::Value(Value::NULL) => 0,
+            _ => anyhow::bail!("invalid MySQL ENUM value"),
+        };
+        anyhow::ensure!(
+            ordinal <= labels.len() as u64,
+            "MySQL ENUM references an unknown label"
+        );
+    }
+    binlog_value_to_element_value(value, Some(context))
+}
+
+fn validate_json_text(value: &serde_json::Value, depth: usize, budget: &mut usize) -> Result<()> {
+    anyhow::ensure!(depth < 100, "MySQL JSON nesting exceeds supported depth");
+    json_budget(budget, 64)?;
+    match value {
+        serde_json::Value::String(value) => json_budget(budget, value.len())?,
+        serde_json::Value::Array(values) => {
+            for value in values {
+                validate_json_text(value, depth + 1, budget)?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                json_budget(budget, key.len())?;
+                validate_json_text(value, depth + 1, budget)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn json_budget(budget: &mut usize, bytes: usize) -> Result<()> {
+    anyhow::ensure!(bytes <= *budget, "decoded MySQL JSON exceeds byte limit");
+    *budget -= bytes;
+    Ok(())
+}
+
+fn strict_json(
+    value: &mysql_common::binlog::jsonb::Value<'_>,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<serde_json::Value> {
+    use mysql_common::binlog::jsonb::Value as Json;
+    anyhow::ensure!(depth < 100, "MySQL JSON nesting exceeds supported depth");
+    json_budget(budget, 64)?;
+    Ok(match value {
+        Json::Null => serde_json::Value::Null,
+        Json::Bool(value) => (*value).into(),
+        Json::I16(value) => (*value).into(),
+        Json::U16(value) => (*value).into(),
+        Json::I32(value) => (*value).into(),
+        Json::U32(value) => (*value).into(),
+        Json::I64(value) => (*value).into(),
+        Json::U64(value) => (*value).into(),
+        Json::F64(value) => serde_json::Value::Number(
+            serde_json::Number::from_f64(*value).context("non-finite MySQL JSON number")?,
+        ),
+        Json::String(value) => {
+            json_budget(budget, value.str_raw().len())?;
+            std::str::from_utf8(value.str_raw())?.into()
+        }
+        Json::SmallArray(value) => strict_json_array(value, depth, budget)?,
+        Json::LargeArray(value) => strict_json_array(value, depth, budget)?,
+        Json::SmallObject(value) => strict_json_object(value, depth, budget)?,
+        Json::LargeObject(value) => strict_json_object(value, depth, budget)?,
+        Json::Opaque(_) => anyhow::bail!("opaque MySQL JSON values are unsupported"),
+    })
+}
+
+fn strict_json_array<T: mysql_common::binlog::jsonb::StorageFormat>(
+    value: &mysql_common::binlog::jsonb::ComplexValue<'_, T, mysql_common::binlog::jsonb::Array>,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<serde_json::Value> {
+    let mut result = Vec::new();
+    for value in value.iter() {
+        result.push(strict_json(&value?, depth + 1, budget)?);
+    }
+    Ok(result.into())
+}
+
+fn strict_json_object<T: mysql_common::binlog::jsonb::StorageFormat>(
+    value: &mysql_common::binlog::jsonb::ComplexValue<'_, T, mysql_common::binlog::jsonb::Object>,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<serde_json::Value> {
+    let mut result = serde_json::Map::new();
+    for entry in value.iter() {
+        let (key, value) = entry?;
+        json_budget(budget, key.value_raw().len())?;
+        let key = std::str::from_utf8(key.value_raw())?.to_string();
+        anyhow::ensure!(
+            result
+                .insert(key, strict_json(&value, depth + 1, budget)?)
+                .is_none(),
+            "duplicate MySQL JSON object key"
+        );
+    }
+    Ok(result.into())
 }
 
 /// Build per-column conversion context from TableMapEvent type/metadata + optional ENUM/SET labels.
@@ -435,6 +772,146 @@ mod tests {
     use super::*;
     use mysql_async::Value;
     use ordered_float::OrderedFloat;
+
+    #[test]
+    fn native_values_reject_lossy_text_nonfinite_numbers_and_unbounded_json() -> Result<()> {
+        use mysql_common::binlog::jsonb::{JsonbString, Value as Json};
+        let string = ctx(ColumnType::MYSQL_TYPE_VARCHAR, None, None, None);
+        let bytes = BinlogValue::Value(Value::Bytes(vec![0, 255]));
+        assert!(strict_value(&bytes, &string, false, false, 1024).is_err());
+        assert_eq!(
+            strict_value(&bytes, &string, true, false, 1024)?,
+            ElementValue::List(vec![ElementValue::Integer(0), ElementValue::Integer(255)])
+        );
+        assert!(strict_value(
+            &BinlogValue::Value(Value::Double(f64::NAN)),
+            &string,
+            false,
+            false,
+            1024
+        )
+        .is_err());
+        assert!(strict_value(
+            &BinlogValue::JsonDiff(Vec::new()),
+            &string,
+            false,
+            false,
+            1024
+        )
+        .is_err());
+        assert!(strict_json(&Json::String(JsonbString::new(vec![255])), 0, &mut 1024).is_err());
+        assert!(strict_json(&Json::F64(f64::INFINITY), 0, &mut 1024).is_err());
+        assert!(strict_json(&Json::Null, 100, &mut 1024).is_err());
+        assert!(strict_json(
+            &Json::String(JsonbString::new(b"four".as_slice())),
+            0,
+            &mut 67
+        )
+        .is_err());
+        assert_eq!(
+            strict_json(
+                &Json::String(JsonbString::new(b"four".as_slice())),
+                0,
+                &mut 68
+            )?,
+            serde_json::json!("four")
+        );
+        let json = ctx(ColumnType::MYSQL_TYPE_JSON, None, None, None);
+        for (text, limit, valid) in [
+            ("\"four\"".to_string(), 67, false),
+            ("\"four\"".to_string(), 68, true),
+            ("[0,0,0]".to_string(), 255, false),
+            ("[0,0,0]".to_string(), 256, true),
+            ("{".to_string(), 1024, false),
+            (
+                format!("{}0{}", "[".repeat(99), "]".repeat(99)),
+                10000,
+                true,
+            ),
+            (
+                format!("{}0{}", "[".repeat(100), "]".repeat(100)),
+                10000,
+                false,
+            ),
+        ] {
+            assert_eq!(
+                strict_value(
+                    &BinlogValue::Value(Value::Bytes(text.into_bytes())),
+                    &json,
+                    false,
+                    false,
+                    limit
+                )
+                .is_ok(),
+                valid
+            );
+        }
+        let enumeration = ctx(
+            ColumnType::MYSQL_TYPE_ENUM,
+            None,
+            Some(vec!["one".into()]),
+            None,
+        );
+        assert!(strict_value(
+            &BinlogValue::Value(Value::Int(2)),
+            &enumeration,
+            false,
+            false,
+            1024
+        )
+        .is_err());
+        let set = ctx(
+            ColumnType::MYSQL_TYPE_SET,
+            None,
+            None,
+            Some(vec!["one".into()]),
+        );
+        assert!(strict_value(
+            &BinlogValue::Value(Value::Bytes(vec![2])),
+            &set,
+            false,
+            false,
+            1024
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn native_mediumint_values_are_sign_extended_without_changing_unsigned_values() -> Result<()> {
+        let context = ctx(ColumnType::MYSQL_TYPE_INT24, None, None, None);
+        for (raw, signed) in [
+            (0, 0),
+            (8_388_607, 8_388_607),
+            (8_388_608, -8_388_608),
+            (16_777_215, -1),
+        ] {
+            let value = BinlogValue::Value(Value::Int(raw));
+            assert_eq!(
+                strict_value(&value, &context, false, false, 1024)?,
+                ElementValue::Integer(signed)
+            );
+            assert_eq!(
+                strict_value(&value, &context, false, true, 1024)?,
+                ElementValue::Integer(raw)
+            );
+        }
+        let negative = BinlogValue::Value(Value::Int(-8_388_608));
+        assert_eq!(
+            strict_value(&negative, &context, false, false, 1024)?,
+            ElementValue::Integer(-8_388_608)
+        );
+        assert!(strict_value(&negative, &context, false, true, 1024).is_err());
+        assert!(strict_value(
+            &BinlogValue::Value(Value::Int(16_777_216)),
+            &context,
+            false,
+            false,
+            1024
+        )
+        .is_err());
+        Ok(())
+    }
 
     fn ctx(
         col_type: ColumnType,

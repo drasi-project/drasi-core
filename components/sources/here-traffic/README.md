@@ -153,6 +153,19 @@ spec:
 The source stores the last successful poll timestamp under key `last_poll_timestamp`
 in the StateStore partition for the source ID.
 
+## Stop and Restart
+
+Each run uses a fresh shutdown receiver. A healthy duplicate start remains
+harmless, while incomplete cleanup blocks replacement. Stop waits up to five
+seconds for the owned poller without aborting an in-flight HTTP request or state
+write. A cancelled or timed-out stop keeps ownership; a later stop must finish
+cleanup before restart. Worker panics remain errors. Completed cleanup clears
+old channel subscribers and position filters.
+
+The stored poll timestamp is not an atomic checkpoint of downstream query
+processing or external effects. These lifecycle guarantees do not add historical
+replay or exactly-once delivery.
+
 ## Rate Limiting
 
 If HERE API responds with `429`, the client backs off:
@@ -196,11 +209,15 @@ let source = HereTrafficSource::builder_oauth(
 
 ## Integration Tests
 
-Run the mock HTTP integration test:
+Run the local HTTP integrations and lifecycle tests (no HERE credentials needed):
 
 ```bash
-cargo test -p drasi-source-here-traffic --test integration_test -- --ignored --nocapture
+cargo test -p drasi-source-here-traffic --lib --test integration_test
 ```
+
+The default suite covers live change detection, rate-limit backoff, three actual
+polling restarts, retained state writes across cancellation/timeouts and
+cancelled base cleanup after a worker panic.
 
 ## Troubleshooting
 

@@ -602,7 +602,7 @@ mod durable {
     }
 
     async fn open_capacity(path: &std::path::Path, capacity: usize) -> Arc<IndexedEnvelopeStore> {
-        Arc::new(
+        let store = Arc::new(
             IndexedEnvelopeStore::try_new(
                 resources(path).await,
                 codec(),
@@ -611,7 +611,12 @@ mod durable {
                 RetentionPolicy::Backpressure,
             )
             .expect("durable journal"),
-        )
+        );
+        assert_eq!(
+            store.durability(),
+            drasi_core::interface::StorageDurability::LOCAL_PROCESS_RESTART
+        );
+        store
     }
 
     #[tokio::test]
@@ -914,6 +919,9 @@ mod durable {
         StageCheckpoint,
         BeforeCommit,
         AfterCommit,
+        PauseReadCheckpoint,
+        PauseReadSequence,
+        PauseReadOutbox,
     }
 
     struct FaultBackend {
@@ -922,6 +930,7 @@ mod durable {
         entered: tokio::sync::Notify,
         resume: tokio::sync::Notify,
         persistent: bool,
+        reads: [std::sync::atomic::AtomicUsize; 3],
     }
 
     impl FaultBackend {
@@ -947,6 +956,25 @@ mod durable {
         fn arm(&self, fault: Fault) {
             self.fault
                 .store(fault as usize, std::sync::atomic::Ordering::Release);
+        }
+
+        async fn reading(
+            &self,
+            fault: Fault,
+            pause: Fault,
+            counter: usize,
+        ) -> Result<(), IndexError> {
+            self.reads[counter].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.fail(fault)?;
+            if self.take(pause) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(())
+        }
+
+        fn read_counts(&self) -> [usize; 3] {
+            [0, 1, 2].map(|index| self.reads[index].load(std::sync::atomic::Ordering::Acquire))
         }
 
         fn checkpoints(&self) -> &Arc<dyn drasi_core::interface::CheckpointStore> {
@@ -999,6 +1027,7 @@ mod durable {
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Notify::new(),
             persistent,
+            reads: [0, 0, 0].map(std::sync::atomic::AtomicUsize::new),
         })
     }
 
@@ -1045,7 +1074,8 @@ mod durable {
             &self,
             key: &str,
         ) -> Result<Option<drasi_core::interface::SourceCheckpoint>, IndexError> {
-            self.fail(Fault::ReadCheckpoint)?;
+            self.reading(Fault::ReadCheckpoint, Fault::PauseReadCheckpoint, 0)
+                .await?;
             self.checkpoints().read_checkpoint(key).await
         }
         async fn read_all_checkpoints(
@@ -1072,7 +1102,8 @@ mod durable {
                 .await
         }
         async fn read_result_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
-            self.fail(Fault::ReadSequence)?;
+            self.reading(Fault::ReadSequence, Fault::PauseReadSequence, 1)
+                .await?;
             self.checkpoints().read_result_sequence(key).await
         }
     }
@@ -1087,7 +1118,8 @@ mod durable {
             key: &str,
             after: u64,
         ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
-            self.fail(Fault::ReadOutbox)?;
+            self.reading(Fault::ReadOutbox, Fault::PauseReadOutbox, 2)
+                .await?;
             self.outbox().read_from(key, after).await
         }
         async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
@@ -1116,6 +1148,346 @@ mod durable {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_journal_reads_once_per_owner_and_keeps_only_its_retained_window() {
+        let directory = tempfile::tempdir().expect("directory");
+        for reopened in [false, true] {
+            let backend = fault_backend(directory.path(), true).await;
+            let store = IndexedEnvelopeStore::try_new(
+                backend.bundle(true),
+                codec(),
+                "edge",
+                NonZeroUsize::new(32).expect("capacity"),
+                RetentionPolicy::Backpressure,
+            )
+            .expect("store");
+            assert_eq!(backend.read_counts(), [0, 0, 0], "construction does no I/O");
+            let generation = store.acquire_generation().expect("generation");
+            let start = if reopened { 257 } else { 1 };
+            for position in start..start + 256 {
+                let value = u16::try_from(position).expect("bounded test sequence");
+                assert_eq!(
+                    store
+                        .append(generation, &root("source", position, &[value]))
+                        .await
+                        .expect("commit"),
+                    position
+                );
+                let next = store
+                    .next(generation, position - 1)
+                    .await
+                    .expect("read")
+                    .expect("committed envelope");
+                assert_eq!(next.position, position);
+                assert_eq!(values(&next.envelope), [value]);
+                store.acknowledge(generation, position).await.expect("ack");
+                assert_eq!(
+                    store.progress(generation).await.expect("progress"),
+                    position
+                );
+            }
+            let head = start + 255;
+            assert!(matches!(
+                store.next(generation, 0).await,
+                Err(PipeError::PositionUnavailable { oldest, .. }) if oldest == head - 31
+            ));
+            assert!(store.next(generation, head).await.expect("end").is_none());
+            let replacement = store.acquire_generation().expect("new binding");
+            assert_eq!(
+                store.progress(replacement).await.expect("cached progress"),
+                head
+            );
+            assert!(matches!(
+                store.progress(generation).await,
+                Err(PipeError::Closed)
+            ));
+            assert_eq!(
+                backend.read_counts(),
+                [1, 1, 1],
+                "append, lookup, progress, handling and rebinding never reread the window"
+            );
+            let persisted = backend
+                .outbox()
+                .read_from("edge", 0)
+                .await
+                .expect("disk window");
+            assert_eq!(persisted.len(), 32);
+            assert_eq!(persisted.first().expect("oldest").0, head - 31);
+            assert_eq!(persisted.last().expect("latest").0, head);
+            store.shutdown().await.expect("cleanup");
+            drop((store, backend));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_cached_pruning_preserves_strict_gaps_across_reconstruction() {
+        let directory = tempfile::tempdir().expect("directory");
+        for reopened in [false, true] {
+            let store = Arc::new(
+                IndexedEnvelopeStore::try_new(
+                    resources(directory.path()).await,
+                    codec(),
+                    "edge",
+                    NonZeroUsize::new(2).expect("capacity"),
+                    RetentionPolicy::PruneOldest,
+                )
+                .expect("store"),
+            );
+            let mut pipe = RetainedPipe::new(store.clone(), ReplayGapPolicy::Strict).expect("pipe");
+            if !reopened {
+                for sequence in 1..=5 {
+                    pipe.sender()
+                        .send(root("source", sequence, &[7]))
+                        .await
+                        .expect("append");
+                }
+            }
+            let mut receiver = pipe.take_receiver().expect("receiver");
+            assert!(matches!(
+                receiver.receive().await,
+                Err(PipeError::PositionUnavailable {
+                    requested: 0,
+                    oldest: 4
+                })
+            ));
+            assert_eq!(
+                store
+                    .progress(store.generation())
+                    .await
+                    .expect("strict progress"),
+                0
+            );
+            drop((receiver, pipe));
+            if reopened {
+                let mut pipe =
+                    RetainedPipe::new(store.clone(), ReplayGapPolicy::SkipWithNotification)
+                        .expect("explicit skip policy");
+                let mut receiver = pipe.take_receiver().expect("receiver");
+                for sequence in 4..=5 {
+                    let delivery = receiver
+                        .receive()
+                        .await
+                        .expect("explicit gap handling")
+                        .expect("retained");
+                    assert_eq!(delivery.envelope().system().sequence(), sequence);
+                    handled(delivery).await;
+                }
+                assert_eq!(
+                    store
+                        .progress(store.generation())
+                        .await
+                        .expect("handled progress"),
+                    5
+                );
+                drop((receiver, pipe));
+            }
+            store.shutdown().await.expect("cleanup");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interrupted_journal_load_never_installs_partial_state_or_accepts_input() {
+        for (fault, cancelled_counts) in [
+            (Fault::PauseReadCheckpoint, [2, 1, 1]),
+            (Fault::PauseReadSequence, [2, 2, 1]),
+            (Fault::PauseReadOutbox, [2, 2, 2]),
+        ] {
+            for revoke in [false, true] {
+                let directory = tempfile::tempdir().expect("directory");
+                let backend = fault_backend(directory.path(), true).await;
+                let store = IndexedEnvelopeStore::try_new(
+                    backend.bundle(true),
+                    codec(),
+                    "edge",
+                    NonZeroUsize::new(2).expect("capacity"),
+                    RetentionPolicy::Backpressure,
+                )
+                .expect("store");
+                let generation = store.acquire_generation().expect("generation");
+                backend.arm(fault);
+                let input = root("source", 1, &[7]);
+                let mut operation = Box::pin(store.append(generation, &input));
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::select! {
+                        _ = backend.entered.notified() => {}
+                        result = &mut operation => panic!("read barrier not reached: {result:?}"),
+                    }
+                })
+                .await
+                .expect("read entered");
+                if revoke {
+                    store.revoke_generation(generation);
+                    backend.resume.notify_one();
+                    assert!(matches!(operation.await, Err(PipeError::Closed)));
+                } else {
+                    drop(operation);
+                }
+                assert!(backend
+                    .outbox()
+                    .read_from("edge", 0)
+                    .await
+                    .expect("no input")
+                    .is_empty());
+                let replacement = store
+                    .acquire_generation()
+                    .expect("read did not fence writes");
+                assert_eq!(
+                    store.progress(replacement).await.expect("complete state"),
+                    0
+                );
+                assert_eq!(
+                    backend.read_counts(),
+                    if revoke { [1, 1, 1] } else { cancelled_counts },
+                    "{fault:?}: a cancelled partial read must be reconstructed"
+                );
+                assert_eq!(
+                    store
+                        .append(replacement, &input)
+                        .await
+                        .expect("accept once"),
+                    1
+                );
+                store.shutdown().await.expect("cleanup");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn corrupt_journal_reconstruction_rejects_reads_and_writes_without_changing_storage() {
+        for case in [
+            "missing-head",
+            "head-behind",
+            "head-ahead",
+            "progress-ahead",
+            "missing-tail",
+            "missing-middle",
+            "empty-window",
+            "invalid-envelope",
+        ] {
+            let directory = tempfile::tempdir().expect("directory");
+            let backend = fault_backend(directory.path(), true).await;
+            backend
+                .original
+                .indexes()
+                .session_control
+                .begin()
+                .await
+                .expect("begin");
+            for position in 1..=3 {
+                if case == "empty-window"
+                    || case == "missing-tail" && position == 3
+                    || case == "missing-middle" && position == 2
+                {
+                    continue;
+                }
+                let bytes = if case == "invalid-envelope" && position == 1 {
+                    bytes::Bytes::from_static(b"invalid-envelope")
+                } else {
+                    codec()
+                        .encode(&root("source", position, &[7]))
+                        .expect("encode")
+                };
+                backend
+                    .outbox()
+                    .append("edge", position, &bytes)
+                    .await
+                    .expect("stage record");
+            }
+            let head = match case {
+                "missing-head" => 0,
+                "head-behind" => 2,
+                "head-ahead" => 4,
+                _ => 3,
+            };
+            let progress = match case {
+                "progress-ahead" => 4,
+                "invalid-envelope" => 1,
+                _ => 0,
+            };
+            backend
+                .checkpoints()
+                .stage_result_sequence("edge", head)
+                .await
+                .expect("head");
+            backend
+                .checkpoints()
+                .stage_checkpoint("computation-pipe-consumer:edge", progress, None)
+                .await
+                .expect("progress");
+            backend
+                .original
+                .indexes()
+                .session_control
+                .commit()
+                .await
+                .expect("commit");
+            let before = backend
+                .outbox()
+                .read_from("edge", 0)
+                .await
+                .expect("persisted records");
+            let store = IndexedEnvelopeStore::try_new(
+                backend.bundle(true),
+                codec(),
+                "edge",
+                NonZeroUsize::new(3).expect("capacity"),
+                RetentionPolicy::Backpressure,
+            )
+            .expect("store");
+            let generation = store.acquire_generation().expect("generation");
+            assert!(
+                matches!(store.progress(generation).await, Err(PipeError::Backend(_))),
+                "{case}"
+            );
+            assert!(
+                matches!(store.next(generation, 0).await, Err(PipeError::Backend(_))),
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    store.append(generation, &root("source", 4, &[8])).await,
+                    Err(PipeError::Backend(_))
+                ),
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    store.acknowledge(generation, 3).await,
+                    Err(PipeError::Backend(_))
+                ),
+                "{case}"
+            );
+            assert_eq!(
+                backend
+                    .outbox()
+                    .read_from("edge", 0)
+                    .await
+                    .expect("unchanged"),
+                before,
+                "{case}"
+            );
+            assert_eq!(
+                backend
+                    .checkpoints()
+                    .read_result_sequence("edge")
+                    .await
+                    .expect("head"),
+                Some(head)
+            );
+            assert_eq!(
+                backend
+                    .checkpoints()
+                    .read_checkpoint("computation-pipe-consumer:edge")
+                    .await
+                    .expect("progress")
+                    .expect("saved")
+                    .sequence,
+                progress
+            );
+            store.shutdown().await.expect("cleanup");
+        }
+    }
+
     #[tokio::test]
     async fn durable_storage_failures_preserve_committed_data_and_fence_interrupted_writes() {
         for (operation, fault, fenced) in [
@@ -1131,6 +1503,13 @@ mod durable {
             ("acknowledge", Fault::StageCheckpoint, true),
         ] {
             let directory = tempfile::tempdir().expect("directory");
+            let seed = open(directory.path()).await;
+            let generation = seed.acquire_generation().expect("seed generation");
+            seed.append(generation, &root("source", 1, &[7]))
+                .await
+                .expect("committed seed");
+            seed.shutdown().await.expect("seed cleanup");
+            drop(seed);
             let backend = fault_backend(directory.path(), true).await;
             let store = IndexedEnvelopeStore::try_new(
                 backend.bundle(true),
@@ -1141,10 +1520,6 @@ mod durable {
             )
             .expect("store");
             let generation = store.acquire_generation().expect("generation");
-            store
-                .append(generation, &root("source", 1, &[7]))
-                .await
-                .expect("committed seed");
             backend.arm(fault);
             let result = match operation {
                 "append" => store
@@ -1357,6 +1732,12 @@ mod durable {
             .expect_err("regression")
             .to_string()
             .contains("acknowledgement position"));
+        store
+            .shutdown()
+            .await
+            .expect("cleanup before storage mutation");
+        drop((store, backend));
+        let backend = fault_backend(directory.path(), true).await;
         backend
             .original
             .indexes()
@@ -1371,20 +1752,37 @@ mod durable {
             .expect("max sequence");
         backend
             .outbox()
-            .append_and_trim("edge", 1, b"invalid-envelope", 1)
+            .append_and_trim(
+                "edge",
+                u64::MAX,
+                &codec()
+                    .encode(&root("source", 1, &[7]))
+                    .expect("valid envelope"),
+                u64::MAX,
+            )
             .await
-            .expect("corrupt bytes");
+            .expect("last possible position");
         backend
             .original
             .indexes()
             .session_control
             .commit()
             .await
-            .expect("commit corruption");
-        assert!(matches!(
-            store.next(generation, 0).await,
-            Err(PipeError::Backend(_))
-        ));
+            .expect("commit boundary");
+        let store = IndexedEnvelopeStore::try_new(
+            backend.bundle(true),
+            codec(),
+            "edge",
+            NonZeroUsize::new(2).expect("capacity"),
+            RetentionPolicy::Backpressure,
+        )
+        .expect("reconstruct boundary");
+        let generation = store.acquire_generation().expect("generation");
+        assert!(store
+            .next(generation, u64::MAX)
+            .await
+            .expect("end")
+            .is_none());
         assert!(store
             .append(generation, &root("source", 2, &[8]))
             .await

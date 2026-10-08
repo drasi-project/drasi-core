@@ -17,6 +17,9 @@
 //! Application reaction plugin for Drasi
 //!
 //! This plugin implements Application reactions for Drasi.
+//! Use [`NativeApplicationReaction`] for direct ComputationGraph envelope
+//! delivery with bounded channel or awaited callback completion. The existing
+//! [`ApplicationReaction`] remains the legacy `QueryResult` interface.
 //!
 //! # Example
 //!
@@ -37,11 +40,13 @@
 pub mod application;
 pub mod config;
 pub mod descriptor;
+pub mod native;
 pub mod subscription;
 
 pub use application::ApplicationReaction;
 pub use application::ApplicationReactionHandle;
 pub use config::ApplicationReactionConfig;
+pub use native::ApplicationReaction as NativeApplicationReaction;
 
 /// Builder for Application reaction
 pub struct ApplicationReactionBuilder {

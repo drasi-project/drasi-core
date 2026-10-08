@@ -1,7 +1,89 @@
 # Application reaction
 
-The application reaction delivers query changes to Rust code through an
-in-process channel. It works with both ComponentGraph and ComputationGraph.
+The application reaction delivers changes to Rust code in-process. Choose
+`NativeApplicationReaction` for direct ComputationGraph delivery, or the existing
+`ApplicationReaction` for the legacy `QueryResult` interface. Both run under
+ComputationGraph; the legacy implementation is unchanged.
+
+## Native application delivery
+
+`NativeApplicationReaction` implements `ComputationComponent` and `EnvelopeSink`
+directly. It has one `in` port with an explicit schema and no processor task,
+subscription forwarder, legacy adapter, journal, or automatic recovery service.
+Connect it to any native output with the same full schema.
+
+| Mode | Successful handling means | Ownership |
+|---|---|---|
+| `channel(id, schema, NonZeroUsize)` | **Accepted** into the bounded application queue, not processed by the application | Application owns the returned single-consumer receiver |
+| `callback(id, schema, handler)` | **Handled**: the returned callback future completed successfully | Graph invokes and awaits one callback at a time |
+
+The pipe and application channel have separate, explicit capacities. A full
+channel backpressures; cancelling a capacity wait publishes nothing. Stop does
+not drain or close the application-owned queue. Queued values and the receiver
+survive a soft component restart; explicitly close/drain the receiver when done.
+A closed receiver produces a typed error, never successful delivery.
+
+Callbacks receive `InputEnvelope`, including its unchanged event, metadata and
+context. They must cooperate with the async runtime and retain any submitted
+work until it completes. No callback task is spawned by the reaction. If graph
+processing is cancelled, the reaction retains the **same** callback future and
+resumes it during cleanup. A cancelled or timed-out stop retains that work and
+blocks restart. Callback errors preserve their original causes; a panic poisons
+the binding permanently, requiring component replacement after cleanup.
+
+Neither mode promises durable or exactly-once external effects. `Handled` does
+not make a callback's remote writes transactional, and returning after merely
+queuing work confirms only that queuing. Channel mode rejects completed-handling
+acknowledgement claims. Recovery evidence remains unknown unless a separate,
+properly integrated service supplies it.
+
+### Native query wiring
+
+Ordinary `.with_query(...)` wrappers own internal QueryGraphs and expose no
+root data ports. Do not invent a `q1/out` endpoint on those wrappers. Use the
+existing native query pipeline (or a native query factory) to obtain declared
+root query ports. For example, on an initialized, not-yet-started instance with
+an ordinary source named `source`:
+
+```rust,ignore
+use drasi_lib::{Query, computation::v1::*};
+
+drasi.computation_component("source")?.wait_created().await?;
+let pipeline = drasi.computation_pipeline()?
+    .source(
+        drasi.borrow_computation_source("source").await?,
+        SourceSubscriptionOptions::default(),
+    )?
+    .query(Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("source")
+        .enable_bootstrap(false)
+        .build())
+    .build()?;
+let report = drasi.add_components(pipeline).await?;
+anyhow::ensure!(report.committed, "{report:?}");
+```
+
+Create the native reaction with `QueryChangeCodec::schema().descriptor().clone()`.
+Add it using `add_computation_component(ComponentAddition::new(
+ConstructedComponent::sink(Box::new(reaction))))`, then connect the native
+`q1/out` to `reaction.input()` using `computation_control()?.connect(...)`.
+Capture the input endpoint before moving the reaction. **Connect before awaiting
+creation**: an unbound input can legitimately keep the node uncreated.
+Check the connection report, start the instance, and await the reaction handle's
+`wait_started()` with a caller-selected deadline before sending input.
+
+The [compiled registration example](src/native.rs) shows the exact APIs;
+[real-query tests](tests/native.rs) demonstrate both delivery modes and three
+reaction-only restarts without restarting the source. Use `QueryChangeCodec`
+to read query metadata and decode row changes from native envelopes.
+
+The callback and receiver are external Rust bindings, not serializable
+configuration or FFI values. Reconstructing a graph must explicitly supply them.
+This addition does not change the legacy plugin's configuration, callbacks,
+dynamic-plugin ABI, or Server registration.
+
+## Legacy application delivery
 
 For a complete source/query/reaction program, run this from the drasi-core
 repository root:

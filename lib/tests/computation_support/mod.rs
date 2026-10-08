@@ -345,7 +345,16 @@ impl PipeProvider for AuditedBoundedPipe {
     }
 
     fn create(&self) -> std::result::Result<ProvidedPipe, PipeError> {
-        let provided = BoundedPipeConfig { capacity: 1 }.create()?;
+        self.create_with_capacity(1)
+    }
+}
+
+impl AuditedBoundedPipe {
+    pub fn create_with_capacity(
+        &self,
+        capacity: usize,
+    ) -> std::result::Result<ProvidedPipe, PipeError> {
+        let provided = BoundedPipeConfig { capacity }.create()?;
         Ok(ProvidedPipe {
             pipe: Box::new(AuditedPipe {
                 inner: provided.pipe,

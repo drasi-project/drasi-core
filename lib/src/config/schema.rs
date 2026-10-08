@@ -163,7 +163,7 @@ pub struct SourceSubscriptionConfig {
 ///     request_position_handle: false,
 /// };
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSubscriptionSettings {
     pub source_id: String,
     pub enable_bootstrap: bool,

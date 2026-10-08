@@ -83,7 +83,12 @@ pub struct DesiredTopology {
     pub resources: Vec<ResourceSpecification>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resource_configurations: BTreeMap<ResourceId, serde_json::Value>,
+    /// Dependent resource -> required resource and its expected role.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_dependencies: BTreeMap<ResourceId, BTreeMap<ResourceId, ResourceRole>>,
     pub requirements: PipeRequirements,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_requirements: Vec<crate::computation::v1::RecoveryRequirement>,
     /// Desired links crossing an exact/subset selection boundary are explicit.
     pub boundary_relationships: Vec<DesiredRelationship>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -315,14 +320,29 @@ impl DesiredPipe {
 
 impl DesiredTopology {
     pub(crate) fn component_resource_users(&self, resource: &ResourceId) -> BTreeSet<ComponentId> {
+        let mut affected = BTreeSet::from([resource.clone()]);
+        self.include_resource_dependents(&mut affected);
         self.components.iter().filter_map(|node| {
             let ComponentConstruction::Factory(spec) = &node.construction else { return None; };
-            (spec.dependencies.values().flatten().any(|id| id == resource)
-                || spec.configuration.values().any(|value| matches!(value, ConfigurationValue::Reference { resource: id, .. } if id == resource)))
+            (spec.dependencies.values().flatten().any(|id| affected.contains(id))
+                || spec.configuration.values().any(|value| matches!(value, ConfigurationValue::Reference { resource: id, .. } if affected.contains(id))))
                 .then(|| node.descriptor.id().clone())
         }).chain(self.component_resources.iter()
-            .filter(|(_, resources)| resources.contains(resource))
+            .filter(|(_, resources)| !resources.is_disjoint(&affected))
             .map(|(id, _)| id.clone())).collect()
+    }
+
+    pub(crate) fn include_resource_dependents(&self, selected: &mut BTreeSet<ResourceId>) {
+        resources::include_dependents(&self.resource_dependencies, selected);
+    }
+
+    pub(crate) fn include_resource_dependencies(&self, selected: &mut BTreeSet<ResourceId>) {
+        resources::include_dependencies(&self.resource_dependencies, selected);
+    }
+
+    /// Validate dependency declarations and return providers before their users.
+    pub fn resource_construction_order(&self) -> GraphResult<Vec<ResourceId>> {
+        resources::construction_order(self.resources.iter(), &self.resource_dependencies)
     }
 
     pub fn build_components(
@@ -370,7 +390,9 @@ impl DesiredTopology {
         }
         let mut builder = ComputationGraph::builder(self.graph_id.as_str())
             .requirements(self.requirements.clone());
+        builder.recovery_requirements = self.recovery_requirements.clone();
         builder.allow_empty = self.allow_incomplete;
+        builder.resource_dependencies = self.resource_dependencies.clone();
         builder.unbound_relationships = self.boundary_relationships.clone();
         for resource in &self.resources {
             builder = builder.declare_resource(resource.clone())?;
@@ -480,6 +502,7 @@ impl DesiredTopology {
         }
         graph.snapshot.control_connections = self.control_connections.clone().into();
         graph.snapshot.subscriptions = self.subscriptions.clone().into();
+        graph.snapshot.recovery_requirements = self.recovery_requirements.clone();
         graph.snapshot.readiness_required = self.readiness_required.clone();
         graph.snapshot.component_resources = self.component_resources.clone();
         graph.snapshot.component_plugins = self.component_plugins.clone();
@@ -497,6 +520,28 @@ impl DesiredTopology {
                 }
             })
             .collect();
+        if !graph.snapshot.allow_incomplete {
+            graph.validate_recovery(true)?;
+        }
+        for node in graph
+            .snapshot
+            .nodes
+            .iter()
+            .filter(|node| node.role == ComponentRole::Source)
+        {
+            if let Some(admission) = graph.components[graph.ids[node.descriptor.id()]]
+                .recovery_contract()?
+                .source_admission
+            {
+                super::validate_admission(
+                    &admission,
+                    node,
+                    &graph.snapshot,
+                    &graph.resource_handles,
+                    None,
+                )?;
+            }
+        }
         graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
         graph.inspector.publish(&graph.snapshot, graph.observed());
         Ok(graph)
@@ -625,6 +670,7 @@ impl GraphSnapshot {
                 resources.extend(attached.iter().cloned());
             }
         }
+        resources::include_dependencies(&self.resource_dependencies, &mut resources);
         Ok(DesiredTopology {
             version: 1,
             graph_id: self.id.to_string(),
@@ -643,7 +689,19 @@ impl GraphSnapshot {
                 .filter(|(id, _)| resources.contains(*id))
                 .map(|(id, configuration)| (id.clone(), configuration.clone()))
                 .collect(),
+            resource_dependencies: self
+                .resource_dependencies
+                .iter()
+                .filter(|(id, _)| resources.contains(*id))
+                .map(|(id, dependencies)| (id.clone(), dependencies.clone()))
+                .collect(),
             requirements: self.requirements.clone(),
+            recovery_requirements: self
+                .recovery_requirements
+                .iter()
+                .filter(|requirement| selected.contains(&requirement.consumer))
+                .cloned()
+                .collect(),
             boundary_relationships,
             control_connections: self
                 .control_connections

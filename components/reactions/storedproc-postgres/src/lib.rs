@@ -45,6 +45,7 @@
 //! [Handlebars]: https://crates.io/crates/handlebars
 
 pub mod config;
+pub mod delivery;
 pub mod descriptor;
 pub mod executor;
 pub mod reaction;

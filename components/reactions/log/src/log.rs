@@ -19,6 +19,7 @@ use handlebars::Handlebars;
 use log::debug;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use tokio::sync::Mutex;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
@@ -27,6 +28,7 @@ use drasi_lib::Reaction;
 
 pub struct LogReaction {
     pub(crate) base: ReactionBase,
+    cleanup_required: Mutex<bool>,
     config: LogReactionConfig,
 }
 
@@ -64,6 +66,7 @@ impl LogReaction {
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
             base: ReactionBase::new(params),
+            cleanup_required: Mutex::new(false),
             config,
         })
     }
@@ -104,6 +107,7 @@ impl LogReaction {
             .with_priority_queue_capacity(priority_queue_capacity);
         Ok(Self {
             base: ReactionBase::new(params),
+            cleanup_required: Mutex::new(false),
             config,
         })
     }
@@ -311,6 +315,7 @@ impl LogReactionBuilder {
             params = params.with_priority_queue_capacity(capacity);
         }
         Ok(LogReaction {
+            cleanup_required: Mutex::new(false),
             base: ReactionBase::new(params),
             config: self.config,
         })
@@ -370,6 +375,11 @@ impl Reaction for LogReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.base.processing_task.read().await.is_some() {
+            return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         log_component_start("Reaction", &self.base.id);
 
         // Transition to Starting
@@ -377,14 +387,6 @@ impl Reaction for LogReaction {
             .set_status(
                 ComponentStatus::Starting,
                 Some("Starting log reaction".to_string()),
-            )
-            .await;
-
-        // Transition to Running
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("Log reaction started".to_string()),
             )
             .await;
 
@@ -401,7 +403,7 @@ impl Reaction for LogReaction {
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
-        let processing_task = tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
             // Set up Handlebars with json helper
             let mut handlebars = Handlebars::new();
             handlebars.register_helper(
@@ -610,17 +612,20 @@ impl Reaction for LogReaction {
                     }
                 }
             }
-        });
-
-        // Store the processing task handle
-        self.base.set_processing_task(processing_task).await;
-
+        }).await?;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Log reaction started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        // Use ReactionBase common stop functionality
-        self.base.stop_common().await?;
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
+        self.base.stop_common_gracefully().await?;
 
         // Transition to Stopped
         self.base
@@ -629,7 +634,7 @@ impl Reaction for LogReaction {
                 Some("Log reaction stopped".to_string()),
             )
             .await;
-
+        *cleanup_required = false;
         Ok(())
     }
 

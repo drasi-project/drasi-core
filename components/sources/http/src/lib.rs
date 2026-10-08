@@ -233,7 +233,7 @@ pub mod template_engine;
 // Export HTTP source models and conversion
 pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
@@ -1252,7 +1252,8 @@ impl Source for HttpSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        let server_handle = tokio::spawn(
+        drasi_lib::context::workers::spawn_owned_worker(
+            &self.base.task_handle,
             async move {
                 let addr = format!("{host}:{port}");
                 info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
@@ -1281,9 +1282,9 @@ impl Source for HttpSource {
                 }
             }
             .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(server_handle);
+        )
+        .await
+        .with_context(|| format!("HTTP source '{}' listener registration", self.base.id))?;
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
 
         // Check for startup errors with a short timeout
@@ -1308,7 +1309,7 @@ impl Source for HttpSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            let prune_handle = tokio::spawn(async move {
+            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -1331,8 +1332,9 @@ impl Source for HttpSource {
                         }
                     }
                 }
-            });
-            *self.prune_task.write().await = Some(prune_handle);
+            })
+            .await
+            .with_context(|| format!("HTTP source '{}' WAL pruner registration", self.base.id))?;
         }
 
         Ok(())
@@ -1348,26 +1350,28 @@ impl Source for HttpSource {
             )
             .await;
 
-        // Cancel WAL pruning task
-        if let Some(handle) = self.prune_task.write().await.take() {
-            handle.abort();
-        }
-
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
 
-        if let Some(handle) = self.base.task_handle.write().await.take() {
-            let _ = timeout(Duration::from_secs(5), handle).await;
-        }
-
+        drasi_lib::context::workers::cancel_owned_worker(
+            &mut *self.prune_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("HTTP source '{}' WAL pruning cleanup", self.base.id))?;
+        drasi_lib::context::workers::join_owned_worker(
+            &mut *self.base.task_handle.write().await,
+            Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("HTTP source '{}' listener cleanup", self.base.id))?;
         self.base
             .set_status(
                 ComponentStatus::Stopped,
                 Some("Adaptive HTTP source stopped".to_string()),
             )
             .await;
-
         Ok(())
     }
 
@@ -1870,6 +1874,22 @@ fn build_cors_layer(cors_config: &CorsConfig) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stop_joins_the_wal_pruner() {
+        let source = HttpSourceBuilder::new("pruner").build().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let worker = task.abort_handle();
+        *source.prune_task.write().await = Some(task);
+        ready.await.unwrap();
+        source.stop().await.unwrap();
+        assert!(worker.is_finished());
+        assert!(source.prune_task.read().await.is_none());
+    }
 
     mod construction {
         use super::*;

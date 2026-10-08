@@ -434,6 +434,9 @@ impl LinearTransaction {
                 .clone(),
             prepared.schemas.clone(),
         )?;
+        store
+            .bindings
+            .bind_standalone_owner(&provider, Arc::downgrade(&store.transaction))?;
         let step_stream_prefix = format!(
             "transaction-step/{}/{}/{}",
             entities::encode_entity_key(&scope),
@@ -443,13 +446,13 @@ impl LinearTransaction {
         Ok(Self {
             definition,
             prepared,
+            failed: store.bindings.failure.clone(),
             store,
             step_stream_prefix,
             pending: VecDeque::new(),
             deferred: None,
             wakeup: Arc::new(TransactionWakeup::default()),
             progress: None,
-            failed: Arc::new(AtomicBool::new(false)),
             running: false,
         })
     }
@@ -602,6 +605,16 @@ impl LinearTransaction {
 
 #[async_trait]
 impl ComputationComponent for LinearTransaction {
+    fn recovery_contract(&self) -> super::ComponentRecovery {
+        let contract = super::ComponentRecovery::transactional(self.store.transaction.resources())
+            .expect("transaction store validates atomic resource participation")
+            .with_output_bindings(self.store.bindings.clone());
+        match &self.progress {
+            Some(progress) => contract.with_committed_progress(progress.clone()),
+            None => contract,
+        }
+    }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.prepared.descriptor
     }
@@ -656,6 +669,17 @@ impl ComputationComponent for LinearTransaction {
 
 #[async_trait]
 impl Transformer for LinearTransaction {
+    async fn bind_output_destinations(&mut self, bindings: &OutputBindings) -> anyhow::Result<()> {
+        self.check_running()?;
+        let mut guard = self.guard();
+        self.store.bind_output_destinations(bindings).await?;
+        self.pending = self.store.pending()?;
+        self.wakeup
+            .set(!self.pending.is_empty() || self.deferred.is_some());
+        guard.complete = true;
+        Ok(())
+    }
+
     fn has_pending_emissions(&self) -> bool {
         !self.pending.is_empty() || self.deferred.is_some()
     }
@@ -810,6 +834,10 @@ impl TransactionTransformer {
 
 #[async_trait]
 impl ComputationComponent for TransactionTransformer {
+    fn recovery_contract(&self) -> super::ComponentRecovery {
+        self.processor().recovery_contract()
+    }
+
     fn query_api(&self) -> Option<Arc<super::QueryApi>> {
         self.processor().query_api()
     }
@@ -842,6 +870,12 @@ impl ComputationComponent for TransactionTransformer {
 
 #[async_trait]
 impl Transformer for TransactionTransformer {
+    async fn bind_output_destinations(&mut self, bindings: &OutputBindings) -> anyhow::Result<()> {
+        self.processor_mut()
+            .bind_output_destinations(bindings)
+            .await
+    }
+
     fn has_pending_emissions(&self) -> bool {
         self.processor().has_pending_emissions()
     }

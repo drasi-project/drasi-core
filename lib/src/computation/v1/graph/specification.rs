@@ -107,6 +107,111 @@ pub struct ConfigurationSchema {
     pub allow_additional: bool,
 }
 
+impl ConfigurationSchema {
+    /// Validate unresolved values without fetching configuration or secrets.
+    pub fn validate_values(
+        &self,
+        configuration: &BTreeMap<Arc<str>, ConfigurationValue>,
+        declarations: &BTreeMap<ResourceId, ResourceRole>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> GraphResult<()> {
+        for (key, field) in &self.fields {
+            if field.required && !configuration.contains_key(key) {
+                return Err(super::topology(format!(
+                    "missing configuration field {key}"
+                )));
+            }
+        }
+        for (key, value) in configuration {
+            validate_identifier("configuration field", key)?;
+            let field = self.fields.get(key);
+            if field.is_none() && !self.allow_additional {
+                return Err(super::topology(format!(
+                    "unknown configuration field {key}"
+                )));
+            }
+            match value {
+                ConfigurationValue::Literal(value) => {
+                    if field.is_some_and(|field| field.secret || !field.value_type.accepts(value)) {
+                        return Err(super::topology(format!("configuration field {key} requires a compatible value or unresolved secret reference")));
+                    }
+                }
+                ConfigurationValue::Reference {
+                    resource,
+                    key: reference,
+                    secret,
+                } => {
+                    validate_identifier("configuration reference", reference)?;
+                    let role = declarations.get(resource).ok_or_else(|| {
+                        super::topology(format!("unknown configuration resource {resource}"))
+                    })?;
+                    if *secret && *role != ResourceRole::SecretStore {
+                        return Err(super::topology(
+                            "secret references require a secret-store resource",
+                        ));
+                    }
+                    if field.is_some_and(|field| field.secret) && !secret {
+                        return Err(super::topology("secret fields require secret references"));
+                    }
+                    if let Some(handle) = resources.get(resource) {
+                        handle
+                            .get::<ConfigurationResolverResource>()?
+                            .0
+                            .validate_reference(reference)
+                            .map_err(|error| {
+                                super::topology(format!(
+                                    "invalid configuration reference: {error:#}"
+                                ))
+                            })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve already validated values using only the supplied resource owners.
+    pub async fn resolve_values(
+        &self,
+        values: &BTreeMap<Arc<str>, ConfigurationValue>,
+        resources: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Result<BTreeMap<Arc<str>, serde_json::Value>, ComponentCreationError> {
+        let mut configuration = BTreeMap::new();
+        for (key, value) in values {
+            let value = match value {
+                ConfigurationValue::Literal(value) => value.clone(),
+                ConfigurationValue::Reference { resource, key, .. } => {
+                    let resolver = resources
+                        .get(resource)
+                        .ok_or_else(|| {
+                            ComponentCreationError::retryable(anyhow::anyhow!(
+                                "resource {resource} is not realized"
+                            ))
+                        })?
+                        .get::<ConfigurationResolverResource>()
+                        .map_err(ComponentCreationError::terminal)?;
+                    resolver
+                        .0
+                        .resolve(key)
+                        .await
+                        .map_err(ComponentCreationError::retryable)?
+                }
+            };
+            if self
+                .fields
+                .get(key)
+                .is_some_and(|field| !field.value_type.accepts(&value))
+            {
+                return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                    "resolved configuration field {key} has an incompatible type"
+                )));
+            }
+            configuration.insert(key.clone(), value);
+        }
+        Ok(configuration)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceRole {
     Bootstrap,
@@ -155,6 +260,19 @@ pub trait ResourceCleanup: Send + Sync {
 #[async_trait]
 pub trait ResourceConstructor: Send + Sync {
     async fn construct(&self) -> anyhow::Result<ResourceHandle>;
+
+    /// Only declared dependencies are supplied, after successful construction.
+    /// Dependency-aware providers must opt in instead of silently ignoring them.
+    async fn construct_with_dependencies(
+        &self,
+        dependencies: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> anyhow::Result<ResourceHandle> {
+        anyhow::ensure!(
+            dependencies.is_empty(),
+            "resource constructor does not support dependencies"
+        );
+        self.construct().await
+    }
 }
 
 /// An actual constructed resource, held separately from desired specifications.
@@ -468,38 +586,9 @@ impl ConstructionContext {
         resources: BTreeMap<ResourceId, ResourceHandle>,
         schema: &ConfigurationSchema,
     ) -> Result<Self, ComponentCreationError> {
-        let mut configuration = BTreeMap::new();
-        for (key, value) in &specification.configuration {
-            let value = match value {
-                ConfigurationValue::Literal(value) => value.clone(),
-                ConfigurationValue::Reference { resource, key, .. } => {
-                    let resolver = resources
-                        .get(resource)
-                        .ok_or_else(|| {
-                            ComponentCreationError::retryable(anyhow::anyhow!(
-                                "resource {resource} is not realized"
-                            ))
-                        })?
-                        .get::<ConfigurationResolverResource>()
-                        .map_err(ComponentCreationError::terminal)?;
-                    resolver
-                        .0
-                        .resolve(key)
-                        .await
-                        .map_err(ComponentCreationError::retryable)?
-                }
-            };
-            if schema
-                .fields
-                .get(key)
-                .is_some_and(|field| !field.value_type.accepts(&value))
-            {
-                return Err(ComponentCreationError::terminal(anyhow::anyhow!(
-                    "resolved configuration field {key} has an incompatible type"
-                )));
-            }
-            configuration.insert(key.clone(), value);
-        }
+        let configuration = schema
+            .resolve_values(&specification.configuration, &resources)
+            .await?;
         Ok(Self {
             instance_id,
             graph_id,
@@ -535,56 +624,14 @@ pub(super) fn validate_specification(
             "factory implementation, role, plugin, or configuration version mismatch",
         ));
     }
-    for (key, field) in &descriptor.configuration.fields {
-        if field.required && !spec.configuration.contains_key(key) {
-            return Err(super::topology(format!(
-                "missing configuration field {key}"
-            )));
-        }
-    }
-    for (key, value) in &spec.configuration {
-        validate_identifier("configuration field", key)?;
-        let field = descriptor.configuration.fields.get(key);
-        if field.is_none() && !descriptor.configuration.allow_additional {
-            return Err(super::topology(format!(
-                "unknown configuration field {key}"
-            )));
-        }
-        match value {
-            ConfigurationValue::Literal(value) => {
-                if field.is_some_and(|field| field.secret || !field.value_type.accepts(value)) {
-                    return Err(super::topology(format!("configuration field {key} requires a compatible value or unresolved secret reference")));
-                }
-            }
-            ConfigurationValue::Reference {
-                resource,
-                key: reference,
-                secret,
-            } => {
-                validate_identifier("configuration reference", reference)?;
-                let declaration = declarations.get(resource).ok_or_else(|| {
-                    super::topology(format!("unknown configuration resource {resource}"))
-                })?;
-                if *secret && declaration.role != ResourceRole::SecretStore {
-                    return Err(super::topology(
-                        "secret references require a secret-store resource",
-                    ));
-                }
-                if field.is_some_and(|field| field.secret) && !secret {
-                    return Err(super::topology("secret fields require secret references"));
-                }
-                if let Some(handle) = resources.get(resource) {
-                    handle
-                        .get::<ConfigurationResolverResource>()?
-                        .0
-                        .validate_reference(reference)
-                        .map_err(|error| {
-                            super::topology(format!("invalid configuration reference: {error:#}"))
-                        })?;
-                }
-            }
-        }
-    }
+    descriptor.configuration.validate_values(
+        &spec.configuration,
+        &declarations
+            .iter()
+            .map(|(id, declaration)| (id.clone(), declaration.role))
+            .collect(),
+        resources,
+    )?;
     for (slot, requirement) in &descriptor.dependencies {
         validate_identifier("dependency slot", slot)?;
         let dependencies = spec

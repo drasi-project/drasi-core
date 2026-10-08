@@ -603,7 +603,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(err, DrasiError::OperationFailed { .. }),
+            matches!(err.classification(), DrasiError::OperationFailed { .. }),
             "Removing nonexistent source should fail, got: {err:?}"
         );
     }

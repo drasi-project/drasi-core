@@ -51,6 +51,16 @@ impl FfiBootstrapProviderProxy {
     }
 }
 
+impl Drop for FfiBootstrapProviderProxy {
+    fn drop(&mut self) {
+        let vtable = self.vtable.get_mut().unwrap_or_else(|error| {
+            log::error!("Releasing a poisoned bootstrap provider proxy");
+            error.into_inner()
+        });
+        (vtable.drop_fn)(vtable.state);
+    }
+}
+
 #[async_trait::async_trait]
 impl BootstrapProvider for FfiBootstrapProviderProxy {
     async fn bootstrap(
@@ -58,8 +68,10 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
         request: drasi_lib::bootstrap::BootstrapRequest,
         context: &drasi_lib::bootstrap::BootstrapContext,
         event_tx: drasi_lib::channels::events::BootstrapEventSender,
-        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+        settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> anyhow::Result<BootstrapResult> {
+        let settings_json = serde_json::to_string(&settings)?;
+        let properties_json = serde_json::to_string(context.properties())?;
         // Start the provider and take ownership of the stream handles inside a
         // block so no raw pointer is held across an await point.
         //
@@ -99,6 +111,8 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
                 FfiStr::from_str(&request.request_id),
                 FfiStr::from_str(&context.server_id),
                 FfiStr::from_str(&context.source_id),
+                FfiStr::from_str(&settings_json),
+                FfiStr::from_str(&properties_json),
             );
 
             if stream_ptr.is_null() {

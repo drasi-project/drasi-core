@@ -118,6 +118,23 @@ fn definition(query: &str) -> ContinuousQueryDefinition {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn disabled_durable_delivery_keeps_its_completion_future_small() {
+    let mut query = ContinuousQueryTransformer::new(
+        definition("MATCH (n:Person) RETURN n.name AS name"),
+        Arc::new(InMemoryComputationProvider),
+    )
+    .await
+    .unwrap();
+    let completion = query.delivery_completed(&[]);
+    let bytes = std::mem::size_of_val(completion.as_ref().get_ref());
+    assert!(
+        bytes <= 16 * std::mem::size_of::<usize>(),
+        "disabled durable delivery retained storage-operation state: {bytes} bytes"
+    );
+    completion.await.unwrap();
+}
+
 async fn run_query(
     definition: ContinuousQueryDefinition,
     provider: Arc<dyn ComputationIndexProvider>,

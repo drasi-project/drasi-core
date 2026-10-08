@@ -83,6 +83,39 @@ This is **not** a transaction around the upstream source or downstream reaction.
 An HTTP call or another external effect cannot be rolled back by this storage
 transaction.
 
+## Shared storage foundation
+
+Core now provides an opt-in `ComputationTransactionGroup`: one storage owner,
+one processor and up to 256 active journal members using the same actual
+transaction. Live and scheduled query hooks can return journal mutations to
+commit with processing. Rejected staging rolls back all participating writes;
+failed or interrupted post-commit cache updates block the group until recovery.
+Members stop independently, so stopping the processor need not stop delivery
+from its journal. Dropping the group owner blocks new work while retaining
+members' ability to finish storage cleanup.
+
+Each member's outbox keys are isolated, so clearing producer output or
+checkpoints need not erase journal records or metadata stored in that journal's
+outbox. Groups require a dedicated store; standalone output is not migrated.
+
+Library `SharedStorageGroup` now exposes this to the continuous-query, durable
+middleware and linear-transaction factories. Its index-provider resource is
+graph-owned; each participating QoS pipe also declares that resource using
+`with_shared_storage`. Capacity reservations happen before processing and never
+hold the storage transaction while waiting. Journal appends and receipts join
+the existing producer commit; subsequent forwarding reuses the receipts.
+Native transaction participants inside that host container use the same commit
+through their existing state mailbox; no ABI extension or native storage handle
+is needed. This does not upgrade standalone native transformers or external sinks.
+See [construction and limits](computation-graph-qos.md#shared-produceroutput-commits).
+
+Quiesced producer stop preserves journal delivery. Aborting active storage
+instead fences all members until cleanup/reconstruction, with explicit errors
+for waiting publishers and receivers. This does not support multiple query
+processors in a group or make external effects transactional. Ordinary
+separate-store configurations retain the forwarding confirmation described
+above. Plugin services and packaged Server configuration remain separate work.
+
 ## Which transformers can participate
 
 Ordinary graph transformers still implement `Transformer` and run independently.

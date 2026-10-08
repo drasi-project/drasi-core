@@ -42,6 +42,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const DEADLINE: Duration = Duration::from_secs(10);
+#[path = "network/durable.rs"]
+mod durable_tests;
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

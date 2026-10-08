@@ -7,7 +7,7 @@ use std::{
     result::Result,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex as StdMutex,
+        Arc, Mutex as StdMutex, OnceLock,
     },
 };
 
@@ -18,6 +18,21 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
 use super::*;
+
+mod admission;
+mod ingress;
+mod recovery;
+mod replay;
+mod retirement;
+mod shared;
+pub use admission::{
+    AdmissionOptions, AdmissionReceipt, AdmissionRejection, ProducerSession, ProducerStatus,
+};
+pub use ingress::SourceAdmission;
+pub use recovery::QosRecoveryOptions;
+pub use replay::{ReplayOptions, ReplayRejection};
+pub(crate) use retirement::QosRetirement;
+pub(crate) use shared::QosReservation;
 
 /// A new subscription's cut. Reopening an existing subscriber keeps its cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +74,7 @@ impl QosChannelDefinition {
             subscriber: subscriber.into(),
             definition: self.clone(),
             gap_policy: ReplayGapPolicy::Strict,
+            shared_storage: None,
         }
     }
 
@@ -88,6 +104,16 @@ pub struct QosPipeConfig {
     pub subscriber: String,
     pub definition: QosChannelDefinition,
     pub gap_policy: ReplayGapPolicy,
+    /// Keep the graph-owned provider live independently of the producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_storage: Option<ResourceId>,
+}
+
+impl QosPipeConfig {
+    pub fn with_shared_storage(mut self, resource: ResourceId) -> Self {
+        self.shared_storage = Some(resource);
+        self
+    }
 }
 
 impl PipeProvider for QosPipeConfig {
@@ -98,10 +124,19 @@ impl PipeProvider for QosPipeConfig {
         Some((self.resource.clone(), self.subscriber.clone()))
     }
     fn resource_dependencies(&self) -> BTreeMap<ResourceId, ResourceRole> {
-        BTreeMap::from([(self.resource.clone(), ResourceRole::StateStore)])
+        let mut resources = BTreeMap::from([(self.resource.clone(), ResourceRole::StateStore)]);
+        if let Some(storage) = &self.shared_storage {
+            resources.insert(storage.clone(), ResourceRole::IndexBackend);
+        }
+        resources
     }
     fn capabilities(&self) -> Result<PipeCapabilities, PipeError> {
         self.definition.validate()?;
+        if self.shared_storage.as_ref() == Some(&self.resource) {
+            return Err(backend(
+                "shared storage and QoS journal need distinct resource IDs",
+            ));
+        }
         if !self.definition.subscribers.contains_key(&self.subscriber) {
             return Err(backend("QoS pipe names an undeclared subscriber"));
         }
@@ -123,6 +158,26 @@ impl PipeProvider for QosPipeConfig {
                 .map_err(|error| backend(error.to_string()))?;
             if channel.definition != self.definition {
                 return Err(backend("QoS channel differs from its pipe declaration"));
+            }
+            if channel.is_shared() != self.shared_storage.is_some() {
+                return Err(backend(
+                    "shared QoS requires its graph-owned storage dependency",
+                ));
+            }
+            if let Some(storage) = &self.shared_storage {
+                let provider = resources
+                    .get(storage)
+                    .ok_or_else(|| backend("shared QoS storage resource is unavailable"))?
+                    .get::<super::QueryIndexProviderResource>()
+                    .map_err(|error| PipeError::Backend(error.into()))?;
+                let store = channel.storage()?.ok_or(PipeError::Closed)?;
+                if !provider
+                    .0
+                    .transaction_group()
+                    .is_some_and(|group| group.contains(&store.transaction))
+                {
+                    return Err(backend("QoS journal belongs to a different storage group"));
+                }
             }
         }
         Ok(())
@@ -159,6 +214,10 @@ struct Metadata {
     head: u64,
     producer_sequence: Option<u64>,
     cursors: BTreeMap<String, Cursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission: Option<admission::AdmissionState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replay: Option<replay::ReplayState>,
 }
 
 struct State {
@@ -180,9 +239,10 @@ struct Binding {
 }
 
 struct Persistent {
-    transaction: ComputationTransaction,
+    transaction: Arc<ComputationTransaction>,
     key: String,
     codec: EnvelopeCodec,
+    shared: bool,
 }
 
 /// A shared bounded journal: one append, independent subscriber completions.
@@ -192,11 +252,16 @@ struct Persistent {
 /// transaction, never a transaction held open while business code is running.
 pub struct QosChannel {
     definition: QosChannelDefinition,
+    durability: drasi_core::interface::StorageDurability,
     state: Mutex<State>,
     bindings: StdMutex<Bindings>,
     persistent: StdMutex<Option<Arc<Persistent>>>,
     closed: AtomicBool,
+    admission_bound: AtomicBool,
+    replay_identity: OnceLock<uuid::Uuid>,
+    configuring_replay: AtomicBool,
     changed: Notify,
+    shared: Option<shared::SharedChannel>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +298,8 @@ fn initial(definition: &QosChannelDefinition) -> Result<Metadata, PipeError> {
         head: 0,
         producer_sequence: None,
         cursors,
+        admission: None,
+        replay: None,
     })
 }
 
@@ -245,6 +312,7 @@ impl QosChannel {
         let metadata = initial(&definition)?;
         Ok(Arc::new(Self {
             definition,
+            durability: drasi_core::interface::StorageDurability::VOLATILE,
             state: Mutex::new(State {
                 metadata,
                 entries: BTreeMap::new(),
@@ -252,7 +320,11 @@ impl QosChannel {
             bindings: StdMutex::new(Bindings::default()),
             persistent: StdMutex::new(None),
             closed: AtomicBool::new(false),
+            admission_bound: AtomicBool::new(false),
+            replay_identity: OnceLock::new(),
+            configuring_replay: AtomicBool::new(false),
             changed: Notify::new(),
+            shared: None,
         }))
     }
 
@@ -262,8 +334,30 @@ impl QosChannel {
         codec: EnvelopeCodec,
         key: impl Into<String>,
     ) -> Result<Arc<Self>, PipeError> {
+        Self::persistent_options(definition, indexes, codec, key.into(), None).await
+    }
+
+    /// Require the configured recovery mode on both initial creation and reopen.
+    /// A missing service setting is Disabled, not permission to load another mode.
+    pub async fn persistent_with_recovery(
+        definition: QosChannelDefinition,
+        indexes: ComputationIndexes,
+        codec: EnvelopeCodec,
+        key: impl Into<String>,
+        recovery: QosRecoveryOptions,
+    ) -> Result<Arc<Self>, PipeError> {
+        recovery.validate_storage(&definition, indexes.durability())?;
+        Self::persistent_options(definition, indexes, codec, key.into(), Some(recovery)).await
+    }
+
+    async fn persistent_options(
+        definition: QosChannelDefinition,
+        indexes: ComputationIndexes,
+        codec: EnvelopeCodec,
+        key: String,
+        recovery: Option<QosRecoveryOptions>,
+    ) -> Result<Arc<Self>, PipeError> {
         definition.validate()?;
-        let key = key.into();
         data::validate_identifier("QoS journal", &key)?;
         if !definition.durable
             || !indexes
@@ -276,18 +370,97 @@ impl QosChannel {
         }
         let transaction =
             ComputationTransaction::try_new(indexes).map_err(|error| backend(error.to_string()))?;
+        Self::open_persistent(definition, transaction, codec, key, None, recovery).await
+    }
+
+    /// A journal member of an explicitly owned storage group. Its replay record,
+    /// events and cursors share the producer's transaction, not its lifetime.
+    pub async fn shared(
+        definition: QosChannelDefinition,
+        group: &drasi_core::computation::ComputationTransactionGroup,
+        journal: &str,
+        codec: EnvelopeCodec,
+        replay: ReplayOptions,
+    ) -> Result<Arc<Self>, PipeError> {
+        definition.validate()?;
+        replay.validate(&definition)?;
+        group
+            .durability()
+            .require(replay.failure_scope)
+            .map_err(|error| PipeError::Backend(error.into()))?;
+        let transaction = group
+            .journal_transaction(journal)
+            .map_err(|error| PipeError::Backend(error.into()))?;
+        Self::open_persistent(
+            definition,
+            transaction,
+            codec,
+            "events".into(),
+            Some(replay),
+            None,
+        )
+        .await
+    }
+
+    async fn open_persistent(
+        definition: QosChannelDefinition,
+        transaction: ComputationTransaction,
+        codec: EnvelopeCodec,
+        key: String,
+        shared_replay: Option<ReplayOptions>,
+        recovery: Option<QosRecoveryOptions>,
+    ) -> Result<Arc<Self>, PipeError> {
+        let store = Arc::new(Persistent {
+            transaction: Arc::new(transaction),
+            key,
+            codec,
+            shared: shared_replay.is_some(),
+        });
+        let transaction = &store.transaction;
+        let key = &store.key;
+        let codec = &store.codec;
         let resources = transaction.resources();
-        let checkpoint = resources.checkpoint_store().expect("validated transaction");
-        let saved = checkpoint
-            .read_checkpoint(&key)
-            .await
-            .map_err(|error| backend(error.to_string()))?;
-        let records = resources
-            .outbox_writer()
-            .expect("validated transaction")
-            .read_from(&key, 0)
-            .await
-            .map_err(|error| backend(error.to_string()))?;
+        if !resources
+            .checkpoint_store()
+            .is_some_and(|checkpoint| checkpoint.is_persistent())
+        {
+            return Err(backend("persistent QoS requires persistent checkpoints"));
+        }
+        let read = async {
+            let saved = store.read_metadata().await?;
+            let records = resources
+                .outbox_writer()
+                .expect("validated transaction")
+                .read_from(key, 0)
+                .await?;
+            Ok::<_, drasi_core::interface::IndexError>((saved, records))
+        };
+        let (saved, records) = if let Some(options) = &shared_replay {
+            transaction
+                .run(async {
+                    let (mut saved, records) = read.await?;
+                    if saved.is_none() {
+                        if !records.is_empty() {
+                            return Err(drasi_core::interface::IndexError::CorruptedData.into());
+                        }
+                        let mut metadata = initial(&definition)
+                            .map_err(drasi_core::interface::IndexError::other)?;
+                        metadata.replay = Some(replay::ReplayState::new(options.clone()));
+                        let bytes = Bytes::from(
+                            serde_json::to_vec(&metadata)
+                                .map_err(drasi_core::interface::IndexError::other)?,
+                        );
+                        store.stage_metadata(0, &bytes).await?;
+                        saved = Some(drasi_core::interface::SourceCheckpoint::new(0, Some(bytes)));
+                    }
+                    Ok((saved, records))
+                })
+                .await
+                .map_err(|error| PipeError::Backend(error.into()))?
+        } else {
+            read.await
+                .map_err(|error| PipeError::Backend(error.into()))?
+        };
         let mut metadata = match saved {
             Some(saved) => {
                 let bytes = saved
@@ -322,13 +495,16 @@ impl QosChannel {
                 if !records.is_empty() {
                     return Err(backend("QoS records have no committed metadata"));
                 }
-                let metadata = initial(&definition)?;
+                let mut metadata = initial(&definition)?;
+                if let Some(recovery) = &recovery {
+                    recovery.prepare(&mut metadata)?;
+                }
                 let bytes = Bytes::from(
                     serde_json::to_vec(&metadata).map_err(|error| backend(error.to_string()))?,
                 );
                 transaction
                     .run(async {
-                        checkpoint.stage_checkpoint(&key, 0, Some(&bytes)).await?;
+                        store.stage_metadata(0, &bytes).await?;
                         Ok(())
                     })
                     .await
@@ -336,6 +512,22 @@ impl QosChannel {
                 metadata
             }
         };
+        let recovery_changed = recovery
+            .as_ref()
+            .map(|recovery| recovery.prepare(&mut metadata))
+            .transpose()?
+            .unwrap_or(false);
+        if let Some(options) = &shared_replay {
+            if metadata.admission.is_some()
+                || !metadata.replay.as_ref().is_some_and(|replay| {
+                    replay.options() == *options && replay.identity().is_some()
+                })
+            {
+                return Err(backend(
+                    "shared QoS requires its original replay settings and journal identity",
+                ));
+            }
+        }
         let mut entries = BTreeMap::new();
         let mut previous = None;
         for (position, bytes) in records {
@@ -372,6 +564,11 @@ impl QosChannel {
             }
         }
         if metadata.definition != definition {
+            if metadata.admission.is_some() || metadata.replay.is_some() {
+                return Err(backend(
+                    "receipt-tracked channel settings cannot change without an explicit migration",
+                ));
+            }
             let oldest = entries.keys().next().copied().unwrap_or(1);
             for (id, start) in &definition.subscribers {
                 if metadata
@@ -430,33 +627,90 @@ impl QosChannel {
                     resources
                         .outbox_writer()
                         .expect("validated transaction")
-                        .trim_before(&key, floor)
+                        .trim_before(key, floor)
                         .await?;
-                    checkpoint
-                        .stage_checkpoint(&key, metadata.head, Some(&bytes))
-                        .await?;
+                    store.stage_metadata(metadata.head, &bytes).await?;
                     Ok(())
                 })
                 .await
                 .map_err(|error| PipeError::Backend(error.into()))?;
             entries.retain(|position, _| *position >= floor);
         }
-        Ok(Arc::new(Self {
+        if let Some(admission) = &metadata.admission {
+            admission.validate(&definition, metadata.head)?;
+            resources
+                .durability()
+                .require(admission.failure_scope())
+                .map_err(|error| PipeError::Backend(error.into()))?;
+            admission.validate_entries(&entries)?;
+        }
+        if let Some(replay) = &metadata.replay {
+            if metadata.admission.is_some() {
+                return Err(backend(
+                    "client admission and output replay tracking are mutually exclusive",
+                ));
+            }
+            replay.validate(&definition, metadata.head, &entries, codec)?;
+            resources
+                .durability()
+                .require(replay.failure_scope())
+                .map_err(|error| PipeError::Backend(error.into()))?;
+        }
+        if recovery_changed {
+            let bytes = Bytes::from(
+                serde_json::to_vec(&metadata).map_err(|error| PipeError::Backend(error.into()))?,
+            );
+            transaction
+                .run(async {
+                    store.stage_metadata(metadata.head, &bytes).await?;
+                    Ok(())
+                })
+                .await
+                .map_err(|error| PipeError::Backend(error.into()))?;
+        }
+        let replay_options = metadata.replay.as_ref().map(|replay| replay.options());
+        let replay_identity = metadata
+            .replay
+            .as_ref()
+            .and_then(|replay| replay.identity())
+            .map_or_else(OnceLock::new, OnceLock::from);
+        let durability = resources.durability();
+        let channel = Arc::new_cyclic(|owner| Self {
             definition,
+            durability,
             state: Mutex::new(State { metadata, entries }),
             bindings: StdMutex::new(Bindings::default()),
-            persistent: StdMutex::new(Some(Arc::new(Persistent {
-                transaction,
-                key,
-                codec,
-            }))),
+            persistent: StdMutex::new(Some(store)),
             closed: AtomicBool::new(false),
+            admission_bound: AtomicBool::new(false),
+            replay_identity,
+            configuring_replay: AtomicBool::new(false),
             changed: Notify::new(),
-        }))
+            shared: shared_replay
+                .as_ref()
+                .map(|_| shared::SharedChannel::new(owner.clone())),
+        });
+        if let Some(options) = replay_options {
+            channel.enable_replay(options).await?;
+        }
+        Ok(channel)
     }
 
     pub fn resource(self: &Arc<Self>) -> ResourceHandle {
         ResourceHandle::new(ResourceRole::StateStore, self.clone()).with_cleanup(self.clone())
+    }
+
+    pub fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.durability
+    }
+
+    pub fn definition(&self) -> &QosChannelDefinition {
+        &self.definition
+    }
+
+    pub(super) fn matches_definition(&self, pipe: &QosPipeConfig) -> bool {
+        self.definition == pipe.definition
+            && self.definition.subscribers.contains_key(&pipe.subscriber)
     }
 
     fn storage(&self) -> Result<Option<Arc<Persistent>>, PipeError> {
@@ -518,8 +772,18 @@ impl QosChannel {
         let Some(store) = self.storage()? else {
             return Ok(());
         };
+        if store.shared {
+            return Err(backend(
+                "shared QoS writes must use the group transaction path",
+            ));
+        }
         let bytes =
             Bytes::from(serde_json::to_vec(metadata).map_err(|error| backend(error.to_string()))?);
+        if (metadata.admission.is_some() || metadata.replay.is_some())
+            && bytes.len() > admission::MAX_METADATA_BYTES
+        {
+            return Err(backend("receipt metadata exceeds its 4 MiB bound"));
+        }
         let record = append
             .map(|(position, envelope, floor)| {
                 store
@@ -577,9 +841,13 @@ impl QosChannel {
         envelope: &ChangeEnvelope,
         endpoint: Option<&Endpoint>,
     ) -> Result<EnqueueReceipt, PipeError> {
+        if self.shared.is_some() {
+            return self.publish_shared(envelope, endpoint).await;
+        }
         if envelope.system().stream() != &self.definition.stream {
             return Err(backend("QoS channel received an event from another stream"));
         }
+        let mut replay_candidate = None;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -593,7 +861,27 @@ impl QosChannel {
                 }
             }
             let sequence = envelope.system().sequence();
-            if state
+            if let Some(replay) = &state.metadata.replay {
+                let candidate = match &replay_candidate {
+                    Some(candidate) => candidate,
+                    None => replay_candidate.insert(replay::Candidate::new(
+                        envelope,
+                        &self.storage()?.ok_or(PipeError::Closed)?.codec,
+                    )?),
+                };
+                if let Some(position) = replay.check(candidate)? {
+                    return Ok(EnqueueReceipt::new(envelope.id().clone()).with_position(position));
+                }
+                if let Some(previous) = state.metadata.producer_sequence {
+                    if sequence <= previous {
+                        return Err(ReplayRejection::TransportSequence {
+                            previous,
+                            received: sequence,
+                        }
+                        .into());
+                    }
+                }
+            } else if state
                 .metadata
                 .producer_sequence
                 .is_some_and(|saved| sequence <= saved)
@@ -629,6 +917,11 @@ impl QosChannel {
                 }
                 return Err(backend("QoS producer sequence regressed, changed, or is outside retained retry history"));
             }
+            if state.metadata.admission.is_some() {
+                return Err(backend(
+                    "this channel requires a registered producer session for new admission",
+                ));
+            }
             let full = state.entries.len() == self.definition.capacity.get();
             let floor = state.entries.keys().next().copied().unwrap_or(1);
             let blocked = full
@@ -652,6 +945,9 @@ impl QosChannel {
             let mut metadata = state.metadata.clone();
             metadata.head = position;
             metadata.producer_sequence = Some(sequence);
+            if let (Some(replay), Some(candidate)) = (&mut metadata.replay, &replay_candidate) {
+                replay.record(candidate, position);
+            }
             let _wake = WakeOnDrop(&self.changed);
             self.persist(&metadata, Some((position, envelope, retain_from)))
                 .await?;
@@ -670,6 +966,9 @@ impl QosChannel {
     /// Abandon a disconnected subscriber's remaining obligation explicitly.
     /// A retired identity cannot be reused as a new subscription.
     pub async fn retire(&self, subscriber: &str) -> Result<(), PipeError> {
+        if self.shared.is_some() {
+            return self.retire_shared(subscriber).await;
+        }
         let mut state = self.state.lock().await;
         self.check()?;
         {
@@ -710,12 +1009,22 @@ impl QosChannel {
             .bindings
             .lock()
             .map_err(|_| backend("QoS bindings poisoned"))?;
+        if self.configuring_replay.load(Ordering::Acquire) {
+            return Err(backend("output replay configuration is still committing"));
+        }
         if bindings
             .consumers
             .get(subscriber)
             .is_some_and(|binding| !binding.cancelled.load(Ordering::Acquire))
         {
             return Err(backend("QoS subscriber already has a live owner"));
+        }
+        if let Some(shared) = &self.shared {
+            if shared.subscriber_write_pending(subscriber)? {
+                return Err(backend(
+                    "QoS subscriber has an unfinished progress operation",
+                ));
+            }
         }
         bindings.generation = bindings
             .generation
@@ -761,6 +1070,9 @@ impl ResourceCleanup for QosChannel {
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.closed.store(true, Ordering::Release);
         self.changed.notify_waiters();
+        if let Some(store) = self.storage()? {
+            store.transaction.cancel_retirement()?;
+        }
         let _state = self.state.lock().await;
         if let Some(store) = self.storage()? {
             store.transaction.shutdown().await?;
@@ -779,6 +1091,14 @@ struct Endpoint {
     binding: Arc<Binding>,
 }
 impl Endpoint {
+    fn check_writable(&self) -> Result<(), PipeError> {
+        self.check()?;
+        if self.binding.closed.load(Ordering::Acquire) {
+            return Err(PipeError::Closed);
+        }
+        Ok(())
+    }
+
     fn check(&self) -> Result<(), PipeError> {
         self.channel.check()?;
         let bindings = self
@@ -797,6 +1117,9 @@ impl Endpoint {
         Ok(())
     }
     async fn complete(&self, position: u64, skip: bool) -> Result<(), PipeError> {
+        if self.channel.shared.is_some() {
+            return self.channel.complete_shared(self, position, skip).await;
+        }
         let mut state = self.channel.state.lock().await;
         self.check()?;
         let mut metadata = state.metadata.clone();
@@ -903,7 +1226,7 @@ impl EnvelopeReceiver for Receiver {
             }
             if self.endpoint.binding.pending.load(Ordering::Acquire) {
                 drop(state);
-                notified.await;
+                self.endpoint.channel.wait_changed(notified).await?;
                 continue;
             }
             if let Some(oldest) = state.entries.keys().next().copied() {
@@ -945,7 +1268,7 @@ impl EnvelopeReceiver for Receiver {
                 return Ok(None);
             }
             drop(state);
-            notified.await;
+            self.endpoint.channel.wait_changed(notified).await?;
         }
     }
 }
@@ -1025,7 +1348,10 @@ mod foundation_tests {
         ] {
             let mut valid = definition();
             valid.subscribers.insert("consumer".into(), start);
-            assert!(QosChannel::volatile(valid).is_ok());
+            assert_eq!(
+                QosChannel::volatile(valid).expect("valid").durability(),
+                drasi_core::interface::StorageDurability::VOLATILE
+            );
         }
     }
 

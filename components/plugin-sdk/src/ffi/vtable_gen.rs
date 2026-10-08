@@ -285,6 +285,63 @@ fn dispatch_to_runtime<R: Send + 'static>(
     rx.recv().expect("plugin runtime task dropped unexpectedly")
 }
 
+#[derive(Default)]
+pub(crate) struct InitializationState {
+    failure: std::sync::OnceLock<String>,
+}
+
+impl InitializationState {
+    fn failure(&self) -> Option<&str> {
+        self.failure.get().map(String::as_str)
+    }
+
+    fn run<T>(
+        &self,
+        prepare: impl FnOnce() -> T,
+        initialize: impl FnOnce(T) -> FfiResult,
+    ) -> Result<(), &str> {
+        let result = catch_panic_ffi(std::panic::AssertUnwindSafe(|| {
+            // Take ownership of transferred resources even when rejecting reuse.
+            let context = prepare();
+            match self.failure() {
+                Some(error) => FfiResult::err(error.to_owned()),
+                None => initialize(context),
+            }
+        }));
+        if let Err(error) = unsafe { result.into_result() } {
+            self.failure.get_or_init(|| {
+                format!("{error}; initialization failed: cleanup and recreate this plugin instance")
+            });
+        }
+        match self.failure() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+fn dispatch_initialization(
+    handle: &tokio::runtime::Handle,
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+) -> FfiResult {
+    // Joining preserves the original panic and waits for the initializer's
+    // unwind before reporting failure across the synchronous C boundary.
+    let task = handle.spawn(future);
+    dispatch_to_runtime(handle, async move {
+        match task.await {
+            Ok(()) => FfiResult::ok(),
+            Err(error) if error.is_panic() => FfiResult::from_panic(error.into_panic()),
+            Err(error) => FfiResult::err(format!("plugin initialization interrupted: {error}")),
+        }
+    })
+}
+
+fn signal_result_push_exit(callback: FfiResultPushCallbackFn, context: *mut c_void) {
+    #[allow(clippy::manual_dangling_ptr)]
+    let sentinel = 1usize as *mut c_void;
+    callback(context, sentinel);
+}
+
 // ============================================================================
 // Component status conversion
 // ============================================================================
@@ -686,6 +743,7 @@ pub(crate) struct SourceWrapper<T: Source + 'static> {
     /// Cached instance_id from FfiRuntimeContext (set during initialize).
     pub instance_id: std::sync::RwLock<String>,
     pub status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+    pub initialization: InitializationState,
 }
 
 /// Build a SourceVtable from a concrete type implementing the DrasiLib Source trait.
@@ -791,6 +849,10 @@ pub fn build_source_vtable<T: Source + 'static>(
     extern "C" fn start_fn<T: Source + 'static>(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            if let Some(error) = w.initialization.failure() {
+                emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_instance_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -846,6 +908,9 @@ pub fn build_source_vtable<T: Source + 'static>(
 
     extern "C" fn status_fn<T: Source + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const SourceWrapper<T>);
         let status = dispatch_to_runtime(&handle, async move {
@@ -885,6 +950,10 @@ pub fn build_source_vtable<T: Source + 'static>(
         has_resume_sequence: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        if let Some(error) = w.initialization.failure() {
+            emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+            return std::ptr::null_mut();
+        }
         let source_id_str = unsafe { source_id.to_string() };
         let qid = unsafe { query_id.to_string() };
         let nodes_str = unsafe { nodes_json.to_string() };
@@ -964,21 +1033,28 @@ pub fn build_source_vtable<T: Source + 'static>(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        let handle = (w.runtime_handle)().handle().clone();
-        forward_status(
-            &w.status_forwarder,
-            status_rx,
-            ffi_ctx,
-            "source",
-            w.lifecycle_emitter,
-            &handle,
+        let result = w.initialization.run(
+            || build_source_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "source",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let ptr = SendPtr(state as *const SourceWrapper<T>);
+                dispatch_initialization(&handle, async move {
+                    let inner = unsafe { ptr.as_ref() };
+                    inner.inner.initialize(runtime_ctx).await
+                })
+            },
         );
-        let ptr = SendPtr(state as *const SourceWrapper<T>);
-        dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { ptr.as_ref() };
-            inner.inner.initialize(runtime_ctx).await
-        });
+        if let Err(error) = result {
+            emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+        }
     }
 
     extern "C" fn set_bootstrap_provider_fn<T: Source + 'static>(
@@ -993,6 +1069,10 @@ pub fn build_source_vtable<T: Source + 'static>(
             vtable: std::sync::Mutex::new(*vtable),
         });
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        if let Some(error) = w.initialization.failure() {
+            emit_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+            return;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const SourceWrapper<T>);
         dispatch_to_runtime(&handle, async move {
@@ -1047,6 +1127,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
         status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
 
     SourceVtable {
@@ -1095,6 +1176,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
         status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+        initialization: InitializationState,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -1190,6 +1272,10 @@ pub fn build_source_vtable_from_boxed(
     extern "C" fn start_fn(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const DynSourceWrapper) };
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_dyn_source_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -1245,6 +1331,9 @@ pub fn build_source_vtable_from_boxed(
 
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let inner_ptr = SendPtr(state as *const DynSourceWrapper);
         let status = dispatch_to_runtime(&handle, async move {
@@ -1284,6 +1373,10 @@ pub fn build_source_vtable_from_boxed(
         has_resume_sequence: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
+        if let Some(error) = w.initialization.failure() {
+            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
+            return std::ptr::null_mut();
+        }
         let source_id_str = unsafe { source_id.to_string() };
         let qid = unsafe { query_id.to_string() };
         let nodes_str = unsafe { nodes_json.to_string() };
@@ -1360,21 +1453,28 @@ pub fn build_source_vtable_from_boxed(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        let handle = (w.runtime_handle)().handle().clone();
-        forward_status(
-            &w.status_forwarder,
-            status_rx,
-            ffi_ctx,
-            "source",
-            w.lifecycle_emitter,
-            &handle,
+        let result = w.initialization.run(
+            || build_source_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "source",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+                dispatch_initialization(&handle, async move {
+                    let inner = unsafe { inner_ptr.as_ref() };
+                    inner.inner.initialize(runtime_ctx).await
+                })
+            },
         );
-        let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-        dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { inner_ptr.as_ref() };
-            inner.inner.initialize(runtime_ctx).await
-        });
+        if let Err(error) = result {
+            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
+        }
     }
 
     extern "C" fn set_bootstrap_provider_fn(
@@ -1389,6 +1489,10 @@ pub fn build_source_vtable_from_boxed(
             vtable: std::sync::Mutex::new(*vtable),
         });
         let w = unsafe { &*(state as *const DynSourceWrapper) };
+        if let Some(error) = w.initialization.failure() {
+            emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Error, error);
+            return;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let inner_ptr = SendPtr(state as *const DynSourceWrapper);
         dispatch_to_runtime(&handle, async move {
@@ -1440,6 +1544,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
         status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
 
     SourceVtable {
@@ -1481,6 +1586,7 @@ pub(crate) struct ReactionWrapper<T: Reaction + 'static> {
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     pub instance_id: std::sync::RwLock<String>,
     pub status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+    pub initialization: InitializationState,
 }
 
 /// Build a ReactionVtable from a concrete type implementing the DrasiLib Reaction trait.
@@ -1567,6 +1673,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     extern "C" fn start_fn<T: Reaction + 'static>(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            if let Some(error) = w.initialization.failure() {
+                emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -1622,6 +1732,9 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
 
     extern "C" fn status_fn<T: Reaction + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const ReactionWrapper<T>);
         let status = dispatch_to_runtime(&handle, async move {
@@ -1673,21 +1786,28 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        let handle = (w.runtime_handle)().handle().clone();
-        forward_status(
-            &w.status_forwarder,
-            status_rx,
-            ffi_ctx,
-            "reaction",
-            w.lifecycle_emitter,
-            &handle,
+        let result = w.initialization.run(
+            || build_reaction_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "reaction",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let ptr = SendPtr(state as *const ReactionWrapper<T>);
+                dispatch_initialization(&handle, async move {
+                    let inner = unsafe { ptr.as_ref() };
+                    inner.inner.initialize(runtime_ctx).await
+                })
+            },
         );
-        let ptr = SendPtr(state as *const ReactionWrapper<T>);
-        dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { ptr.as_ref() };
-            inner.inner.initialize(runtime_ctx).await
-        });
+        if let Err(error) = result {
+            emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+        }
     }
 
     extern "C" fn start_result_push_fn<T: Reaction + 'static>(
@@ -1701,6 +1821,11 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         // spawn_blocking (to avoid starving async workers), then enqueues
         // each result into the reaction's priority queue.
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        if let Some(error) = w.initialization.failure() {
+            emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+            signal_result_push_exit(callback, callback_ctx);
+            return;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let ctx_raw = callback_ctx as usize;
         let ptr = SendPtr(state as *const ReactionWrapper<T>);
@@ -1772,6 +1897,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     ) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            if let Some(error) = w.initialization.failure() {
+                emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             let ffi_ctx = unsafe { &*ctx };
 
             let query_id = unsafe { ffi_ctx.query_id.to_string() };
@@ -1823,6 +1952,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
         status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
 
     ReactionVtable {
@@ -1866,6 +1996,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
         status_forwarder: std::sync::Mutex<Option<StatusForwarder>>,
+        initialization: InitializationState,
     }
 
     // The state pointer points to a heap-allocated `Arc<DynReactionWrapper>`.
@@ -1965,6 +2096,10 @@ pub fn build_reaction_vtable_from_boxed(
     extern "C" fn start_fn(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = wrapper_ref(state);
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_dyn_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
@@ -2018,6 +2153,9 @@ pub fn build_reaction_vtable_from_boxed(
 
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = wrapper_ref(state);
+        if w.initialization.failure().is_some() {
+            return FfiComponentStatus::Error;
+        }
         let handle = (w.runtime_handle)().handle().clone();
         let arc = wrapper_arc(state);
         let status = dispatch_to_runtime(&handle, async move { arc.inner.status().await });
@@ -2059,21 +2197,28 @@ pub fn build_reaction_vtable_from_boxed(
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
         }
 
-        let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        let handle = (w.runtime_handle)().handle().clone();
-        forward_status(
-            &w.status_forwarder,
-            status_rx,
-            ffi_ctx,
-            "reaction",
-            w.lifecycle_emitter,
-            &handle,
+        let result = w.initialization.run(
+            || build_reaction_runtime_context(ffi_ctx),
+            |(runtime_ctx, status_rx)| {
+                let handle = (w.runtime_handle)().handle().clone();
+                forward_status(
+                    &w.status_forwarder,
+                    status_rx,
+                    ffi_ctx,
+                    "reaction",
+                    w.lifecycle_emitter,
+                    &handle,
+                );
+                let arc = wrapper_arc(state);
+                dispatch_initialization(
+                    &handle,
+                    async move { arc.inner.initialize(runtime_ctx).await },
+                )
+            },
         );
-        let arc = wrapper_arc(state);
-        dispatch_to_runtime(
-            &handle,
-            async move { arc.inner.initialize(runtime_ctx).await },
-        );
+        if let Err(error) = result {
+            emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+        }
     }
 
     extern "C" fn start_result_push_fn(
@@ -2083,6 +2228,11 @@ pub fn build_reaction_vtable_from_boxed(
     ) {
         ffi_guard((), || {
             let w = wrapper_ref(state);
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+                signal_result_push_exit(callback, callback_ctx);
+                return;
+            }
             let handle = (w.runtime_handle)().handle().clone();
             let ctx_raw = callback_ctx as usize;
             // Clone the Arc so the spawned forwarder task owns a strong reference
@@ -2172,6 +2322,10 @@ pub fn build_reaction_vtable_from_boxed(
     extern "C" fn bootstrap_fn(state: *mut c_void, ctx: *const FfiBootstrapContext) -> FfiResult {
         catch_panic_ffi(|| {
             let w = wrapper_ref(state);
+            if let Some(error) = w.initialization.failure() {
+                emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Error, error);
+                return FfiResult::err(error.to_owned());
+            }
             let ffi_ctx = unsafe { &*ctx };
 
             let query_id = unsafe { ffi_ctx.query_id.to_string() };
@@ -2222,6 +2376,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
         status_forwarder: std::sync::Mutex::new(None),
+        initialization: InitializationState::default(),
     });
     // Heap-allocate the Arc handle and pass its raw pointer as the FFI
     // state. drop_fn reclaims the Box (and decrements the Arc); any
@@ -2508,6 +2663,8 @@ pub fn build_bootstrap_provider_vtable(
         request_id: FfiStr,
         server_id: FfiStr,
         source_id: FfiStr,
+        settings_json: FfiStr,
+        properties_json: FfiStr,
     ) -> *mut FfiBootstrapStream {
         ffi_guard(std::ptr::null_mut(), || {
             use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
@@ -2536,6 +2693,16 @@ pub fn build_bootstrap_provider_vtable(
             };
             let server_id_str = unsafe { server_id.to_string() };
             let source_id_str = unsafe { source_id.to_string() };
+            if settings_json.len > super::payload::MAX_FFI_PAYLOAD_BYTES
+                || properties_json.len > super::payload::MAX_FFI_PAYLOAD_BYTES
+                || settings_json.ptr.is_null()
+                || properties_json.ptr.is_null()
+            {
+                log::error!("Invalid bootstrap settings or properties buffer");
+                return std::ptr::null_mut();
+            }
+            let settings_json = unsafe { settings_json.to_string() };
+            let properties_json = unsafe { properties_json.to_string() };
 
             let provider = {
                 let wrapper = unsafe { &*(state as *const BootstrapProviderWrapper) };
@@ -2562,9 +2729,24 @@ pub fn build_bootstrap_provider_vtable(
                             return;
                         }
                     };
-                    let context = BootstrapContext::new_minimal(server_id_str, source_id_str);
-                    let outcome =
-                        rt.block_on(provider.bootstrap(request, &context, event_tx, None));
+                    let outcome = rt.block_on(async {
+                        let settings = serde_json::from_str::<
+                            Option<drasi_lib::config::SourceSubscriptionSettings>,
+                        >(&settings_json)
+                        .map_err(|error| anyhow::anyhow!("invalid bootstrap settings: {error}"))?;
+                        let properties =
+                            serde_json::from_str(&properties_json).map_err(|error| {
+                                anyhow::anyhow!("invalid bootstrap properties: {error}")
+                            })?;
+                        let context = BootstrapContext::with_properties(
+                            server_id_str,
+                            source_id_str,
+                            properties,
+                        );
+                        provider
+                            .bootstrap(request, &context, event_tx, settings.as_ref())
+                            .await
+                    });
                     let _ = result_tx.send(outcome.map_err(|e| format!("{e:#}")));
                 });
             if let Err(e) = spawned {
@@ -3035,8 +3217,8 @@ fn build_source_runtime_context(
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
-        Some(Arc::new(FfiStateStoreProxy {
-            vtable: ffi_ctx.state_store,
+        Some(Arc::new(unsafe {
+            FfiStateStoreProxy::new(ffi_ctx.state_store)
         }))
     };
     let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =
@@ -3063,7 +3245,7 @@ fn build_source_runtime_context(
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
-        update_tx,
+        update_tx: update_tx.into(),
         state_store,
         identity_provider,
         wal_provider,
@@ -3080,8 +3262,8 @@ fn build_reaction_runtime_context(
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
-        Some(Arc::new(FfiStateStoreProxy {
-            vtable: ffi_ctx.state_store,
+        Some(Arc::new(unsafe {
+            FfiStateStoreProxy::new(ffi_ctx.state_store)
         }))
     };
     let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =
@@ -3107,7 +3289,7 @@ fn build_reaction_runtime_context(
     let ctx = drasi_lib::ReactionRuntimeContext {
         instance_id,
         reaction_id: component_id,
-        update_tx,
+        update_tx: update_tx.into(),
         state_store,
         identity_provider,
         snapshot_fetcher,
@@ -4090,6 +4272,54 @@ mod status_forwarder_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn status_saturation_and_callback_revocation_multi_thread() {
         saturated_status_channels().await;
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn setup_panic_poisoning_preserves_the_first_failure_and_releases_rejected_resources() {
+        let state = InitializationState::default();
+        let first = state
+            .run(
+                || panic!("runtime setup failed"),
+                |()| panic!("initializer must not run after setup failure"),
+            )
+            .unwrap_err()
+            .to_owned();
+        assert!(first.contains("runtime setup failed"));
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let error = state
+            .run(
+                || resource,
+                |_| panic!("a failed instance cannot be initialized again"),
+            )
+            .unwrap_err();
+        assert_eq!(error, first);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn successful_initialization_preserves_existing_reinitialization_behavior() {
+        let state = InitializationState::default();
+        let calls = AtomicUsize::new(0);
+        for _ in 0..2 {
+            state
+                .run(
+                    || (),
+                    |()| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        FfiResult::ok()
+                    },
+                )
+                .unwrap();
+        }
+        assert!(state.failure().is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
 

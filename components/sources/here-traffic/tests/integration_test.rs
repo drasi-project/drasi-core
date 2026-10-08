@@ -236,7 +236,6 @@ async fn mount_incident_mock(
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .is_test(true)
@@ -364,13 +363,12 @@ async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
     .await
     .context("Did not observe incident DELETE")?;
 
-    core.stop().await?;
+    core.shutdown().await?;
 
     Ok(())
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_rate_limit_backoff() -> Result<()> {
     let mock_server = MockServer::start().await;
     let bbox = "52.5,13.3,52.6,13.5";

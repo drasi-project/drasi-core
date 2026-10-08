@@ -40,6 +40,7 @@ use drasi_lib::Reaction;
 /// output path, write mode, and Handlebars templates.
 pub struct FileReaction {
     base: ReactionBase,
+    cleanup_required: Mutex<bool>,
     config: FileReactionConfig,
     handlebars: Arc<Handlebars<'static>>,
     file_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -73,6 +74,7 @@ impl FileReaction {
 
         Ok(Self {
             base: ReactionBase::new(params),
+            cleanup_required: Mutex::new(false),
             config,
             handlebars: Arc::new(Self::build_handlebars()),
             file_locks: Self::new_file_locks(),
@@ -642,19 +644,17 @@ impl Reaction for FileReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        if *cleanup_required || self.base.processing_task.read().await.is_some() {
+            return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
+        }
+        *cleanup_required = true;
         log_component_start("File Reaction", &self.base.id);
 
         self.base
             .set_status(
                 ComponentStatus::Starting,
                 Some("Starting file reaction".to_string()),
-            )
-            .await;
-
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("File reaction started".to_string()),
             )
             .await;
 
@@ -666,7 +666,7 @@ impl Reaction for FileReaction {
         let repaired_files = self.repaired_files.clone();
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
-        let processing_task = tokio::spawn(async move {
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
             loop {
                 let query_result_arc = tokio::select! {
                     biased;
@@ -687,20 +687,27 @@ impl Reaction for FileReaction {
                 )
                 .await;
             }
-        });
-
-        self.base.set_processing_task(processing_task).await;
+        }).await?;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("File reaction started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await?;
+        let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
+        self.base.stop_common_gracefully().await?;
         self.base
             .set_status(
                 ComponentStatus::Stopped,
                 Some("File reaction stopped".to_string()),
             )
             .await;
+        *cleanup_required = false;
         Ok(())
     }
 
@@ -717,7 +724,204 @@ impl Reaction for FileReaction {
 mod tests {
     use super::*;
     use crate::config::{QueryConfig, TemplateSpec};
+    use drasi_lib::context::workers::{spawn_owned_worker, WorkerAlreadyOwned, WorkerCleanupError};
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    fn lifecycle_reaction(directory: &Path, mode: WriteMode) -> Result<FileReaction> {
+        let filename = if matches!(mode, WriteMode::PerChange) {
+            "order_{{after.id}}.json"
+        } else {
+            "orders.json"
+        };
+        FileReaction::from_builder(
+            "file-lifecycle".into(),
+            vec!["orders".into()],
+            FileReactionConfig {
+                output_path: directory.to_string_lossy().into_owned(),
+                write_mode: mode,
+                filename_template: Some(filename.into()),
+                routes: HashMap::new(),
+                default_template: None,
+            },
+            None,
+            true,
+        )
+    }
+
+    fn lifecycle_diff(sequence: u64) -> ResultDiff {
+        ResultDiff::Add {
+            data: serde_json::json!({"id": sequence}),
+            row_signature: sequence,
+        }
+    }
+
+    async fn enqueue_and_wait_for_dequeue(reaction: &FileReaction, sequence: u64) -> Result<()> {
+        reaction
+            .enqueue_query_result(QueryResult::new(
+                "orders".into(),
+                sequence,
+                chrono::Utc::now(),
+                vec![lifecycle_diff(sequence)],
+                HashMap::new(),
+            ))
+            .await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !reaction.base.priority_queue.is_empty().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_writes_remain_owned_after_cancelled_and_timed_out_stop() -> Result<()> {
+        for mode in [WriteMode::Append, WriteMode::Overwrite] {
+            let directory = TempDir::new()?;
+            let reaction = lifecycle_reaction(directory.path(), mode)?;
+            let output = directory.path().join("orders.json");
+            let lock = FileReaction::get_file_lock(&reaction.file_locks, &output).await;
+            let held = lock.lock().await;
+            reaction.start().await?;
+            enqueue_and_wait_for_dequeue(&reaction, 1).await?;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), reaction.stop())
+                    .await
+                    .is_err()
+            );
+            let error = reaction.stop().await.unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<WorkerCleanupError>(),
+                Some(WorkerCleanupError::TimedOut { .. })
+            ));
+            tokio::task::yield_now().await;
+            assert!(!reaction
+                .base
+                .processing_task
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .is_finished());
+            assert_eq!(reaction.status().await, ComponentStatus::Stopping);
+            assert!(reaction
+                .start()
+                .await
+                .unwrap_err()
+                .is::<WorkerAlreadyOwned>());
+            assert!(!output.exists());
+            drop(held);
+            reaction.stop().await?;
+            let content = tokio::fs::read_to_string(output).await?;
+            assert_eq!(
+                serde_json::from_str::<Value>(&content)?,
+                serde_json::to_value(lifecycle_diff(1))?
+            );
+            assert!(content.ends_with('\n'));
+            assert!(reaction.base.processing_task.read().await.is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_modes_retain_exact_output_across_three_restarts() -> Result<()> {
+        for mode in [
+            WriteMode::Append,
+            WriteMode::Overwrite,
+            WriteMode::PerChange,
+        ] {
+            let directory = TempDir::new()?;
+            let reaction = lifecycle_reaction(directory.path(), mode.clone())?;
+            reaction.stop().await?;
+            for sequence in 1..=3 {
+                reaction.start().await?;
+                assert!(reaction
+                    .start()
+                    .await
+                    .unwrap_err()
+                    .is::<WorkerAlreadyOwned>());
+                enqueue_and_wait_for_dequeue(&reaction, sequence).await?;
+                reaction.stop().await?;
+                let path = directory
+                    .path()
+                    .join(if matches!(mode, WriteMode::PerChange) {
+                        format!("order_{sequence}.json")
+                    } else {
+                        "orders.json".into()
+                    });
+                let content = tokio::fs::read_to_string(path).await?;
+                let actual = content
+                    .lines()
+                    .map(serde_json::from_str::<Value>)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let sequences = if matches!(mode, WriteMode::Append) {
+                    1..=sequence
+                } else {
+                    sequence..=sequence
+                };
+                let expected = sequences
+                    .map(|id| serde_json::to_value(lifecycle_diff(id)))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                assert_eq!(actual, expected);
+                assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+                assert!(reaction.base.processing_task.read().await.is_none());
+            }
+            if matches!(mode, WriteMode::PerChange) {
+                let entries =
+                    std::fs::read_dir(directory.path())?.collect::<std::io::Result<Vec<_>>>()?;
+                assert_eq!(entries.len(), 3);
+            }
+            reaction.stop().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_file_start_and_panicked_worker_require_cleanup() -> Result<()> {
+        let directory = TempDir::new()?;
+        let reaction = lifecycle_reaction(directory.path(), WriteMode::Append)?;
+        let shutdown = reaction.base.shutdown_tx.write().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reaction.start())
+                .await
+                .is_err()
+        );
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .is::<WorkerAlreadyOwned>());
+        drop(shutdown);
+        reaction.stop().await?;
+
+        spawn_owned_worker(&reaction.base.processing_task, async {
+            panic!("file worker failed")
+        })
+        .await?;
+        let error = reaction.stop().await.unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<WorkerCleanupError>(), Some(WorkerCleanupError::Join(cause)) if cause.is_panic())
+        );
+        assert!(reaction.base.processing_task.read().await.is_none());
+        let shutdown = reaction.base.shutdown_tx.write().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reaction.stop())
+                .await
+                .is_err()
+        );
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .is::<WorkerAlreadyOwned>());
+        drop(shutdown);
+        reaction.stop().await?;
+        reaction.start().await?;
+        reaction.stop().await?;
+        Ok(())
+    }
 
     fn create_test_config() -> FileReactionConfig {
         FileReactionConfig {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod checkpoint_store;
+mod durability;
 mod element_index;
 mod future_queue;
 mod index_backend;
@@ -29,6 +30,7 @@ use std::fmt::Display;
 pub use checkpoint_store::CheckpointStore;
 pub use checkpoint_store::SourceCheckpoint;
 use drasi_query_ast::api::QueryParseError;
+pub use durability::{DurabilityRequirementError, FailureMode, FailureSurvival, StorageDurability};
 pub use element_index::ElementArchiveIndex;
 pub use element_index::ElementIndex;
 pub use element_index::ElementResult;

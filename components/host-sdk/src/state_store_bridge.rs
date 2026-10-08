@@ -22,7 +22,9 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use drasi_lib::StateStoreProvider;
-use drasi_plugin_sdk::ffi::{FfiGetResult, FfiResult, FfiStr, FfiStringArray, StateStoreVtable};
+use drasi_plugin_sdk::ffi::{
+    FfiGetResult, FfiResult, FfiStorageDurability, FfiStr, FfiStringArray, StateStoreVtable,
+};
 
 /// Wraps an FFI body in `catch_unwind` and returns `default` on panic.
 ///
@@ -64,6 +66,7 @@ impl StateStoreVtableBuilder {
             key_count_fn: ss_key_count,
             sync_fn: ss_sync,
             drop_fn: ss_drop,
+            durability_fn: ss_durability,
         }
     }
 }
@@ -71,6 +74,20 @@ impl StateStoreVtableBuilder {
 fn provider_ref(state: *mut c_void) -> &'static dyn StateStoreProvider {
     let arc = unsafe { &*(state as *const Arc<dyn StateStoreProvider>) };
     arc.as_ref()
+}
+
+extern "C" fn ss_durability(state: *mut c_void, out: *mut FfiStorageDurability) -> FfiResult {
+    if state.is_null() || out.is_null() {
+        return FfiResult::err("ss_durability: null state or output".into());
+    }
+    ffi_guard(
+        || FfiResult::err("ss_durability: panic".into()),
+        || {
+            let declaration = FfiStorageDurability::from(provider_ref(state).durability());
+            unsafe { out.write(declaration) };
+            FfiResult::ok()
+        },
+    )
 }
 
 fn block_on<F: std::future::Future>(f: F) -> Option<F::Output> {
@@ -262,15 +279,26 @@ extern "C" fn ss_clear_store(state: *mut c_void, store_id: FfiStr) -> i64 {
     )
 }
 
-extern "C" fn ss_list_keys(state: *mut c_void, store_id: FfiStr) -> FfiStringArray {
+extern "C" fn ss_list_keys(
+    state: *mut c_void,
+    store_id: FfiStr,
+    out_keys: *mut FfiStringArray,
+) -> FfiResult {
     ffi_guard(
-        || FfiStringArray::from_vec(Vec::new()),
+        || FfiResult::err("ss_list_keys: panic".into()),
         || {
+            if out_keys.is_null() {
+                return FfiResult::err("ss_list_keys: null output".into());
+            }
             let provider = provider_ref(state);
             let store_id = unsafe { store_id.to_string() };
             match block_on(provider.list_keys(&store_id)) {
-                Some(Ok(keys)) => FfiStringArray::from_vec(keys),
-                _ => FfiStringArray::from_vec(Vec::new()),
+                Some(Ok(keys)) => {
+                    unsafe { out_keys.write(FfiStringArray::from_vec(keys)) };
+                    FfiResult::ok()
+                }
+                Some(Err(error)) => FfiResult::err(error.to_string()),
+                None => FfiResult::err("failed to build runtime".into()),
             }
         },
     )
@@ -322,7 +350,7 @@ extern "C" fn ss_sync(state: *mut c_void) -> FfiResult {
 
 extern "C" fn ss_drop(state: *mut c_void) {
     ffi_guard(
-        || (),
+        || log::error!("State-store provider panicked during release"),
         || {
             // Reconstruct the Box<Arc<...>> and drop it
             unsafe { drop(Box::from_raw(state as *mut Arc<dyn StateStoreProvider>)) };
@@ -340,6 +368,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StateStoreProvider for FailedRead {
+        fn durability(&self) -> drasi_core::interface::StorageDurability {
+            assert!(!self.0, "injected durability panic");
+            drasi_core::interface::StorageDurability::UNKNOWN
+        }
+
         async fn get(&self, _: &str, _: &str) -> StateStoreResult<Option<Vec<u8>>> {
             assert!(!self.0, "injected provider panic");
             Err(StateStoreError::Other("injected storage outage".into()))
@@ -370,7 +403,8 @@ mod tests {
             unreachable!()
         }
         async fn list_keys(&self, _: &str) -> StateStoreResult<Vec<String>> {
-            unreachable!()
+            assert!(!self.0, "injected provider panic");
+            Err(StateStoreError::Other("injected storage outage".into()))
         }
         async fn store_exists(&self, _: &str) -> StateStoreResult<bool> {
             unreachable!()
@@ -413,15 +447,104 @@ mod tests {
             unsafe { (table.get_fn)(table.state, store(), key()).into_result() }.unwrap(),
             None
         );
+        let mut keys = std::mem::MaybeUninit::uninit();
+        unsafe { (table.list_keys_fn)(table.state, store(), keys.as_mut_ptr()).into_result() }
+            .unwrap();
+        assert!(unsafe { keys.assume_init().into_vec() }.is_empty());
         unsafe { (table.set_fn)(table.state, store(), key(), b"saved".as_ptr(), 5).into_result() }
             .unwrap();
         assert_eq!(
             unsafe { (table.get_fn)(table.state, store(), key()).into_result() }.unwrap(),
             Some(b"saved".to_vec())
         );
+        let mut keys = std::mem::MaybeUninit::uninit();
+        unsafe { (table.list_keys_fn)(table.state, store(), keys.as_mut_ptr()).into_result() }
+            .unwrap();
+        assert_eq!(unsafe { keys.assume_init().into_vec() }, vec!["present"]);
         assert!(weak.upgrade().is_some());
         (table.drop_fn)(table.state);
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn list_errors_and_panics_are_not_empty_history() {
+        for panic in [false, true] {
+            let table = StateStoreVtableBuilder::build(Arc::new(FailedRead(panic)));
+            let mut keys = FfiStringArray::from_vec(vec!["untouched".into()]);
+            let error = unsafe {
+                (table.list_keys_fn)(table.state, FfiStr::from_str("store"), &mut keys)
+                    .into_result()
+            }
+            .expect_err("failed history lookup");
+            assert!(
+                error.contains(if panic { "panic" } else { "storage outage" }),
+                "{error}"
+            );
+            assert_eq!(unsafe { keys.into_vec() }, vec!["untouched"]);
+            (table.drop_fn)(table.state);
+        }
+    }
+
+    #[test]
+    fn durability_and_provider_ownership_survive_the_actual_proxy_boundary() {
+        use drasi_core::interface::StorageDurability;
+        use drasi_plugin_sdk::ffi::state_store_proxy::FfiStateStoreProxy;
+
+        let provider = Arc::new(MemoryStateStoreProvider::new());
+        let weak = Arc::downgrade(&provider);
+        let table = StateStoreVtableBuilder::build(provider.clone());
+        let proxy = Arc::new(unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) });
+        drop(provider);
+        assert_eq!(proxy.try_durability().unwrap(), StorageDurability::VOLATILE);
+        let retained = proxy.clone();
+        drop(proxy);
+        assert!(weak.upgrade().is_some());
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn actual_persistent_and_unknown_provider_declarations_cross_the_bridge() {
+        use drasi_core::interface::StorageDurability;
+        use drasi_plugin_sdk::ffi::state_store_proxy::FfiStateStoreProxy;
+
+        let directory = tempfile::tempdir().unwrap();
+        let persistent = drasi_state_store_redb::RedbStateStoreProvider::new(
+            directory.path().join("state.redb"),
+        )
+        .unwrap();
+        for (provider, expected) in [
+            (
+                Arc::new(persistent) as Arc<dyn StateStoreProvider>,
+                StorageDurability::LOCAL_POWER_LOSS,
+            ),
+            (Arc::new(FailedRead(false)), StorageDurability::UNKNOWN),
+        ] {
+            let table = StateStoreVtableBuilder::build(provider);
+            let proxy = unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) };
+            assert_eq!(proxy.try_durability().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn durability_failure_does_not_initialize_output_or_grant_a_guarantee() {
+        use drasi_core::interface::StorageDurability;
+        use drasi_plugin_sdk::ffi::state_store_proxy::FfiStateStoreProxy;
+
+        let table = StateStoreVtableBuilder::build(Arc::new(FailedRead(true)));
+        let mut output = FfiStorageDurability::from(StorageDurability::LOCAL_POWER_LOSS);
+        assert!(unsafe { (table.durability_fn)(table.state, &mut output).into_result() }.is_err());
+        assert_eq!(
+            StorageDurability::try_from(output).unwrap(),
+            StorageDurability::LOCAL_POWER_LOSS
+        );
+        assert!(
+            unsafe { (table.durability_fn)(table.state, std::ptr::null_mut()).into_result() }
+                .is_err()
+        );
+        let proxy = unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) };
+        assert!(proxy.try_durability().is_err());
+        assert_eq!(proxy.durability(), StorageDurability::UNKNOWN);
     }
 
     #[test]

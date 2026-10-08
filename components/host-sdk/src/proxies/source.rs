@@ -693,7 +693,7 @@ impl Source for SourceProxy {
         // transient pointer: the plugin SDK (>= 0.10.0) copies the vtable fields by value in
         // `FfiIdentityProviderProxy::new` during `initialize_fn` and never retains `ip_ptr`,
         // so it is safe to free the struct here. Plugins built against SDK < 0.10.0 retained
-        // the raw pointer; they are rejected by the loader's exact major.minor version gate
+        // the raw pointer; they are rejected by the loader's explicit ABI allowlist
         // (see `validate_plugin_metadata` in `host-sdk/src/loader.rs`), which prevents a
         // use-after-free. This frees only the `IdentityProviderVtable` struct (no `Drop`
         // impl) — the underlying state remains owned by the plugin proxy and is released via

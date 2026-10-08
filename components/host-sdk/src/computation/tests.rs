@@ -23,6 +23,15 @@ use std::{
     time::Duration,
 };
 
+#[path = "../../tests/fixtures/native_bootstrap.rs"]
+mod bootstrap_fixture;
+#[path = "bootstrap_tests.rs"]
+mod bootstrap_tests;
+#[path = "../../tests/fixtures/native_consumer.rs"]
+mod consumer_fixture;
+#[path = "consumer_tests.rs"]
+pub(super) mod consumer_tests;
+
 fn port(direction: PortDirection) -> PortDescriptor {
     PortDescriptor::new(
         PortId::try_new(if direction == PortDirection::Input {
@@ -308,9 +317,15 @@ fn definition() -> anyhow::Result<sdk::PluginDefinition> {
                 controlled: false,
                 transactional: true,
             }),
+            Arc::new(consumer_fixture::Factory(sdk::ConsumerMode::External)),
+            Arc::new(consumer_fixture::Factory(sdk::ConsumerMode::Transactional)),
         ],
         vec![GraphChangeCodec::schema()],
-    )
+    )?
+    .with_bootstrap_factories(vec![
+        Arc::new(bootstrap_fixture::Factory { progress: false }),
+        Arc::new(bootstrap_fixture::Factory { progress: true }),
+    ])
 }
 sdk::export_computation_plugin!(definition());
 fn plugin() -> Arc<NativePlugin> {
@@ -606,7 +621,7 @@ fn strict_metadata_roles_versions_schema_and_required_fields() {
         .unwrap();
     spec.configuration_version += 1;
     assert!(ComponentFactory::validate(plugin.factories()[0].as_ref(), &spec).is_err());
-    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.15.0");
+    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
 }
 
 #[test]

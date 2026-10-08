@@ -175,7 +175,7 @@ async fn test_file_reaction_append_insert_update_delete() -> Result<()> {
     assert!(lines.iter().any(|l| l.contains(r#""op":"update""#)));
     assert!(lines.iter().any(|l| l.contains(r#""op":"delete""#)));
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
     Ok(())
 }
 
@@ -230,7 +230,7 @@ async fn test_file_reaction_overwrite_mode_keeps_latest() -> Result<()> {
     let content = wait_for_file(&output_file, Duration::from_secs(10)).await?;
     assert!(content.contains(r#""name":"Latest""#));
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
     Ok(())
 }
 
@@ -270,7 +270,7 @@ async fn test_file_reaction_per_change_and_payload_filename() -> Result<()> {
     let content = wait_for_file(&output_file, Duration::from_secs(10)).await?;
     assert!(content.contains(r#""id":"a/b""#));
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
     Ok(())
 }
 
@@ -299,7 +299,7 @@ async fn test_file_reaction_fallback_raw_json() -> Result<()> {
     let content = wait_for_file(&output_file, Duration::from_secs(10)).await?;
     assert!(content.contains("\"ADD\"") && content.contains("\"id\""));
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
     Ok(())
 }
 
@@ -394,7 +394,7 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
         "Expected aggregation with updated template, got: {last_line}"
     );
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
     Ok(())
 }
 
@@ -462,7 +462,7 @@ async fn test_file_reaction_append_recovers_from_partial_line() -> Result<()> {
         "Partial line should have been truncated"
     );
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
     Ok(())
 }
 
@@ -520,6 +520,6 @@ async fn test_file_reaction_append_fsync_produces_valid_ndjson() -> Result<()> {
         "File should end with a newline character"
     );
 
-    drasi.stop().await?;
+    drasi.shutdown().await?;
     Ok(())
 }

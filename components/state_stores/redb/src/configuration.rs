@@ -47,6 +47,50 @@ pub struct RedbConfigurationStore {
 }
 
 impl RedbConfigurationStore {
+    /// Seed a previously unconfigured instance without replacing accepted state,
+    /// including an explicitly accepted empty definition at revision zero.
+    /// The exclusive session spans the existence check and the ordinary atomic
+    /// definition/receipt commit. No component construction occurs here.
+    pub async fn initialize_if_absent(
+        &self,
+        instance: &str,
+        request_id: &str,
+        desired: &DesiredInstance,
+    ) -> Result<bool> {
+        self.initialize_if_absent_with(instance, request_id, || Ok(desired.clone()))
+            .await
+    }
+
+    /// Invoke the host's seed validation only when no accepted definition exists.
+    /// Obsolete startup seeds must not override or prevent loading stored state.
+    pub async fn initialize_if_absent_with(
+        &self,
+        instance: &str,
+        request_id: &str,
+        seed: impl FnOnce() -> Result<DesiredInstance> + Send,
+    ) -> Result<bool> {
+        let session = self.open(instance).await?;
+        let owner = self.owner.clone();
+        let id = instance.to_owned();
+        let retained_session = session.clone();
+        let initialized = tokio::task::spawn_blocking(move || -> Result<bool> {
+            let _session = retained_session;
+            let transaction = owner.database.begin_read()?;
+            let table = transaction.open_table(CURRENT)?;
+            Ok(table.get(id.as_str())?.is_some())
+        })
+        .await
+        .context("configuration initialization worker failed")??;
+        let result = if initialized {
+            Ok(false)
+        } else {
+            let desired = seed()?.normalized()?;
+            session.commit(0, request_id, &desired).await.map(|_| true)
+        };
+        session.close().await?;
+        result
+    }
+
     pub fn new(path: impl AsRef<Path>, key: [u8; 32]) -> Result<Self> {
         let database =
             Database::create(path.as_ref()).context("open graph configuration database")?;
@@ -176,7 +220,7 @@ fn unseal<T: DeserializeOwned>(owner: &DatabaseOwner, context: &str, bytes: &[u8
     let plaintext = owner
         .cipher
         .decrypt(
-            XNonce::from_slice(&bytes[1..25]),
+            &XNonce::from(<[u8; 24]>::try_from(&bytes[1..25])?),
             Payload {
                 msg: &bytes[25..],
                 aad: context.as_bytes(),
@@ -391,6 +435,90 @@ impl ConfigurationSession for Session {
         let mut closed = self.0.closed.lock().await;
         *closed = true;
         self.0.release();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initialization_preserves_accepted_empty_revision_zero_across_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("configuration.redb");
+        let mut changed = DesiredInstance::default();
+        changed.topology.allow_incomplete = true;
+        {
+            let store = RedbConfigurationStore::new(&path, [17; 32])?;
+            assert!(
+                store
+                    .initialize_if_absent("first", "initial", &DesiredInstance::default())
+                    .await?
+            );
+            assert!(
+                !store
+                    .initialize_if_absent("first", "changed", &changed)
+                    .await?
+            );
+            let session = store.open("first").await?;
+            assert_eq!(session.load().await?, CommittedConfiguration::default());
+            assert!(session.receipt("initial").await?.unwrap().durable);
+            assert!(session.receipt("changed").await?.is_none());
+            assert!(store
+                .initialize_if_absent("first", "racing", &changed)
+                .await
+                .unwrap_err()
+                .downcast_ref::<ManagementError>()
+                .is_some());
+            session.close().await?;
+            let external = store.open("external").await?;
+            external
+                .commit(0, "accepted-elsewhere", &DesiredInstance::default())
+                .await?;
+            external.close().await?;
+        }
+        let store = RedbConfigurationStore::new(&path, [17; 32])?;
+        for instance in ["first", "external"] {
+            assert!(
+                !store
+                    .initialize_if_absent_with(instance, "obsolete", || {
+                        anyhow::bail!("obsolete seed must not be evaluated")
+                    })
+                    .await?
+            );
+            assert!(
+                !store
+                    .initialize_if_absent(instance, "changed", &changed)
+                    .await?
+            );
+            let session = store.open(instance).await?;
+            assert_eq!(session.load().await?, CommittedConfiguration::default());
+            session.close().await?;
+        }
+        assert!(
+            store
+                .initialize_if_absent("second", "initial", &changed)
+                .await?
+        );
+        let session = store.open("second").await?;
+        assert_eq!(session.load().await?.desired, changed);
+        session.close().await?;
+        let mut invalid = changed.clone();
+        invalid.version = 2;
+        assert!(store
+            .initialize_if_absent("third", "invalid", &invalid)
+            .await
+            .is_err());
+        assert!(
+            store
+                .initialize_if_absent("third", "initial", &DesiredInstance::default())
+                .await?
+        );
+        let session = store.open("third").await?;
+        assert_eq!(session.load().await?, CommittedConfiguration::default());
+        assert!(session.receipt("invalid").await?.is_none());
+        session.close().await?;
         Ok(())
     }
 }

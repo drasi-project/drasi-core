@@ -157,6 +157,8 @@ fn dependency(specification: &ComponentSpecification, name: &str) -> anyhow::Res
 
 fn resource_users(topology: &DesiredTopology, resource: &ResourceId) -> BTreeSet<ComponentId> {
     let mut users = topology.component_resource_users(resource);
+    let mut affected = BTreeSet::from([resource.clone()]);
+    topology.include_resource_dependents(&mut affected);
     for relationship in topology
         .relationships
         .iter()
@@ -165,7 +167,8 @@ fn resource_users(topology: &DesiredTopology, resource: &ResourceId) -> BTreeSet
         if relationship
             .pipe
             .resource_dependencies()
-            .contains_key(resource)
+            .keys()
+            .any(|id| affected.contains(id))
         {
             users.insert(relationship.definition.from.component.clone());
             users.insert(relationship.definition.to.component.clone());
