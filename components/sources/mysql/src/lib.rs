@@ -224,24 +224,25 @@ impl Source for MySqlReplicationSource {
         // keyed by query_id. The replication stream uses the minimum position
         // across all subscribers to determine where to start the binlog stream.
         if let Some(ref resume_bytes) = settings.resume_from {
-            match ReplicationState::from_position_bytes(resume_bytes) {
-                Some(state) => {
-                    info!(
-                        "Subscriber '{}' requesting resume from {}:{} on source '{}'",
-                        settings.query_id, state.binlog_file, state.binlog_position, self.base.id
-                    );
-                    self.subscriber_resume_positions
-                        .write()
-                        .await
-                        .insert(settings.query_id.clone(), state);
-                }
-                None => {
-                    warn!(
-                        "Failed to deserialize resume_from bytes for subscriber '{}' on source '{}'",
-                        settings.query_id, self.base.id
-                    );
-                }
-            }
+            let state = crate::types::decode_position(resume_bytes).map_err(|err| {
+                warn!(
+                    "Invalid MySQL resume position for subscriber '{}' on source '{}': {err:#}",
+                    settings.query_id, self.base.id
+                );
+                anyhow::anyhow!(
+                    "Invalid MySQL resume position for subscriber '{}' on source '{}'",
+                    settings.query_id,
+                    self.base.id
+                )
+            })?;
+            info!(
+                "Subscriber '{}' requesting resume from {}:{} on source '{}'",
+                settings.query_id, state.binlog_file, state.binlog_position, self.base.id
+            );
+            self.subscriber_resume_positions
+                .write()
+                .await
+                .insert(settings.query_id.clone(), state);
         }
 
         self.base.subscribe_with_bootstrap(&settings, "MySQL").await

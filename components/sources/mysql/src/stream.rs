@@ -47,6 +47,7 @@ pub struct ReplicationStream {
     base: SourceBase,
     decoder: MySqlDecoder,
     pending_changes: Option<Vec<SourceChange>>,
+    transaction_start: Option<BinlogCursor>,
     current_binlog_file: String,
     current_binlog_position: u32,
     current_gtid: Option<String>,
@@ -58,6 +59,12 @@ pub struct ReplicationStream {
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 const INITIAL_RECONNECT_DELAY_SECS: u64 = 5;
 const MAX_RECONNECT_DELAY_SECS: u64 = 60;
+
+#[derive(Debug, PartialEq, Eq)]
+struct BinlogCursor {
+    file: String,
+    position: u32,
+}
 
 struct ResolvedStartPosition {
     filename: String,
@@ -82,6 +89,7 @@ impl ReplicationStream {
             base,
             decoder,
             pending_changes: None,
+            transaction_start: None,
             current_binlog_file: String::new(),
             current_binlog_position: 0,
             current_gtid: None,
@@ -153,6 +161,7 @@ impl ReplicationStream {
 
     async fn run_replication_loop(&mut self, start_position: StartPosition) -> Result<()> {
         self.pending_changes = None;
+        self.transaction_start = None;
         self.current_gtid = match &start_position {
             StartPosition::FromGtid(gtid) => Some(gtid.clone()),
             _ => None,
@@ -300,25 +309,60 @@ impl ReplicationStream {
         self.current_event_timestamp = header.timestamp() as u64;
 
         match event.read_data()? {
-            Some(EventData::TableMapEvent(_)) => {}
+            Some(EventData::RowsEvent(rows_event)) => {
+                self.process_rows_event(stream, rows_event).await?;
+            }
+            other => self.process_control_event(&header, other).await?,
+        }
+
+        debug!(
+            "Processed event: type={} position={}",
+            header.event_type_raw(),
+            header.log_pos()
+        );
+
+        Ok(())
+    }
+
+    async fn process_control_event(
+        &mut self,
+        header: &BinlogEventHeader,
+        data: Option<EventData<'_>>,
+    ) -> Result<()> {
+        match data {
+            Some(EventData::TableMapEvent(_)) => {
+                self.remember_transaction_start(header)?;
+            }
             Some(EventData::RotateEvent(rotate_event)) => {
+                anyhow::ensure!(
+                    self.pending_changes.as_ref().is_none_or(Vec::is_empty),
+                    "MySQL binlog rotated before the buffered transaction committed"
+                );
+                self.transaction_start = None;
                 self.current_binlog_file = rotate_event.name().into_owned();
                 self.current_binlog_position = rotate_event.position() as u32;
             }
             Some(EventData::GtidEvent(gtid_event)) => {
                 let sid = Uuid::from_bytes(gtid_event.sid());
-                self.current_gtid = Some(format!("{sid}:{}", gtid_event.gno()));
+                self.start_new_transaction(header, Some(format!("{sid}:{}", gtid_event.gno())))?;
             }
-            Some(EventData::RowsEvent(rows_event)) => {
-                self.process_rows_event(stream, rows_event).await?;
+            Some(EventData::AnonymousGtidEvent(_)) => {
+                self.start_new_transaction(header, None)?;
             }
             Some(EventData::XidEvent(_)) => {
-                self.flush_transaction(&header).await?;
+                self.flush_transaction(header).await?;
             }
             Some(EventData::QueryEvent(query_event)) => {
                 let query = query_event.query();
-                if query.eq_ignore_ascii_case("COMMIT") || query.eq_ignore_ascii_case("ROLLBACK") {
-                    self.flush_transaction(&header).await?;
+                if query.eq_ignore_ascii_case("BEGIN") {
+                    // BEGIN follows GTID when enabled; do not replace that cursor.
+                    self.remember_transaction_start(header)?;
+                } else if query.eq_ignore_ascii_case("COMMIT")
+                    || query.eq_ignore_ascii_case("ROLLBACK")
+                {
+                    // Rolled-back transactional rows are absent from the binlog.
+                    // Rows logged with ROLLBACK are nontransactional and must survive.
+                    self.flush_transaction(header).await?;
                 }
             }
             Some(other) => {
@@ -331,12 +375,6 @@ impl ReplicationStream {
                 );
             }
         }
-
-        debug!(
-            "Processed event: type={} position={}",
-            header.event_type_raw(),
-            header.log_pos()
-        );
 
         Ok(())
     }
@@ -410,13 +448,16 @@ impl ReplicationStream {
         );
 
         // Attach the current replication position for checkpoint recovery
-        wrapper
-            .set_source_position(self.position_bytes_with_timestamp(self.current_event_timestamp));
+        wrapper.set_source_position(
+            self.replication_state(self.current_event_timestamp)
+                .to_position_bytes(),
+        );
 
         self.base.dispatch_event(wrapper).await
     }
 
     async fn flush_transaction(&mut self, header: &BinlogEventHeader) -> Result<()> {
+        let transaction_start = self.transaction_start.take();
         // Update position from commit header before dispatching
         let commit_position = match header.log_pos() {
             0 => self.current_binlog_position,
@@ -425,15 +466,29 @@ impl ReplicationStream {
         self.current_binlog_position = commit_position;
 
         if let Some(changes) = self.pending_changes.take() {
-            let position_bytes = self.position_bytes_with_timestamp(header.timestamp() as u64);
-            for change in changes {
+            if changes.is_empty() {
+                return Ok(());
+            }
+            let start =
+                transaction_start.context("MySQL transaction has no native replay start cursor")?;
+            anyhow::ensure!(
+                start.file == self.current_binlog_file,
+                "MySQL transaction replay cursor belongs to a different binlog file"
+            );
+            let position = self.replication_state(header.timestamp() as u64);
+            for (row_offset, change) in changes.into_iter().enumerate() {
                 let mut wrapper = SourceEventWrapper::new(
                     self.source_id.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
                     self.base.next_sequence(),
                 );
-                wrapper.set_source_position(position_bytes.clone());
+                wrapper.set_source_position(
+                    position
+                        .clone()
+                        .with_transaction_row(start.position, row_offset as u64)?
+                        .to_position_bytes(),
+                );
                 self.base.dispatch_event(wrapper).await?;
             }
         }
@@ -447,15 +502,49 @@ impl ReplicationStream {
         }
     }
 
-    /// Build a position token from the current replication state with a given timestamp.
-    fn position_bytes_with_timestamp(&self, timestamp: u64) -> bytes::Bytes {
-        let state = ReplicationState::new(
+    fn start_new_transaction(
+        &mut self,
+        header: &BinlogEventHeader,
+        gtid: Option<String>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.pending_changes.as_ref().is_none_or(Vec::is_empty),
+            "MySQL transaction started before the buffered transaction ended"
+        );
+        self.transaction_start = None;
+        self.remember_transaction_start(header)?;
+        self.current_gtid = gtid;
+        Ok(())
+    }
+
+    /// Record only the first GTID/BEGIN/TableMap cursor for this transaction.
+    /// The native event start is log_pos - event_size, after the four-byte magic.
+    fn remember_transaction_start(&mut self, header: &BinlogEventHeader) -> Result<()> {
+        if self.transaction_start.is_none() {
+            anyhow::ensure!(
+                !self.current_binlog_file.is_empty(),
+                "MySQL transaction started without a binlog filename"
+            );
+            let start = header
+                .log_pos()
+                .checked_sub(header.event_size())
+                .filter(|position| *position >= 4)
+                .context("MySQL event has an invalid native transaction start position")?;
+            self.transaction_start = Some(BinlogCursor {
+                file: self.current_binlog_file.clone(),
+                position: start,
+            });
+        }
+        Ok(())
+    }
+
+    fn replication_state(&self, timestamp: u64) -> ReplicationState {
+        ReplicationState::new(
             self.current_binlog_file.clone(),
             self.current_binlog_position,
             self.current_gtid.clone(),
             timestamp,
-        );
-        state.to_position_bytes()
+        )
     }
 
     fn should_process_table(&self, table: &TableMapEvent<'_>) -> bool {
@@ -505,9 +594,7 @@ impl ReplicationStream {
             return Ok(self.config.start_position.clone());
         }
 
-        // Find the minimum (earliest) position across all subscribers.
-        // For GTID-based replication, we use the full GTID set.
-        // For file+offset, we compare lexicographically by file then by position.
+        // Find the earliest subscriber cursor, including partial transaction rows.
         let mut min_state: Option<&ReplicationState> = None;
         for state in positions.values() {
             min_state = Some(match min_state {
@@ -529,7 +616,21 @@ impl ReplicationStream {
     }
 
     fn start_position_from_state(state: &ReplicationState) -> Option<StartPosition> {
-        if let Some(ref gtid) = state.gtid_set {
+        if let Some(start) = state.transaction_start_position() {
+            // A GTID or commit-end cursor would skip unprocessed rows in this
+            // transaction. Replay it and let each subscriber's row cursor filter.
+            if state.gtid_set.is_some() {
+                warn!(
+                    "MySQL partial-row checkpoint requires file-position replay of the same \
+                     binlog history, even with GTID enabled; resume across primary failover \
+                     or binlog renaming is unsupported and requires a fresh bootstrap"
+                );
+            }
+            Some(StartPosition::FromPosition {
+                file: state.binlog_file.clone(),
+                position: start,
+            })
+        } else if let Some(ref gtid) = state.gtid_set {
             Some(StartPosition::FromGtid(gtid.clone()))
         } else if !state.binlog_file.is_empty() {
             Some(StartPosition::FromPosition {
@@ -543,14 +644,7 @@ impl ReplicationStream {
 
     /// Compare two replication states; returns true if `a` is earlier than `b`.
     fn is_earlier(a: &ReplicationState, b: &ReplicationState) -> bool {
-        // Compare by binlog file name (lexicographic), then by position.
-        // Binlog files have names like `mysql-bin.000001` so lexicographic comparison
-        // correctly orders them when the numeric suffix length is consistent.
-        match a.binlog_file.cmp(&b.binlog_file) {
-            std::cmp::Ordering::Less => true,
-            std::cmp::Ordering::Greater => false,
-            std::cmp::Ordering::Equal => a.binlog_position < b.binlog_position,
-        }
+        a.compare_cursor(b).is_lt()
     }
 
     async fn close_stream(stream: BinlogStream) {
@@ -582,10 +676,15 @@ fn parse_gtid_set(gtid: &str) -> Result<Vec<Sid<'static>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::MySqlPositionComparator;
     use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
+    use drasi_lib::channels::SubscriptionResponse;
+    use drasi_lib::config::SourceSubscriptionSettings;
     use drasi_lib::sources::base::SourceBaseParams;
     use mysql_common::binlog::consts::{EventFlags, EventType};
+    use mysql_common::binlog::events::{AnonymousGtidEvent, GtidEvent, QueryEvent, RotateEvent};
     use std::sync::Arc as TestArc;
+    use std::time::Duration;
 
     fn insert_change(source_id: &str, id: &str) -> SourceChange {
         SourceChange::Insert {
@@ -617,17 +716,20 @@ mod tests {
             heartbeat_interval_seconds: 30,
         };
         let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
-        ReplicationStream::new(
+        let mut stream = ReplicationStream::new(
             config,
             source_id.to_string(),
             base,
             StdArc::new(AtomicBool::new(false)),
             StdArc::new(RwLock::new(HashMap::new())),
-        )
+        );
+        stream.current_binlog_file = "mysql-bin.000001".to_string();
+        stream.current_binlog_position = 4;
+        stream
     }
 
-    /// mysql is a native-cursor source: it sets `source_position` from the binlog
-    /// cursor but leaves `sequence` unset, relying on the framework to stamp it.
+    /// mysql keeps its native binlog cursor separate from the sequence allocated
+    /// by SourceBase.
     /// This verifies `push_change` (the immediate, unbuffered dispatch path)
     /// stamps a strictly increasing framework `sequence` on every event while
     /// preserving the binlog `source_position` (issue #828 / #817).
@@ -662,15 +764,21 @@ mod tests {
     }
 
     /// The transaction-buffered path (`flush_transaction`) must likewise stamp a
-    /// unique, increasing sequence on each buffered row while carrying the shared
-    /// commit `source_position`.
+    /// unique, increasing sequence and per-row position with the real comparator enabled.
     #[tokio::test]
     async fn flush_transaction_stamps_unique_sequences() {
         let source_id = "mysql-txn-source";
         let mut stream = test_stream(source_id);
+        stream
+            .base
+            .set_position_comparator(crate::types::MySqlPositionComparator)
+            .await;
         let mut rx = stream.base.test_subscribe().await;
 
         // Buffer several changes as a transaction, then flush them together.
+        let begin =
+            BinlogEventHeader::new(100, EventType::QUERY_EVENT, 1, 23, 27, EventFlags::empty());
+        stream.remember_transaction_start(&begin).unwrap();
         stream.ensure_transaction_buffer();
         let count = 4u64;
         for i in 1..=count {
@@ -680,16 +788,15 @@ mod tests {
                 .expect("buffered push_change should succeed");
         }
 
-        // log_pos = 0 makes flush_transaction keep the current binlog position.
         let header =
-            BinlogEventHeader::new(0, EventType::UNKNOWN_EVENT, 0, 0, 0, EventFlags::empty());
+            BinlogEventHeader::new(101, EventType::XID_EVENT, 1, 27, 200, EventFlags::empty());
         stream
             .flush_transaction(&header)
             .await
             .expect("flush_transaction should succeed");
 
         let mut sequences = Vec::new();
-        for _ in 0..count {
+        for row_offset in 0..count {
             let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
                 .await
                 .expect("timed out waiting for event")
@@ -698,6 +805,12 @@ mod tests {
                 event.source_position.is_some(),
                 "commit source_position must be preserved"
             );
+            let position =
+                crate::types::decode_position(event.source_position.as_ref().unwrap()).unwrap();
+            assert_eq!(position.binlog_position, 200);
+            assert_eq!(position.transaction_start_position(), Some(4));
+            assert_eq!(position.row_offset(), Some(row_offset));
+            assert_eq!(position.last_processed_timestamp, 101);
             sequences.push(event.sequence);
         }
 
@@ -705,6 +818,417 @@ mod tests {
             sequences,
             vec![1, 2, 3, 4],
             "buffered transaction rows must get unique, strictly increasing sequences"
+        );
+    }
+
+    fn transaction_changes(source_id: &str) -> Vec<SourceChange> {
+        let SourceChange::Insert { element: second } = insert_change(source_id, "row-2") else {
+            unreachable!();
+        };
+        let SourceChange::Insert { element: third } = insert_change(source_id, "row-3") else {
+            unreachable!();
+        };
+        vec![
+            insert_change(source_id, "row-1"),
+            SourceChange::Update { element: second },
+            SourceChange::Delete {
+                metadata: third.get_metadata().clone(),
+            },
+            insert_change(source_id, "row-4"),
+        ]
+    }
+
+    async fn flush_test_transaction(stream: &mut ReplicationStream, start: u32, end: u32) {
+        let begin = BinlogEventHeader::new(
+            100,
+            EventType::QUERY_EVENT,
+            1,
+            23,
+            start + 23,
+            EventFlags::empty(),
+        );
+        stream.remember_transaction_start(&begin).unwrap();
+        for (index, change) in transaction_changes(&stream.source_id)
+            .into_iter()
+            .enumerate()
+        {
+            // Each statement/RowsEvent may request a buffer; ordinals span the transaction.
+            stream.ensure_transaction_buffer();
+            let table_map = BinlogEventHeader::new(
+                100,
+                EventType::TABLE_MAP_EVENT,
+                1,
+                20,
+                start + 43 + index as u32 * 20,
+                EventFlags::empty(),
+            );
+            stream.remember_transaction_start(&table_map).unwrap();
+            stream.push_change(change).await.unwrap();
+        }
+        let commit =
+            BinlogEventHeader::new(101, EventType::XID_EVENT, 1, 27, end, EventFlags::empty());
+        stream.flush_transaction(&commit).await.unwrap();
+    }
+
+    async fn subscribe_at(
+        stream: &ReplicationStream,
+        query_id: &str,
+        position: &ReplicationState,
+    ) -> SubscriptionResponse {
+        stream
+            .subscriber_resume_positions
+            .write()
+            .await
+            .insert(query_id.to_string(), position.clone());
+        stream
+            .base
+            .subscribe_with_bootstrap(
+                &SourceSubscriptionSettings {
+                    source_id: stream.source_id.clone(),
+                    query_id: query_id.to_string(),
+                    enable_bootstrap: false,
+                    nodes: Default::default(),
+                    relations: Default::default(),
+                    resume_from: Some(position.to_position_bytes()),
+                    resume_sequence: Some(10),
+                    request_position_handle: false,
+                },
+                "MySQL",
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transaction_replay_delivers_only_remaining_rows_to_each_subscriber() {
+        let mut original = test_stream("mysql-rows");
+        original
+            .base
+            .set_position_comparator(MySqlPositionComparator)
+            .await;
+        original.current_gtid = Some("00000000-0000-0000-0000-000000000001:7".to_string());
+        let mut original_rx = original.base.test_subscribe().await;
+        flush_test_transaction(&mut original, 100, 300).await;
+        let mut positions = Vec::new();
+        for index in 0..4 {
+            let event = tokio::time::timeout(Duration::from_secs(1), original_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(&event.event, SourceEvent::Change(change)
+                if change.get_reference().element_id.as_ref() == format!("row-{}", index + 1)));
+            positions.push(event.source_position.clone().unwrap());
+        }
+
+        let first = crate::types::decode_position(&positions[0]).unwrap();
+        let middle = crate::types::decode_position(&positions[1]).unwrap();
+        let boundary = ReplicationState::new("mysql-bin.000001", 300, None, 0);
+        let mut replay = test_stream("mysql-rows");
+        replay
+            .base
+            .set_position_comparator(MySqlPositionComparator)
+            .await;
+        replay.current_gtid = original.current_gtid.clone();
+        let mut first_sub = subscribe_at(&replay, "after-first", &first).await;
+        let mut middle_sub = subscribe_at(&replay, "after-middle", &middle).await;
+        let mut complete_sub = subscribe_at(&replay, "snapshot", &boundary).await;
+
+        assert_eq!(
+            replay.determine_start_position().await.unwrap(),
+            StartPosition::FromPosition {
+                file: "mysql-bin.000001".to_string(),
+                position: 100,
+            },
+            "a partial row cursor must replay the transaction even when a GTID is present"
+        );
+        assert!(ReplicationStream::is_earlier(&first, &middle));
+        assert!(ReplicationStream::is_earlier(&middle, &boundary));
+
+        flush_test_transaction(&mut replay, 100, 300).await;
+        for expected in &positions[1..] {
+            let event = tokio::time::timeout(Duration::from_secs(1), first_sub.receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.source_position.as_ref(), Some(expected));
+            assert!(event.sequence > 10);
+        }
+        for expected in &positions[2..] {
+            let event = tokio::time::timeout(Duration::from_secs(1), middle_sub.receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.source_position.as_ref(), Some(expected));
+        }
+        flush_test_transaction(&mut replay, 100, 300).await;
+        for sub in [&mut first_sub, &mut middle_sub, &mut complete_sub] {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), sub.receiver.recv())
+                    .await
+                    .is_err(),
+                "duplicate/completed rows must remain suppressed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn row_positions_follow_the_new_binlog_file_after_rotation() {
+        let mut stream = test_stream("mysql-rotation");
+        stream
+            .base
+            .set_position_comparator(MySqlPositionComparator)
+            .await;
+        let mut receiver = stream.base.test_subscribe().await;
+        flush_test_transaction(&mut stream, 100, 300).await;
+        for _ in 0..4 {
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(stream.transaction_start.is_none());
+
+        stream.current_binlog_file = "mysql-bin.000002".to_string();
+        stream.current_binlog_position = 4;
+        flush_test_transaction(&mut stream, 4, 200).await;
+        for offset in 0..4 {
+            let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let position =
+                crate::types::decode_position(event.source_position.as_ref().unwrap()).unwrap();
+            assert_eq!(position.binlog_file, "mysql-bin.000002");
+            assert_eq!(position.transaction_start_position(), Some(4));
+            assert_eq!(position.row_offset(), Some(offset));
+            assert_eq!(
+                ReplicationStream::start_position_from_state(&position),
+                Some(StartPosition::FromPosition {
+                    file: "mysql-bin.000002".to_string(),
+                    position: 4,
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_transaction_file_is_rejected() {
+        let mut stream = test_stream("mysql-mismatched-file");
+        stream.transaction_start = Some(BinlogCursor {
+            file: "mysql-bin.000001".to_string(),
+            position: 4,
+        });
+        stream.current_binlog_file = "mysql-bin.000002".to_string();
+        stream.ensure_transaction_buffer();
+        stream
+            .push_change(insert_change("mysql-mismatched-file", "row"))
+            .await
+            .unwrap();
+        let commit =
+            BinlogEventHeader::new(101, EventType::XID_EVENT, 1, 27, 200, EventFlags::empty());
+        assert!(stream
+            .flush_transaction(&commit)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("different binlog file"));
+    }
+
+    fn query_event(query: &str) -> Option<EventData<'_>> {
+        Some(EventData::QueryEvent(
+            QueryEvent::new(&[][..], &b"test_db"[..]).with_query(query.as_bytes()),
+        ))
+    }
+
+    #[test]
+    fn transaction_start_requires_filename_and_valid_native_offset() {
+        let mut stream = test_stream("mysql-invalid-start");
+        let header =
+            BinlogEventHeader::new(100, EventType::QUERY_EVENT, 1, 23, 27, EventFlags::empty());
+        stream.current_binlog_file.clear();
+        assert!(stream
+            .remember_transaction_start(&header)
+            .unwrap_err()
+            .to_string()
+            .contains("without a binlog filename"));
+        stream.current_binlog_file = "mysql-bin.000001".to_string();
+        for log_pos in [22, 23, 26] {
+            let header = BinlogEventHeader::new(
+                100,
+                EventType::QUERY_EVENT,
+                1,
+                23,
+                log_pos,
+                EventFlags::empty(),
+            );
+            assert!(stream
+                .remember_transaction_start(&header)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid native transaction start position"));
+            assert!(stream.transaction_start.is_none());
+        }
+        stream.remember_transaction_start(&header).unwrap();
+        assert_eq!(stream.transaction_start.unwrap().position, 4);
+    }
+
+    #[tokio::test]
+    async fn gtid_and_anonymous_boundaries_replace_stale_cursor_but_begin_preserves_it() {
+        let mut stream = test_stream("mysql-gtid");
+        for anonymous in [false, true] {
+            let header =
+                BinlogEventHeader::new(100, EventType::GTID_EVENT, 1, 23, 123, EventFlags::empty());
+            let gtid = GtidEvent::new([1; 16], 7);
+            let event = if anonymous {
+                EventData::AnonymousGtidEvent(AnonymousGtidEvent(gtid))
+            } else {
+                EventData::GtidEvent(gtid)
+            };
+            stream
+                .process_control_event(&header, Some(event))
+                .await
+                .unwrap();
+            let expected = BinlogCursor {
+                file: "mysql-bin.000001".to_string(),
+                position: 100,
+            };
+            assert_eq!(stream.transaction_start.as_ref(), Some(&expected));
+            assert_eq!(
+                stream.current_gtid,
+                (!anonymous).then(|| "01010101-0101-0101-0101-010101010101:7".to_string())
+            );
+            let begin = BinlogEventHeader::new(
+                100,
+                EventType::QUERY_EVENT,
+                1,
+                23,
+                146,
+                EventFlags::empty(),
+            );
+            stream
+                .process_control_event(&begin, query_event("BEGIN"))
+                .await
+                .unwrap();
+            assert_eq!(stream.transaction_start.as_ref(), Some(&expected));
+            stream.transaction_start.as_mut().unwrap().position = 4;
+        }
+    }
+
+    #[tokio::test]
+    async fn rotation_and_new_gtid_reject_pending_rows_without_discarding_them() {
+        let mut stream = test_stream("mysql-boundary");
+        let begin =
+            BinlogEventHeader::new(100, EventType::QUERY_EVENT, 1, 23, 27, EventFlags::empty());
+        stream.remember_transaction_start(&begin).unwrap();
+        stream.ensure_transaction_buffer();
+        stream
+            .push_change(insert_change("mysql-boundary", "row"))
+            .await
+            .unwrap();
+        let header = BinlogEventHeader::new(
+            100,
+            EventType::ROTATE_EVENT,
+            1,
+            23,
+            100,
+            EventFlags::empty(),
+        );
+        let rotate = EventData::RotateEvent(RotateEvent::new(4, &b"mysql-bin.000002"[..]));
+        assert!(stream
+            .process_control_event(&header, Some(rotate))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("rotated before the buffered transaction committed"));
+        for event in [
+            EventData::GtidEvent(GtidEvent::new([1; 16], 8)),
+            EventData::AnonymousGtidEvent(AnonymousGtidEvent(GtidEvent::new([0; 16], 0))),
+        ] {
+            assert!(stream
+                .process_control_event(&header, Some(event))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("started before the buffered transaction ended"));
+        }
+        assert_eq!(stream.pending_changes.as_ref().unwrap().len(), 1);
+        assert_eq!(stream.current_binlog_file, "mysql-bin.000001");
+        assert_eq!(stream.transaction_start.as_ref().unwrap().position, 4);
+    }
+
+    #[tokio::test]
+    async fn empty_transaction_ends_without_a_replay_cursor_or_dispatch() {
+        let mut stream = test_stream("mysql-empty");
+        let mut receiver = stream.base.test_subscribe().await;
+        for query in ["COMMIT", "ROLLBACK"] {
+            stream.ensure_transaction_buffer();
+            let header = BinlogEventHeader::new(
+                100,
+                EventType::QUERY_EVENT,
+                1,
+                23,
+                200,
+                EventFlags::empty(),
+            );
+            stream
+                .process_control_event(&header, query_event(query))
+                .await
+                .unwrap();
+            assert_eq!(stream.current_binlog_position, 200);
+            assert!(stream.pending_changes.is_none());
+            assert!(stream.transaction_start.is_none());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), receiver.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_delivers_logged_nontransactional_rows_with_individual_positions() {
+        let mut stream = test_stream("mysql-rollback");
+        stream
+            .base
+            .set_position_comparator(MySqlPositionComparator)
+            .await;
+        let mut receiver = stream.base.test_subscribe().await;
+        let begin =
+            BinlogEventHeader::new(100, EventType::QUERY_EVENT, 1, 23, 27, EventFlags::empty());
+        stream
+            .process_control_event(&begin, query_event("BEGIN"))
+            .await
+            .unwrap();
+        stream.ensure_transaction_buffer();
+        for id in ["first", "second"] {
+            stream
+                .push_change(insert_change("mysql-rollback", id))
+                .await
+                .unwrap();
+        }
+        let rollback =
+            BinlogEventHeader::new(101, EventType::QUERY_EVENT, 1, 23, 200, EventFlags::empty());
+        stream
+            .process_control_event(&rollback, query_event("ROLLBACK"))
+            .await
+            .unwrap();
+        for offset in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("logged rows must not be discarded")
+                .unwrap();
+            let state =
+                crate::types::decode_position(event.source_position.as_ref().unwrap()).unwrap();
+            assert_eq!(state.row_offset(), Some(offset));
+            assert_eq!(state.transaction_start_position(), Some(4));
+            assert_eq!(state.binlog_position, 200);
+        }
+        assert!(stream.pending_changes.is_none());
+        assert!(stream.transaction_start.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), receiver.recv())
+                .await
+                .is_err()
         );
     }
 }
