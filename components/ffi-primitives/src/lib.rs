@@ -40,3 +40,8 @@ pub mod macros;
 pub mod types;
 
 pub use types::*;
+
+/// Marker embedded in every dynamic plugin that links the Rustls `ring`
+/// provider. `xtask build-plugins` checks for this exact NUL-terminated value
+/// in each staged cdylib before publication.
+pub const RUSTLS_RING_PROVIDER_MARKER: [u8; 27] = *b"drasi-rustls-provider=ring\0";

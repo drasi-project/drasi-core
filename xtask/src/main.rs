@@ -516,47 +516,8 @@ fn parse_target(args: &[String]) -> Option<String> {
     None
 }
 
-/// Strip a trailing glibc-version suffix from a `cargo-zigbuild` target triple.
-///
-/// `cargo-zigbuild` accepts targets like `x86_64-unknown-linux-gnu.2.28` to pin
-/// the glibc floor, but it still writes artifacts to the base-triple directory
-/// (`target/x86_64-unknown-linux-gnu/...`) and Rust/OCI metadata should record
-/// the canonical triple. This returns the base triple with any `.<major>.<minor>`
-/// glibc suffix removed; non-glibc targets are returned unchanged.
-fn strip_glibc_suffix(target: &str) -> &str {
-    // Only `*-linux-gnu` targets carry a glibc version suffix.
-    if let Some(idx) = target.find("-linux-gnu.") {
-        // Keep everything up to and including "-linux-gnu".
-        let end = idx + "-linux-gnu".len();
-        &target[..end]
-    } else {
-        target
-    }
-}
-
-/// Returns true when the target triple carries a `cargo-zigbuild` glibc-version
-/// suffix (e.g. `x86_64-unknown-linux-gnu.2.28`), which requires building with
-/// `cargo zigbuild` rather than plain `cargo`/`cross`.
-fn has_glibc_suffix(target: &str) -> bool {
-    target.contains("-linux-gnu.")
-}
-
-/// Build a `Command` from a build-tool string, splitting on whitespace so that
-/// multi-word tools like `"cargo zigbuild"` become the program `cargo` with a
-/// leading `zigbuild` subcommand argument.
-fn build_command(build_tool: &str) -> Command {
-    let mut parts = build_tool.split_whitespace();
-    let program = parts.next().unwrap_or("cargo");
-    let mut cmd = Command::new(program);
-    for extra in parts {
-        cmd.arg(extra);
-    }
-    cmd
-}
-
 struct PluginBuildOptions<'a> {
     build_tool: &'a str,
-    use_zigbuild: bool,
     workspace_root: &'a Path,
     target_directory: &'a Path,
     plugins: &'a [String],
@@ -565,12 +526,17 @@ struct PluginBuildOptions<'a> {
     jobs: usize,
 }
 
+fn has_rustls_crypto_provider_marker(plugin: &Path) -> std::io::Result<bool> {
+    let binary = fs::read(plugin)?;
+    Ok(binary
+        .windows(drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER.len())
+        .any(|window| window == drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER))
+}
+
 fn plugin_build_command(options: PluginBuildOptions<'_>) -> Command {
-    let mut cmd = build_command(options.build_tool);
+    let mut cmd = Command::new(options.build_tool);
     cmd.current_dir(options.workspace_root);
-    if !options.use_zigbuild {
-        cmd.arg("build");
-    }
+    cmd.arg("build");
     cmd.arg("--lib");
     for plugin in options.plugins {
         cmd.args(["-p", plugin]);
@@ -612,18 +578,7 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
 fn build_plugins(args: &[String]) {
     let release = args.iter().any(|a| a == "--release");
     let jobs = parse_jobs(args);
-    // The build target may carry a `cargo-zigbuild` glibc-version suffix
-    // (e.g. `x86_64-unknown-linux-gnu.2.28`). That suffix is passed through to
-    // the build tool to pin the glibc floor, but artifact paths and metadata use
-    // the canonical base triple.
-    let build_target = parse_target(args);
-    let target = build_target
-        .as_deref()
-        .map(|t| strip_glibc_suffix(t).to_string());
-    let use_zigbuild = build_target
-        .as_deref()
-        .map(has_glibc_suffix)
-        .unwrap_or(false);
+    let target = parse_target(args);
     let result = discover_dynamic_plugins();
 
     if result.plugins.is_empty() {
@@ -663,11 +618,7 @@ fn build_plugins(args: &[String]) {
     // Determine whether to use `cross` instead of `cargo`.
     // `cross` only works reliably on Linux hosts (it uses Docker with Linux containers).
     // On macOS/Windows hosts, use `cargo` — macOS cross-arch builds work via `rustup target add`.
-    // When a glibc-pinned target is requested we use `cargo zigbuild` instead of
-    // either, which sets a deterministic glibc floor for the whole link.
-    let use_cross = if use_zigbuild {
-        false
-    } else if let Some(ref t) = target {
+    let use_cross = if let Some(ref t) = target {
         let host = host_target_triple();
         if t != &host && host.contains("linux") {
             // Only use cross on Linux hosts, and only if cross is installed
@@ -684,13 +635,7 @@ fn build_plugins(args: &[String]) {
     } else {
         false
     };
-    let build_tool = if use_zigbuild {
-        "cargo zigbuild"
-    } else if use_cross {
-        "cross"
-    } else {
-        "cargo"
-    };
+    let build_tool = if use_cross { "cross" } else { "cargo" };
 
     println!(
         "=== Building {} cdylib plugins ({}{}, {}, {} parallel jobs) ===",
@@ -704,9 +649,6 @@ fn build_plugins(args: &[String]) {
         jobs
     );
 
-    // The value passed to `--target` on the build command. For zigbuild this is
-    // the glibc-suffixed triple; otherwise it matches the canonical `target`.
-    let cmd_target = build_target.clone().or_else(|| target.clone());
     println!(
         "=== Split into {} dependency-safe Cargo batches ===",
         result.build_batches.len()
@@ -720,11 +662,10 @@ fn build_plugins(args: &[String]) {
         );
         let mut cmd = plugin_build_command(PluginBuildOptions {
             build_tool,
-            use_zigbuild,
             workspace_root: &result.workspace_root,
             target_directory: &result.target_directory,
             plugins: batch,
-            target: cmd_target.as_deref(),
+            target: target.as_deref(),
             release,
             jobs,
         });
@@ -739,6 +680,7 @@ fn build_plugins(args: &[String]) {
 
     let lib_ext = plugin_lib_ext(target.as_deref());
     let mut missing_binaries = Vec::new();
+    let mut plugins_without_rustls_provider = Vec::new();
 
     for info in &result.plugins {
         let name = &info.package.name;
@@ -747,11 +689,29 @@ fn build_plugins(args: &[String]) {
         let dst = plugins_dir.join(format!("{lib_name}.{lib_ext}"));
 
         if src.exists() {
-            fs::copy(&src, &dst).unwrap_or_else(|e| {
+            if let Err(e) = fs::copy(&src, &dst) {
                 eprintln!("Failed to copy {lib_name} to plugins/: {e}");
-                0
-            });
-            let _ = fs::remove_file(&src);
+                missing_binaries.push(name.clone());
+                continue;
+            }
+            if let Err(e) = fs::remove_file(&src) {
+                eprintln!("Failed to remove {lib_name} after copying to plugins/: {e}");
+            }
+            match has_rustls_crypto_provider_marker(&dst) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "ERROR: {lib_name} does not declare the required Rustls crypto provider"
+                    );
+                    plugins_without_rustls_provider.push(name.clone());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "ERROR: failed to inspect {lib_name} for the Rustls crypto provider: {e}"
+                    );
+                    plugins_without_rustls_provider.push(name.clone());
+                }
+            }
         } else {
             eprintln!(
                 "ERROR: expected cdylib not found after build: {}",
@@ -783,13 +743,24 @@ fn build_plugins(args: &[String]) {
         clean_build_artifacts(&build_dir, &lib_name);
     }
 
-    if !missing_binaries.is_empty() {
-        eprintln!(
-            "\n=== {} of {} plugin binaries missing after build ===",
-            missing_binaries.len(),
-            result.plugins.len()
-        );
+    if !missing_binaries.is_empty() || !plugins_without_rustls_provider.is_empty() {
+        if !missing_binaries.is_empty() {
+            eprintln!(
+                "\n=== {} of {} plugin binaries missing after build ===",
+                missing_binaries.len(),
+                result.plugins.len()
+            );
+        }
         for name in &missing_binaries {
+            eprintln!("  - {name}");
+        }
+        if !plugins_without_rustls_provider.is_empty() {
+            eprintln!(
+                "\n=== {} plugin binaries missing the required Rustls crypto provider ===",
+                plugins_without_rustls_provider.len()
+            );
+        }
+        for name in &plugins_without_rustls_provider {
             eprintln!("  - {name}");
         }
         eprintln!("\nContents of build directory ({}):", build_dir.display());
@@ -1881,54 +1852,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn strips_glibc_suffix_from_gnu_triples() {
-        assert_eq!(
-            strip_glibc_suffix("x86_64-unknown-linux-gnu.2.28"),
-            "x86_64-unknown-linux-gnu"
-        );
-        assert_eq!(
-            strip_glibc_suffix("aarch64-unknown-linux-gnu.2.17"),
-            "aarch64-unknown-linux-gnu"
-        );
-    }
-
-    #[test]
-    fn leaves_non_suffixed_triples_unchanged() {
-        for t in [
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-musl",
-            "x86_64-pc-windows-gnu",
-            "aarch64-apple-darwin",
-        ] {
-            assert_eq!(strip_glibc_suffix(t), t);
-        }
-    }
-
-    #[test]
-    fn detects_glibc_suffix() {
-        assert!(has_glibc_suffix("x86_64-unknown-linux-gnu.2.28"));
-        assert!(has_glibc_suffix("aarch64-unknown-linux-gnu.2.17"));
-
-        assert!(!has_glibc_suffix("x86_64-unknown-linux-gnu"));
-        assert!(!has_glibc_suffix("x86_64-unknown-linux-musl"));
-        assert!(!has_glibc_suffix("x86_64-pc-windows-gnu"));
-    }
-
-    #[test]
-    fn build_command_splits_multiword_tools() {
-        // Single-word tool: program only, no leading args.
-        let cargo = build_command("cargo");
-        assert_eq!(cargo.get_program(), "cargo");
-        assert_eq!(cargo.get_args().count(), 0);
-
-        // Multi-word tool: program + subcommand arg.
-        let zig = build_command("cargo zigbuild");
-        assert_eq!(zig.get_program(), "cargo");
-        let args: Vec<_> = zig.get_args().collect();
-        assert_eq!(args, ["zigbuild"]);
-    }
-
     #[cfg(unix)]
     #[test]
     fn cosign_sign_command_failure_is_error() {
@@ -2418,12 +2341,11 @@ exit 2
             "drasi-reaction-http".to_string(),
         ];
         let command = plugin_build_command(PluginBuildOptions {
-            build_tool: "cargo zigbuild",
-            use_zigbuild: true,
+            build_tool: "cargo",
             workspace_root: Path::new("/workspace"),
             target_directory: Path::new("/workspace/target"),
             plugins: &plugins,
-            target: Some("x86_64-unknown-linux-gnu.2.28"),
+            target: Some("x86_64-unknown-linux-gnu"),
             release: true,
             jobs: 8,
         });
@@ -2435,7 +2357,7 @@ exit 2
         assert_eq!(
             args,
             [
-                "zigbuild",
+                "build",
                 "--lib",
                 "-p",
                 "drasi-source-http",
@@ -2446,7 +2368,7 @@ exit 2
                 "--target-dir",
                 "target",
                 "--target",
-                "x86_64-unknown-linux-gnu.2.28",
+                "x86_64-unknown-linux-gnu",
                 "--release",
                 "--jobs",
                 "8",
@@ -2461,7 +2383,6 @@ exit 2
         for build_tool in ["cargo", "cross"] {
             let command = plugin_build_command(PluginBuildOptions {
                 build_tool,
-                use_zigbuild: false,
                 workspace_root: Path::new("/workspace"),
                 target_directory: Path::new("/cache/drasi-target"),
                 plugins: &plugins,
@@ -2596,14 +2517,73 @@ exit 2
     }
 
     #[test]
-    fn plugin_lib_ext_and_name_match_base_gnu_triple() {
-        // After stripping the glibc suffix, the base -gnu triple yields a .so
-        // and a lib-prefixed name (regression guard for the zigbuild path).
-        let base = strip_glibc_suffix("x86_64-unknown-linux-gnu.2.28");
-        assert_eq!(plugin_lib_ext(Some(base)), "so");
+    fn plugin_lib_ext_and_name_match_gnu_triple() {
+        let target = "x86_64-unknown-linux-gnu";
+        assert_eq!(plugin_lib_ext(Some(target)), "so");
         assert_eq!(
-            plugin_lib_name("drasi-source-kubernetes", Some(base)),
+            plugin_lib_name("drasi-source-kubernetes", Some(target)),
             "libdrasi_source_kubernetes"
         );
+    }
+
+    #[test]
+    fn rejects_plugin_without_rustls_provider_marker() {
+        let dir = test_temp_dir("missing-rustls-provider");
+        let plugin = dir.join("libdrasi_source_kubernetes.so");
+        fs::write(&plugin, b"plugin without a provider marker")
+            .expect("plugin fixture should exist");
+
+        assert!(
+            !has_rustls_crypto_provider_marker(&plugin).expect("plugin fixture should be readable")
+        );
+
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[test]
+    fn accepts_plugin_with_rustls_provider_marker() {
+        let dir = test_temp_dir("rustls-provider");
+        let plugin = dir.join("libdrasi_source_kubernetes.so");
+        fs::write(
+            &plugin,
+            [
+                b"plugin with a provider marker".as_slice(),
+                drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER.as_slice(),
+            ]
+            .concat(),
+        )
+        .expect("plugin fixture should exist");
+
+        assert!(
+            has_rustls_crypto_provider_marker(&plugin).expect("plugin fixture should be readable")
+        );
+
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[test]
+    fn rejects_plugin_with_truncated_rustls_provider_marker() {
+        let dir = test_temp_dir("truncated-rustls-provider");
+        let plugin = dir.join("libdrasi_source_kubernetes.so");
+        fs::write(
+            &plugin,
+            &drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER
+                [..drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER.len() - 1],
+        )
+        .expect("plugin fixture should exist");
+
+        assert!(
+            !has_rustls_crypto_provider_marker(&plugin).expect("plugin fixture should be readable")
+        );
+
+        fs::remove_dir_all(dir).expect("test temp dir should be removed");
+    }
+
+    #[test]
+    fn returns_error_for_missing_plugin_marker_input() {
+        let plugin =
+            test_temp_dir("missing-rustls-provider-input").join("libdrasi_source_kubernetes.so");
+
+        assert!(has_rustls_crypto_provider_marker(&plugin).is_err());
     }
 }
