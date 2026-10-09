@@ -1448,6 +1448,12 @@ impl Operations {
         let mut instance = slot.take()?;
         let valid = instance.component.descriptor() == &graph.nodes[index].descriptor
             && instance.component.role() == graph.nodes[index].role;
+        #[cfg(feature = "test-support")]
+        if valid {
+            instance
+                .component
+                .bind_query_test_support(&graph.inspector(), slot.generation);
+        }
         if let Some(control) = self.peer_controls.get(&index) {
             if control.generation() == slot.generation {
                 if valid {

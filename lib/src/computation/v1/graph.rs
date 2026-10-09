@@ -562,6 +562,17 @@ impl Component {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    fn bind_query_test_support(
+        &mut self,
+        inspector: &super::ComputationInspector,
+        generation: super::ComponentGeneration,
+    ) {
+        if let Self::Transformer(component) | Self::Query(component) = self {
+            component.bind_query_test_support(inspector, generation);
+        }
+    }
+
     fn control_handler(&self) -> Option<Arc<dyn super::ControlHandler>> {
         match self {
             Self::Source(component) => component.control_handler(),

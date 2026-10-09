@@ -355,6 +355,10 @@ pub struct ContinuousQueryTransformer {
     draining_futures: bool,
     #[cfg(feature = "test-support")]
     test_session: Option<crate::test_support::QueryTestSession>,
+    #[cfg(feature = "test-support")]
+    test_control: Option<crate::test_support::QueryTestControl>,
+    #[cfg(feature = "test-support")]
+    test_observer: Option<Arc<dyn super::PublicationObserver>>,
     delivery_tracking: bool,
     pending_output: VecDeque<super::ChangeEnvelope>,
     replay_pending: Arc<AtomicBool>,
@@ -458,6 +462,10 @@ impl ContinuousQueryTransformer {
             draining_futures: false,
             #[cfg(feature = "test-support")]
             test_session: None,
+            #[cfg(feature = "test-support")]
+            test_control: None,
+            #[cfg(feature = "test-support")]
+            test_observer: None,
             delivery_tracking: false,
             pending_output: VecDeque::new(),
             replay_pending: Arc::new(AtomicBool::new(false)),
@@ -613,6 +621,11 @@ impl ContinuousQueryTransformer {
         mut self,
         scheduling: Arc<super::QuerySchedulingResource>,
     ) -> anyhow::Result<Self> {
+        #[cfg(feature = "test-support")]
+        anyhow::ensure!(
+            self.test_control.is_none(),
+            "a directly controlled query cannot also use an external scheduled source"
+        );
         anyhow::ensure!(
             !self
                 .results
@@ -623,6 +636,38 @@ impl ContinuousQueryTransformer {
             "bind the scheduling resource before starting a query"
         );
         self.scheduling = Some(scheduling);
+        Ok(self)
+    }
+
+    /// Attach a deterministic clock and committed-output frontier before activation.
+    ///
+    /// Supported with `ComponentBatch`/`ComputationGraph` query ownership. The graph
+    /// binds failure observation; callers must await component readiness before
+    /// requesting a drain. No extra evaluator or worker is created.
+    ///
+    /// This does not enable durable handoff replay. Use the existing
+    /// [`super::TransactionTransformer::from_query`] wrapper when that contract
+    /// is required. Immediate pipe acceptance is not outlet observation.
+    #[cfg(feature = "test-support")]
+    pub fn with_test_control(
+        mut self,
+        control: crate::test_support::QueryTestControl,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.test_control.is_none() && self.scheduling.is_none(),
+            "query already has a test control or external scheduling resource"
+        );
+        anyhow::ensure!(
+            !self
+                .results
+                .state
+                .read()
+                .map_err(|_| anyhow::anyhow!("query state poisoned"))?
+                .recovery_ready,
+            "attach the test control before query activation"
+        );
+        control.bind()?;
+        self.test_control = Some(control);
         Ok(self)
     }
 
@@ -1469,6 +1514,17 @@ impl Drop for ContinuousQueryTransformer {
 
 #[async_trait]
 impl ComputationComponent for ContinuousQueryTransformer {
+    #[cfg(feature = "test-support")]
+    fn bind_query_test_support(
+        &mut self,
+        inspector: &super::ComputationInspector,
+        generation: super::ComponentGeneration,
+    ) {
+        if let Some(control) = &self.test_control {
+            self.test_observer =
+                Some(control.observe_component(inspector, self.definition.id.clone(), generation));
+        }
+    }
     fn recovery_contract(&self) -> super::ComponentRecovery {
         let contract = match &self.source_progress {
             Some(progress) => self
@@ -1542,6 +1598,11 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
+        #[cfg(feature = "test-support")]
+        anyhow::ensure!(
+            self.test_control.is_none() || self.test_observer.is_some(),
+            "direct test-controlled queries require graph lifecycle ownership"
+        );
         {
             let mut state = self
                 .results
@@ -1610,11 +1671,11 @@ impl ComputationComponent for ContinuousQueryTransformer {
         self.results.notify.notify_waiters();
         self.sync_metrics()?;
         #[cfg(feature = "test-support")]
-        if let Some(control) = self
-            .scheduling
-            .as_ref()
-            .and_then(|scheduling| scheduling.test_control.as_ref())
-        {
+        if let Some(control) = self.test_control.as_ref().or_else(|| {
+            self.scheduling
+                .as_ref()
+                .and_then(|scheduling| scheduling.test_control.as_ref())
+        }) {
             self.test_session = Some(control.connect()?);
         }
         if let Some(scheduling) = &self.scheduling {

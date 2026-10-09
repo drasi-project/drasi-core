@@ -3,8 +3,11 @@
 
 //! Per-query deterministic timing on the native ComputationGraph runtime.
 //!
-//! Attach using [`crate::DrasiLibBuilder::with_query_test_control`]. No global
-//! clock, source timestamps, query configuration or production cadence changes.
+//! Attach using [`crate::DrasiLibBuilder::with_query_test_control`] or the actual
+//! [`crate::computation::v1::ContinuousQueryTransformer::with_test_control`] /
+//! [`crate::computation::v1::TransactionTransformer::with_test_control`] in a native
+//! component batch. No global clock, source timestamps, query configuration or
+//! production cadence changes.
 //! See `lib/docs/query-test-control.md` for ordering and recovery scope.
 
 use std::{
@@ -19,8 +22,8 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 
 use crate::{
     computation::v1::{
-        ComputationInspection, ComputationInspector, GraphError, PublicationObserver,
-        QueryPublicationMode,
+        ComponentGeneration, ComponentId, ComputationInspection, ComputationInspector, GraphError,
+        PublicationObserver, QueryPublicationMode,
     },
     error::{DrasiError, Result},
 };
@@ -47,7 +50,7 @@ pub struct DrainReport {
 
 /// An explicit physical eligibility clock and awaited native query frontier.
 ///
-/// One control binds to one builder query for its lifetime. Clones share time and
+/// One control binds to one query for its lifetime. Clones share time and
 /// serialization. Stopping/restarting that query retains the clock, but rebuilding
 /// a library requires a new control. This control is not persisted.
 #[derive(Clone)]
@@ -193,8 +196,24 @@ impl QueryTestControl {
     }
 
     pub(crate) fn observe(&self, inspector: &ComputationInspector) -> Arc<dyn PublicationObserver> {
-        let observer: Arc<dyn PublicationObserver> =
-            Arc::new(FailureObserver(Arc::downgrade(&self.inner)));
+        let observer: Arc<dyn PublicationObserver> = Arc::new(FailureObserver {
+            control: Arc::downgrade(&self.inner),
+            component: None,
+        });
+        inspector.observe(&observer);
+        observer
+    }
+
+    pub(crate) fn observe_component(
+        &self,
+        inspector: &ComputationInspector,
+        id: ComponentId,
+        generation: ComponentGeneration,
+    ) -> Arc<dyn PublicationObserver> {
+        let observer: Arc<dyn PublicationObserver> = Arc::new(FailureObserver {
+            control: Arc::downgrade(&self.inner),
+            component: Some((id, generation)),
+        });
         inspector.observe(&observer);
         observer
     }
@@ -251,16 +270,41 @@ struct PendingRequest {
     _operation: OwnedMutexGuard<()>,
 }
 
-struct FailureObserver(Weak<ControlInner>);
+struct FailureObserver {
+    control: Weak<ControlInner>,
+    component: Option<(ComponentId, ComponentGeneration)>,
+}
 
 impl PublicationObserver for FailureObserver {
     fn publish(&self, previous: &ComputationInspection, current: &ComputationInspection) {
-        let Some(inner) = self.0.upgrade() else {
+        let Some(inner) = self.control.upgrade() else {
             return;
         };
-        // This observer belongs to the ordinary query's private QueryGraph,
-        // including its scheduler, source adapters and output outlet, not siblings.
+        if let Some((id, generation)) = &self.component {
+            if !current
+                .observed
+                .components
+                .get(id)
+                .is_some_and(|node| node.generation == *generation)
+            {
+                return;
+            }
+        }
         if let Some(failure) = current.observed.components.iter().find_map(|(id, node)| {
+            // Ordinary controls observe their private QueryGraph. A directly
+            // assembled query observes only itself and actual immediate peers.
+            if let Some((query, _)) = &self.component {
+                if id != query
+                    && !current.desired.edges.iter().any(|edge| {
+                        (&edge.definition.from.component == query
+                            && &edge.definition.to.component == id)
+                            || (&edge.definition.to.component == query
+                                && &edge.definition.from.component == id)
+                    })
+                {
+                    return None;
+                }
+            }
             let failure = node.failure.as_ref()?;
             let unchanged = previous
                 .observed

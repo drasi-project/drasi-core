@@ -3,6 +3,10 @@
 
 #![cfg(feature = "test-support")]
 
+#[cfg(feature = "computation-rocksdb-tests")]
+#[path = "query_test_control/native.rs"]
+mod native;
+
 use std::{
     collections::HashMap,
     sync::{
