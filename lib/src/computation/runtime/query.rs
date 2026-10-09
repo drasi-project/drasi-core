@@ -124,6 +124,8 @@ impl PublicationObserver for QueryStatusObserver {
 }
 
 struct QueryExecution {
+    #[cfg(feature = "test-support")]
+    test_observer: Option<Arc<dyn PublicationObserver>>,
     catalog: QueryResultsCatalog,
     output_generation: OnceLock<QueryOutputGenerationReader>,
     source_bindings: Vec<Arc<SourceInstance>>,
@@ -224,6 +226,15 @@ impl QueryInstance {
             self.status.subscribe(),
         )?;
         let mut pipeline = pipeline;
+        #[cfg(feature = "test-support")]
+        let test_control = owner
+            .test_controls
+            .get()
+            .and_then(|controls| controls.get(&config.id));
+        #[cfg(feature = "test-support")]
+        if let Some(control) = test_control {
+            pipeline = pipeline.with_test_control(control.clone());
+        }
         runtime
             .index_factory
             .computation_backend(config.storage_backend.as_ref())?;
@@ -243,8 +254,12 @@ impl QueryInstance {
         graph_config.dispatch_buffer_capacity = Some(config.outbox_capacity.clamp(1, 1_000_000));
         let (graph, subscriptions) = pipeline.query(graph_config).build_with_subscriptions()?;
         let inspector = graph.inspector();
+        #[cfg(feature = "test-support")]
+        let test_observer = test_control.map(|control| control.observe(&inspector));
         let scope = ScopedGraph::new(graph, services.scope);
         Ok(QueryExecution {
+            #[cfg(feature = "test-support")]
+            test_observer,
             catalog,
             output_generation: OnceLock::new(),
             source_bindings,
@@ -579,6 +594,12 @@ impl RuntimeComponent for QueryInstance {
         };
         let mut life = execution.life.lock().await;
         life.activation = None;
+        #[cfg(feature = "test-support")]
+        if execution.test_observer.is_some() {
+            let result = life.scope.stop_test_query().await;
+            self.notify();
+            return result;
+        }
         let result = life.scope.stop().await;
         self.notify();
         result

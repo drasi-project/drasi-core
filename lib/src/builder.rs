@@ -126,6 +126,8 @@ pub struct DrasiLibBuilder {
     dispatch_buffer_capacity: Option<usize>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
+    #[cfg(feature = "test-support")]
+    query_test_controls: Vec<(String, crate::test_support::QueryTestControl)>,
     source_instances: Vec<(
         Box<dyn SourceTrait>,
         std::collections::HashMap<String, String>,
@@ -206,6 +208,8 @@ impl DrasiLibBuilder {
             dispatch_buffer_capacity: None,
             storage_backends: Vec::new(),
             query_configs: Vec::new(),
+            #[cfg(feature = "test-support")]
+            query_test_controls: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
             bootstrap_metadata: Vec::new(),
@@ -523,6 +527,21 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Attach a deterministic clock and native output frontier to a builder query.
+    ///
+    /// Only available with `test-support`. The control is not persisted and does
+    /// not change query configuration, source timestamps or uncontrolled queries.
+    /// See [`crate::test_support::QueryTestControl`] for the exact drain boundary.
+    #[cfg(feature = "test-support")]
+    pub fn with_query_test_control(
+        mut self,
+        query_id: impl Into<String>,
+        control: crate::test_support::QueryTestControl,
+    ) -> Self {
+        self.query_test_controls.push((query_id.into(), control));
+        self
+    }
+
     /// Build the DrasiLib instance.
     ///
     /// This validates the configuration, creates all components, and initializes the server.
@@ -576,6 +595,26 @@ impl DrasiLibBuilder {
     }
 
     async fn build_inner(self) -> Result<DrasiLib> {
+        #[cfg(feature = "test-support")]
+        let test_controls = {
+            let mut controls = std::collections::BTreeMap::new();
+            for (id, control) in self.query_test_controls {
+                if !self.query_configs.iter().any(|query| query.id == id) {
+                    return Err(DrasiError::invalid_config(format!(
+                        "test control references unknown builder query '{id}'"
+                    )));
+                }
+                if controls.insert(id.clone(), control).is_some() {
+                    return Err(DrasiError::invalid_config(format!(
+                        "duplicate test control for query '{id}'"
+                    )));
+                }
+            }
+            for control in controls.values() {
+                control.bind()?;
+            }
+            controls
+        };
         // Build the configuration
         let config = DrasiLibConfig {
             id: self.server_id.unwrap_or_else(|| "drasi-lib".to_string()),
@@ -652,6 +691,8 @@ impl DrasiLibBuilder {
             self.reaction_instances,
             self.bootstrap_metadata,
             self.wal_provider,
+            #[cfg(feature = "test-support")]
+            test_controls,
         )
         .await
     }

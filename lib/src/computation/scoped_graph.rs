@@ -239,6 +239,32 @@ impl ScopedGraph {
         Ok(())
     }
 
+    /// Test-controlled queries must be cancellable even with a deliberately
+    /// blocked output consumer. Use the graph's existing abort-and-await stop,
+    /// rather than its graceful edge-drain boundary.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn stop_test_query(&mut self) -> anyhow::Result<()> {
+        if self.run.is_none() {
+            return self.stop().await;
+        }
+        let control = self.published_control().await?;
+        let revision = control.desired_snapshot().revision;
+        let report = self
+            .drive(async move {
+                Ok(control
+                    .stop_components(revision, GraphSelection::All)
+                    .await?)
+            })
+            .await?;
+        anyhow::ensure!(
+            report.summary == super::v1::OperationSummary::Completed,
+            "controlled query stop failed: {:?}",
+            report.components
+        );
+        self.paused.clear();
+        Ok(())
+    }
+
     pub(crate) async fn shutdown(&mut self) -> anyhow::Result<()> {
         if self.disposed {
             return Ok(());

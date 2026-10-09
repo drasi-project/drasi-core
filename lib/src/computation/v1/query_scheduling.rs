@@ -30,6 +30,8 @@ use tokio::sync::watch;
 pub struct QuerySchedulingResource {
     queue: watch::Sender<Option<Weak<dyn FutureQueue>>>,
     closed: AtomicBool,
+    #[cfg(feature = "test-support")]
+    pub(crate) test_control: Option<crate::test_support::QueryTestControl>,
 }
 
 impl Default for QuerySchedulingResource {
@@ -37,10 +39,20 @@ impl Default for QuerySchedulingResource {
         Self {
             queue: watch::channel(None).0,
             closed: AtomicBool::new(false),
+            #[cfg(feature = "test-support")]
+            test_control: None,
         }
     }
 }
 impl QuerySchedulingResource {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn with_test_control(
+        mut self,
+        control: Option<crate::test_support::QueryTestControl>,
+    ) -> Self {
+        self.test_control = control;
+        self
+    }
     pub(super) fn ready(&self, queue: Arc<dyn FutureQueue>) {
         self.queue.send_replace(Some(Arc::downgrade(&queue)));
     }
@@ -117,6 +129,11 @@ impl EnvelopeSource for QueryScheduledSource {
         loop {
             if self.scheduling.closed.load(Ordering::Acquire) {
                 return Ok(None);
+            }
+            #[cfg(feature = "test-support")]
+            if self.scheduling.test_control.is_some() {
+                updates.changed().await?;
+                continue;
             }
             let queue = updates.borrow_and_update().as_ref().and_then(Weak::upgrade);
             let Some(queue) = queue else {

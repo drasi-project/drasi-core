@@ -58,6 +58,7 @@ Start with the guide for your task:
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
 | [Issues, gaps and next-phase work](docs/computation-graph-backlog.md) | Plain-English explanations of unfinished work, suggested priorities, complexity and disruption risk |
 | [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
+| [Deterministic query tests](docs/query-test-control.md) | Opt-in per-query clock control and the exact native committed-output/pipe-acceptance frontier |
 
 From the drasi-core repository root, run a complete in-process example:
 
