@@ -12,6 +12,10 @@ and the decisions about when to create, start, stop or replace them.
 This describes the implementation in this branch.
 **ComputationGraph is the only execution engine.**
 
+For a detailed implementation-oriented explanation, including the shift from
+ComponentGraph and where to work in the code, see the
+[maintainer's guide](computation-graph-maintainers-guide.md).
+
 Optional [managed configuration](managed-configuration.md) adds durable
 desired-state acceptance, component reconciliation and named snapshots
 directly to DrasiLib. Factories, storage and provider resolution are supplied

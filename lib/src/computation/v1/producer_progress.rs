@@ -313,6 +313,14 @@ impl GraphInputProgress {
         )
     }
 
+    pub(super) fn validate_durability(&self, persistent: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !persistent || !self.volatile_producer,
+            "persistent graph processing cannot recover through volatile middleware"
+        );
+        Ok(())
+    }
+
     pub async fn validate(
         &self,
         store: &dyn CheckpointStore,
@@ -324,10 +332,7 @@ impl GraphInputProgress {
             self.producer.is_some() || owner.is_none(),
             "graph input omitted its committed producer identity"
         );
-        anyhow::ensure!(
-            !persistent || !self.volatile_producer,
-            "persistent graph processing cannot recover through volatile middleware"
-        );
+        self.validate_durability(persistent)?;
         match (&self.producer, owner) {
             (Some(identity), owner) => {
                 anyhow::ensure!(

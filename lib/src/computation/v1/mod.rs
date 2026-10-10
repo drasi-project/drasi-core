@@ -135,6 +135,10 @@
 //! [`PipeCapability::RankedEventOrder`] is distinct from producer FIFO. This
 //! orders admitted events, without waiting for quiet sources or promising a
 //! watermark over unseen events.
+//! For explicit bounded waiting and within-source timestamp reordering, use
+//! [`SourceTimeMergeTransformer`]. Its source timestamps are mandatory; late
+//! inputs follow an explicit policy rather than entering an already-advanced
+//! ordered output. It does not change ordinary pipe/query scheduling.
 //!
 //! Acceptance is not handling, acknowledgement or durability. Operational errors
 //! remain visible on their component; independent components remain activated.
@@ -213,6 +217,8 @@ mod transaction_state;
 pub use transaction_state::TransactionContext;
 mod transaction_transformer;
 pub use transaction_transformer::*;
+mod time_merge;
+pub use time_merge::*;
 mod pipe;
 mod pipe_metrics;
 mod ports;

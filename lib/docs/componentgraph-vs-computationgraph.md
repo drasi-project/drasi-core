@@ -76,6 +76,17 @@ Scheduled notifications share that queue but have a distinct kind and rank.
 This orders available work, not unseen events, and does not wait for every source
 to advance.
 
+For bounded waiting and reordering, the native
+[`SourceTimeMergeTransformer`](computation-graph-time-merge.md) accepts multiple
+source streams and emits one nondecreasing source-change-time stream. It requires
+explicit source timestamps rather than receipt time or record properties.
+Reorder allowance, maximum residence wait, optional idle timeout and count/byte
+limits are configurable. Late events fail-and-retain by default, with explicit
+separate-route or discard alternatives. Persistent mode retains its buffer,
+frontier and unconfirmed output atomically and requires durable output pipes.
+It does not claim completeness beyond the configured lateness window or repair
+already-published query state.
+
 The source's dispatch mode controls admission to the query inbox: Channel
 backpressures; Broadcast can drop arrivals when full. The query's dispatch mode
 controls its outgoing results. Source order is part of the query's configuration
@@ -494,6 +505,9 @@ The main boundaries when adopting the functionality are:
   capability does not establish connector feature parity or deployment capacity.
 
 ## Implementation and further reading
+
+For the design rationale, execution model and code navigation behind this
+snapshot, see the [maintainer's guide](computation-graph-maintainers-guide.md).
 
 | Area | References |
 |---|---|

@@ -57,6 +57,7 @@ Start with the guide for your task:
 | Guide | What it covers |
 |---|---|
 | [Rust developer guide](docs/developer-guide/README.md) | A complete application, configuration choices, recovery, operations and extension development |
+| [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
 | [Opt-in resilience and recovery plan](docs/computation-graph-reliability-plan.md) | Proposed phased work for shared recovery services, pipe/provider activation, and a fast path without added recovery machinery |

@@ -9,6 +9,9 @@ tool. It contains the exact API names and rules that the shorter guides leave
 out. The APIs are under `drasi_lib::computation::v1` and are available without a
 feature opt-in.
 
+For an architectural explanation rather than an API reference, use the
+[maintainer's guide](computation-graph-maintainers-guide.md).
+
 ## Main types and ownership
 
 | Type | Responsibility |
@@ -94,6 +97,15 @@ state-dependent middleware. Choose memory-only state with `new` or atomic
 persistent state and saved output with `new_durable`. See the
 [middleware guide](computation-graph-middleware.md) for configuration, batching
 and recovery limits.
+
+`SourceTimeMergeTransformer` buffers multiple declared source streams and emits
+one source-change-time-ordered stream, including reordering within a source.
+Source timestamps are mandatory. Count/byte limits, a reorder allowance,
+maximum residence wait, optional idle timeout and explicit late-event policies
+bound the behavior. Memory-only and atomic persistent constructors are available;
+durable outputs require lossless persistent handoff. See the
+[source-time merge guide](computation-graph-time-merge.md) for native assembly,
+monitoring, held-event resolution and recovery limits.
 
 `TransactionTransformer` owns either a configured linear sequence whose
 implementations also implement `TransactionalTransformer`, or a query body using

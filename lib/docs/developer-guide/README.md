@@ -2,6 +2,10 @@
 
 **Implementation snapshot: 9 October 2026**
 
+For engineers changing Drasi itself, the separate
+[ComputationGraph maintainer's guide](../computation-graph-maintainers-guide.md)
+explains runtime design and implementation ownership.
+
 ## Drasi in your application
 
 Drasi maintains the answers to queries as data changes. A query can join data
@@ -860,6 +864,15 @@ source rank, optional source ID and `drop_when_full`. It is how ordered source
 admission is represented; the queue resource must be the actual shared object.
 Direct graph input merge is Arrival by default; `EventTimeAcrossStreams`
 orders available stream heads without breaking their individual sequence.
+
+For an explicitly buffered cross-source time merge, use the native
+[`SourceTimeMergeTransformer`](../computation-graph-time-merge.md). It requires
+source-supplied change timestamps, can reorder within each source, and has
+count/byte limits, maximum waiting, optional idle-source handling and explicit
+late-event policies. The default late policy fails and retains the event;
+separate routing and deliberate discard are opt-ins. Its durable constructor
+persists the buffer/frontier and unconfirmed output and requires durable output
+pipes. This is explicit native topology, not an ordinary queue setting.
 
 A retained pipe connects to a declared retained-store resource. Its capacity,
 durable declaration, retention policy and replay-gap policy must match actual
