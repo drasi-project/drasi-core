@@ -59,36 +59,20 @@ impl BinaryEnvelopeCodec {
 
     pub fn encode(&self, envelope: &ChangeEnvelope) -> Result<Vec<u8>> {
         self.registry.schema(envelope.changes().schema())?;
-        let mut lineage = Vec::new();
-        let mut parent = envelope.lineage();
-        while let Some(entry) = parent {
-            lineage.push((
-                Identity::envelope(entry.envelope_id()),
-                Metadata::from(entry.system().as_ref()),
-            ));
-            parent = entry.parent();
-        }
-        let entries: Vec<_> = envelope.annotations().entries().collect();
-        let frame = Frame {
-            format: Self::VERSION,
-            id: Identity::envelope(envelope.id()),
-            change_set: Identity {
-                namespace: Cow::Borrowed(envelope.changes().id().namespace()),
-                value: Buffer::borrowed(envelope.changes().id().value()),
-            },
-            schema: Descriptor::from(envelope.changes().schema()),
-            operations: envelope
-                .changes()
-                .operations()
-                .iter()
-                .map(Operation::from)
-                .collect(),
-            system: Metadata::from(envelope.system().as_ref()),
-            lineage,
-            context_identity: envelope.context_identity(),
-            annotations: entries.iter().map(Annotation::from).collect(),
-        };
-        encode_bounded_messagepack(&frame, self.max_bytes.get())
+        with_frame(envelope, |frame| {
+            encode_bounded_messagepack(frame, self.max_bytes.get())
+        })
+    }
+
+    /// Exact size of the complete binary envelope, without allocating encoded bytes.
+    /// This measures wire representation, not heap allocation or process memory.
+    /// The already-validated envelope does not need a decoding schema registry.
+    pub fn encoded_size(envelope: &ChangeEnvelope) -> Result<usize> {
+        with_frame(envelope, |frame| {
+            let mut counter = ByteCounter(0);
+            rmp_serde::encode::write_named(&mut counter, frame)?;
+            Ok(counter.0)
+        })
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<ChangeEnvelope> {
@@ -141,6 +125,61 @@ impl BinaryEnvelopeCodec {
             frame.context_identity,
             annotations,
         )?)
+    }
+}
+
+fn with_frame<T>(
+    envelope: &ChangeEnvelope,
+    use_frame: impl FnOnce(&Frame<'_>) -> Result<T>,
+) -> Result<T> {
+    let mut lineage = Vec::new();
+    let mut parent = envelope.lineage();
+    while let Some(entry) = parent {
+        lineage.push((
+            Identity::envelope(entry.envelope_id()),
+            Metadata::from(entry.system().as_ref()),
+        ));
+        parent = entry.parent();
+    }
+    let entries: Vec<_> = envelope.annotations().entries().collect();
+    let frame = Frame {
+        format: BinaryEnvelopeCodec::VERSION,
+        id: Identity::envelope(envelope.id()),
+        change_set: Identity {
+            namespace: Cow::Borrowed(envelope.changes().id().namespace()),
+            value: Buffer::borrowed(envelope.changes().id().value()),
+        },
+        schema: Descriptor::from(envelope.changes().schema()),
+        operations: envelope
+            .changes()
+            .operations()
+            .iter()
+            .map(Operation::from)
+            .collect(),
+        system: Metadata::from(envelope.system().as_ref()),
+        lineage,
+        context_identity: envelope.context_identity(),
+        annotations: entries.iter().map(Annotation::from).collect(),
+    };
+    use_frame(&frame)
+}
+
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.checked_add(bytes.len()).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "binary envelope size overflow")
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.write(bytes).map(|_| ())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

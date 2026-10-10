@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, watch};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 
 use super::{pipe_metrics::PipeMetrics, PipeMetricsSnapshot};
 use super::{
@@ -124,6 +128,137 @@ impl PipeProvider for BoundedPipeConfig {
     }
 }
 
+/// Volatile FIFO bounded by envelope count and full binary-envelope bytes.
+///
+/// One envelope larger than `max_bytes` is admitted only when no other byte
+/// reservations exist. It reserves the entire budget until received/discarded.
+/// Pending sends and downstream handling are not buffered bytes. Separate fan-out
+/// pipes each charge the complete envelope, even when its allocations are shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ByteBoundedPipeConfig {
+    pub capacity: usize,
+    pub max_bytes: usize,
+}
+
+impl PipeProvider for ByteBoundedPipeConfig {
+    fn specification(&self) -> Option<super::DesiredPipe> {
+        Some(super::DesiredPipe::ByteBounded(*self))
+    }
+
+    fn capabilities(&self) -> Result<PipeCapabilities, PipeError> {
+        let maximum = Semaphore::MAX_PERMITS.min(u32::MAX as usize);
+        if self.max_bytes == 0 || self.max_bytes > maximum {
+            return Err(PipeError::Backend(anyhow::anyhow!(
+                "pipe byte budget must be in 1..={maximum}, got {}",
+                self.max_bytes
+            )));
+        }
+        BoundedPipeConfig {
+            capacity: self.capacity,
+        }
+        .capabilities()
+    }
+
+    fn create(&self) -> Result<ProvidedPipe, PipeError> {
+        let capabilities = self.capabilities()?;
+        let pipe = Queue::<ByteEnvelope>::new(
+            capabilities,
+            self.capacity,
+            ByteBudget {
+                maximum: self.max_bytes,
+                permits: Arc::new(Semaphore::new(self.max_bytes)),
+            },
+        );
+        let control = pipe.sender.control.clone();
+        Ok(ProvidedPipe {
+            pipe: Box::new(pipe),
+            control,
+        })
+    }
+}
+
+trait QueuedEnvelope: Send + Sync + 'static {
+    type Budget: Send + Sync;
+    type Reservation: Send;
+
+    fn reserve(
+        envelope: &ChangeEnvelope,
+        budget: &Self::Budget,
+        metrics: &PipeMetrics,
+        counted_wait: bool,
+    ) -> impl Future<Output = Result<Self::Reservation, PipeError>> + Send;
+    fn queued(envelope: ChangeEnvelope, reservation: Self::Reservation) -> Self;
+    fn into_envelope(self) -> ChangeEnvelope;
+}
+
+impl QueuedEnvelope for ChangeEnvelope {
+    type Budget = ();
+    type Reservation = ();
+
+    fn reserve(
+        _: &ChangeEnvelope,
+        _: &(),
+        _: &PipeMetrics,
+        _: bool,
+    ) -> impl Future<Output = Result<(), PipeError>> + Send {
+        std::future::ready(Ok(()))
+    }
+    fn queued(envelope: ChangeEnvelope, _: ()) -> Self {
+        envelope
+    }
+    fn into_envelope(self) -> ChangeEnvelope {
+        self
+    }
+}
+
+struct ByteBudget {
+    maximum: usize,
+    permits: Arc<Semaphore>,
+}
+
+struct ByteEnvelope {
+    envelope: ChangeEnvelope,
+    reservation: OwnedSemaphorePermit,
+}
+
+impl QueuedEnvelope for ByteEnvelope {
+    type Budget = ByteBudget;
+    type Reservation = OwnedSemaphorePermit;
+
+    async fn reserve(
+        envelope: &ChangeEnvelope,
+        budget: &ByteBudget,
+        metrics: &PipeMetrics,
+        counted_wait: bool,
+    ) -> Result<Self::Reservation, PipeError> {
+        let size = super::BinaryEnvelopeCodec::encoded_size(envelope)
+            .map_err(|error| PipeError::Backend(error.into()))?;
+        // An oversized envelope occupies the whole budget, so it cannot share
+        // the queue with a normal or another oversized envelope.
+        let charge = size.min(budget.maximum);
+        if !counted_wait && budget.permits.available_permits() < charge {
+            metrics.blocked();
+        }
+        budget
+            .permits
+            .clone()
+            .acquire_many_owned(charge as u32)
+            .await
+            .map_err(|_| PipeError::Closed)
+    }
+    fn queued(envelope: ChangeEnvelope, reservation: Self::Reservation) -> Self {
+        Self {
+            envelope,
+            reservation,
+        }
+    }
+    fn into_envelope(self) -> ChangeEnvelope {
+        drop(self.reservation);
+        self.envelope
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Closure {
     Open,
@@ -160,52 +295,60 @@ impl PipeControl for Control {
     }
 }
 
-struct Sender {
-    sender: mpsc::Sender<ChangeEnvelope>,
+struct Sender<T: QueuedEnvelope> {
+    sender: mpsc::Sender<T>,
     control: Arc<Control>,
+    budget: T::Budget,
 }
 
 #[async_trait]
-impl EnvelopeSender for Sender {
+impl<T: QueuedEnvelope> EnvelopeSender for Sender<T> {
     async fn send(
         &self,
         envelope: ChangeEnvelope,
     ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         let mut closure = self.control.0.subscribe();
-        if self.sender.capacity() == 0 && *self.control.0.borrow() == Closure::Open {
+        let counted_wait = self.sender.capacity() == 0 && *self.control.0.borrow() == Closure::Open;
+        if counted_wait {
             self.control.1.blocked();
         }
         let permit = tokio::select! {
             biased;
-            _ = closure.wait_for(|state| *state != Closure::Open) => None,
-            permit = self.sender.reserve() => permit.ok(),
+            _ = closure.wait_for(|state| *state != Closure::Open) => Err(PipeError::Closed),
+            permit = async {
+                let reservation = T::reserve(&envelope, &self.budget, &self.control.1, counted_wait).await?;
+                // A count reservation must never survive an await: it would keep
+                // a closed receiver from finishing its drain.
+                let permit = self.sender.reserve().await.map_err(|_| PipeError::Closed)?;
+                Ok((permit, reservation))
+            } => permit,
         };
         // Holding the watch read guard makes enqueue and explicit close linearizable.
         // No await occurs after removing capacity or before returning acceptance.
         let state = self.control.0.borrow();
         match permit {
-            Some(permit) if *state == Closure::Open => {
+            Ok((permit, reservation)) if *state == Closure::Open => {
                 let receipt = EnqueueReceipt::new(envelope.id().clone());
                 self.control.1.accepted();
                 self.control.2.fetch_add(1, Ordering::AcqRel);
-                permit.send(envelope);
+                permit.send(T::queued(envelope, reservation));
                 Ok(receipt)
             }
-            _ => Err(SendFailure {
+            result => Err(SendFailure {
                 envelope,
-                error: PipeError::Closed,
+                error: result.err().unwrap_or(PipeError::Closed),
             }),
         }
     }
 }
 
-struct Receiver {
-    receiver: mpsc::Receiver<ChangeEnvelope>,
+struct Receiver<T: QueuedEnvelope> {
+    receiver: mpsc::Receiver<T>,
     control: Arc<Control>,
 }
 
 #[async_trait]
-impl EnvelopeReceiver for Receiver {
+impl<T: QueuedEnvelope> EnvelopeReceiver for Receiver<T> {
     async fn receive(&mut self) -> std::result::Result<Option<Delivery>, PipeError> {
         let mut closure = self.control.0.subscribe();
         loop {
@@ -232,7 +375,7 @@ impl EnvelopeReceiver for Receiver {
                     return Ok(envelope.map(|envelope| {
                         self.control.1.delivered();
                         self.control.2.fetch_sub(1, Ordering::AcqRel);
-                        Delivery::new(envelope, None)
+                        Delivery::new(envelope.into_envelope(), None)
                     }));
                 }
             }
@@ -240,7 +383,7 @@ impl EnvelopeReceiver for Receiver {
     }
 }
 
-impl Drop for Receiver {
+impl<T: QueuedEnvelope> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.control.cancel();
         self.control.1.discarded(self.receiver.len());
@@ -263,15 +406,27 @@ impl Drop for Receiver {
 /// discards buffered events when the receiver is next polled/dropped. Neither
 /// reverses already delivered processing or external effects. The pipe itself
 /// owns a sender: drop it after transferring endpoints for natural end-of-stream.
-pub struct BoundedPipe {
+pub struct BoundedPipe(Queue<ChangeEnvelope>);
+
+struct Queue<T: QueuedEnvelope> {
     capabilities: PipeCapabilities,
-    sender: Arc<Sender>,
-    receiver: Option<Receiver>,
+    sender: Arc<Sender<T>>,
+    receiver: Option<Receiver<T>>,
 }
 
 impl BoundedPipe {
     pub fn new(capacity: usize) -> std::result::Result<Self, PipeError> {
         let capabilities = BoundedPipeConfig { capacity }.capabilities()?;
+        Ok(Self(Queue::new(capabilities, capacity, ())))
+    }
+
+    pub fn control(&self) -> Arc<dyn PipeControl> {
+        self.0.sender.control.clone()
+    }
+}
+
+impl<T: QueuedEnvelope> Queue<T> {
+    fn new(capabilities: PipeCapabilities, capacity: usize, budget: T::Budget) -> Self {
         let (sender, receiver) = mpsc::channel(capacity);
         let (closure, _) = watch::channel(Closure::Open);
         let control = Arc::new(Control(
@@ -279,34 +434,46 @@ impl BoundedPipe {
             PipeMetrics::default(),
             AtomicUsize::new(0),
         ));
-        Ok(Self {
+        Self {
             capabilities,
             sender: Arc::new(Sender {
                 sender,
                 control: control.clone(),
+                budget,
             }),
             receiver: Some(Receiver { receiver, control }),
-        })
-    }
-
-    pub fn control(&self) -> Arc<dyn PipeControl> {
-        self.sender.control.clone()
+        }
     }
 }
 
 impl Pipe for BoundedPipe {
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
-        self.control().metrics()
+        self.0.metrics()
+    }
+    fn capabilities(&self) -> &PipeCapabilities {
+        self.0.capabilities()
+    }
+
+    fn sender(&self) -> Arc<dyn EnvelopeSender> {
+        self.0.sender()
+    }
+
+    fn take_receiver(&mut self) -> std::result::Result<Box<dyn EnvelopeReceiver>, PipeError> {
+        self.0.take_receiver()
+    }
+}
+
+impl<T: QueuedEnvelope> Pipe for Queue<T> {
+    fn metrics(&self) -> Option<PipeMetricsSnapshot> {
+        self.sender.control.metrics()
     }
     fn capabilities(&self) -> &PipeCapabilities {
         &self.capabilities
     }
-
     fn sender(&self) -> Arc<dyn EnvelopeSender> {
         self.sender.clone()
     }
-
-    fn take_receiver(&mut self) -> std::result::Result<Box<dyn EnvelopeReceiver>, PipeError> {
+    fn take_receiver(&mut self) -> Result<Box<dyn EnvelopeReceiver>, PipeError> {
         self.receiver
             .take()
             .map(|receiver| Box::new(receiver) as Box<dyn EnvelopeReceiver>)

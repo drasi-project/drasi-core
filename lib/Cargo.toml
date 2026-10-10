@@ -122,7 +122,7 @@ sha2 = "0.10"
 tempfile = "3.8"
 mockall = "0.12"
 tokio-test = "0.4"
-tokio = { version = "1.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "test-util"] }
 assert_matches = "1.5"
 serial_test = "3.0"
 pretty_assertions = "1.4"

@@ -361,13 +361,14 @@ impl ComputationTopologySource {
                     let definition = &pipe.relationship.definition;
                     let profile = match &pipe.relationship.pipe {
                         DesiredPipe::Bounded { .. } => "Bounded",
+                        DesiredPipe::ByteBounded(_) => "ByteBounded",
                         DesiredPipe::Broadcast { .. } => "Broadcast",
                         DesiredPipe::Retained(_) => "Retained",
                         DesiredPipe::Qos(_) => "Qos",
                         DesiredPipe::Ranked(_) => "Ranked",
                         DesiredPipe::External { .. } => "External",
                     };
-                    elements.insert(key.clone(), self.node(&key, "ComputationPipe", serde_json::json!({
+                    let mut properties = serde_json::json!({
                         "fromComponent": definition.from.component.as_str(), "fromPort": definition.from.port.as_str(),
                         "toComponent": definition.to.component.as_str(), "toPort": definition.to.port.as_str(),
                         "representation": pipe.representation(),
@@ -379,7 +380,11 @@ impl ComputationTopologySource {
                         "capacity": pipe.capabilities.as_ref().and_then(PipeCapabilities::capacity).map(|capacity| capacity.get()),
                         "orphanPermitted": pipe.relationship.policy.orphan_permitted,
                         "failurePhase": pipe.failure().map(|failure| format!("{:?}", failure.phase)),
-                    })));
+                    });
+                    if let DesiredPipe::ByteBounded(config) = &pipe.relationship.pipe {
+                        properties["maxBytes"] = config.max_bytes.into();
+                    }
+                    elements.insert(key.clone(), self.node(&key, "ComputationPipe", properties));
                     let relation = format!("v1:owns:{key}");
                     elements.insert(
                         relation.clone(),

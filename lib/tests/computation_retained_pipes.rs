@@ -1122,6 +1122,16 @@ mod durable {
                 .await?;
             self.outbox().read_from(key, after).await
         }
+        async fn read_page(
+            &self,
+            key: &str,
+            after: u64,
+            limits: drasi_core::interface::OutboxPageLimits,
+        ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+            self.reading(Fault::ReadOutbox, Fault::PauseReadOutbox, 2)
+                .await?;
+            self.outbox().read_page(key, after, limits).await
+        }
         async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
             self.outbox().read_latest_sequence(key).await
         }
@@ -1145,6 +1155,78 @@ mod durable {
         }
         async fn trim_to_capacity(&self, key: &str, capacity: usize) -> Result<usize, IndexError> {
             self.outbox().trim_to_capacity(key, capacity).await
+        }
+    }
+
+    #[tokio::test]
+    async fn paged_refill_cancellation_revocation_and_io_failure_preserve_committed_history() {
+        for revoke in [false, true] {
+            let directory = tempfile::tempdir().expect("directory");
+            let backend = fault_backend(directory.path(), true).await;
+            let store = IndexedEnvelopeStore::try_new_with_options(
+                backend.bundle(true),
+                codec(),
+                "edge",
+                NonZeroUsize::new(4).unwrap(),
+                RetentionPolicy::Backpressure,
+                IndexedJournalOptions {
+                    max_bytes: None,
+                    page_limits: Some(drasi_core::interface::OutboxPageLimits {
+                        max_records: NonZeroUsize::new(1).unwrap(),
+                        max_bytes: NonZeroUsize::new(1).unwrap(),
+                    }),
+                },
+            )
+            .expect("paged store");
+            let generation = store.acquire_generation().expect("generation");
+            for sequence in 1..=4 {
+                store
+                    .append(generation, &root("source", sequence, &[sequence as u16]))
+                    .await
+                    .expect("append");
+            }
+            backend.arm(Fault::PauseReadOutbox);
+            let mut refill = Box::pin(store.next(generation, 1));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = backend.entered.notified() => {},
+                    result = &mut refill => panic!("refill did not pause: {:?}", result.map(|entry| entry.map(|entry| entry.position))),
+                }
+            })
+            .await
+            .expect("paused read");
+            if revoke {
+                store.revoke_generation(generation);
+                backend.resume.notify_one();
+                assert!(refill.await.is_err(), "revoked page must not escape");
+            } else {
+                drop(refill);
+            }
+            let generation = store.acquire_generation().expect("new generation");
+            assert_eq!(
+                store
+                    .progress(generation)
+                    .await
+                    .expect("unchanged progress"),
+                0
+            );
+            backend.arm(Fault::ReadOutbox);
+            assert!(matches!(
+                store.next(generation, 1).await,
+                Err(PipeError::Backend(_))
+            ));
+            for sequence in 1..=4 {
+                assert_eq!(
+                    store
+                        .next(generation, sequence - 1)
+                        .await
+                        .expect("retry")
+                        .expect("history")
+                        .position,
+                    sequence
+                );
+            }
+            store.shutdown().await.expect("cleanup");
         }
     }
 

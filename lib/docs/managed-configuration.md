@@ -301,7 +301,7 @@ lock; concurrent independent processes sharing the file are not supported.
 Commits use redb transactions with `Durability::Immediate`. The current
 definition and request receipt commit together. Snapshots are atomic immutable
 copies of committed configuration. Request/snapshot records are retained; there
-is no automatic history pruning or key rotation.
+is no automatic history pruning unless receipt expiry is explicitly enabled.
 
 All definition, receipt and snapshot values use authenticated XChaCha20-Poly1305
 encryption. The host supplies a 32-byte key; no key or plaintext fallback is
@@ -309,6 +309,75 @@ stored in the database. A key-check record rejects the wrong key at open.
 Instance/request/snapshot names remain visible as table keys. Use appropriate
 filesystem permissions and a real external key provider. Losing the key loses
 access to stored configuration.
+
+### Bounded request history
+
+Default stores and memory-only management retain arbitrary request IDs and their
+original receipts indefinitely. Applications opting into expiry use
+`RedbConfigurationStore::new_with_options(path, key, ConfigurationStoreOptions {
+receipt_batch_capacity: Some(capacity) })`, with a caller-chosen `NonZeroUsize`.
+This bounds accepted receipts **per instance**, not total database bytes:
+definitions can vary in size, and snapshots and instance namespaces remain separate.
+
+Obtain each new operation's ID with `drasi.new_configuration_request_id().await`
+(or `ConfigurationSession::new_request_id`). Save that ID and reuse it for all
+retries of that operation. Do not generate a replacement ID to resolve an uncertain
+outcome. The helper also works without expiry, returning an ordinary UUID.
+The management driver refuses ID generation while acceptance is unconfirmed.
+For one-time initialization, obtain an ID from a temporary configuration session,
+close that session, then supply the ID to `initialize_if_absent`.
+
+Expiry IDs identify a persisted namespace and batch. A batch accepts at most
+`capacity` distinct requests, including accepted no-op changes. Once full, generating
+another ID atomically removes that batch's receipts and advances the batch number.
+All its IDs expire together, including generated-but-unused IDs. This is **not**
+a time-to-live or sliding retention window. An unused ID submitted to a full batch
+returns `RequestBatchFull`; old/foreign batch IDs return `RequestExpired`.
+Arbitrary or malformed IDs return `GeneratedRequestIdRequired`. Reusing a retained
+ID still returns its original receipt, or rejects changed content.
+
+Expiry means the old outcome is no longer available, **not that it failed**.
+Inspect the current committed definition and decide whether a genuinely new
+operation is appropriate. Expired IDs never become fresh requests after ordinary
+reopening; constant-size batch metadata replaces permanent expired-ID tombstones.
+Snapshot restoration does not rewind this metadata.
+
+Enabling expiry on an existing database expires its legacy receipts immediately,
+while preserving current definitions and named snapshots. It updates the database
+format so older software cannot reopen it under indefinite-retry semantics.
+The capacity is persisted; reopening requires the same explicit policy. Disabling
+or resizing it is rejected rather than silently changing retry guarantees.
+Standard Host/Server configuration recipes do not expose these owner options.
+
+### Snapshot cleanup
+
+`list_configuration_snapshots(after, limit)` returns a bounded page of names and
+saved revisions, without returning definitions. Pass the last returned name as the
+next exclusive cursor; ordering is provider-defined.
+`delete_configuration_snapshot(name, expected_revision)` removes only the matching
+saved revision, returns false for an absent name, and rejects a revision mismatch.
+Both memory management and redb support these operations. There is no automatic
+age-based deletion. Cleanup does not change current configuration, request
+receipts, processing state, or external effects.
+
+### Encryption-key rotation
+
+`store.rotate_key(replacement_key).await` atomically re-encrypts all live values,
+including receipt-policy metadata, in one immediate-durability transaction.
+Close every configuration session first, normally through each instance's
+`shutdown().await`. Rotation refuses live sessions and blocks new opens until
+the actual storage worker finishes, even if its waiting caller is cancelled.
+
+Provision the replacement key externally **before** rotation and retain both keys
+until success or reopening confirms the active key. A precommit failure preserves
+the old key. A failure with an uncertain commit result fences the provider:
+drop/reopen it with the externally retained keys to establish which is active,
+rather than attempting writes with an unconfirmed in-memory key.
+
+Rotation reads and rewrites one record at a time but an atomic rewrite can need
+substantial temporary disk space. It does not re-encrypt old free pages, backups,
+or filesystem snapshots and is **not secure erasure** of old ciphertext. Backup
+key retention and secure disposal remain operator responsibilities.
 
 ## Secrets and snapshots
 
@@ -336,6 +405,9 @@ Existing state/configuration compatibility checks still apply.
 `ConfigurationStore` / `ConfigurationSession` are narrow transactional interfaces,
 not aliases for `StateStoreProvider::set_many`: a generic state store may permit
 partial writes and is not sufficient for durable configuration acceptance.
+Custom session wrappers must forward request-ID generation and snapshot
+housekeeping to preserve their provider's policy. Snapshot housekeeping defaults
+to an explicit unsupported-operation error for providers that do not implement it.
 
 `HostManagementResources` supplies standard memory-index, middleware,
 transactional-registry and configuration-resolver recipes. Applications supply

@@ -7,6 +7,11 @@ DrasiLib is a Rust library that brings [Drasi](https://drasi.io/) change process
 
 DrasiLib is part of the [Drasi project](https://github.com/drasi-project), a [CNCF Sandbox](https://www.cncf.io/projects/drasi/) Data Change Processing platform.
 
+**New to the Rust library? Start with the [Rust developer guide](docs/developer-guide/README.md).**
+Learn application construction, direct graph composition, recovery, runtime
+management and extension development through a complete inventory application
+and focused alternatives. The guide covers this development branch.
+
 ## How It Works
 
 ```
@@ -29,11 +34,15 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-drasi-lib = "0.4"
+drasi-lib = { path = "../drasi-core/lib" }
 tokio = { version = "1", features = ["full"] }
 ```
 
-**Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
+This path assumes your application is beside a matching `drasi-core` checkout.
+The APIs in this branch are not necessarily available in published crate versions.
+The [development setup](docs/developer-guide/README.md#a-rust-project-and-a-complete-example) includes the application
+source/reaction dependencies and required toolchain. Non-jq examples do not need
+jq build tools.
 
 ## ComputationGraph runtime
 
@@ -47,6 +56,7 @@ Start with the guide for your task:
 
 | Guide | What it covers |
 |---|---|
+| [Rust developer guide](docs/developer-guide/README.md) | A complete application, configuration choices, recovery, operations and extension development |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
 | [Opt-in resilience and recovery plan](docs/computation-graph-reliability-plan.md) | Proposed phased work for shared recovery services, pipe/provider activation, and a fast path without added recovery machinery |

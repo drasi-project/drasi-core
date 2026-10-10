@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::interface::{IndexError, OutboxWriter};
+use crate::interface::{IndexError, OutboxPageLimits, OutboxWriter};
 
 pub(super) struct GroupOutbox {
     inner: Arc<dyn OutboxWriter>,
@@ -69,6 +69,17 @@ impl OutboxWriter for GroupOutbox {
         self.inner.read_latest_sequence(&self.key(query_id)?).await
     }
 
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_sequence: u64,
+        limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        self.inner
+            .read_page(&self.key(query_id)?, after_sequence, limits)
+            .await
+    }
+
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
         self.inner.clear(&self.key(query_id)?).await
     }
@@ -124,14 +135,46 @@ mod tests {
     #[tokio::test]
     async fn group_outbox_rejects_invalid_keys_on_every_operation() {
         let writer = GroupOutbox::new(Arc::new(InMemoryOutboxWriter::new()), None);
+        let limits = OutboxPageLimits {
+            max_records: std::num::NonZeroUsize::new(1).unwrap(),
+            max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
+        };
         for key in ["", "\0", "a\0b"] {
             assert!(writer.append(key, 1, b"data").await.is_err());
             assert!(writer.read_from(key, 0).await.is_err());
+            assert!(writer.read_page(key, 0, limits).await.is_err());
             assert!(writer.read_latest_sequence(key).await.is_err());
             assert!(writer.clear(key).await.is_err());
             assert!(writer.append_and_trim(key, 1, b"data", 1).await.is_err());
             assert!(writer.trim_before(key, 1).await.is_err());
             assert!(writer.trim_to_capacity(key, 1).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn group_outbox_pages_preserve_namespace_and_limits() {
+        let inner = Arc::new(InMemoryOutboxWriter::new());
+        let processor = GroupOutbox::new(inner.clone(), None);
+        let journal = GroupOutbox::new(inner, Some("q"));
+        processor.append("q", 1, b"processor").await.unwrap();
+        journal.append("q", 1, b"journal").await.unwrap();
+        journal.append("q", 2, b"next").await.unwrap();
+        let limits = OutboxPageLimits {
+            max_records: std::num::NonZeroUsize::new(1).unwrap(),
+            max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
+        };
+        assert_eq!(
+            processor.read_page("q", 0, limits).await.unwrap(),
+            vec![(1, b"processor".to_vec())]
+        );
+        assert_eq!(
+            journal.read_page("q", 0, limits).await.unwrap(),
+            vec![(1, b"journal".to_vec())]
+        );
+        assert_eq!(
+            journal.read_page("q", 1, limits).await.unwrap(),
+            vec![(2, b"next".to_vec())]
+        );
+        assert!(journal.read_page("q", 2, limits).await.unwrap().is_empty());
     }
 }

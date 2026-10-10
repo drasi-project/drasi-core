@@ -25,6 +25,7 @@ pub enum DesiredPipe {
     Bounded {
         capacity: usize,
     },
+    ByteBounded(crate::computation::v1::ByteBoundedPipeConfig),
     Broadcast {
         capacity: usize,
         lag_policy: crate::computation::v1::BroadcastLagPolicy,
@@ -253,7 +254,7 @@ impl DesiredPipe {
             Self::Qos(config) => config.resource_dependencies(),
             Self::Ranked(config) => config.resource_dependencies(),
             Self::External { resources, .. } => resources.clone(),
-            Self::Bounded { .. } | Self::Broadcast { .. } => BTreeMap::new(),
+            Self::Bounded { .. } | Self::ByteBounded(_) | Self::Broadcast { .. } => BTreeMap::new(),
         }
     }
 
@@ -265,6 +266,7 @@ impl DesiredPipe {
             Self::Bounded { capacity } => Box::new(crate::computation::v1::BoundedPipeConfig {
                 capacity: *capacity,
             }),
+            Self::ByteBounded(config) => Box::new(*config),
             Self::Broadcast {
                 capacity,
                 lag_policy,

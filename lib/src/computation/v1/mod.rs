@@ -123,8 +123,11 @@
 //! unavailable source. Only actual finite exhaustion closes outgoing pipes,
 //! so filters and fanin drain naturally even if providers retained sender clones.
 //! Failed or stopped producers leave their bindings idle, not falsely exhausted.
-//! Queue capacity counts queued envelopes, not bytes, component-local state,
-//! in-flight processing, or a transform's caller-allocated result vector.
+//! Count-only capacity is the default. [`ByteBoundedPipeConfig`] and optional
+//! retained/non-shared QoS journal budgets also charge full binary-envelope size.
+//! They do not bound component-local state, in-flight processing, or a transform's
+//! caller-allocated result vector. Persistent journals can opt into bounded
+//! history pages without weakening full startup validation.
 //! Ordinary continuous-query pipelines explicitly use [`RankedInputQueue`]:
 //! one shared bounded queue ordered by producer progress, merging available
 //! stream heads by wrapper event time and declaration rank. Scheduled signals
@@ -229,6 +232,7 @@ mod inspection;
 pub use inspection::*;
 mod inventory;
 pub use inventory::*;
+mod journal_budget;
 mod qos_pipe;
 mod query_bootstrap;
 mod query_codec;

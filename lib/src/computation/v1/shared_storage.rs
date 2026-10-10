@@ -64,6 +64,25 @@ impl SharedStorageGroup {
     ) -> Result<Arc<QosChannel>, PipeError> {
         QosChannel::shared(definition, &self.owner, journal, codec, replay).await
     }
+
+    pub async fn channel_with_page_limits(
+        &self,
+        definition: QosChannelDefinition,
+        journal: &str,
+        codec: EnvelopeCodec,
+        replay: ReplayOptions,
+        page_limits: drasi_core::interface::OutboxPageLimits,
+    ) -> Result<Arc<QosChannel>, PipeError> {
+        QosChannel::shared_with_page_limits(
+            definition,
+            &self.owner,
+            journal,
+            codec,
+            replay,
+            page_limits,
+        )
+        .await
+    }
 }
 
 #[async_trait]

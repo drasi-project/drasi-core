@@ -15,6 +15,8 @@ use drasi_lib::computation::v1::*;
 
 #[path = "computation_qos/configured.rs"]
 mod configured;
+#[path = "computation_qos/reliability.rs"]
+mod reliability;
 #[path = "computation_qos/replay.rs"]
 mod replay;
 
@@ -765,7 +767,7 @@ struct ModelConsumer {
 async fn seeded_qos_schedules_match_an_independent_acceptance_and_completion_ledger() -> Result<()>
 {
     let mut exercised = [0; 8];
-    for seed in 1..=32_u64 {
+    for seed in 1..=128_u64 {
         let retention = if seed % 2 == 0 {
             RetentionPolicy::Backpressure
         } else {
@@ -794,7 +796,7 @@ async fn seeded_qos_schedules_match_an_independent_acceptance_and_completion_led
         let mut accepted: Vec<ChangeEnvelope> = Vec::new();
         let mut schedule = seed;
         tokio::time::timeout(Duration::from_secs(5), async {
-            for step in 0..128 {
+            for step in 0..1024 {
                 schedule = schedule
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
@@ -804,7 +806,7 @@ async fn seeded_qos_schedules_match_an_independent_acceptance_and_completion_led
                 let oldest = head
                     .saturating_sub(definition.capacity.get() as u64)
                     .saturating_add(1);
-                if action == 0 || action == 1 || action == 6 && step < 96 {
+                if action == 0 || action == 1 || action == 6 && step < 768 {
                     let next = event(head * 3)?;
                     let blocked = retention == RetentionPolicy::Backpressure
                         && head >= definition.capacity.get() as u64

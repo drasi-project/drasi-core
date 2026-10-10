@@ -14,9 +14,11 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::computation::{ComputationIndexes, ComputationTransaction};
+use drasi_core::interface::OutboxPageLimits;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
+use super::journal_budget::{JournalAppend, JournalBudget};
 use super::*;
 
 mod admission;
@@ -223,6 +225,82 @@ struct Metadata {
 struct State {
     metadata: Metadata,
     entries: BTreeMap<u64, ChangeEnvelope>,
+    oldest: Option<u64>,
+    retained: usize,
+    source_position: Option<Bytes>,
+    page_limits: Option<drasi_core::interface::OutboxPageLimits>,
+    budget: Option<JournalBudget>,
+}
+
+impl State {
+    fn prepare_append(
+        &self,
+        definition: &QosChannelDefinition,
+        envelope: &ChangeEnvelope,
+    ) -> Result<(u64, Option<JournalAppend>), PipeError> {
+        let remove = self.retained.saturating_sub(definition.capacity.get() - 1);
+        let budget = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.prepare(envelope, remove))
+            .transpose()?;
+        let remove = budget.as_ref().map_or(remove, |append| append.remove);
+        if remove > 0 && definition.retention == RetentionPolicy::Backpressure {
+            let last_removed = self
+                .oldest
+                .and_then(|oldest| oldest.checked_add(remove as u64 - 1))
+                .ok_or_else(|| backend("invalid QoS capacity accounting"))?;
+            if self
+                .metadata
+                .cursors
+                .values()
+                .any(|cursor| !cursor.retired && cursor.position < last_removed)
+            {
+                return Err(PipeError::CapacityExhausted);
+            }
+        }
+        let position = self
+            .metadata
+            .head
+            .checked_add(1)
+            .ok_or_else(|| backend("QoS journal sequence exhausted"))?;
+        Ok((
+            self.oldest
+                .and_then(|oldest| oldest.checked_add(remove as u64))
+                .unwrap_or(position),
+            budget,
+        ))
+    }
+
+    fn append_committed(
+        &mut self,
+        position: u64,
+        envelope: ChangeEnvelope,
+        retain_from: u64,
+        budget: Option<JournalAppend>,
+    ) {
+        self.source_position = envelope.system().source_position().cloned();
+        if self.page_limits.is_some() {
+            if self
+                .entries
+                .first_key_value()
+                .is_some_and(|(first, _)| *first < retain_from)
+            {
+                self.entries.clear();
+            }
+        } else {
+            self.entries.retain(|position, _| *position >= retain_from);
+            self.entries.insert(position, envelope);
+        }
+        self.oldest = Some(retain_from);
+        self.retained = (position - retain_from + 1) as usize;
+        if let Some(append) = budget {
+            self.budget
+                .as_mut()
+                .expect("configured journal budget")
+                .apply(append);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -245,6 +323,28 @@ struct Persistent {
     shared: bool,
 }
 
+impl Persistent {
+    async fn read_records(
+        &self,
+        after: u64,
+        limits: Option<drasi_core::interface::OutboxPageLimits>,
+    ) -> Result<Vec<(u64, Vec<u8>)>, drasi_core::interface::IndexError> {
+        let outbox = self
+            .transaction
+            .resources()
+            .outbox_writer()
+            .expect("validated transaction");
+        match limits {
+            Some(limits) => {
+                let records = outbox.read_page(&self.key, after, limits).await?;
+                limits.validate_page(&records)?;
+                Ok(records)
+            }
+            None => outbox.read_from(&self.key, after).await,
+        }
+    }
+}
+
 /// A shared bounded journal: one append, independent subscriber completions.
 ///
 /// Volatile and persistent profiles have identical handoff semantics. Persistent
@@ -252,6 +352,7 @@ struct Persistent {
 /// transaction, never a transaction held open while business code is running.
 pub struct QosChannel {
     definition: QosChannelDefinition,
+    max_bytes: Option<NonZeroUsize>,
     durability: drasi_core::interface::StorageDurability,
     state: Mutex<State>,
     bindings: StdMutex<Bindings>,
@@ -272,6 +373,15 @@ pub struct QosChannelProgress {
     pub retired: Vec<String>,
     pub producer_sequence: Option<u64>,
     pub source_position: Option<Bytes>,
+}
+
+/// Resource-level options for a non-shared persistent journal. The budget counts
+/// each retained envelope once, independently of its subscriber count.
+#[derive(Debug, Clone, Default)]
+pub struct QosJournalOptions {
+    pub recovery: Option<QosRecoveryOptions>,
+    pub max_bytes: Option<NonZeroUsize>,
+    pub page_limits: Option<drasi_core::interface::OutboxPageLimits>,
 }
 
 fn backend(message: impl Into<String>) -> PipeError {
@@ -305,6 +415,20 @@ fn initial(definition: &QosChannelDefinition) -> Result<Metadata, PipeError> {
 
 impl QosChannel {
     pub fn volatile(definition: QosChannelDefinition) -> Result<Arc<Self>, PipeError> {
+        Self::volatile_options(definition, None)
+    }
+
+    pub fn volatile_with_byte_budget(
+        definition: QosChannelDefinition,
+        max_bytes: NonZeroUsize,
+    ) -> Result<Arc<Self>, PipeError> {
+        Self::volatile_options(definition, Some(max_bytes))
+    }
+
+    fn volatile_options(
+        definition: QosChannelDefinition,
+        max_bytes: Option<NonZeroUsize>,
+    ) -> Result<Arc<Self>, PipeError> {
         definition.validate()?;
         if definition.durable {
             return Err(backend("durable QoS requires persistent storage"));
@@ -312,10 +436,16 @@ impl QosChannel {
         let metadata = initial(&definition)?;
         Ok(Arc::new(Self {
             definition,
+            max_bytes,
             durability: drasi_core::interface::StorageDurability::VOLATILE,
             state: Mutex::new(State {
                 metadata,
                 entries: BTreeMap::new(),
+                oldest: None,
+                retained: 0,
+                source_position: None,
+                page_limits: None,
+                budget: max_bytes.map(JournalBudget::new),
             }),
             bindings: StdMutex::new(Bindings::default()),
             persistent: StdMutex::new(None),
@@ -334,7 +464,14 @@ impl QosChannel {
         codec: EnvelopeCodec,
         key: impl Into<String>,
     ) -> Result<Arc<Self>, PipeError> {
-        Self::persistent_options(definition, indexes, codec, key.into(), None).await
+        Self::persistent_with_options(
+            definition,
+            indexes,
+            codec,
+            key,
+            QosJournalOptions::default(),
+        )
+        .await
     }
 
     /// Require the configured recovery mode on both initial creation and reopen.
@@ -346,18 +483,32 @@ impl QosChannel {
         key: impl Into<String>,
         recovery: QosRecoveryOptions,
     ) -> Result<Arc<Self>, PipeError> {
-        recovery.validate_storage(&definition, indexes.durability())?;
-        Self::persistent_options(definition, indexes, codec, key.into(), Some(recovery)).await
+        Self::persistent_with_options(
+            definition,
+            indexes,
+            codec,
+            key,
+            QosJournalOptions {
+                recovery: Some(recovery),
+                max_bytes: None,
+                page_limits: None,
+            },
+        )
+        .await
     }
 
-    async fn persistent_options(
+    pub async fn persistent_with_options(
         definition: QosChannelDefinition,
         indexes: ComputationIndexes,
         codec: EnvelopeCodec,
-        key: String,
-        recovery: Option<QosRecoveryOptions>,
+        key: impl Into<String>,
+        options: QosJournalOptions,
     ) -> Result<Arc<Self>, PipeError> {
         definition.validate()?;
+        if let Some(recovery) = &options.recovery {
+            recovery.validate_storage(&definition, indexes.durability())?;
+        }
+        let key = key.into();
         data::validate_identifier("QoS journal", &key)?;
         if !definition.durable
             || !indexes
@@ -370,7 +521,7 @@ impl QosChannel {
         }
         let transaction =
             ComputationTransaction::try_new(indexes).map_err(|error| backend(error.to_string()))?;
-        Self::open_persistent(definition, transaction, codec, key, None, recovery).await
+        Self::open_persistent(definition, transaction, codec, key, None, options).await
     }
 
     /// A journal member of an explicitly owned storage group. Its replay record,
@@ -381,6 +532,30 @@ impl QosChannel {
         journal: &str,
         codec: EnvelopeCodec,
         replay: ReplayOptions,
+    ) -> Result<Arc<Self>, PipeError> {
+        Self::open_shared(definition, group, journal, codec, replay, None).await
+    }
+
+    /// Bounds the decoded journal cache. Startup still validates every record
+    /// under the shared storage gate, and refills exclude concurrent group writes.
+    pub async fn shared_with_page_limits(
+        definition: QosChannelDefinition,
+        group: &drasi_core::computation::ComputationTransactionGroup,
+        journal: &str,
+        codec: EnvelopeCodec,
+        replay: ReplayOptions,
+        page_limits: OutboxPageLimits,
+    ) -> Result<Arc<Self>, PipeError> {
+        Self::open_shared(definition, group, journal, codec, replay, Some(page_limits)).await
+    }
+
+    async fn open_shared(
+        definition: QosChannelDefinition,
+        group: &drasi_core::computation::ComputationTransactionGroup,
+        journal: &str,
+        codec: EnvelopeCodec,
+        replay: ReplayOptions,
+        page_limits: Option<OutboxPageLimits>,
     ) -> Result<Arc<Self>, PipeError> {
         definition.validate()?;
         replay.validate(&definition)?;
@@ -397,7 +572,10 @@ impl QosChannel {
             codec,
             "events".into(),
             Some(replay),
-            None,
+            QosJournalOptions {
+                page_limits,
+                ..QosJournalOptions::default()
+            },
         )
         .await
     }
@@ -408,14 +586,45 @@ impl QosChannel {
         codec: EnvelopeCodec,
         key: String,
         shared_replay: Option<ReplayOptions>,
-        recovery: Option<QosRecoveryOptions>,
+        options: QosJournalOptions,
     ) -> Result<Arc<Self>, PipeError> {
+        if shared_replay.is_some() && (options.max_bytes.is_some() || options.recovery.is_some()) {
+            return Err(backend(
+                "shared transactional QoS requires its own replay policy and does not support byte budgets",
+            ));
+        }
         let store = Arc::new(Persistent {
             transaction: Arc::new(transaction),
             key,
             codec,
             shared: shared_replay.is_some(),
         });
+        let load = Self::load_persistent(definition, store.clone(), shared_replay, options);
+        if store.shared {
+            store
+                .transaction
+                .run(async {
+                    load.await
+                        .map_err(|error| drasi_core::interface::IndexError::other(error).into())
+                })
+                .await
+                .map_err(|error| PipeError::Backend(error.into()))
+        } else {
+            load.await
+        }
+    }
+
+    async fn load_persistent(
+        definition: QosChannelDefinition,
+        store: Arc<Persistent>,
+        shared_replay: Option<ReplayOptions>,
+        options: QosJournalOptions,
+    ) -> Result<Arc<Self>, PipeError> {
+        let QosJournalOptions {
+            recovery,
+            max_bytes,
+            page_limits,
+        } = options;
         let transaction = &store.transaction;
         let key = &store.key;
         let codec = &store.codec;
@@ -428,35 +637,30 @@ impl QosChannel {
         }
         let read = async {
             let saved = store.read_metadata().await?;
-            let records = resources
-                .outbox_writer()
-                .expect("validated transaction")
-                .read_from(key, 0)
-                .await?;
+            let records = store.read_records(0, page_limits).await?;
             Ok::<_, drasi_core::interface::IndexError>((saved, records))
         };
         let (saved, records) = if let Some(options) = &shared_replay {
-            transaction
-                .run(async {
-                    let (mut saved, records) = read.await?;
-                    if saved.is_none() {
-                        if !records.is_empty() {
-                            return Err(drasi_core::interface::IndexError::CorruptedData.into());
-                        }
-                        let mut metadata = initial(&definition)
-                            .map_err(drasi_core::interface::IndexError::other)?;
-                        metadata.replay = Some(replay::ReplayState::new(options.clone()));
-                        let bytes = Bytes::from(
-                            serde_json::to_vec(&metadata)
-                                .map_err(drasi_core::interface::IndexError::other)?,
-                        );
-                        store.stage_metadata(0, &bytes).await?;
-                        saved = Some(drasi_core::interface::SourceCheckpoint::new(0, Some(bytes)));
+            async {
+                let (mut saved, records) = read.await?;
+                if saved.is_none() {
+                    if !records.is_empty() {
+                        return Err(drasi_core::interface::IndexError::CorruptedData);
                     }
-                    Ok((saved, records))
-                })
-                .await
-                .map_err(|error| PipeError::Backend(error.into()))?
+                    let mut metadata =
+                        initial(&definition).map_err(drasi_core::interface::IndexError::other)?;
+                    metadata.replay = Some(replay::ReplayState::new(options.clone()));
+                    let bytes = Bytes::from(
+                        serde_json::to_vec(&metadata)
+                            .map_err(drasi_core::interface::IndexError::other)?,
+                    );
+                    store.stage_metadata(0, &bytes).await?;
+                    saved = Some(drasi_core::interface::SourceCheckpoint::new(0, Some(bytes)));
+                }
+                Ok::<_, drasi_core::interface::IndexError>((saved, records))
+            }
+            .await
+            .map_err(|error| PipeError::Backend(error.into()))?
         } else {
             read.await
                 .map_err(|error| PipeError::Backend(error.into()))?
@@ -529,31 +733,93 @@ impl QosChannel {
             }
         }
         let mut entries = BTreeMap::new();
-        let mut previous = None;
-        for (position, bytes) in records {
-            if position == 0 || previous.is_some_and(|previous| previous + 1 != position) {
-                return Err(backend("QoS journal contains a sequence gap"));
-            }
-            let envelope = codec
-                .decode(&bytes)
-                .map_err(|error| backend(error.to_string()))?;
-            if envelope.system().stream() != &definition.stream {
-                return Err(backend("QoS journal contains another producer stream"));
-            }
-            entries.insert(position, envelope);
-            previous = Some(position);
+        let mut budget = max_bytes.map(JournalBudget::new);
+        let mut previous: Option<u64> = None;
+        let mut producer_sequence = None;
+        let mut source_position = None;
+        let mut retained = 0usize;
+        let mut oldest = None;
+        let mut replay_scan = replay::ReplayScan::default();
+        if let Some(admission) = &metadata.admission {
+            admission.validate(&definition, metadata.head)?;
+            resources
+                .durability()
+                .require(admission.failure_scope())
+                .map_err(|error| PipeError::Backend(error.into()))?;
         }
-        if entries.len() > metadata.definition.capacity.get()
+        if let Some(replay) = &metadata.replay {
+            if metadata.admission.is_some() {
+                return Err(backend(
+                    "client admission and output replay tracking are mutually exclusive",
+                ));
+            }
+            replay.validate(&definition, metadata.head)?;
+            resources
+                .durability()
+                .require(replay.failure_scope())
+                .map_err(|error| PipeError::Backend(error.into()))?;
+        }
+        let mut records = records;
+        loop {
+            if records.is_empty() {
+                break;
+            }
+            let mut page = BTreeMap::new();
+            for (position, bytes) in records {
+                if position == 0
+                    || previous.is_some_and(|previous| previous.checked_add(1) != Some(position))
+                {
+                    return Err(backend("QoS journal contains a sequence gap"));
+                }
+                let envelope = codec
+                    .decode(&bytes)
+                    .map_err(|error| backend(error.to_string()))?;
+                if envelope.system().stream() != &definition.stream {
+                    return Err(backend("QoS journal contains another producer stream"));
+                }
+                if let Some(admission) = &metadata.admission {
+                    admission.validate_entry(position, &envelope)?;
+                }
+                if let Some(replay) = &metadata.replay {
+                    replay.validate_entry(
+                        metadata.head,
+                        position,
+                        &envelope,
+                        codec,
+                        &mut replay_scan,
+                    )?;
+                }
+                if let Some(budget) = &mut budget {
+                    budget.restore(&envelope)?;
+                }
+                oldest.get_or_insert(position);
+                retained = retained
+                    .checked_add(1)
+                    .ok_or_else(|| backend("QoS retained count overflow"))?;
+                producer_sequence = Some(envelope.system().sequence());
+                source_position = envelope.system().source_position().cloned();
+                page.insert(position, envelope);
+                previous = Some(position);
+            }
+            if entries.is_empty() {
+                entries = page;
+            }
+            if page_limits.is_none() {
+                break;
+            }
+            records = store
+                .read_records(previous.unwrap_or(0), page_limits)
+                .await
+                .map_err(|error| PipeError::Backend(error.into()))?;
+        }
+        if retained > metadata.definition.capacity.get()
             || previous != (metadata.head > 0).then_some(metadata.head)
-            || entries
-                .last_key_value()
-                .map(|(_, envelope)| envelope.system().sequence())
-                != metadata.producer_sequence
+            || producer_sequence != metadata.producer_sequence
         {
             return Err(backend("QoS journal head and retained data disagree"));
         }
         if metadata.definition.retention == RetentionPolicy::Backpressure {
-            if let Some(oldest) = entries.keys().next() {
+            if let Some(oldest) = oldest {
                 if metadata
                     .cursors
                     .values()
@@ -569,7 +835,7 @@ impl QosChannel {
                     "receipt-tracked channel settings cannot change without an explicit migration",
                 ));
             }
-            let oldest = entries.keys().next().copied().unwrap_or(1);
+            let first = oldest.unwrap_or(1);
             for (id, start) in &definition.subscribers {
                 if metadata
                     .cursors
@@ -581,11 +847,11 @@ impl QosChannel {
                 }
                 if !metadata.cursors.contains_key(id) {
                     let position = match start {
-                        SubscriptionStart::Earliest => oldest.saturating_sub(1),
+                        SubscriptionStart::Earliest => first.saturating_sub(1),
                         SubscriptionStart::Latest => metadata.head,
                         SubscriptionStart::After(position) => *position,
                     };
-                    if position > metadata.head || position < oldest.saturating_sub(1) {
+                    if position > metadata.head || position < first.saturating_sub(1) {
                         return Err(backend("new QoS subscriber requested unavailable history"));
                     }
                     metadata.cursors.insert(
@@ -602,7 +868,7 @@ impl QosChannel {
                     cursor.retired = true;
                 }
             }
-            let floor = oldest.max(
+            let floor = first.max(
                 metadata
                     .head
                     .saturating_sub(definition.capacity.get() as u64)
@@ -635,26 +901,11 @@ impl QosChannel {
                 .await
                 .map_err(|error| PipeError::Backend(error.into()))?;
             entries.retain(|position, _| *position >= floor);
-        }
-        if let Some(admission) = &metadata.admission {
-            admission.validate(&definition, metadata.head)?;
-            resources
-                .durability()
-                .require(admission.failure_scope())
-                .map_err(|error| PipeError::Backend(error.into()))?;
-            admission.validate_entries(&entries)?;
-        }
-        if let Some(replay) = &metadata.replay {
-            if metadata.admission.is_some() {
-                return Err(backend(
-                    "client admission and output replay tracking are mutually exclusive",
-                ));
+            oldest = oldest.map(|oldest| oldest.max(floor));
+            retained = oldest.map_or(0, |oldest| (metadata.head - oldest + 1) as usize);
+            if let Some(budget) = &mut budget {
+                budget.retain_last(retained);
             }
-            replay.validate(&definition, metadata.head, &entries, codec)?;
-            resources
-                .durability()
-                .require(replay.failure_scope())
-                .map_err(|error| PipeError::Backend(error.into()))?;
         }
         if recovery_changed {
             let bytes = Bytes::from(
@@ -677,8 +928,17 @@ impl QosChannel {
         let durability = resources.durability();
         let channel = Arc::new_cyclic(|owner| Self {
             definition,
+            max_bytes,
             durability,
-            state: Mutex::new(State { metadata, entries }),
+            state: Mutex::new(State {
+                metadata,
+                entries,
+                oldest,
+                retained,
+                source_position,
+                page_limits,
+                budget,
+            }),
             bindings: StdMutex::new(Bindings::default()),
             persistent: StdMutex::new(Some(store)),
             closed: AtomicBool::new(false),
@@ -706,6 +966,10 @@ impl QosChannel {
 
     pub fn definition(&self) -> &QosChannelDefinition {
         &self.definition
+    }
+
+    pub fn max_bytes(&self) -> Option<NonZeroUsize> {
+        self.max_bytes
     }
 
     pub(super) fn matches_definition(&self, pipe: &QosPipeConfig) -> bool {
@@ -742,7 +1006,7 @@ impl QosChannel {
         self.check()?;
         Ok(QosChannelProgress {
             accepted: state.metadata.head,
-            earliest_available: state.entries.keys().next().copied(),
+            earliest_available: state.oldest,
             processed: state
                 .metadata
                 .cursors
@@ -757,11 +1021,129 @@ impl QosChannel {
                 .map(|(id, _)| id.clone())
                 .collect(),
             producer_sequence: state.metadata.producer_sequence,
-            source_position: state
-                .entries
-                .last_key_value()
-                .and_then(|(_, envelope)| envelope.system().source_position().cloned()),
+            source_position: state.source_position.clone(),
         })
+    }
+
+    async fn cache_after(&self, state: &mut State, after: u64) -> Result<(), PipeError> {
+        let Some(limits) = state.page_limits else {
+            return Ok(());
+        };
+        let Some(start) = after
+            .checked_add(1)
+            .filter(|start| *start <= state.metadata.head)
+        else {
+            return Ok(());
+        };
+        if state.entries.contains_key(&start) {
+            return Ok(());
+        }
+        let store = self.storage()?.ok_or(PipeError::Closed)?;
+        let records = store
+            .read_records(after, Some(limits))
+            .await
+            .map_err(|error| PipeError::Backend(error.into()))?;
+        self.check()?;
+        let mut entries = BTreeMap::new();
+        let mut expected = Some(start);
+        let mut replay_scan = replay::ReplayScan::default();
+        for (position, bytes) in records {
+            if Some(position) != expected || position > state.metadata.head {
+                return Err(backend("QoS page positions are inconsistent"));
+            }
+            let envelope = store
+                .codec
+                .decode(&bytes)
+                .map_err(|error| PipeError::Backend(error.into()))?;
+            if envelope.system().stream() != &self.definition.stream {
+                return Err(backend("QoS page contains another producer stream"));
+            }
+            if let Some(admission) = &state.metadata.admission {
+                admission.validate_entry(position, &envelope)?;
+            }
+            if let Some(replay) = &state.metadata.replay {
+                replay.validate_entry(
+                    state.metadata.head,
+                    position,
+                    &envelope,
+                    &store.codec,
+                    &mut replay_scan,
+                )?;
+            }
+            entries.insert(position, envelope);
+            expected = position.checked_add(1);
+        }
+        if entries.is_empty() {
+            return Err(backend("QoS page ended before journal head"));
+        }
+        state.entries = entries;
+        Ok(())
+    }
+
+    async fn refill_shared_delivery(
+        &self,
+        endpoint: &Arc<Endpoint>,
+    ) -> Result<Option<Delivery>, PipeError> {
+        let store = self.storage()?.ok_or(PipeError::Closed)?;
+        store
+            .transaction
+            .run(async {
+                // Writers take the group gate before channel state. Never invert it.
+                let mut state = self.state.lock().await;
+                endpoint
+                    .check()
+                    .map_err(drasi_core::interface::IndexError::other)?;
+                let cursor = &state.metadata.cursors[&endpoint.subscriber];
+                if cursor.retired {
+                    return Err(drasi_core::interface::IndexError::other(backend(
+                        "QoS subscriber is retired",
+                    ))
+                    .into());
+                }
+                let after = cursor.position;
+                if !endpoint.binding.pending.load(Ordering::Acquire)
+                    && state.oldest.map_or(true, |oldest| after >= oldest - 1)
+                {
+                    self.cache_after(&mut state, after)
+                        .await
+                        .map_err(drasi_core::interface::IndexError::other)?;
+                    endpoint
+                        .check()
+                        .map_err(drasi_core::interface::IndexError::other)?;
+                    return Ok(endpoint.delivery(&state, after));
+                }
+                Ok(None)
+            })
+            .await
+            .map_err(|error| PipeError::Backend(error.into()))
+    }
+
+    async fn retained_sequence(
+        &self,
+        state: &mut State,
+        sequence: u64,
+    ) -> Result<Option<u64>, PipeError> {
+        let mut after = state.oldest.map_or(0, |oldest| oldest - 1);
+        loop {
+            self.cache_after(state, after).await?;
+            if let Some((position, _)) = state
+                .entries
+                .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+                .find(|(_, saved)| saved.system().sequence() == sequence)
+            {
+                return Ok(Some(*position));
+            }
+            if state.page_limits.is_none() {
+                return Ok(None);
+            }
+            let Some((last, _)) = state.entries.last_key_value() else {
+                return Ok(None);
+            };
+            if *last >= state.metadata.head {
+                return Ok(None);
+            }
+            after = *last;
+        }
     }
 
     async fn persist(
@@ -886,11 +1268,11 @@ impl QosChannel {
                 .producer_sequence
                 .is_some_and(|saved| sequence <= saved)
             {
-                let retained = state
-                    .entries
-                    .iter()
-                    .find(|(_, saved)| saved.system().sequence() == sequence);
-                if let Some((position, saved)) = retained {
+                if let Some(position) = self.retained_sequence(&mut state, sequence).await? {
+                    if let Some(endpoint) = endpoint {
+                        endpoint.check()?;
+                    }
+                    let saved = &state.entries[&position];
                     // Full comparison includes source position and branch context.
                     let same = if let Some(store) = self.storage()? {
                         store
@@ -911,7 +1293,7 @@ impl QosChannel {
                     };
                     if same {
                         return Ok(
-                            EnqueueReceipt::new(envelope.id().clone()).with_position(*position)
+                            EnqueueReceipt::new(envelope.id().clone()).with_position(position)
                         );
                     }
                 }
@@ -922,26 +1304,20 @@ impl QosChannel {
                     "this channel requires a registered producer session for new admission",
                 ));
             }
-            let full = state.entries.len() == self.definition.capacity.get();
-            let floor = state.entries.keys().next().copied().unwrap_or(1);
-            let blocked = full
-                && self.definition.retention == RetentionPolicy::Backpressure
-                && state
-                    .metadata
-                    .cursors
-                    .values()
-                    .any(|cursor| !cursor.retired && cursor.position < floor);
-            if blocked {
-                drop(state);
-                notified.await;
-                continue;
-            }
+            let (retain_from, budget) = match state.prepare_append(&self.definition, envelope) {
+                Ok(prepared) => prepared,
+                Err(PipeError::CapacityExhausted) => {
+                    drop(state);
+                    notified.await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let position = state
                 .metadata
                 .head
                 .checked_add(1)
                 .ok_or_else(|| backend("QoS journal sequence exhausted"))?;
-            let retain_from = if full { floor + 1 } else { floor };
             let mut metadata = state.metadata.clone();
             metadata.head = position;
             metadata.producer_sequence = Some(sequence);
@@ -951,8 +1327,7 @@ impl QosChannel {
             let _wake = WakeOnDrop(&self.changed);
             self.persist(&metadata, Some((position, envelope, retain_from)))
                 .await?;
-            state.entries.retain(|position, _| *position >= retain_from);
-            state.entries.insert(position, envelope.clone());
+            state.append_committed(position, envelope.clone(), retain_from, budget);
             state.metadata = metadata;
             if endpoint.is_some_and(|endpoint| endpoint.check().is_err()) {
                 return Err(PipeError::AcceptanceUnknown {
@@ -1091,6 +1466,22 @@ struct Endpoint {
     binding: Arc<Binding>,
 }
 impl Endpoint {
+    fn delivery(self: &Arc<Self>, state: &State, after: u64) -> Option<Delivery> {
+        let (position, envelope) = state
+            .entries
+            .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            .next()?;
+        let delivery = Delivery::new(
+            envelope.clone(),
+            Some(Box::new(Ack {
+                endpoint: self.clone(),
+                position: *position,
+            })),
+        );
+        self.binding.pending.store(true, Ordering::Release);
+        Some(delivery)
+    }
+
     fn check_writable(&self) -> Result<(), PipeError> {
         self.check()?;
         if self.binding.closed.load(Ordering::Acquire) {
@@ -1218,7 +1609,7 @@ impl EnvelopeReceiver for Receiver {
             let notified = self.endpoint.channel.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let state = self.endpoint.channel.state.lock().await;
+            let mut state = self.endpoint.channel.state.lock().await;
             self.endpoint.check()?;
             let cursor = &state.metadata.cursors[&self.endpoint.subscriber];
             if cursor.retired {
@@ -1229,39 +1620,45 @@ impl EnvelopeReceiver for Receiver {
                 self.endpoint.channel.wait_changed(notified).await?;
                 continue;
             }
-            if let Some(oldest) = state.entries.keys().next().copied() {
+            if let Some(oldest) = state.oldest {
                 if cursor.position < oldest - 1 {
                     let requested = cursor.position;
                     drop(state);
                     if self.gap_policy == ReplayGapPolicy::Strict {
                         return Err(PipeError::PositionUnavailable { requested, oldest });
                     }
+                    self.endpoint.complete(oldest - 1, true).await?;
                     log::warn!(
                         "QoS subscriber {} explicitly skips positions {}..{}",
                         self.endpoint.subscriber,
                         requested + 1,
                         oldest
                     );
-                    self.endpoint.complete(oldest - 1, true).await?;
                     continue;
                 }
             }
-            if let Some((position, envelope)) = state
-                .entries
-                .range((
-                    std::ops::Bound::Excluded(cursor.position),
-                    std::ops::Bound::Unbounded,
-                ))
-                .next()
+            let after = cursor.position;
+            if self.endpoint.channel.shared.is_some()
+                && state.page_limits.is_some()
+                && after.checked_add(1).is_some_and(|next| {
+                    next <= state.metadata.head && !state.entries.contains_key(&next)
+                })
             {
-                let delivery = Delivery::new(
-                    envelope.clone(),
-                    Some(Box::new(Ack {
-                        endpoint: self.endpoint.clone(),
-                        position: *position,
-                    })),
-                );
-                self.endpoint.binding.pending.store(true, Ordering::Release);
+                drop(state);
+                let delivery = self
+                    .endpoint
+                    .channel
+                    .refill_shared_delivery(&self.endpoint)
+                    .await?;
+                self.endpoint.check()?;
+                if delivery.is_some() {
+                    return Ok(delivery);
+                }
+                continue;
+            }
+            self.endpoint.channel.cache_after(&mut state, after).await?;
+            self.endpoint.check()?;
+            if let Some(delivery) = self.endpoint.delivery(&state, after) {
                 return Ok(Some(delivery));
             }
             if self.endpoint.binding.closed.load(Ordering::Acquire) {

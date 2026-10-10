@@ -43,6 +43,9 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Notify;
 
+#[path = "computation_transaction_transformer/reliability.rs"]
+mod reliability;
+
 type TestResult<T> = anyhow::Result<T>;
 
 fn id(value: &str) -> ComponentId {

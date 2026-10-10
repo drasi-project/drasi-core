@@ -13,7 +13,7 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::{computation::v1::*, management::*, DrasiLib};
-use drasi_state_store_redb::RedbConfigurationStore;
+use drasi_state_store_redb::{ConfigurationStoreOptions, RedbConfigurationStore};
 use serde_json::{json, Value};
 
 struct Service {
@@ -46,12 +46,14 @@ impl ComputationService for Service {
 struct Factory {
     descriptor: FactoryDescriptor,
     created: Arc<AtomicUsize>,
+    create_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 impl Factory {
     fn new(created: Arc<AtomicUsize>) -> Self {
         Self {
             created,
+            create_gate: None,
             descriptor: FactoryDescriptor {
                 implementation: ImplementationIdentity::try_new("test/managed-service", "1")
                     .expect("implementation"),
@@ -79,6 +81,10 @@ impl ComponentFactory for Factory {
         &self,
         context: ConstructionContext,
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        if let Some((entered, release)) = &self.create_gate {
+            entered.notify_one();
+            release.notified().await;
+        }
         self.created.fetch_add(1, Ordering::SeqCst);
         if std::env::var_os("DRASI_TEST_CRASH_DURING_CREATE").is_some() {
             std::process::exit(72);
@@ -152,6 +158,123 @@ async fn open(
         .with_configuration_store(store)
         .build()
         .await?)
+}
+
+#[tokio::test]
+async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired_changes_before_construction(
+) -> Result<()> {
+    for persistent in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let store = if persistent {
+            Some(Arc::new(RedbConfigurationStore::new_with_options(
+                directory.path().join("configuration.redb"),
+                [44; 32],
+                ConfigurationStoreOptions {
+                    receipt_batch_capacity: std::num::NonZeroUsize::new(2),
+                },
+            )?))
+        } else {
+            None
+        };
+        let mut builder = DrasiLib::builder()
+            .with_id("housekeeping")
+            .with_component_factories(registry(count.clone()));
+        if let Some(store) = &store {
+            builder = builder.with_configuration_store(store.clone());
+        }
+        let core = builder.build().await?;
+        let first = core.new_configuration_request_id().await?;
+        let first_receipt = core
+            .apply_desired_state(0, &first, desired(&[("a", false)]))
+            .await?;
+        core.snapshot_desired_configuration("first").await?;
+        let second = core.new_configuration_request_id().await?;
+        let second_receipt = core
+            .apply_desired_state(first_receipt.revision, &second, desired(&[("b", false)]))
+            .await?;
+        core.snapshot_desired_configuration("second").await?;
+        let page = core
+            .list_configuration_snapshots(None, std::num::NonZeroUsize::new(1).unwrap())
+            .await?;
+        assert_eq!(
+            page,
+            [ConfigurationSnapshotSummary {
+                name: "first".into(),
+                revision: first_receipt.revision
+            }]
+        );
+        let page = core
+            .list_configuration_snapshots(
+                Some("first".into()),
+                std::num::NonZeroUsize::new(1).unwrap(),
+            )
+            .await?;
+        assert_eq!(page[0].name, "second");
+        assert!(core
+            .delete_configuration_snapshot("first", first_receipt.revision + 1)
+            .await
+            .is_err());
+        assert!(
+            core.delete_configuration_snapshot("first", first_receipt.revision)
+                .await?
+        );
+        assert!(core.load_configuration_snapshot("first").await?.is_none());
+        let third = core.new_configuration_request_id().await?;
+        if persistent {
+            let before = count.load(Ordering::SeqCst);
+            assert!(core.configuration_receipt(&first).await.is_err());
+            assert!(core
+                .apply_desired_state(
+                    second_receipt.revision,
+                    &first,
+                    desired(&[("forbidden", false)])
+                )
+                .await
+                .is_err());
+            assert_eq!(count.load(Ordering::SeqCst), before);
+            assert_eq!(
+                core.desired_configuration()?.revision,
+                second_receipt.revision
+            );
+        } else {
+            assert_eq!(
+                core.configuration_receipt(&first).await?,
+                Some(first_receipt)
+            );
+        }
+        let third_receipt = core
+            .apply_desired_state(second_receipt.revision, &third, desired(&[("c", false)]))
+            .await?;
+        core.shutdown().await?;
+        assert!(core.new_configuration_request_id().await.is_err());
+        if let Some(store) = store {
+            let restored = open(store, "housekeeping", count).await?;
+            assert_eq!(
+                restored.desired_configuration()?.revision,
+                third_receipt.revision
+            );
+            assert_eq!(
+                restored.configuration_receipt(&third).await?,
+                Some(third_receipt)
+            );
+            assert!(restored.configuration_receipt(&first).await.is_err());
+            assert!(restored
+                .load_configuration_snapshot("first")
+                .await?
+                .is_none());
+            assert_eq!(
+                restored
+                    .load_configuration_snapshot("second")
+                    .await?
+                    .unwrap()
+                    .revision,
+                second_receipt.revision
+            );
+            restored.shutdown().await?;
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -359,6 +482,213 @@ async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() ->
 }
 
 #[tokio::test]
+async fn restoration_preserves_intent_when_secret_provider_or_factory_versions_are_unavailable(
+) -> Result<()> {
+    struct Secrets {
+        available: bool,
+    }
+    #[async_trait]
+    impl ConfigurationResolver for Secrets {
+        fn validate_reference(&self, key: &str) -> Result<()> {
+            anyhow::ensure!(key == "token", "unknown secret reference");
+            Ok(())
+        }
+        async fn resolve(&self, _: &str) -> Result<Value> {
+            anyhow::ensure!(self.available, "secret is unavailable");
+            Ok(json!("test-only-secret"))
+        }
+    }
+    struct Resources {
+        provider: bool,
+        secret: bool,
+    }
+    #[async_trait]
+    impl ManagementResourceResolver for Resources {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            spec: &ResourceSpecification,
+            _: &Value,
+        ) -> Result<ResourceHandle> {
+            anyhow::ensure!(self.provider, "secret provider is unavailable");
+            Ok(ResourceHandle::new(
+                spec.role,
+                Arc::new(ConfigurationResolverResource(Arc::new(Secrets {
+                    available: self.secret,
+                }))),
+            ))
+        }
+    }
+    for unavailable in [
+        "provider",
+        "secret",
+        "implementation-version",
+        "configuration-version",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let store = Arc::new(RedbConfigurationStore::new(
+            directory.path().join("restore.redb"),
+            [45; 32],
+        )?);
+        let mut target = desired(&[("dependent", false)]);
+        let resource = ResourceId::try_new("secrets")?;
+        target.topology.resources.push(ResourceSpecification {
+            id: resource.clone(),
+            role: ResourceRole::SecretStore,
+            ownership: ResourceOwnership::Graph,
+            binding: "secrets".into(),
+        });
+        target
+            .topology
+            .resource_configurations
+            .insert(resource.clone(), json!({}));
+        let ComponentConstruction::Factory(spec) = &mut target.topology.components[0].construction
+        else {
+            unreachable!()
+        };
+        spec.configuration.insert(
+            "credential".into(),
+            ConfigurationValue::Reference {
+                resource,
+                key: "token".into(),
+                secret: true,
+            },
+        );
+        let target = target.normalized()?;
+        let session = store.open("restore").await?;
+        session.commit(0, "original", &target).await?;
+        session.snapshot("original").await?;
+        session.close().await?;
+        let created = Arc::new(AtomicUsize::new(0));
+        let mut factory = Factory::new(created.clone());
+        if unavailable == "implementation-version" {
+            factory.descriptor.implementation =
+                ImplementationIdentity::try_new("test/managed-service", "2")?;
+        }
+        if unavailable == "configuration-version" {
+            factory.descriptor.configuration_version = 2;
+        }
+        let mut factories = FactoryRegistry::standard();
+        factories.register(Arc::new(factory))?;
+        let core = DrasiLib::builder()
+            .with_id("restore")
+            .with_configuration_store(store.clone())
+            .with_component_factories(factories)
+            .with_management_resources(Arc::new(Resources {
+                provider: unavailable != "provider",
+                secret: unavailable != "secret",
+            }))
+            .build()
+            .await?;
+        assert!(
+            !core.management_status().await?.converged(),
+            "{unavailable}"
+        );
+        let observed = core.computation_control()?.observed();
+        let dependent = &observed.components[&ComponentId::try_new("dependent")?];
+        assert!(
+            dependent.realization != RealizationState::Created,
+            "{unavailable}: {dependent:?}"
+        );
+        assert_eq!(created.load(Ordering::Acquire), 0, "{unavailable}");
+        assert_eq!(core.desired_configuration()?.desired, target);
+        assert_eq!(
+            core.configuration_receipt("original")
+                .await?
+                .unwrap()
+                .revision,
+            1
+        );
+        core.shutdown().await?;
+        let recovered = DrasiLib::builder()
+            .with_id("restore")
+            .with_configuration_store(store.clone())
+            .with_component_factories(registry(created.clone()))
+            .with_management_resources(Arc::new(Resources {
+                provider: true,
+                secret: true,
+            }))
+            .build()
+            .await?;
+        assert!(
+            recovered.reconcile_desired_state().await?.converged(),
+            "{unavailable}"
+        );
+        assert_eq!(created.load(Ordering::Acquire), 1);
+        assert_eq!(recovered.desired_configuration()?.desired, target);
+        recovered.shutdown().await?;
+        let session = store.open("restore").await?;
+        assert_eq!(
+            session.load_snapshot("original").await?.unwrap().desired,
+            target
+        );
+        session.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_restore_retains_lease_until_reconciliation_and_cleanup_finish() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("interrupted.redb"),
+        [47; 32],
+    )?);
+    let target = desired(&[("restoring", false)]).normalized()?;
+    let seed = store.open("restore").await?;
+    seed.commit(0, "original", &target).await?;
+    seed.close().await?;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factory = Factory::new(created.clone());
+    factory.create_gate = Some((entered.clone(), release.clone()));
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(factory))?;
+    let restoring = tokio::spawn({
+        let store = store.clone();
+        async move {
+            DrasiLib::builder()
+                .with_id("restore")
+                .with_configuration_store(store)
+                .with_component_factories(factories)
+                .build()
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await?;
+    restoring.abort();
+    assert!(restoring.await.err().unwrap().is_cancelled());
+    assert!(matches!(
+        store.open("restore").await.err().unwrap().downcast_ref(),
+        Some(ManagementError::AlreadyOwned(_))
+    ));
+    release.notify_one();
+    let released = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match store.open("restore").await {
+                Ok(session) => return Ok::<_, anyhow::Error>(session),
+                Err(error)
+                    if matches!(error.downcast_ref(), Some(ManagementError::AlreadyOwned(_))) =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await??;
+    assert_eq!(released.load().await?.desired, target);
+    assert_eq!(released.receipt("original").await?.unwrap().revision, 1);
+    released.close().await?;
+    let reopened = open(store, "restore", created).await?;
+    assert!(reopened.reconcile_desired_state().await?.converged());
+    reopened.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn stored_definitions_and_snapshots_are_encrypted_and_wrong_keys_fail() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("encrypted.redb");
@@ -443,6 +773,9 @@ impl ConfigurationStore for FaultStore {
 }
 #[async_trait]
 impl ConfigurationSession for FaultSession {
+    async fn new_request_id(&self) -> Result<String> {
+        self.inner.new_request_id().await
+    }
     async fn load(&self) -> Result<CommittedConfiguration> {
         if self
             .fault
@@ -511,6 +844,16 @@ impl ConfigurationSession for FaultSession {
     }
     async fn load_snapshot(&self, id: &str) -> Result<Option<CommittedConfiguration>> {
         self.inner.load_snapshot(id).await
+    }
+    async fn list_snapshots(
+        &self,
+        after: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<ConfigurationSnapshotSummary>> {
+        self.inner.list_snapshots(after, limit).await
+    }
+    async fn delete_snapshot(&self, name: &str, expected: u64) -> Result<bool> {
+        self.inner.delete_snapshot(name, expected).await
     }
     async fn close(&self) -> Result<()> {
         self.inner.close().await
@@ -686,6 +1029,10 @@ async fn unavailable_commit_confirmation_is_explicit_and_reconcile_reloads_autho
     assert!(
         core.desired_configuration().is_err(),
         "unconfirmed cached state must not appear authoritative"
+    );
+    assert!(
+        core.new_configuration_request_id().await.is_err(),
+        "do not expire receipts while configuration acceptance is unconfirmed"
     );
     let status = core.management_status().await?;
     assert!(!status.converged());

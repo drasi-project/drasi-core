@@ -176,6 +176,18 @@ impl<T: OutboxWriter + ?Sized + 'static> OutboxWriter for ScopedIndex<T> {
             .run_async(async move { inner.read_from(&query, after).await })
             .await
     }
+    async fn read_page(
+        &self,
+        query: &str,
+        after: u64,
+        limits: crate::interface::OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let inner = self.inner.clone();
+        let query = query.to_owned();
+        self.work
+            .run_async(async move { inner.read_page(&query, after, limits).await })
+            .await
+    }
     async fn read_latest_sequence(&self, query: &str) -> Result<Option<u64>, IndexError> {
         let inner = self.inner.clone();
         let query = query.to_owned();

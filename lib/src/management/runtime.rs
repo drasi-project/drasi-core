@@ -16,6 +16,7 @@ use super::*;
 use crate::computation::{instance::InstanceGraph, v1::*};
 
 enum Command {
+    NewRequestId(oneshot::Sender<Result<String>>),
     Apply {
         expected: u64,
         request: String,
@@ -30,6 +31,12 @@ enum Command {
         String,
         oneshot::Sender<Result<Option<CommittedConfiguration>>>,
     ),
+    ListSnapshots(
+        Option<String>,
+        std::num::NonZeroUsize,
+        oneshot::Sender<Result<Vec<ConfigurationSnapshotSummary>>>,
+    ),
+    DeleteSnapshot(String, u64, oneshot::Sender<Result<bool>>),
     Close(oneshot::Sender<Result<()>>),
 }
 
@@ -251,6 +258,25 @@ impl Management {
     pub(crate) async fn receipt(&self, id: String) -> Result<Option<AcceptanceReceipt>> {
         valid_name(&id)?;
         self.request(|reply| Command::Receipt(id, reply)).await
+    }
+    pub(crate) async fn new_request_id(&self) -> Result<String> {
+        self.request(Command::NewRequestId).await
+    }
+    pub(crate) async fn list_snapshots(
+        &self,
+        after: Option<String>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<ConfigurationSnapshotSummary>> {
+        if let Some(after) = &after {
+            valid_name(after)?;
+        }
+        self.request(|reply| Command::ListSnapshots(after, limit, reply))
+            .await
+    }
+    pub(crate) async fn delete_snapshot(&self, name: String, expected: u64) -> Result<bool> {
+        valid_name(&name)?;
+        self.request(|reply| Command::DeleteSnapshot(name, expected, reply))
+            .await
     }
     pub(crate) async fn snapshot(&self, name: String) -> Result<CommittedConfiguration> {
         valid_name(&name)?;
@@ -691,6 +717,19 @@ impl Driver {
     async fn run(&mut self, mut receive: mpsc::Receiver<Command>) {
         while let Some(command) = receive.recv().await {
             match command {
+                Command::NewRequestId(reply) => {
+                    let result = if self.shutdown.load(Ordering::Acquire) {
+                        Err(ManagementError::Closed.into())
+                    } else if !self.confirmed.load(Ordering::Acquire) {
+                        Err(ManagementError::ConfigurationUnconfirmed.into())
+                    } else {
+                        match &self.store {
+                            Some(store) => store.new_request_id().await,
+                            None => Ok(uuid::Uuid::new_v4().to_string()),
+                        }
+                    };
+                    let _ = reply.send(result);
+                }
                 Command::Apply {
                     expected,
                     request,
@@ -760,6 +799,46 @@ impl Driver {
                     let result = match &self.store {
                         Some(store) => store.load_snapshot(&name).await,
                         None => Ok(self.snapshots.get(&name).cloned()),
+                    };
+                    let _ = reply.send(result);
+                }
+                Command::ListSnapshots(after, limit, reply) => {
+                    let result = match &self.store {
+                        Some(store) => store.list_snapshots(after.as_deref(), limit).await,
+                        None => Ok(self
+                            .snapshots
+                            .range::<str, _>((
+                                after
+                                    .as_deref()
+                                    .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
+                                std::ops::Bound::Unbounded,
+                            ))
+                            .take(limit.get())
+                            .map(|(name, snapshot)| ConfigurationSnapshotSummary {
+                                name: name.clone(),
+                                revision: snapshot.revision,
+                            })
+                            .collect()),
+                    };
+                    let _ = reply.send(result);
+                }
+                Command::DeleteSnapshot(name, expected, reply) => {
+                    let result = match &self.store {
+                        Some(store) => store.delete_snapshot(&name, expected).await,
+                        None => match self.snapshots.get(&name) {
+                            Some(snapshot) if snapshot.revision != expected => {
+                                Err(ManagementError::RevisionConflict {
+                                    expected,
+                                    actual: snapshot.revision,
+                                }
+                                .into())
+                            }
+                            Some(_) => {
+                                self.snapshots.remove(&name);
+                                Ok(true)
+                            }
+                            None => Ok(false),
+                        },
                     };
                     let _ = reply.send(result);
                 }

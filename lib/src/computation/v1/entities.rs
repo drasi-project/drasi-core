@@ -562,7 +562,9 @@ impl ComputationTopology {
                 DesiredPipe::Qos(config) => config.resource_dependencies(),
                 DesiredPipe::Ranked(config) => config.resource_dependencies(),
                 DesiredPipe::External { resources, .. } => resources.clone(),
-                DesiredPipe::Bounded { .. } | DesiredPipe::Broadcast { .. } => BTreeMap::new(),
+                DesiredPipe::Bounded { .. }
+                | DesiredPipe::ByteBounded(_)
+                | DesiredPipe::Broadcast { .. } => BTreeMap::new(),
             };
             topology.insert_pipe(PipeEntity {
                 relationship: relationship.clone(),

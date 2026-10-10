@@ -140,13 +140,13 @@ cargo() {
         mappings=/dev/null
         package=drasi-reaction-http
         profile=http-lifecycle
-        sources=(lib components/reactions/http/tests/*.rs)
+        sources=(lib components/reactions/http/tests/integration_tests.rs components/reactions/http/tests/output_schema.rs components/reactions/http/tests/recovery_e2e.rs)
     elif [[ " $* " == *" -p drasi-reaction-grpc "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
         package=drasi-reaction-grpc
         profile=grpc-lifecycle
-        sources=(lib components/reactions/grpc/tests/*.rs)
+        sources=(lib components/reactions/grpc/tests/integration_tests.rs components/reactions/grpc/tests/recovery_e2e.rs)
     elif [[ " $* " == *" -p drasi-reaction-application "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
@@ -164,7 +164,7 @@ cargo() {
         mappings=/dev/null
         package=drasi-reaction-loki
         profile=loki-lifecycle
-        sources=(lib components/reactions/loki/tests/*.rs)
+        sources=(lib components/reactions/loki/tests/loki_integration_tests.rs)
     elif [[ " $* " == *" -p drasi-core "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
@@ -176,7 +176,7 @@ cargo() {
         mappings=/dev/null
         package=drasi-index-rocksdb
         profile=rocksdb-backends
-        sources=(lib components/indexes/rocksdb/tests/computation_result_transactions.rs)
+        sources=(lib components/indexes/rocksdb/tests/computation_result_transactions.rs components/indexes/rocksdb/tests/outbox_live_results_tests.rs)
     elif [[ " $* " == *" -p drasi-index-garnet "* ]]; then
         inventory=/dev/null
         mappings=/dev/null

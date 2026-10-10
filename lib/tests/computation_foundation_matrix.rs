@@ -336,7 +336,7 @@ async fn matrix() {
             }
         }
     }
-    assert_eq!(combinations, 512);
+    assert_eq!(combinations, 648);
 }
 
 #[tokio::test(flavor = "current_thread")]

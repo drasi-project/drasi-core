@@ -27,12 +27,54 @@ makes an external effect transactional.
 `RetainedPipe` remains a lower-level single-consumer retained transport.
 Do not share its one progress cursor across independent consumers.
 Its persistent `IndexedEnvelopeStore` loads and validates retained bytes and
-progress on first use, then keeps that window in memory. Append, next-item lookup
-and acknowledgement no longer reread the full journal. Cached state changes only
+progress on first use. Its default cache keeps the whole window; optional
+`IndexedJournalOptions::page_limits` uses bounded reads and a bounded payload
+cache instead. Cached state changes only
 after a confirmed commit; interrupted writes still require reconstruction.
 Reopening with smaller capacity keeps older obligations until the retention
 policy permits removing them. Do not mutate the owned journal/checkpoint through
 another writer while the store is live.
+
+## Optional journal resource limits
+
+Retained stores and non-shared QoS journals can enforce a count limit and a
+full-binary-envelope byte quota together. Use the retained store's
+`new_with_byte_budget`/`try_new_with_byte_budget`, or
+`QosChannel::volatile_with_byte_budget` and
+`QosChannel::persistent_with_options`. `QosJournalOptions` combines `recovery`,
+optional `max_bytes`, and optional `page_limits`; omitted options preserve the
+existing count-only/eager-cache behavior.
+
+Bytes are charged once per journal, not once per subscriber. Backpressure only
+prunes handled history; explicit lossy policy can discard obligations and report
+gaps. No append partially prunes before discovering a remaining obligation.
+An oversized envelope can occupy the window alone. Reopening with a smaller
+quota preserves outstanding history and blocks admission until safe pruning.
+Client admission charges the complete derived envelope, including new progress
+metadata. Binary charges do not depend on the stored JSON representation.
+
+Persistent retained and QoS owners can select positive
+`OutboxPageLimits { max_records, max_bytes }`. Page bytes measure the **stored**
+record, independently of the binary admission quota. An oversized stored record
+is returned alone. Unsupported backends fail explicitly. Startup still validates
+all history and receipt/progress relationships, but keeps a bounded payload
+cache; legacy retry lookup may scan pages. Optional byte accounting keeps one
+size per retained record, and metadata/backend buffers are separate costs.
+The memory and both RocksDB outboxes implement this API. Pages are not
+multi-call transactional snapshots; do not bypass journal ownership.
+
+Shared transactional QoS keeps count-based reservations. Use
+`SharedStorageGroup::channel_with_page_limits` (or
+`QosChannel::shared_with_page_limits`) to bound its payload cache. Full startup
+validation and each refill run under the actual group transaction gate; refills
+acquire that gate before channel state and capture a delivery before releasing
+state, so subscribers cannot repeatedly evict each other's unread pages.
+Paging trades additional reads and group transactions for a bounded payload cache.
+Cancelling an active shared refill fences the group until cleanup and
+reconstruction, just like other interrupted shared transactions.
+Host/Server recipes do not yet expose byte/page owner options: applications must
+reconstruct them explicitly. No pipe-definition or stored-envelope format changes
+are required. See [page and quota boundaries](computation-graph-schemas-ports-pipes.md#journal-byte-budgets-and-bounded-history-pages).
 
 ## Explicit recovery configuration
 
@@ -279,8 +321,9 @@ do not release their retention obligations. Old binding handles cannot complete
 deliveries for a replacement subscriber.
 
 The slowest required consumer determines when old entries can be evicted under
-`Backpressure`. Bounds count envelopes, not bytes; use an appropriate capacity
-and codec message limit. No finite buffer promises unlimited ingestion while a
+`Backpressure`. Bounds count envelopes by default; non-shared journals can also
+select the binary-byte quota above. Use an appropriate capacity and codec
+message limit. No finite buffer promises unlimited ingestion while a
 required consumer remains unavailable.
 
 ## Persistent storage
@@ -553,8 +596,10 @@ required history fail under `Backpressure`.
 
 `PruneOldest` permits loss. A lagging endpoint defaults to
 `ReplayGapPolicy::Strict`; `SkipWithNotification` must be explicitly selected
-and logs the skipped interval. Strict gap detection is not a substitute for
-lossless retention.
+and logs the skipped half-open interval after the cursor advancement succeeds.
+Cancelled or failed advancement does not log a successful skip. This diagnostic
+is not a durable audit-delivery guarantee. Strict gap detection is not a
+substitute for lossless retention.
 
 ## Declarative hosts
 

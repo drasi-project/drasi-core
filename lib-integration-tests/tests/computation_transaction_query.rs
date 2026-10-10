@@ -22,6 +22,9 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::computation::v1::*;
 use drasi_state_store_redb::RedbStateStoreProvider;
 
+#[path = "computation_transaction_query/reliability.rs"]
+mod reliability;
+
 fn provider(root: &Path) -> Arc<dyn ComputationIndexProvider> {
     LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)))
 }
@@ -440,20 +443,31 @@ fn scheduled_input(
     due: u64,
     effective_from: u64,
 ) -> Result<InputEnvelope> {
+    scheduled_named_input("one", sequence, active, due, effective_from, sequence == 1)
+}
+
+fn scheduled_named_input(
+    name: &str,
+    sequence: u64,
+    active: bool,
+    due: u64,
+    effective_from: u64,
+    insert: bool,
+) -> Result<InputEnvelope> {
     let element = Element::Node {
         metadata: ElementMetadata {
-            reference: ElementReference::new("source", "one"),
+            reference: ElementReference::new("source", name),
             labels: Arc::from([Arc::from("Item")]),
             effective_from,
         },
         properties: ElementPropertyMap::from(
-            serde_json::json!({"active":active,"due":due,"name":"one"}),
+            serde_json::json!({"active":active,"due":due,"name":name}),
         ),
     };
     Ok(InputEnvelope {
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
-            if sequence == 1 {
+            if insert {
                 SourceChange::Insert { element }
             } else {
                 SourceChange::Update { element }
@@ -496,6 +510,127 @@ async fn scheduled_pair(
     query.start().await?;
     source.start().await?;
     Ok((query, source))
+}
+
+async fn timer_burst_reconstruction() -> Result<()> {
+    const COUNT: usize = 256;
+    let directory = tempfile::tempdir()?;
+    let progress = Arc::new(QuerySourceProgress::new(
+        "timer-pressure",
+        ComponentId::try_new("query")?,
+    )?);
+    let mut sequence = 0;
+    {
+        let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+        for index in 0..COUNT {
+            sequence += 1;
+            assert!(query
+                .transform(scheduled_named_input(
+                    &format!("item-{index}"),
+                    sequence,
+                    true,
+                    2000,
+                    1000,
+                    true
+                )?)
+                .await?
+                .is_empty());
+        }
+        for index in (0..COUNT).step_by(4) {
+            sequence += 1;
+            assert!(query
+                .transform(scheduled_named_input(
+                    &format!("item-{index}"),
+                    sequence,
+                    false,
+                    2000,
+                    1500,
+                    false
+                )?)
+                .await?
+                .is_empty());
+        }
+        clock.stop().await?;
+        query.stop().await?;
+    }
+    let (mut query, mut clock) = scheduled_pair(directory.path(), progress.clone()).await?;
+    let expected: std::collections::BTreeSet<_> = (0..COUNT)
+        .filter(|index| index % 4 != 0)
+        .map(|index| format!("item-{index}"))
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.len() < expected.len() {
+        let hint = tokio::time::timeout(Duration::from_secs(5), clock.next())
+            .await??
+            .context("recovered due work")?;
+        let mut pending = query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                envelope: hint.envelope,
+            })
+            .await?;
+        loop {
+            for output in &pending {
+                let results = QueryChangeCodec::to_legacy_result(&output.envelope)?;
+                for result in results.results {
+                    let drasi_lib::channels::ResultDiff::Add { data, .. } = result else {
+                        anyhow::bail!("unexpected scheduled result: {result:?}");
+                    };
+                    let name = data["name"].as_str().context("scheduled name")?.to_owned();
+                    assert!(expected.contains(&name), "cancelled or unknown timer fired");
+                    assert!(seen.insert(name), "duplicate timer result");
+                }
+            }
+            query.delivery_completed(&pending).await?;
+            pending = query.continue_transform().await?;
+            if pending.is_empty() {
+                break;
+            }
+        }
+    }
+    assert_eq!(seen, expected);
+    assert_eq!(
+        progress.snapshot().checkpoints
+            [&SourceProgressKey::Stream(StreamId::try_new("input/out")?)]
+            .sequence,
+        sequence
+    );
+    assert_eq!(
+        query
+            .query_results()
+            .context("query results")?
+            .snapshot()?
+            .rows
+            .len(),
+        expected.len()
+    );
+    let stale = GraphChangeCodec::encode_futures_due(
+        &ComponentId::try_new("clock")?,
+        StreamId::try_new("clock/out")?,
+        999,
+        chrono::DateTime::from_timestamp_millis(2000).context("due")?,
+    )?;
+    assert!(query
+        .transform(InputEnvelope {
+            port: PortId::try_new("in")?,
+            envelope: stale
+        })
+        .await?
+        .is_empty());
+    assert!(!query.has_pending_emissions());
+    clock.stop().await?;
+    query.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timer_burst_reconstruction_current_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(60), timer_burst_reconstruction()).await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timer_burst_reconstruction_multi_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(60), timer_burst_reconstruction()).await?
 }
 
 #[tokio::test]

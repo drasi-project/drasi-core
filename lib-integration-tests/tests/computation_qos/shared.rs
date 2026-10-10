@@ -4,6 +4,338 @@
 use super::*;
 use drasi_core::interface::{IndexError, OutboxWriter};
 
+struct PagedReadGate {
+    after: std::sync::atomic::AtomicU64,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    fail: AtomicBool,
+}
+
+impl Default for PagedReadGate {
+    fn default() -> Self {
+        Self {
+            after: std::sync::atomic::AtomicU64::new(u64::MAX),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            fail: AtomicBool::new(false),
+        }
+    }
+}
+
+struct PagedOutbox {
+    inner: Arc<dyn OutboxWriter>,
+    gate: Arc<PagedReadGate>,
+    work: Arc<drasi_core::computation::ComputationIoScope>,
+}
+
+struct PagedCleanup {
+    inner: Arc<dyn drasi_core::computation::ComputationResourceCleanup>,
+    work: Arc<drasi_core::computation::ComputationIoScope>,
+}
+
+#[async_trait]
+impl drasi_core::computation::ComputationResourceCleanup for PagedCleanup {
+    fn cancel(&self) {
+        self.work.cancel();
+        self.inner.cancel();
+    }
+    async fn quiesce(&self) -> Result<(), IndexError> {
+        self.work.quiesce().await?;
+        self.inner.quiesce().await
+    }
+    async fn shutdown(&self) -> Result<(), IndexError> {
+        self.work.shutdown().await?;
+        self.inner.shutdown().await
+    }
+}
+
+#[async_trait]
+impl OutboxWriter for PagedOutbox {
+    async fn append(&self, key: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+        self.inner.append(key, sequence, data).await
+    }
+    async fn read_from(&self, key: &str, after: u64) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        assert!(
+            !key.ends_with("_6576656e7473"),
+            "paged journals must not eagerly load event history"
+        );
+        self.inner.read_from(key, after).await
+    }
+    async fn read_page(
+        &self,
+        key: &str,
+        after: u64,
+        limits: drasi_core::interface::OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let inner = self.inner.clone();
+        let gate = self.gate.clone();
+        let key = key.to_owned();
+        self.work
+            .run_async(async move {
+                let page = inner.read_page(&key, after, limits).await?;
+                if gate
+                    .after
+                    .compare_exchange(after, u64::MAX, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    gate.entered.notify_one();
+                    gate.resume.notified().await;
+                    if gate.fail.load(Ordering::SeqCst) {
+                        return Err(IndexError::IOError);
+                    }
+                }
+                Ok(page)
+            })
+            .await
+    }
+    async fn read_latest_sequence(&self, key: &str) -> Result<Option<u64>, IndexError> {
+        self.inner.read_latest_sequence(key).await
+    }
+    async fn clear(&self, key: &str) -> Result<(), IndexError> {
+        self.inner.clear(key).await
+    }
+    async fn append_and_trim(
+        &self,
+        key: &str,
+        sequence: u64,
+        data: &[u8],
+        floor: u64,
+    ) -> Result<usize, IndexError> {
+        self.inner.append_and_trim(key, sequence, data, floor).await
+    }
+    async fn trim_before(&self, key: &str, floor: u64) -> Result<usize, IndexError> {
+        self.inner.trim_before(key, floor).await
+    }
+    async fn trim_to_capacity(&self, key: &str, capacity: usize) -> Result<usize, IndexError> {
+        self.inner.trim_to_capacity(key, capacity).await
+    }
+}
+
+async fn paged_group(path: &Path, gate: Arc<PagedReadGate>) -> Result<Arc<SharedStorageGroup>> {
+    let original = uncertain_indexes(path, Arc::new(AtomicBool::new(false)), None).await?;
+    let work = Arc::new(drasi_core::computation::ComputationIoScope::default());
+    let cleanup = Arc::new(PagedCleanup {
+        inner: original.cleanup().expect("cleanup").clone(),
+        work: work.clone(),
+    });
+    let outbox = Arc::new(PagedOutbox {
+        inner: original.outbox_writer().expect("outbox").clone(),
+        gate,
+        work,
+    });
+    let control = original.indexes().session_control.clone();
+    SharedStorageGroup::new(
+        "query-graph",
+        ComponentId::try_new("query")?,
+        wrapped_indexes(original, control, outbox)?.with_cleanup(cleanup),
+    )
+}
+
+async fn paged_channel(group: &SharedStorageGroup) -> Result<Arc<QosChannel>> {
+    Ok(group
+        .channel_with_page_limits(
+            definition(true, RetentionPolicy::Backpressure, 2),
+            "paged",
+            codec()?,
+            options(),
+            drasi_core::interface::OutboxPageLimits {
+                max_records: NonZeroUsize::new(1).expect("page count"),
+                max_bytes: NonZeroUsize::new(1).expect("page bytes"),
+            },
+        )
+        .await?)
+}
+
+async fn paged_ack(
+    receiver: &mut dyn EnvelopeReceiver,
+    sequence: u64,
+) -> Result<Box<dyn Acknowledgement>> {
+    let delivery = tokio::time::timeout(Duration::from_secs(5), receiver.receive())
+        .await??
+        .expect("shared output");
+    assert_eq!(delivery.envelope().system().sequence(), sequence);
+    Ok(delivery.into_parts().1.expect("handling acknowledgement"))
+}
+
+#[tokio::test]
+async fn paged_shared_startup_holds_the_group_gate_across_every_page() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let inputs = admitted_inputs(&directory.path().join("inputs")).await?;
+    let gate = Arc::new(PagedReadGate::default());
+    let group = paged_group(directory.path(), gate.clone()).await?;
+    let channel = paged_channel(&group).await?;
+    for input in &inputs {
+        channel.publish(input).await?;
+    }
+    channel.shutdown().await?;
+    gate.after.store(1, Ordering::SeqCst);
+    let processor = drasi_core::computation::ComputationTransaction::try_new(
+        group.create_indexes("query-graph", "query").await?,
+    )?;
+    let (restored, writer) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            paged_channel(&group),
+            async {
+                gate.entered.notified().await;
+                let write = processor.run(async { Ok(()) });
+                tokio::pin!(write);
+                tokio::select! {
+                    result = &mut write => anyhow::bail!("writer bypassed a later reconstruction page: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+                gate.resume.notify_one();
+                write.await?;
+                Ok::<_, anyhow::Error>(())
+            }
+        )
+    }).await?;
+    writer?;
+    let restored = restored?;
+    assert_eq!(restored.progress().await?.accepted, 2);
+    restored.shutdown().await?;
+    processor.shutdown().await?;
+    group.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn paged_shared_refill_waits_without_holding_channel_state() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let inputs = admitted_inputs(&directory.path().join("inputs")).await?;
+    let group = paged_group(directory.path(), Arc::new(PagedReadGate::default())).await?;
+    let channel = paged_channel(&group).await?;
+    for input in &inputs {
+        channel.publish(input).await?;
+    }
+    let mut pipe = shared_endpoint(&group, &channel, "fast")?;
+    let mut receiver = pipe.pipe.take_receiver()?;
+    let processor = drasi_core::computation::ComputationTransaction::try_new(
+        group.create_indexes("query-graph", "query").await?,
+    )?;
+    let entered = tokio::sync::Notify::new();
+    let waiting = tokio::sync::Notify::new();
+    let (writer, delivery) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            processor.run(async {
+                entered.notify_one();
+                waiting.notified().await;
+                assert_eq!(
+                    channel
+                        .progress()
+                        .await
+                        .map_err(IndexError::other)?
+                        .accepted,
+                    2
+                );
+                Ok(())
+            }),
+            async {
+                entered.notified().await;
+                let receive = receiver.receive();
+                tokio::pin!(receive);
+                assert!(futures::poll!(&mut receive).is_pending());
+                waiting.notify_one();
+                receive.await
+            }
+        )
+    })
+    .await?;
+    writer?;
+    let delivery = delivery?.expect("first output");
+    assert_eq!(delivery.envelope().system().sequence(), 1);
+    delivery
+        .into_parts()
+        .1
+        .expect("ack")
+        .complete(HandlingOutcome::Handled)
+        .await?;
+    paged_ack(receiver.as_mut(), 2)
+        .await?
+        .complete(HandlingOutcome::Handled)
+        .await?;
+    channel.shutdown().await?;
+    processor.shutdown().await?;
+    group.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn paged_shared_refill_failure_and_cancellation_preserve_unhandled_history() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let inputs = admitted_inputs(&directory.path().join("inputs")).await?;
+    for cancel in [false, true] {
+        let path = directory
+            .path()
+            .join(if cancel { "cancel" } else { "failure" });
+        let gate = Arc::new(PagedReadGate::default());
+        let group = paged_group(&path, gate.clone()).await?;
+        let channel = paged_channel(&group).await?;
+        for input in &inputs {
+            channel.publish(input).await?;
+        }
+        let mut pipe = shared_endpoint(&group, &channel, "fast")?;
+        let mut receiver = pipe.pipe.take_receiver()?;
+        paged_ack(receiver.as_mut(), 1)
+            .await?
+            .complete(HandlingOutcome::Handled)
+            .await?;
+        gate.after.store(1, Ordering::SeqCst);
+        gate.fail.store(!cancel, Ordering::SeqCst);
+        let mut receive = Box::pin(receiver.receive());
+        tokio::select! {
+            result = &mut receive => anyhow::bail!("refill did not reach its owned page read: {}", result.is_ok()),
+            _ = gate.entered.notified() => {}
+        }
+        if cancel {
+            drop(receive);
+            assert!(
+                channel.progress().await.is_err(),
+                "interrupted shared transactions must fence delivery"
+            );
+            let closing = channel.shutdown();
+            tokio::pin!(closing);
+            tokio::select! {
+                result = &mut closing => anyhow::bail!("cleanup abandoned actual page I/O: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+            gate.resume.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), closing).await??;
+        } else {
+            gate.resume.notify_one();
+            assert!(receive.await.is_err());
+            assert_eq!(channel.progress().await?.processed["fast"], 1);
+            paged_ack(receiver.as_mut(), 2)
+                .await?
+                .complete(HandlingOutcome::Handled)
+                .await?;
+            channel.shutdown().await?;
+        }
+        group.shutdown().await?;
+        drop(receiver);
+        drop(pipe);
+        drop(channel);
+        drop(group);
+        let group = paged_group(&path, Arc::new(PagedReadGate::default())).await?;
+        let channel = paged_channel(&group).await?;
+        assert_eq!(channel.progress().await?.accepted, 2);
+        assert_eq!(
+            channel.progress().await?.processed["fast"],
+            if cancel { 1 } else { 2 }
+        );
+        if cancel {
+            let mut pipe = shared_endpoint(&group, &channel, "fast")?;
+            let mut receiver = pipe.pipe.take_receiver()?;
+            paged_ack(receiver.as_mut(), 2)
+                .await?
+                .complete(HandlingOutcome::Handled)
+                .await?;
+        }
+        channel.shutdown().await?;
+        group.shutdown().await?;
+    }
+    Ok(())
+}
+
 struct FailSecondJournalAppend {
     inner: Arc<dyn OutboxWriter>,
     staged: std::sync::Mutex<Vec<String>>,

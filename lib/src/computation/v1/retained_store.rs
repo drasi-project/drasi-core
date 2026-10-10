@@ -24,8 +24,10 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::computation::ComputationIndexes;
+use drasi_core::interface::OutboxPageLimits;
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Notify};
 
+use super::journal_budget::JournalBudget;
 use super::{ChangeEnvelope, EnvelopeCodec, PipeError, ResourceCleanup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -45,6 +47,10 @@ pub struct StoredEnvelope {
 #[async_trait]
 pub trait RetainedEnvelopeStore: ResourceCleanup + Send + Sync {
     fn capacity(&self) -> NonZeroUsize;
+    /// Optional full binary-envelope byte quota, configured on the journal owner.
+    fn max_bytes(&self) -> Option<NonZeroUsize> {
+        None
+    }
     fn durable(&self) -> bool;
     fn durability(&self) -> drasi_core::computation::StorageDurability {
         if self.durable() {
@@ -86,11 +92,13 @@ struct MemoryState {
     entries: BTreeMap<u64, ChangeEnvelope>,
     head: u64,
     progress: u64,
+    budget: Option<JournalBudget>,
 }
 
 pub struct MemoryEnvelopeStore {
     state: std::sync::Mutex<MemoryState>,
     capacity: NonZeroUsize,
+    max_bytes: Option<NonZeroUsize>,
     policy: RetentionPolicy,
     generation: AtomicU64,
     epoch: AtomicU64,
@@ -100,9 +108,31 @@ pub struct MemoryEnvelopeStore {
 
 impl MemoryEnvelopeStore {
     pub fn new(capacity: NonZeroUsize, policy: RetentionPolicy) -> Self {
+        Self::with_budget(capacity, policy, None)
+    }
+
+    /// Budget retained history, including acknowledged entries until pruning.
+    /// Oversized envelopes require an otherwise empty retained window.
+    pub fn new_with_byte_budget(
+        capacity: NonZeroUsize,
+        policy: RetentionPolicy,
+        max_bytes: NonZeroUsize,
+    ) -> Self {
+        Self::with_budget(capacity, policy, Some(max_bytes))
+    }
+
+    fn with_budget(
+        capacity: NonZeroUsize,
+        policy: RetentionPolicy,
+        max_bytes: Option<NonZeroUsize>,
+    ) -> Self {
         Self {
-            state: std::sync::Mutex::new(MemoryState::default()),
+            state: std::sync::Mutex::new(MemoryState {
+                budget: max_bytes.map(JournalBudget::new),
+                ..MemoryState::default()
+            }),
             capacity,
+            max_bytes,
             policy,
             generation: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
@@ -128,6 +158,9 @@ impl MemoryEnvelopeStore {
 
 #[async_trait]
 impl RetainedEnvelopeStore for MemoryEnvelopeStore {
+    fn max_bytes(&self) -> Option<NonZeroUsize> {
+        self.max_bytes
+    }
     fn capacity(&self) -> NonZeroUsize {
         self.capacity
     }
@@ -176,17 +209,32 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
             .head
             .checked_add(1)
             .ok_or_else(|| PipeError::Backend(anyhow::anyhow!("retained position exhausted")))?;
-        if state.entries.len() >= self.capacity.get() {
-            let oldest = state
+        let remove = state.entries.len().saturating_sub(self.capacity.get() - 1);
+        let budget = state
+            .budget
+            .as_ref()
+            .map(|budget| budget.prepare(envelope, remove))
+            .transpose()?;
+        let remove = budget.as_ref().map_or(remove, |append| append.remove);
+        if remove > 0 {
+            let last_removed = state
                 .entries
                 .keys()
-                .next()
-                .copied()
-                .expect("nonempty bounded history");
-            if self.policy == RetentionPolicy::Backpressure && oldest > state.progress {
+                .nth(remove - 1)
+                .expect("bounded journal accounting");
+            if self.policy == RetentionPolicy::Backpressure && *last_removed > state.progress {
                 return Err(PipeError::CapacityExhausted);
             }
-            state.entries.remove(&oldest);
+        }
+        for _ in 0..remove {
+            state.entries.pop_first();
+        }
+        if let Some(append) = budget {
+            state
+                .budget
+                .as_mut()
+                .expect("configured budget")
+                .apply(append);
         }
         state.entries.insert(position, envelope.clone());
         state.head = position;
@@ -249,6 +297,7 @@ impl ResourceCleanup for MemoryEnvelopeStore {
         }
         self.generation.store(0, Ordering::Release);
         state.entries.clear();
+        state.budget = None;
         self.notify.notify_waiters();
         Ok(())
     }
@@ -263,6 +312,8 @@ pub struct IndexedEnvelopeStore {
     codec: Arc<EnvelopeCodec>,
     key: String,
     capacity: NonZeroUsize,
+    max_bytes: Option<NonZeroUsize>,
+    page_limits: Option<OutboxPageLimits>,
     policy: RetentionPolicy,
     lock: Mutex<Option<IndexedState>>,
     generation: AtomicU64,
@@ -273,8 +324,19 @@ pub struct IndexedEnvelopeStore {
 
 struct IndexedState {
     entries: BTreeMap<u64, Bytes>,
+    oldest: Option<u64>,
+    retained: usize,
     head: u64,
     progress: u64,
+    budget: Option<JournalBudget>,
+}
+
+/// Storage-owner policy, independent of a pipe's handling/capability declaration.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexedJournalOptions {
+    pub max_bytes: Option<NonZeroUsize>,
+    pub page_limits: Option<OutboxPageLimits>,
 }
 
 impl IndexedEnvelopeStore {
@@ -285,7 +347,52 @@ impl IndexedEnvelopeStore {
         capacity: NonZeroUsize,
         policy: RetentionPolicy,
     ) -> Result<Self, PipeError> {
+        Self::try_new_with_options(
+            indexes,
+            codec,
+            key,
+            capacity,
+            policy,
+            IndexedJournalOptions::default(),
+        )
+    }
+
+    /// Reconstruct all existing obligations before enforcing the configured byte
+    /// quota on new appends. Budgeting does not change the persisted envelope codec.
+    pub fn try_new_with_byte_budget(
+        indexes: ComputationIndexes,
+        codec: Arc<EnvelopeCodec>,
+        key: impl Into<String>,
+        capacity: NonZeroUsize,
+        policy: RetentionPolicy,
+        max_bytes: NonZeroUsize,
+    ) -> Result<Self, PipeError> {
+        Self::try_new_with_options(
+            indexes,
+            codec,
+            key,
+            capacity,
+            policy,
+            IndexedJournalOptions {
+                max_bytes: Some(max_bytes),
+                page_limits: None,
+            },
+        )
+    }
+
+    pub fn try_new_with_options(
+        indexes: ComputationIndexes,
+        codec: Arc<EnvelopeCodec>,
+        key: impl Into<String>,
+        capacity: NonZeroUsize,
+        policy: RetentionPolicy,
+        options: IndexedJournalOptions,
+    ) -> Result<Self, PipeError> {
         let key = key.into();
+        let IndexedJournalOptions {
+            max_bytes,
+            page_limits,
+        } = options;
         super::data::validate_identifier("retained store", &key)?;
         indexes
             .atomic_result_transaction()
@@ -308,6 +415,8 @@ impl IndexedEnvelopeStore {
             codec,
             key,
             capacity,
+            max_bytes,
+            page_limits,
             policy,
             lock: Mutex::new(None),
             generation: AtomicU64::new(0),
@@ -347,27 +456,66 @@ impl IndexedEnvelopeStore {
             .await
             .map_err(|error| PipeError::Backend(error.into()))?
             .unwrap_or(0);
-        let records = self
-            .indexes
-            .outbox_writer()
-            .expect("validated outbox")
-            .read_from(&self.key, 0)
-            .await
-            .map_err(|error| PipeError::Backend(error.into()))?;
+        let outbox = self.indexes.outbox_writer().expect("validated outbox");
         let mut entries = BTreeMap::new();
+        let mut budget = self.max_bytes.map(JournalBudget::new);
         let mut previous: Option<u64> = None;
-        for (position, bytes) in records {
-            if position == 0 || previous.is_some_and(|value| value.checked_add(1) != Some(position))
-            {
-                return Err(PipeError::Backend(anyhow::anyhow!(
-                    "retained journal positions are not consecutive"
-                )));
+        let mut oldest = None;
+        let mut retained = 0usize;
+        loop {
+            let records = match self.page_limits {
+                Some(limits) => {
+                    let records = outbox
+                        .read_page(&self.key, previous.unwrap_or(0), limits)
+                        .await
+                        .map_err(|error| PipeError::Backend(error.into()))?;
+                    limits
+                        .validate_page(&records)
+                        .map_err(|error| PipeError::Backend(error.into()))?;
+                    records
+                }
+                None => outbox
+                    .read_from(&self.key, 0)
+                    .await
+                    .map_err(|error| PipeError::Backend(error.into()))?,
+            };
+            if records.is_empty() {
+                break;
             }
-            self.codec
-                .decode(&bytes)
-                .map_err(|error| PipeError::Backend(error.into()))?;
-            entries.insert(position, Bytes::from(bytes));
-            previous = Some(position);
+            let mut page = BTreeMap::new();
+            for (position, bytes) in records {
+                if position == 0
+                    || previous.is_some_and(|value| value.checked_add(1) != Some(position))
+                {
+                    return Err(PipeError::Backend(anyhow::anyhow!(
+                        "retained journal positions are not consecutive"
+                    )));
+                }
+                let envelope = self
+                    .codec
+                    .decode(&bytes)
+                    .map_err(|error| PipeError::Backend(error.into()))?;
+                if let Some(budget) = &mut budget {
+                    budget.restore(&envelope)?;
+                }
+                oldest.get_or_insert(position);
+                retained = retained.checked_add(1).ok_or_else(|| {
+                    PipeError::Backend(anyhow::anyhow!("retained count overflow"))
+                })?;
+                page.insert(position, Bytes::from(bytes));
+                previous = Some(position);
+            }
+            if self.page_limits.is_none()
+                || entries.is_empty()
+                || progress
+                    .checked_add(1)
+                    .is_some_and(|position| page.contains_key(&position))
+            {
+                entries = page;
+            }
+            if self.page_limits.is_none() {
+                break;
+            }
         }
         if previous.unwrap_or(0) != head || progress > head {
             return Err(PipeError::Backend(anyhow::anyhow!(
@@ -376,8 +524,11 @@ impl IndexedEnvelopeStore {
         }
         Ok(IndexedState {
             entries,
+            oldest,
+            retained,
             head,
             progress,
+            budget,
         })
     }
 
@@ -417,6 +568,9 @@ impl Drop for WriteFence<'_> {
 
 #[async_trait]
 impl RetainedEnvelopeStore for IndexedEnvelopeStore {
+    fn max_bytes(&self) -> Option<NonZeroUsize> {
+        self.max_bytes
+    }
     fn capacity(&self) -> NonZeroUsize {
         self.capacity
     }
@@ -465,15 +619,23 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .expect("validated checkpoint");
         let outbox = self.indexes.outbox_writer().expect("validated outbox");
         let remove = state
-            .entries
-            .len()
+            .retained
             .saturating_add(1)
             .saturating_sub(self.capacity.get());
+        let budget = state
+            .budget
+            .as_ref()
+            .map(|budget| budget.prepare(envelope, remove))
+            .transpose()?;
+        let remove = budget.as_ref().map_or(remove, |append| append.remove);
         if remove > 0 && self.policy == RetentionPolicy::Backpressure {
-            let last_removed = state.entries.keys().nth(remove - 1).ok_or_else(|| {
-                PipeError::Backend(anyhow::anyhow!("invalid retained capacity accounting"))
-            })?;
-            if *last_removed > state.progress {
+            let last_removed = state
+                .oldest
+                .and_then(|oldest| oldest.checked_add(remove as u64 - 1))
+                .ok_or_else(|| {
+                    PipeError::Backend(anyhow::anyhow!("invalid retained capacity accounting"))
+                })?;
+            if last_removed > state.progress {
                 return Err(PipeError::CapacityExhausted);
             }
         }
@@ -481,6 +643,10 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .head
             .checked_add(1)
             .ok_or_else(|| PipeError::Backend(anyhow::anyhow!("retained position exhausted")))?;
+        let retain_from = state
+            .oldest
+            .and_then(|oldest| oldest.checked_add(remove as u64))
+            .unwrap_or(position);
         let mut fence = WriteFence {
             store: self,
             complete: false,
@@ -492,14 +658,7 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
         outbox
-            .append_and_trim(
-                &self.key,
-                position,
-                &bytes,
-                position
-                    .saturating_sub(self.capacity.get() as u64)
-                    .saturating_add(1),
-            )
+            .append_and_trim(&self.key, position, &bytes, retain_from)
             .await
             .map_err(|error| PipeError::Backend(error.into()))?;
         checkpoint
@@ -520,10 +679,32 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
                 source: anyhow::anyhow!("pipe generation revoked during durable commit"),
             });
         }
-        for _ in 0..remove {
-            state.entries.pop_first();
+        if self.page_limits.is_some() {
+            state.entries.retain(|position, _| *position >= retain_from);
+        } else {
+            for _ in 0..remove {
+                state.entries.pop_first();
+            }
         }
-        state.entries.insert(position, bytes);
+        if let Some(append) = budget {
+            state
+                .budget
+                .as_mut()
+                .expect("configured budget")
+                .apply(append);
+        }
+        if self.page_limits.map_or(true, |limits| {
+            let cached_bytes = state.entries.values().map(Bytes::len).sum();
+            limits.admits(state.entries.len(), cached_bytes, bytes.len())
+                && state
+                    .entries
+                    .last_key_value()
+                    .map_or(true, |(last, _)| last.checked_add(1) == Some(position))
+        }) {
+            state.entries.insert(position, bytes);
+        }
+        state.retained = state.retained - remove + 1;
+        state.oldest = Some(retain_from);
         state.head = position;
         fence.complete = true;
         self.notify.notify_waiters();
@@ -531,18 +712,56 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
     }
 
     async fn next(&self, generation: u64, after: u64) -> Result<Option<StoredEnvelope>, PipeError> {
-        let state = self.lock_state(generation).await?;
-        if let Some((oldest, _)) = state.entries.first_key_value() {
+        let mut state = self.lock_state(generation).await?;
+        if let Some(oldest) = state.oldest {
             if after < oldest.saturating_sub(1) {
                 return Err(PipeError::PositionUnavailable {
                     requested: after,
-                    oldest: *oldest,
+                    oldest,
                 });
             }
         }
         let Some(start) = after.checked_add(1) else {
             return Ok(None);
         };
+        if start > state.head {
+            return Ok(None);
+        }
+        if let Some(limits) = self.page_limits {
+            if !state.entries.contains_key(&start) {
+                let records = self
+                    .indexes
+                    .outbox_writer()
+                    .expect("validated outbox")
+                    .read_page(&self.key, after, limits)
+                    .await
+                    .map_err(|error| PipeError::Backend(error.into()))?;
+                check_generation(&self.generation, generation)?;
+                limits
+                    .validate_page(&records)
+                    .map_err(|error| PipeError::Backend(error.into()))?;
+                let mut page = BTreeMap::new();
+                let mut expected = Some(start);
+                for (position, bytes) in records {
+                    if Some(position) != expected || position > state.head {
+                        return Err(PipeError::Backend(anyhow::anyhow!(
+                            "retained page is inconsistent"
+                        )));
+                    }
+                    self.codec
+                        .decode(&bytes)
+                        .map_err(|error| PipeError::Backend(error.into()))?;
+                    page.insert(position, Bytes::from(bytes));
+                    expected = position.checked_add(1);
+                }
+                if page.is_empty() {
+                    return Err(PipeError::Backend(anyhow::anyhow!(
+                        "retained page ended before journal head"
+                    )));
+                }
+                state.entries = page;
+            }
+        }
         state
             .entries
             .range(start..)

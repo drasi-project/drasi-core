@@ -151,6 +151,12 @@ for profile in default no-default-features extra-capabilities integration plugin
             inventory=/dev/null
             mappings=/dev/null
             sources=(lib "components/reactions/$reaction/tests/"*.rs)
+            # Helper-only Rust test targets compile but contain no test cases.
+            case "$reaction" in
+                http) sources=(lib components/reactions/http/tests/integration_tests.rs components/reactions/http/tests/output_schema.rs components/reactions/http/tests/recovery_e2e.rs) ;;
+                grpc) sources=(lib components/reactions/grpc/tests/integration_tests.rs components/reactions/grpc/tests/recovery_e2e.rs) ;;
+                loki) sources=(lib components/reactions/loki/tests/loki_integration_tests.rs) ;;
+            esac
             targets=(--lib --tests)
             test_arguments+=(--test-threads=1)
             if [[ "$reaction" == aws-sqs || "$reaction" == loki ]]; then
@@ -178,8 +184,8 @@ for profile in default no-default-features extra-capabilities integration plugin
             package=drasi-index-rocksdb
             inventory=/dev/null
             mappings=/dev/null
-            sources=(lib components/indexes/rocksdb/tests/computation_result_transactions.rs)
-            targets=(--lib --test computation_result_transactions)
+            sources=(lib components/indexes/rocksdb/tests/computation_result_transactions.rs components/indexes/rocksdb/tests/outbox_live_results_tests.rs)
+            targets=(--lib --test computation_result_transactions --test outbox_live_results_tests)
             features+=(--features computation)
             ;;
         garnet-backends)

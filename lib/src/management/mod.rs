@@ -258,6 +258,37 @@ impl crate::DrasiLib {
             .map_err(Into::into)
     }
 
+    /// Generate an ID for a new configuration operation. Reuse the same ID for
+    /// retries. Opt-in expiry stores may expire a full previous batch here.
+    pub async fn new_configuration_request_id(&self) -> crate::Result<String> {
+        self.management()?
+            .new_request_id()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn list_configuration_snapshots(
+        &self,
+        after: Option<String>,
+        limit: std::num::NonZeroUsize,
+    ) -> crate::Result<Vec<ConfigurationSnapshotSummary>> {
+        self.management()?
+            .list_snapshots(after, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn delete_configuration_snapshot(
+        &self,
+        name: impl Into<String>,
+        expected_revision: u64,
+    ) -> crate::Result<bool> {
+        self.management()?
+            .delete_snapshot(name.into(), expected_revision)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Privileged, immutable committed configuration snapshot, including nodes
     /// that have never constructed successfully. Does not snapshot runtime data.
     pub async fn snapshot_desired_configuration(

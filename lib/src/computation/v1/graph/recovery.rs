@@ -80,7 +80,7 @@ fn transport(
     resources: &BTreeMap<ResourceId, ResourceHandle>,
 ) -> Result<Option<StorageDurability>, RecoveryIncompatibility> {
     match &edge.pipe {
-        DesiredPipe::Bounded { .. } => Ok(None),
+        DesiredPipe::Bounded { .. } | DesiredPipe::ByteBounded(_) => Ok(None),
         DesiredPipe::Ranked(config) if !config.drop_when_full => Ok(None),
         DesiredPipe::Ranked(_) | DesiredPipe::Broadcast { .. } => {
             Err(RecoveryIncompatibility::LossyDelivery)

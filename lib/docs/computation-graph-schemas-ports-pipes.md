@@ -6,7 +6,7 @@
 [Transactions](computation-graph-transactions.md)
 
 This describes the current branch implementation, reviewed against `e46f6130`
-on 2026-10-04. Suggested improvements below are **not implemented features**.
+on 2026-10-09. Suggested improvements below are **not implemented features**.
 
 Read sections 1-2 for the overview, 3-4 for data and connection rules,
 [5 for pipe choices](#5-the-five-pipe-families), and 6-8 for execution and limits.
@@ -232,7 +232,7 @@ for quality of service.
 
 | Family | Buffer arrangement | What happens when full? | Handling acknowledgement | Survives process restart? |
 |---|---|---|---|---|
-| Bounded | One queue per connection | Producer waits | No | No |
+| Bounded | One queue per connection; count-only or opt-in byte-bounded | Producer waits | No | No |
 | Broadcast | One queue per connection | Discard oldest queued envelope | No | No |
 | Ranked input | One shared queue across producer connections | Wait, or discard incoming envelope, by configuration | No | No |
 | Retained | One journal and one consumer-progress position | Wait for handling, or prune oldest history | Yes | Only with persistent store |
@@ -248,6 +248,39 @@ Capacity becomes available when an envelope is **received**, not when processing
 finishes. A successful send only confirms enqueueing. Use it when temporary
 in-process buffering is enough and losing that queue on a crash is acceptable
 or recoverable elsewhere.
+
+`ByteBoundedPipeConfig { capacity, max_bytes }` adds an **opt-in serialized-byte
+budget** to the same FIFO and lifecycle contract. It does not change existing
+`BoundedPipeConfig` construction or its saved configuration shape. The desired
+pipe configuration is:
+
+```json
+{"ByteBounded": {"capacity": 128, "max_bytes": 1048576}}
+```
+
+The charge is the exact complete `BinaryEnvelopeCodec` representation, including
+record payloads, identifiers, schema, system metadata, annotations and lineage.
+Sizing does not allocate an encoded payload copy, although frame construction
+uses temporary metadata/operation collections. It needs no decoding registry.
+
+Both count and byte capacity must be available before acceptance. An envelope
+larger than the entire budget is allowed **only as an exclusive singleton**:
+it reserves the full budget until received or discarded. A pending send cannot
+hold up graceful draining, and cancelling a wait releases its reservations.
+Received deliveries release capacity even if downstream handling has not finished.
+
+`capacity` must be positive and fit Tokio's channel limit. `max_bytes` must be in
+`1..=min(tokio::sync::Semaphore::MAX_PERMITS, u32::MAX)` (at most 4,294,967,295
+bytes on a 64-bit host). Invalid limits fail explicitly. Topology-as-data exposes
+the `ByteBounded` profile, envelope `capacity`, and `maxBytes`.
+
+This is **not a heap or process-RAM limit**: allocation overhead, unaccepted sender
+arguments, downstream work and component-local state are not charged as queued
+data, and the oversized singleton can exceed the nominal budget. Admission
+reservations may temporarily consume quota before acceptance. Independent fan-out
+pipes each charge full wire size even when their payload allocations are shared.
+Retained/non-shared QoS budgets are configured on their journal owners, as
+described below. This FIFO option does not change ranked or broadcast admission.
 
 ### Broadcast: keep moving and accept loss
 
@@ -307,16 +340,63 @@ old binding handles; independent consumers must not share this single cursor.
 or is explicitly skipped and logged under `SkipWithNotification`.
 Acknowledged history can remain until capacity pressure removes it.
 
-Persistent retained storage loads its committed window once, validates its
-records and progress, and caches serialized bytes. Ordinary appends/lookups no
-longer copy the whole window from storage. This trades memory for cheaper reads:
-capacity and maximum envelope size bound the normal cache. Reducing capacity on
-reopen preserves the older window until its obligations can safely be removed.
+By default, persistent retained storage loads its committed window once,
+validates its records and progress, and caches serialized bytes. It can instead
+use `IndexedJournalOptions::page_limits` to scan and cache bounded pages.
+Reducing capacity or a byte quota on reopen preserves the older window until
+its obligations can safely be removed.
 Failed/cancelled loading cannot install a partial cache; uncertain writes require
 cleanup and reconstruction, not reuse of cached state.
 
 This is a lower-level single-consumer facility, not automatic duplicate
 suppression for retried producer sends.
+
+`MemoryEnvelopeStore::new_with_byte_budget`,
+`IndexedEnvelopeStore::try_new_with_byte_budget`, and
+`IndexedEnvelopeStore::try_new_with_options` configure optional journal-byte
+limits without changing `RetainedPipeConfig`. They charge full binary-envelope
+size even when persisted records use the JSON envelope codec. A budgeted append
+plans all count/byte pruning before mutation; under backpressure, every removed
+record must already be handled. An oversized record requires an otherwise empty
+window. Explicitly lossy retention may prune pending records and report gaps.
+
+### Journal byte budgets and bounded history pages
+
+Non-shared QoS has the same optional byte policy through
+`QosChannel::volatile_with_byte_budget` and
+`QosChannel::persistent_with_options`/`QosJournalOptions::max_bytes`. Each record
+is charged once for the journal, regardless of subscriber count. Client admission
+charges the derived accepted envelope, including its added identity/progress,
+not just the smaller client input. Disconnect never releases an obligation.
+Shared transactional QoS still reserves count capacity before output size is
+known; byte budgets are not supported for that profile.
+
+`IndexedJournalOptions::page_limits` and `QosJournalOptions::page_limits` select
+`OutboxPageLimits { max_records, max_bytes }`, with positive limits. Unlike the
+binary admission quota, a page's byte limit counts its **stored payload bytes**.
+One oversized stored record is returned alone to ensure progress. Memory and
+both RocksDB outbox implementations support the bounded API; an unsupported
+provider returns `NotSupported`, never a full-history read disguised as a page.
+Scoped/group wrappers preserve operation ownership and journal namespaces.
+
+Opt-in owners retain one bounded payload page, not a map of every payload behind
+the paged API. Every retained record is still checked on startup, including late
+corruption and receipt/progress consistency. Normal cache misses read additional
+pages. Legacy QoS retries may scan the retained window with bounded reads;
+admission/output-replay receipts remain independently bounded. Shared
+transactional QoS currently retains its eager payload cache.
+
+These are not constant-memory or process-RAM guarantees. Startup scans all history;
+page replacement/validation has transient buffers; the provider has its own
+iterator, decompression and block-cache costs; one record may exceed a limit.
+Optional binary-byte accounting also keeps one size per retained record.
+Page calls are not a multi-call snapshot: the journal owner must exclude foreign
+writers while reconstructing or reading its history.
+
+Limits are explicit resource-owner construction policy. Existing pipe definitions
+and persisted envelope formats are unchanged; applications must reconstruct
+these options themselves. The standard Host/Server resource recipes do not
+automatically persist or restore these new owner policies.
 
 **What "durable" survives:** the Rust storage interfaces now expose
 `StorageDurability`, with separate declarations for process restart, power loss,
@@ -510,7 +590,7 @@ Readiness and neighbour messages use a **separate control mechanism**, not data
 envelopes sent through these pipes. A full data queue does not itself fill the
 control queue, although a monopolized controller can still delay servicing it.
 
-Bounded, broadcast, and ranked pipes expose accepted, delivered, discarded,
+Bounded (including byte-bounded), broadcast, and ranked pipes expose accepted, delivered, discarded,
 blocked-send, current-depth, and maximum-depth counters. These are diagnostic,
 not atomic proof of processing or drain completion. Retained and QoS pipes do
 not currently supply the same generic metrics; `QosChannel::progress()` instead
@@ -520,17 +600,17 @@ and producer/source position.
 ## 8. Known limits and worthwhile improvements
 
 The [opt-in resilience and recovery plan](computation-graph-reliability-plan.md)
-describes proposed work on these reliability boundaries, including shared plugin
-services and a fast path without added recovery machinery. Storage declarations
-and explicit path assertions are implemented foundations, not the completed
-admission, delivery, handover and restoration services described by that plan.
+records the completed native-framework admission, delivery, handover and
+restoration services. Those services remain opt-in and do not automatically
+upgrade every connector. The following limits concern current runtime capacity
+and declared guarantees, not missing foundation services.
 
 | Current limit | Consequence and improvement opportunity |
 |---|---|
 | **No pipe rate limiter** | Capacity limits buffered envelopes, not throughput. Add optional asynchronous admission/delivery limits with explicit rate and burst size. `governor`, already used by the test framework, is a candidate. Preserve ordering, cancellation, acknowledgements, and shared QoS accounting. |
-| **Controller fairness defect** | An immediately ready source with nonblocking broadcast sends can monopolize the processing loop. Bound work per scheduling turn. Rate limiting may hide this, but is not a general fix. |
-| **Envelope counts are not memory budgets** | Large batches, record bytes, annotations, in-flight work, and component-local buffers can dominate memory. Add byte/batch limits where needed; codec size limits alone do not bound all in-process allocations. |
-| **Persistent history also occupies memory** | Retained storage caches committed bytes, and QoS caches decoded envelopes. Both load the retained window on reconstruction. Large histories need appropriately chosen capacity/message limits; a future bounded-page provider API could reduce startup and memory costs. |
+| **Native CPU parallelism is not automatic** | Per-node work budgets already bound immediately ready work and preserve controller progress. Native nodes in one graph still share a controller; measure CPU-heavy workloads before adding independently scheduled execution. Rate limiting is a separate policy. |
+| **Byte quotas are not memory budgets** | Byte-bounded FIFO charges complete serialized envelopes and permits one exclusive oversized item. Other pipe profiles remain count-bounded; component state, allocation overhead and pending/downstream work remain outside these quotas. Retained/QoS budgeting must follow journal and acknowledgement lifetimes. |
+| **Persistent history also occupies memory** | Retained and QoS owners can opt into bounded payload pages; defaults cache the full window. Shared QoS holds the group transaction across startup validation and each refill. Startup still scans every record. Byte accounting, progress, receipt metadata and backend buffers need separate memory allowances. |
 | **Acknowledged delivery is serial per consumer** | Retained/QoS allow one outstanding item per consumer. This simplifies correct progress but can limit throughput. Any windowed/batched acknowledgement extension must prevent later completion from skipping unfinished earlier work. |
 | **Schemas require exact agreement** | No automatic version compatibility, field conversion, or migration of stored envelopes. Use explicit conversion components now; define upgrade and recovery rules before adding automatic compatibility. |
 | **No automatic end-to-end recovery promise** | Every producer, intermediate stateful component, pipe, and consumer must preserve its own boundary. A volatile ingress or acceptance-only reaction can break an otherwise durable path. Verify the actual complete pipeline. |

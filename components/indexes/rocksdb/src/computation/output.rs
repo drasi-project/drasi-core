@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, LiveResultsWriter, OutboxWriter, RowMutation};
+use drasi_core::interface::{
+    IndexError, LiveResultsWriter, OutboxPageLimits, OutboxWriter, RowMutation,
+};
 use rocksdb::{Direction, IteratorMode};
 
 use crate::{live_results::LIVE_RESULTS_CF, outbox::OUTBOX_CF, IndexDb, RocksDbSessionState};
@@ -88,6 +90,20 @@ impl ComputationOutboxWriter {
 
 #[async_trait]
 impl OutboxWriter for ComputationOutboxWriter {
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_sequence: u64,
+        limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        prefix(query_id)?;
+        let query = query_id.to_owned();
+        let db = self.db.clone();
+        self.work
+            .run(move || crate::outbox::read_page(&db, &query, after_sequence, limits))
+            .await
+    }
+
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let key = key(&prefix(query_id)?, sequence);
         let data = data.to_vec();

@@ -27,7 +27,7 @@ drasi-plugin-sdk.workspace = true
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }
 drasi-wal-redb.workspace = true
 
-tokio = { version = "1.6", features = ["full"] }
+tokio = { version = "1.6", features = ["full", "test-util"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio-postgres = "0.7"

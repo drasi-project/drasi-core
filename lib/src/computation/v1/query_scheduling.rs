@@ -113,6 +113,16 @@ impl ComputationComponent for QueryScheduledSource {
 #[async_trait]
 impl EnvelopeSource for QueryScheduledSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        self.next_with_clock(|| chrono::Utc::now().timestamp_millis())
+            .await
+    }
+}
+
+impl QueryScheduledSource {
+    async fn next_with_clock(
+        &mut self,
+        now: impl Fn() -> i64,
+    ) -> anyhow::Result<Option<OutputEnvelope>> {
         let mut updates = self.scheduling.queue.subscribe();
         loop {
             if self.scheduling.closed.load(Ordering::Acquire) {
@@ -144,7 +154,7 @@ impl EnvelopeSource for QueryScheduledSource {
                 .ok()
                 .and_then(chrono::DateTime::from_timestamp_millis)
                 .ok_or_else(|| anyhow::anyhow!("scheduled event time is out of range"))?;
-            let now = chrono::Utc::now().timestamp_millis();
+            let now = now();
             if timestamp.timestamp_millis() > now {
                 let wait = (timestamp.timestamp_millis() - now).min(5000) as u64;
                 tokio::select! {
@@ -286,6 +296,78 @@ mod tests {
     };
     use drasi_functions_cypher::CypherFunctionSet;
     use std::num::NonZeroUsize;
+
+    #[tokio::test(start_paused = true)]
+    async fn scheduled_source_rechecks_forward_and_backward_wall_clock_jumps() -> anyhow::Result<()>
+    {
+        let queue: Arc<dyn FutureQueue> = Arc::new(
+            drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue::new(),
+        );
+        queue
+            .push(
+                PushType::Always,
+                0,
+                1,
+                &ElementReference::new("source", "one"),
+                0,
+                10_000,
+            )
+            .await?;
+        let scheduling = Arc::new(QuerySchedulingResource::default());
+        scheduling.ready(queue.clone());
+        let mut source = QueryScheduledSource::new(
+            ComponentId::try_new("clock")?,
+            StreamId::try_new("clock/out")?,
+            scheduling.clone(),
+        )?;
+        let now = std::sync::atomic::AtomicI64::new(0);
+        let mut next = Box::pin(source.next_with_clock(|| now.load(Ordering::Acquire)));
+        assert!(futures::poll!(&mut next).is_pending());
+        tokio::time::advance(Duration::from_millis(4_999)).await;
+        now.store(20_000, Ordering::Release);
+        assert!(futures::poll!(&mut next).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let first = next.await?.unwrap();
+        assert_eq!(
+            first
+                .envelope
+                .system()
+                .timestamp()
+                .unwrap()
+                .timestamp_millis(),
+            10_000
+        );
+        assert_eq!(first.envelope.system().sequence(), 1);
+        assert_eq!(
+            queue.peek_due_time().await?,
+            Some(10_000),
+            "notifications never pop work"
+        );
+
+        now.store(1_000, Ordering::Release);
+        let mut next = Box::pin(source.next_with_clock(|| now.load(Ordering::Acquire)));
+        assert!(futures::poll!(&mut next).is_pending());
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert!(futures::poll!(&mut next).is_pending());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(
+            futures::poll!(&mut next).is_pending(),
+            "backward jump must not fire early"
+        );
+        now.store(10_000, Ordering::Release);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let second = next.await?.unwrap();
+        assert_eq!(second.envelope.system().sequence(), 2);
+        assert_eq!(
+            second.envelope.system().timestamp(),
+            first.envelope.system().timestamp()
+        );
+        let mut waiting = Box::pin(source.next_with_clock(|| now.load(Ordering::Acquire)));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        scheduling.shutdown().await?;
+        assert!(waiting.await?.is_none());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn scheduled_source_reports_due_time_and_maintains_its_own_sequence() {

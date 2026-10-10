@@ -63,4 +63,4 @@ pub use provider::RedbStateStoreProvider;
 #[cfg(feature = "configuration")]
 mod configuration;
 #[cfg(feature = "configuration")]
-pub use configuration::RedbConfigurationStore;
+pub use configuration::{ConfigurationStoreOptions, RedbConfigurationStore};

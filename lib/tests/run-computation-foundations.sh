@@ -46,9 +46,12 @@ run default -p drasi-lib --lib --tests
 run no-default-features -p drasi-lib --no-default-features \
     --test computation_foundations --test computation_foundation_matrix \
     --test computation_contracts --test computation_deployment \
-    --test computation_graph_dataflow --test computation_topology
+    --test computation_graph_dataflow --test computation_topology \
+    --test computation_byte_budgets --test computation_journal_budgets \
+    --test computation_query_responsiveness
 run persistence -p drasi-lib --no-default-features --features computation-rocksdb-tests \
-    --test computation_retained_pipes --test computation_transaction_transformer \
+    --test computation_retained_pipes --test computation_journal_budgets \
+    --test computation_transaction_transformer \
     --test computation_query_faults --test computation_query_recovery \
     --test computation_temporal_retractions --test computation_consumer_recovery
 run integration -p lib-integration-tests \
@@ -56,7 +59,26 @@ run integration -p lib-integration-tests \
     --test computation_transaction_query --test computation_factory_lifecycle \
     --test computation_persistent_output --test computation_source_recovery \
     --test computation_consumer_contract --test computation_remote_effects \
+    --test computation_management --test computation_managed_resources \
     -- --test-threads=1
+run configuration-store -p drasi-state-store-redb --features configuration --lib
+
+for runtime in current-thread multi-thread; do
+    if ! cargo run --locked --quiet --release -p drasi-lib --no-default-features \
+        --example core_resource_soak -- 1024 "$runtime" \
+        > "$logs/resource-soak-$runtime.json" 2> "$logs/resource-soak-$runtime.log"; then
+        cat "$logs/resource-soak-$runtime.log" >&2
+        printf 'failed: resource-soak-%s\n' "$runtime" > "$logs/foundations.status"
+        exit 1
+    fi
+    if ! cargo run --locked --quiet --release -p drasi-lib --no-default-features \
+        --example core_resource_soak -- 1024 "$runtime" replacement \
+        > "$logs/resource-replacement-$runtime.json" 2> "$logs/resource-replacement-$runtime.log"; then
+        cat "$logs/resource-replacement-$runtime.log" >&2
+        printf 'failed: resource-replacement-%s\n' "$runtime" > "$logs/foundations.status"
+        exit 1
+    fi
+done
 
 if $coverage; then
     cargo llvm-cov report --json --output-path "$logs/coverage.json"

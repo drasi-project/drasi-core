@@ -15,7 +15,7 @@ import statistics
 import subprocess
 
 
-def measure(binary, events, window, plugin=None):
+def measure(binary, events, window, plugin=None, *, arguments=(), require_allocations=True):
     environment = {**os.environ, "RUST_LOG": "error"}
     if plugin is not None:
         environment["DRASI_NATIVE_STANDARD_PLUGIN"] = str(plugin)
@@ -30,6 +30,7 @@ def measure(binary, events, window, plugin=None):
         scale = 1024
     else:
         raise RuntimeError("RSS measurement requires macOS or Linux")
+    command.extend(str(argument) for argument in arguments)
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     result = subprocess.run(
         command, capture_output=True, text=True, env=environment, timeout=180
@@ -38,6 +39,8 @@ def measure(binary, events, window, plugin=None):
     if result.returncode:
         raise RuntimeError(f"{binary} failed:\n{result.stdout}\n{result.stderr}")
     value = json.loads(result.stdout.splitlines()[-1])
+    if value["events"] != events or value["window"] != window:
+        raise RuntimeError(f"Benchmark returned a different event count/window: {value}")
     rss = re.search(pattern, result.stderr, re.MULTILINE)
     if rss is None:
         raise RuntimeError(f"Missing RSS measurement:\n{result.stderr}")
@@ -45,8 +48,9 @@ def measure(binary, events, window, plugin=None):
     value["process_cpu_seconds"] = (
         after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
     )
-    value["allocations_per_event"] = value["allocations"] / events
-    value["allocated_bytes_per_event"] = value["allocated_bytes"] / events
+    if require_allocations:
+        value["allocations_per_event"] = value["allocations"] / events
+        value["allocated_bytes_per_event"] = value["allocated_bytes"] / events
     return value
 
 

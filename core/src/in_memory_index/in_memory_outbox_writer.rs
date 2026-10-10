@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::interface::{IndexError, OutboxWriter};
+use crate::interface::{IndexError, OutboxPageLimits, OutboxWriter};
 
 /// In-memory outbox writer for testing and volatile use.
 ///
@@ -83,6 +83,30 @@ impl OutboxWriter for InMemoryOutboxWriter {
             .and_then(|map| map.keys().next_back().copied()))
     }
 
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_sequence: u64,
+        limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let store = self.data.read().await;
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        if let Some(map) = store.get(query_id) {
+            for (sequence, data) in map.range((
+                std::ops::Bound::Excluded(after_sequence),
+                std::ops::Bound::Unbounded,
+            )) {
+                if !limits.admits(entries.len(), bytes, data.len()) {
+                    break;
+                }
+                bytes += data.len();
+                entries.push((*sequence, data.clone()));
+            }
+        }
+        Ok(entries)
+    }
+
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
         let mut store = self.data.write().await;
         store.remove(query_id);
@@ -125,6 +149,58 @@ impl OutboxWriter for InMemoryOutboxWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn outbox_pages_bound_count_and_bytes_without_losing_oversized_or_empty_records() {
+        let writer = InMemoryOutboxWriter::new();
+        let limits = OutboxPageLimits {
+            max_records: std::num::NonZeroUsize::new(2).unwrap(),
+            max_bytes: std::num::NonZeroUsize::new(4).unwrap(),
+        };
+        for (position, bytes) in [
+            (1, &b""[..]),
+            (2, b"ab"),
+            (3, b"cd"),
+            (4, b"oversized"),
+            (5, b"x"),
+            (6, b""),
+            (u64::MAX, b"z"),
+        ] {
+            writer.append("q", position, bytes).await.unwrap();
+        }
+        for (after, expected) in [
+            (0, vec![1, 2]),
+            (2, vec![3]),
+            (3, vec![4]),
+            (4, vec![5, 6]),
+            (6, vec![u64::MAX]),
+            (u64::MAX, vec![]),
+        ] {
+            let page = writer.read_page("q", after, limits).await.unwrap();
+            limits.validate_page(&page).unwrap();
+            assert_eq!(
+                page.iter()
+                    .map(|(position, _)| *position)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        assert!(writer
+            .read_page("missing", 0, limits)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(limits
+            .validate_page(&[(1, vec![0; 5]), (2, vec![])])
+            .is_err());
+        assert!(limits
+            .validate_page(&[(1, vec![0; 3]), (2, vec![0; 2])])
+            .is_err());
+        assert!(matches!(
+            LegacyOutbox(writer).read_page("q", 0, limits).await,
+            Err(IndexError::NotSupported)
+        ));
+    }
 
     #[tokio::test]
     async fn test_append_and_read() {

@@ -37,6 +37,7 @@ struct Calls {
     stops: AtomicUsize,
     updates: AtomicUsize,
     creates: AtomicUsize,
+    drops: AtomicUsize,
     fail_stop: AtomicBool,
     fail_create: AtomicBool,
     terminal: AtomicBool,
@@ -82,6 +83,11 @@ struct Sink {
     label: String,
     gate: Option<Arc<Gate>>,
     accepted: bool,
+}
+impl Drop for Sink {
+    fn drop(&mut self) {
+        self.calls.drops.fetch_add(1, Ordering::SeqCst);
+    }
 }
 #[async_trait]
 impl ComputationComponent for Sink {
@@ -302,6 +308,178 @@ async fn replace_sink_at_safe_boundary() {
     cancelled(result);
 }
 both_tokio_flavors!(sink_replacement, replace_sink_at_safe_boundary);
+
+async fn sustained_multihop_fanout_churn() {
+    let upstream = Arc::new(Calls::default());
+    let stable = Arc::new(Calls::default());
+    let (source, input) = source(upstream.clone());
+    let (received, mut outputs) = mpsc::channel(8);
+    let mut graph = ComputationGraph::builder("sustained-fanout")
+        .source(source)
+        .transformer(Box::new(NativeTransform::new("middle", |input| {
+            Ok(vec![output(derived(
+                &input.envelope,
+                "middle",
+                input.envelope.system().sequence(),
+                input.envelope.changes().clone(),
+            ))])
+        })))
+        .sink(Box::new(sink(
+            "stable",
+            "stable",
+            stable.clone(),
+            received.clone(),
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(endpoint("middle", "out"), stream("middle"))
+        .connect(
+            edge("source", "middle"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("middle", "stable"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .expect("graph");
+    let run = graph.run().expect("scope");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        let mut revision = GraphRevision(1);
+        for cycle in 0..128 {
+            let old = Arc::new(Calls::default());
+            let new = Arc::new(Calls::default());
+            let gate = Arc::new(Gate::default());
+            let mut consumer = sink("transient", "old", old.clone(), received.clone());
+            consumer.gate = Some(gate.clone());
+            let preview = control
+                .preview(
+                    revision,
+                    vec![
+                        DesiredMutation::PutComponent(definition("transient")),
+                        DesiredMutation::Bind(DesiredRelationship {
+                            definition: edge("middle", "transient"),
+                            policy: RelationshipPolicy::default(),
+                            pipe: DesiredPipe::Bounded { capacity: 1 },
+                        }),
+                    ],
+                )
+                .await
+                .expect("add preview");
+            let added = control
+                .reconcile(preview, bind_sink(consumer))
+                .await
+                .expect("add");
+            assert_eq!(added.summary, OperationSummary::Completed);
+            revision = added.revision;
+            let first = cycle * 2 + 1;
+            input
+                .send(output(root("source", first, &[1])))
+                .await
+                .expect("input");
+            gate.entered.notified().await;
+            assert_eq!(outputs.recv().await, Some(("stable".into(), first)));
+
+            let old_observed = control.observed().components[&component("transient")].clone();
+            let preview = control
+                .preview(
+                    revision,
+                    vec![DesiredMutation::ReplaceComponent(definition("transient"))],
+                )
+                .await
+                .expect("replace preview");
+            let replacement = control.reconcile(
+                preview,
+                bind_sink(sink("transient", "new", new.clone(), received.clone())),
+            );
+            let (report, ()) = tokio::join!(replacement, async {
+                let mut observed = control.subscribe_observed();
+                observed
+                    .wait_for(|state| {
+                        state.components[&component("transient")].lifecycle
+                            == ComponentLifecycle::Quiescing
+                    })
+                    .await
+                    .expect("handling boundary");
+                assert_eq!(old.stops.load(Ordering::SeqCst), 0);
+                assert_eq!(old.drops.load(Ordering::SeqCst), 0);
+                input
+                    .send(output(root("source", first + 1, &[2])))
+                    .await
+                    .expect("queued input");
+                gate.release.notify_one();
+            });
+            let report = report.expect("replacement");
+            assert_eq!(report.summary, OperationSummary::Completed);
+            revision = report.revision;
+            let actual = [
+                outputs.recv().await.expect("old completion"),
+                outputs.recv().await.expect("stable branch"),
+                outputs.recv().await.expect("replacement branch"),
+            ];
+            assert_eq!(
+                BTreeSet::from(actual),
+                BTreeSet::from([
+                    ("old".into(), first),
+                    ("stable".into(), first + 1),
+                    ("new".into(), first + 1),
+                ])
+            );
+            assert_eq!(old.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(old.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(old.drops.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                control
+                    .report_health(
+                        revision,
+                        HealthObservation {
+                            component: component("transient"),
+                            generation: old_observed.generation,
+                            operation: old_observed.operation,
+                            health: ComponentHealth::Healthy,
+                        }
+                    )
+                    .await,
+                Err(GraphError::StaleGeneration)
+            ));
+
+            let preview = control
+                .preview(
+                    revision,
+                    vec![DesiredMutation::RemoveComponents {
+                        selection: GraphSelection::Exact(vec![component("transient")]),
+                        policy: RemovalPolicy::Drain,
+                    }],
+                )
+                .await
+                .expect("remove preview");
+            let report = control
+                .reconcile(preview, TopologyBindings::default())
+                .await
+                .expect("remove");
+            assert_eq!(report.summary, OperationSummary::Completed);
+            revision = report.revision;
+            assert_eq!(new.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(new.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(new.drops.load(Ordering::SeqCst), 1);
+            assert_eq!(control.desired_snapshot().nodes.len(), 3);
+            assert_eq!(control.observed().components.len(), 3);
+            assert!(outputs.try_recv().is_err(), "unexpected duplicate delivery");
+        }
+        assert_eq!(upstream.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(stable.starts.load(Ordering::SeqCst), 1);
+        control.cancel();
+    });
+    cancelled(result);
+    graph.dispose().await.expect("release graph");
+    drop(graph);
+    assert_eq!(upstream.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(stable.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(stable.drops.load(Ordering::SeqCst), 1);
+}
+
+both_tokio_flavors!(sustained_multihop_churn, sustained_multihop_fanout_churn);
 
 async fn add_remove_preserves_stable_indices() {
     let upstream = Arc::new(Calls::default());

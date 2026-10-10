@@ -181,26 +181,25 @@ impl AdmissionState {
         self.options.failure_scope
     }
 
-    pub(super) fn validate_entries(
+    pub(super) fn validate_entry(
         &self,
-        entries: &BTreeMap<u64, ChangeEnvelope>,
+        position: u64,
+        envelope: &ChangeEnvelope,
     ) -> Result<(), PipeError> {
-        for (position, envelope) in entries {
-            let progress =
-                GraphProducerProgress::from_envelope(envelope).map_err(PipeError::Backend)?;
-            let id = EnvelopeId::try_new(
-                format!("admission:{}", self.identity.incarnation()),
-                Bytes::copy_from_slice(&position.to_be_bytes()),
-            )?;
-            if !progress.is_some_and(|progress| {
-                progress.identity() == &self.identity && progress.sequence() == *position
-            }) || envelope.system().sequence() != *position
-                || envelope.id() != &id
-            {
-                return Err(backend(
-                    "admission journal contains inconsistent producer progress",
-                ));
-            }
+        let progress =
+            GraphProducerProgress::from_envelope(envelope).map_err(PipeError::Backend)?;
+        let id = EnvelopeId::try_new(
+            format!("admission:{}", self.identity.incarnation()),
+            Bytes::copy_from_slice(&position.to_be_bytes()),
+        )?;
+        if !progress.is_some_and(|progress| {
+            progress.identity() == &self.identity && progress.sequence() == position
+        }) || envelope.system().sequence() != position
+            || envelope.id() != &id
+        {
+            return Err(backend(
+                "admission journal contains inconsistent producer progress",
+            ));
         }
         Ok(())
     }
@@ -518,17 +517,6 @@ impl QosChannel {
                 "admission requires at least one active subscriber obligation",
             ));
         }
-        let full = state.entries.len() == self.definition.capacity.get();
-        let floor = state.entries.keys().next().copied().unwrap_or(1);
-        if full
-            && state
-                .metadata
-                .cursors
-                .values()
-                .any(|cursor| !cursor.retired && cursor.position < floor)
-        {
-            return Err(PipeError::CapacityExhausted);
-        }
         let position = state
             .metadata
             .head
@@ -549,7 +537,7 @@ impl QosChannel {
         GraphProducerProgress::annotate(&mut envelope, &admission.identity, position)
             .map_err(PipeError::Backend)?;
         validate(&envelope).map_err(PipeError::Backend)?;
-        let retain_from = if full { floor + 1 } else { floor };
+        let (retain_from, budget) = state.prepare_append(&self.definition, &envelope)?;
         let mut metadata = state.metadata.clone();
         metadata.head = position;
         metadata.producer_sequence = Some(position);
@@ -569,8 +557,7 @@ impl QosChannel {
         let _wake = WakeOnDrop(&self.changed);
         self.persist(&metadata, Some((position, &envelope, retain_from)))
             .await?;
-        state.entries.retain(|position, _| *position >= retain_from);
-        state.entries.insert(position, envelope);
+        state.append_committed(position, envelope, retain_from, budget);
         state.metadata = metadata;
         Ok(AdmissionReceipt {
             session: session.clone(),

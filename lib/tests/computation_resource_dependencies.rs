@@ -4,7 +4,7 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
     },
 };
@@ -28,6 +28,8 @@ struct State {
     gate_cleanup: AtomicBool,
     entered: Notify,
     release: Notify,
+    created: AtomicUsize,
+    dropped: AtomicUsize,
 }
 
 impl State {
@@ -56,6 +58,12 @@ struct Owner {
     closed: AtomicBool,
 }
 
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.state.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[async_trait]
 impl ResourceCleanup for Owner {
     async fn shutdown(&self) -> Result<()> {
@@ -72,10 +80,10 @@ impl ResourceCleanup for Owner {
                 self.state.entered.notify_one();
                 self.state.release.notified().await;
             }
-            anyhow::ensure!(
-                !self.state.fail_cleanup.load(Ordering::Acquire),
-                "injected leaf cleanup failure"
-            );
+            if self.state.fail_cleanup.load(Ordering::Acquire) {
+                self.state.entered.notify_one();
+                anyhow::bail!("injected leaf cleanup failure");
+            }
         }
         self.closed.store(true, Ordering::Release);
         Ok(())
@@ -142,6 +150,7 @@ impl ManagementResourceResolver for Resolver {
             dependencies,
             closed: AtomicBool::new(false),
         });
+        self.0.created.fetch_add(1, Ordering::SeqCst);
         self.0
             .latest
             .lock()
@@ -270,6 +279,114 @@ async fn failed_cleanup_retains_all_dependencies_until_retry() -> Result<()> {
     assert!(root.closed.load(Ordering::Acquire));
     core.shutdown().await?;
     Ok(())
+}
+
+async fn sustained_dependency_churn() -> Result<()> {
+    const CYCLES: u32 = 128;
+    let state = Arc::new(State::default());
+    let core = open(&state).await?;
+    let mut revision = 0;
+    for cycle in 0..CYCLES {
+        state.calls.lock().expect("calls").clear();
+        core.apply_desired_state(revision, &format!("add-{cycle}"), definition(cycle))
+            .await?;
+        revision += 1;
+        assert!(core.reconcile_desired_state().await?.converged());
+        let old: Vec<_> = ["a-leaf", "m-middle", "z-root"]
+            .into_iter()
+            .map(|name| Arc::downgrade(&state.owner(name)))
+            .collect();
+        assert_eq!(
+            state.created.load(Ordering::SeqCst) - state.dropped.load(Ordering::SeqCst),
+            3
+        );
+
+        state.fail_cleanup.store(true, Ordering::Release);
+        core.apply_desired_state(
+            revision,
+            &format!("replace-{cycle}"),
+            definition(cycle + CYCLES),
+        )
+        .await?;
+        revision += 1;
+        state.entered.notified().await;
+        assert!(!core.management_status().await?.converged());
+        assert!(old.iter().all(|owner| {
+            owner
+                .upgrade()
+                .is_some_and(|owner| !owner.closed.load(Ordering::Acquire))
+        }));
+        assert_eq!(
+            state.created.load(Ordering::SeqCst) - state.dropped.load(Ordering::SeqCst),
+            3,
+            "failed cleanup must not construct a replacement generation"
+        );
+        state.fail_cleanup.store(false, Ordering::Release);
+        assert!(core.reconcile_desired_state().await?.converged());
+        assert!(old.iter().all(|owner| owner.upgrade().is_none()));
+
+        core.apply_desired_state(
+            revision,
+            &format!("remove-{cycle}"),
+            DesiredInstance::default(),
+        )
+        .await?;
+        revision += 1;
+        assert!(core.reconcile_desired_state().await?.converged());
+        assert!(state
+            .latest
+            .lock()
+            .expect("owners")
+            .values()
+            .all(|owner| owner.upgrade().is_none()));
+        assert_eq!(
+            state.created.load(Ordering::SeqCst),
+            (cycle as usize + 1) * 6
+        );
+        assert_eq!(
+            state.created.load(Ordering::SeqCst),
+            state.dropped.load(Ordering::SeqCst),
+            "resource owners accumulated after cycle {cycle}"
+        );
+        assert_eq!(
+            state.calls(),
+            [
+                "open:z-root",
+                "open:m-middle",
+                "open:a-leaf",
+                "close:a-leaf",
+                "close:a-leaf",
+                "close:m-middle",
+                "close:z-root",
+                "open:z-root",
+                "open:m-middle",
+                "open:a-leaf",
+                "close:a-leaf",
+                "close:m-middle",
+                "close:z-root",
+            ]
+        );
+    }
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sustained_dependency_churn_current_thread() -> Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sustained_dependency_churn(),
+    )
+    .await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sustained_dependency_churn_multi_thread() -> Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sustained_dependency_churn(),
+    )
+    .await?
 }
 
 #[tokio::test]

@@ -51,6 +51,12 @@ pub(super) struct ReplayState {
     receipts: BTreeMap<u64, admission::Receipt>,
 }
 
+#[derive(Default)]
+pub(super) struct ReplayScan {
+    logical: u64,
+    transport: Option<u64>,
+}
+
 impl ReplayState {
     pub(super) fn new(options: ReplayOptions) -> Self {
         Self {
@@ -114,8 +120,6 @@ impl ReplayState {
         &self,
         definition: &QosChannelDefinition,
         head: u64,
-        entries: &BTreeMap<u64, ChangeEnvelope>,
-        codec: &EnvelopeCodec,
     ) -> Result<(), PipeError> {
         self.options.validate(definition)?;
         let count = head.min(self.options.receipt_capacity.get() as u64);
@@ -145,29 +149,38 @@ impl ReplayState {
         if let Some(producer) = &self.producer {
             producer.validate(&definition.stream)?;
         }
-        let mut previous = 0;
-        let mut previous_transport = None;
-        for (position, envelope) in entries {
-            let candidate = Candidate::new(envelope, codec)?;
-            if self.producer.as_ref() != Some(&candidate.producer)
-                || candidate.sequence <= previous
-                || previous_transport
-                    .is_some_and(|sequence| envelope.system().sequence() <= sequence)
-                || candidate.sequence > self.sequence
-                || (*position == head && candidate.sequence != self.sequence)
-            {
-                return Err(backend(
-                    "output replay journal has inconsistent producer progress",
-                ));
-            }
-            if *position > head - count && self.check(&candidate)? != Some(*position) {
-                return Err(backend(
-                    "output replay receipt disagrees with its journal entry",
-                ));
-            }
-            previous = candidate.sequence;
-            previous_transport = Some(envelope.system().sequence());
+        Ok(())
+    }
+
+    pub(super) fn validate_entry(
+        &self,
+        head: u64,
+        position: u64,
+        envelope: &ChangeEnvelope,
+        codec: &EnvelopeCodec,
+        scan: &mut ReplayScan,
+    ) -> Result<(), PipeError> {
+        let count = head.min(self.options.receipt_capacity.get() as u64);
+        let candidate = Candidate::new(envelope, codec)?;
+        if self.producer.as_ref() != Some(&candidate.producer)
+            || candidate.sequence <= scan.logical
+            || scan
+                .transport
+                .is_some_and(|sequence| envelope.system().sequence() <= sequence)
+            || candidate.sequence > self.sequence
+            || (position == head && candidate.sequence != self.sequence)
+        {
+            return Err(backend(
+                "output replay journal has inconsistent producer progress",
+            ));
         }
+        if position > head - count && self.check(&candidate)? != Some(position) {
+            return Err(backend(
+                "output replay receipt disagrees with its journal entry",
+            ));
+        }
+        scan.logical = candidate.sequence;
+        scan.transport = Some(envelope.system().sequence());
         Ok(())
     }
 }

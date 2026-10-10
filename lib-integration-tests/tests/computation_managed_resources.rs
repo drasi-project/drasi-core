@@ -318,6 +318,7 @@ struct Listener {
     address: std::net::SocketAddr,
     socket: tokio::sync::Mutex<Option<tokio::net::TcpListener>>,
     fail_cleanup: AtomicBool,
+    hold_cleanup: AtomicBool,
     cleanup_attempts: std::sync::atomic::AtomicUsize,
     starts: std::sync::atomic::AtomicUsize,
     stops: std::sync::atomic::AtomicUsize,
@@ -339,7 +340,9 @@ impl Listener {
 impl ResourceCleanup for Listener {
     async fn shutdown(&self) -> Result<()> {
         self.cleanup_attempts.fetch_add(1, Ordering::AcqRel);
-        if self.fail_cleanup.swap(false, Ordering::AcqRel) {
+        if self.hold_cleanup.load(Ordering::Acquire)
+            || self.fail_cleanup.swap(false, Ordering::AcqRel)
+        {
             anyhow::bail!("injected listener cleanup failure");
         }
         self.socket.lock().await.take();
@@ -351,6 +354,8 @@ impl ResourceCleanup for Listener {
 struct Listeners {
     latest: Mutex<BTreeMap<ResourceId, Weak<Listener>>>,
     gate: Mutex<Option<Arc<Gate>>>,
+    after_bind: Mutex<Option<Arc<Gate>>>,
+    crash: std::sync::atomic::AtomicUsize,
     wrong_role: AtomicBool,
     created: std::sync::atomic::AtomicUsize,
     user_creations: std::sync::atomic::AtomicUsize,
@@ -381,16 +386,28 @@ impl ManagementResourceResolver for Listeners {
             gate.entered.notify_one();
             gate.release.notified().await;
         }
+        if self.crash.load(Ordering::Acquire) == 1 {
+            std::process::exit(83);
+        }
         let socket = tokio::net::TcpListener::bind(
             configuration["listen"]
                 .as_str()
                 .context("missing listener address")?,
         )
         .await?;
+        if self.crash.load(Ordering::Acquire) == 2 {
+            std::process::exit(84);
+        }
+        let gate = self.after_bind.lock().expect("post-bind gate").take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         let listener = Arc::new(Listener {
             address: socket.local_addr()?,
             socket: tokio::sync::Mutex::new(Some(socket)),
             fail_cleanup: AtomicBool::new(false),
+            hold_cleanup: AtomicBool::new(false),
             cleanup_attempts: std::sync::atomic::AtomicUsize::new(0),
             starts: std::sync::atomic::AtomicUsize::new(0),
             stops: std::sync::atomic::AtomicUsize::new(0),
@@ -467,7 +484,9 @@ impl ComponentFactory for ListenerFactory {
     }
 }
 
-async fn listeners() -> Result<(DrasiLib, Arc<Listeners>, DesiredInstance)> {
+async fn open_listeners(
+    store: Option<Arc<RedbConfigurationStore>>,
+) -> Result<(DrasiLib, Arc<Listeners>)> {
     let resolver = Arc::new(Listeners::default());
     let implementation = ImplementationIdentity::try_new("test/listener-user", "1")?;
     let mut factories = FactoryRegistry::standard();
@@ -484,11 +503,18 @@ async fn listeners() -> Result<(DrasiLib, Arc<Listeners>, DesiredInstance)> {
         },
         resources: resolver.clone(),
     }))?;
-    let core = DrasiLib::builder()
+    let mut builder = DrasiLib::builder()
+        .with_id("listener-handover")
         .with_management_resources(resolver.clone())
-        .with_component_factories(factories)
-        .build()
-        .await?;
+        .with_component_factories(factories);
+    if let Some(store) = store {
+        builder = builder.with_configuration_store(store);
+    }
+    Ok((builder.build().await?, resolver))
+}
+
+fn listener_desired() -> Result<DesiredInstance> {
+    let implementation = ImplementationIdentity::try_new("test/listener-user", "1")?;
     let mut target = ComputationGraph::empty("listeners")?
         .snapshot()
         .select(GraphSelection::All)?;
@@ -523,12 +549,204 @@ async fn listeners() -> Result<(DrasiLib, Arc<Listeners>, DesiredInstance)> {
             }),
         });
     }
-    let desired: DesiredInstance = target.into();
+    Ok(target.into())
+}
+
+async fn listeners() -> Result<(DrasiLib, Arc<Listeners>, DesiredInstance)> {
+    let (core, resolver) = open_listeners(None).await?;
+    let desired = listener_desired()?;
     core.apply_desired_state(0, "initial", desired.clone())
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     core.start().await?;
     Ok((core, resolver, desired))
+}
+
+#[tokio::test]
+async fn listener_resolution_timeout_releases_partial_acquisition_and_preserves_retry() -> Result<()>
+{
+    let (core, resolver, mut desired) = listeners().await?;
+    let old = resolver.listener("changed")?;
+    let unrelated = resolver.listener("unrelated")?;
+    let id = ResourceId::try_new("changed")?;
+    desired.topology.resource_configurations.insert(
+        id.clone(),
+        serde_json::json!({"listen":old.address.to_string()}),
+    );
+    let gate = Arc::new(Gate::default());
+    *resolver.after_bind.lock().unwrap() = Some(gate.clone());
+    core.apply_desired_state(1, "timeout", desired.clone())
+        .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified()).await?;
+    assert!(old.socket.lock().await.is_none());
+    assert!(std::net::TcpListener::bind(old.address).is_err());
+    unrelated.connect().await?;
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
+    core.configuration_receipt("timeout").await?;
+    let status = core.management_status().await?;
+    assert!(!status.converged(), "{status:?}");
+    assert!(status.resource_errors.contains_key(&id), "{status:?}");
+    assert_eq!(core.desired_configuration()?.desired, desired.normalized()?);
+    assert_eq!(resolver.created.load(Ordering::Acquire), 2);
+    assert_eq!(resolver.user_creations.load(Ordering::Acquire), 2);
+    // The timed-out constructor owned a real bound socket, not just a pending future.
+    drop(std::net::TcpListener::bind(old.address)?);
+    assert!(core.reconcile_desired_state().await?.converged());
+    resolver.listener("changed")?.connect().await?;
+    assert!(Arc::ptr_eq(&unrelated, &resolver.listener("unrelated")?));
+    assert_eq!(unrelated.stops.load(Ordering::Acquire), 0);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_listener_contention_does_not_lose_accepted_target_or_restart_unrelated_users(
+) -> Result<()> {
+    let (core, resolver, mut desired) = listeners().await?;
+    let old = resolver.listener("changed")?;
+    let unrelated = resolver.listener("unrelated")?;
+    let id = ResourceId::try_new("changed")?;
+    desired.topology.resource_configurations.insert(
+        id.clone(),
+        serde_json::json!({"listen":old.address.to_string()}),
+    );
+    let gate = Arc::new(Gate::default());
+    *resolver.gate.lock().unwrap() = Some(gate.clone());
+    core.apply_desired_state(1, "contended", desired).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified()).await?;
+    let competitor = std::net::TcpListener::bind(old.address)?;
+    gate.release.notify_one();
+    core.configuration_receipt("contended").await?;
+    let failed = core.management_status().await?;
+    assert!(!failed.converged());
+    assert!(failed.resource_errors.contains_key(&id), "{failed:?}");
+    assert_eq!(core.desired_configuration()?.revision, 2);
+    assert_eq!(resolver.created.load(Ordering::Acquire), 2);
+    assert_eq!(resolver.user_creations.load(Ordering::Acquire), 2);
+    unrelated.connect().await?;
+    drop(competitor);
+    assert!(core.reconcile_desired_state().await?.converged());
+    resolver.listener("changed")?.connect().await?;
+    assert!(Arc::ptr_eq(&unrelated, &resolver.listener("unrelated")?));
+    assert_eq!(unrelated.stops.load(Ordering::Acquire), 0);
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "listener replacement process worker invoked by the parent test"]
+async fn listener_replacement_crash_worker() -> Result<()> {
+    let path = std::path::PathBuf::from(std::env::var("DRASI_LISTENER_WORKER_PATH")?);
+    let phase: usize = std::env::var("DRASI_LISTENER_WORKER_PHASE")?.parse()?;
+    let (core, resolver) =
+        open_listeners(Some(Arc::new(RedbConfigurationStore::new(path, [29; 32])?))).await?;
+    let mut desired = listener_desired()?;
+    core.apply_desired_state(0, "initial", desired.clone())
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    core.start().await?;
+    desired.topology.resource_configurations.insert(
+        ResourceId::try_new("changed")?,
+        serde_json::json!({"listen":resolver.listener("changed")?.address.to_string()}),
+    );
+    resolver.crash.store(phase, Ordering::Release);
+    core.apply_desired_state(1, "replace", desired).await?;
+    core.configuration_receipt("replace").await?;
+    anyhow::bail!("listener replacement did not reach the requested process-exit boundary")
+}
+
+#[tokio::test]
+async fn process_death_before_and_after_listener_bind_restores_committed_replacement() -> Result<()>
+{
+    for (phase, exit) in [(1, 83), (2, 84)] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("listeners.redb");
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "listener_replacement_crash_worker",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("DRASI_LISTENER_WORKER_PATH", &path)
+                .env("DRASI_LISTENER_WORKER_PHASE", phase.to_string())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        assert_eq!(output.status.code(), Some(exit), "{output:?}");
+        let (core, resolver) = open_listeners(Some(Arc::new(RedbConfigurationStore::new(
+            &path, [29; 32],
+        )?)))
+        .await?;
+        let committed = core.desired_configuration()?;
+        assert_eq!(committed.revision, 2);
+        assert_eq!(
+            core.configuration_receipt("replace")
+                .await?
+                .unwrap()
+                .revision,
+            2
+        );
+        assert!(core.reconcile_desired_state().await?.converged());
+        core.start().await?;
+        let changed = resolver.listener("changed")?;
+        assert_eq!(
+            committed.desired.topology.resource_configurations[&ResourceId::try_new("changed")?]
+                ["listen"],
+            changed.address.to_string()
+        );
+        changed.connect().await?;
+        resolver.listener("unrelated")?.connect().await?;
+        core.shutdown().await?;
+        drop(std::net::TcpListener::bind(changed.address)?);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_shutdown_retains_configuration_lease_and_stale_owner_cannot_close_replacement(
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(RedbConfigurationStore::new(
+        directory.path().join("shutdown.redb"),
+        [46; 32],
+    )?);
+    let (old, resolver) = open_listeners(Some(store.clone())).await?;
+    old.apply_desired_state(0, "initial", listener_desired()?)
+        .await?;
+    assert!(old.reconcile_desired_state().await?.converged());
+    old.start().await?;
+    let listener = resolver.listener("changed")?;
+    listener.hold_cleanup.store(true, Ordering::Release);
+    assert!(old.shutdown().await.is_err());
+    assert!(matches!(
+        store
+            .open("listener-handover")
+            .await
+            .err()
+            .unwrap()
+            .downcast_ref(),
+        Some(ManagementError::AlreadyOwned(_))
+    ));
+    let unrelated = store.open("unrelated").await?;
+    unrelated.close().await?;
+    assert!(listener.socket.lock().await.is_some());
+    listener.hold_cleanup.store(false, Ordering::Release);
+    old.shutdown().await?;
+    assert!(listener.socket.lock().await.is_none());
+    let (replacement, resources) = open_listeners(Some(store.clone())).await?;
+    replacement.start().await?;
+    old.shutdown().await?;
+    drop((old, resolver));
+    assert!(store.open("listener-handover").await.is_err());
+    resources.listener("changed")?.connect().await?;
+    replacement.shutdown().await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -976,6 +1194,7 @@ async fn live_traffic_transition(
     fail_construction: bool,
     fail_handling: bool,
 ) -> Result<()> {
+    const CYCLES: u64 = 64;
     let directory = tempfile::tempdir()?;
     let Traffic {
         core,
@@ -990,7 +1209,7 @@ async fn live_traffic_transition(
     let before = graph.observed();
     let mut expected_versions = Vec::new();
     let mut capacity = 2;
-    for iteration in 0..8_u64 {
+    for iteration in 0..CYCLES {
         let first = iteration * 4 + 1;
         let old = resolver.channel()?;
         let gate = Arc::new(Gate::default());
@@ -1154,7 +1373,7 @@ async fn live_traffic_transition(
     }
     for id in ["consumer", "mirror"] {
         let seen = probes[id].handled.borrow();
-        assert_eq!(seen.len(), 32, "{id}");
+        assert_eq!(seen.len(), (CYCLES * 4) as usize, "{id}");
         for (index, (version, envelope)) in seen.iter().enumerate() {
             let expected = event(index as u64 + 1)?;
             assert_eq!(envelope.id(), expected.id(), "{id} at {index}");
@@ -1181,7 +1400,7 @@ async fn live_traffic_transition(
             probe.stops.load(Ordering::Acquire)
         );
     }
-    let target = traffic_desired(capacity, 8)?;
+    let target = traffic_desired(capacity, CYCLES)?;
     let specification = &target.topology.resources[0];
     let reopened = resolver
         .resolve(
@@ -1192,7 +1411,7 @@ async fn live_traffic_transition(
         )
         .await?;
     let channel = reopened.get::<QosChannel>()?;
-    wait_journal(&channel, 32, 32).await?;
+    wait_journal(&channel, CYCLES * 4, CYCLES * 4).await?;
     channel.shutdown().await?;
     Ok(())
 }
@@ -1206,7 +1425,7 @@ async fn live_full_queues_preserve_exact_work_across_sink_and_journal_replacemen
         (true, true, false),
     ] {
         tokio::time::timeout(
-            std::time::Duration::from_secs(45),
+            std::time::Duration::from_secs(180),
             live_traffic_transition(journal, construction, handling),
         )
         .await??;
@@ -1224,7 +1443,7 @@ async fn live_full_queues_preserve_exact_work_across_sink_and_journal_replacemen
         (true, true, false),
     ] {
         tokio::time::timeout(
-            std::time::Duration::from_secs(45),
+            std::time::Duration::from_secs(180),
             live_traffic_transition(journal, construction, handling),
         )
         .await??;

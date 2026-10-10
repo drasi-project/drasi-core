@@ -22,7 +22,8 @@
 use std::sync::Arc;
 
 use drasi_core::interface::{
-    IndexBackendPlugin, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SessionGuard,
+    IndexBackendPlugin, IndexError, LiveResultsWriter, OutboxPageLimits, OutboxWriter, RowMutation,
+    SessionControl, SessionGuard,
 };
 use drasi_index_rocksdb::{
     open_unified_db, RocksDbIndexProvider, RocksDbLiveResultsWriter, RocksDbMemoryBudget,
@@ -47,6 +48,70 @@ fn live_writer(db: Arc<drasi_index_rocksdb::IndexDb>) -> RocksDbLiveResultsWrite
 }
 
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn outbox_pages_bound_stored_bytes_and_keep_namespace_boundaries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let writer = outbox_writer(db);
+    let limits = OutboxPageLimits {
+        max_records: std::num::NonZeroUsize::new(2).unwrap(),
+        max_bytes: std::num::NonZeroUsize::new(4).unwrap(),
+    };
+    for (position, value) in [
+        (1, &b"ab"[..]),
+        (2, b"cd"),
+        (3, b"oversized"),
+        (4, b""),
+        (u64::MAX, b"z"),
+    ] {
+        writer.append("q1", position, value).await.unwrap();
+    }
+    writer.append("q10", 1, b"another namespace").await.unwrap();
+    for (after, expected) in [
+        (0, vec![1, 2]),
+        (2, vec![3]),
+        (3, vec![4, u64::MAX]),
+        (u64::MAX, vec![]),
+    ] {
+        let page = writer.read_page("q1", after, limits).await.unwrap();
+        limits.validate_page(&page).unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|(position, _)| *position)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn outbox_paging_rejects_malformed_keys_even_at_resume_boundaries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let writer = outbox_writer(db.clone());
+    writer.append("q1", 1, b"first").await.unwrap();
+    writer.append("q1", 2, b"next").await.unwrap();
+    let limits = OutboxPageLimits {
+        max_records: std::num::NonZeroUsize::new(1).unwrap(),
+        max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
+    };
+    let mut key = b"q1\0".to_vec();
+    key.extend_from_slice(&1u64.to_be_bytes());
+    key.push(0);
+    db.put_cf(&db.cf_handle("outbox").unwrap(), &key, b"corrupt")
+        .unwrap();
+    assert!(matches!(
+        writer.read_page("q1", 1, limits).await,
+        Err(IndexError::CorruptedData)
+    ));
+    db.delete_cf(&db.cf_handle("outbox").unwrap(), &key)
+        .unwrap();
+    assert_eq!(
+        writer.read_page("q1", 1, limits).await.unwrap(),
+        vec![(2, b"next".to_vec())]
+    );
+}
 
 #[tokio::test]
 async fn test_outbox_append_and_read() {

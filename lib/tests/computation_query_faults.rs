@@ -22,8 +22,8 @@ use drasi_core::{
         ComputationIndexProvider, ComputationIndexes, ComputationResource, TransactionDomain,
     },
     interface::{
-        CheckpointStore, IndexError, IndexSet, LiveResultsWriter, RowMutation, SessionControl,
-        SourceCheckpoint,
+        CheckpointStore, FutureElementRef, FutureQueue, IndexError, IndexSet, LiveResultsWriter,
+        PushType, RowMutation, SessionControl, SourceCheckpoint,
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
@@ -61,6 +61,9 @@ enum Fault {
     DeliverySequence,
     DeliveryConfirmed,
     InputTransport,
+    SchedulePush,
+    ScheduleRemove,
+    SchedulePop,
 }
 
 struct Injection {
@@ -210,6 +213,64 @@ struct Provider {
     inner: Arc<dyn ComputationIndexProvider>,
     fault: Arc<Injection>,
 }
+
+struct SchedulingQueue {
+    inner: Arc<dyn FutureQueue>,
+    fault: Arc<Injection>,
+}
+
+#[async_trait]
+impl FutureQueue for SchedulingQueue {
+    async fn push(
+        &self,
+        push_type: PushType,
+        position: usize,
+        signature: u64,
+        element: &ElementReference,
+        original_time: u64,
+        due_time: u64,
+    ) -> Result<bool, IndexError> {
+        let result = self
+            .inner
+            .push(
+                push_type,
+                position,
+                signature,
+                element,
+                original_time,
+                due_time,
+            )
+            .await?;
+        if self.fault.take(Fault::SchedulePush) {
+            return Err(IndexError::IOError);
+        }
+        Ok(result)
+    }
+    async fn remove(&self, position: usize, signature: u64) -> Result<(), IndexError> {
+        self.inner.remove(position, signature).await?;
+        if self.fault.take(Fault::ScheduleRemove) {
+            return Err(IndexError::IOError);
+        }
+        Ok(())
+    }
+    async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+        let result = self.inner.pop().await?;
+        if self.fault.take(Fault::SchedulePop) {
+            assert!(
+                result.is_some(),
+                "fault must follow an actual scheduled pop"
+            );
+            return Err(IndexError::IOError);
+        }
+        Ok(result)
+    }
+    async fn peek_due_time(&self) -> Result<Option<u64>, IndexError> {
+        self.inner.peek_due_time().await
+    }
+    async fn clear(&self) -> Result<(), IndexError> {
+        self.inner.clear().await
+    }
+}
 #[async_trait]
 impl ComputationIndexProvider for Provider {
     async fn create_indexes(
@@ -229,7 +290,10 @@ impl ComputationIndexProvider for Provider {
                 element_index: set.element_index.clone(),
                 archive_index: set.archive_index.clone(),
                 result_index: set.result_index.clone(),
-                future_queue: set.future_queue.clone(),
+                future_queue: Arc::new(SchedulingQueue {
+                    inner: set.future_queue.clone(),
+                    fault: self.fault.clone(),
+                }),
                 session_control: control,
             },
             Some(domain.clone()),
@@ -362,6 +426,148 @@ fn input(sequence: u64) -> InputEnvelope {
         )
         .expect("input"),
     }
+}
+
+fn scheduling_definition(point: Fault) -> ContinuousQueryDefinition {
+    let mut definition = definition(true);
+    definition.query = if point == Fault::ScheduleRemove {
+        "MATCH (n:Person) WITH n, drasi.trueUntil(n.active, n.due) AS scheduled WHERE scheduled AND n.visible RETURN n.name AS name"
+    } else {
+        "MATCH (n:Person) WHERE drasi.trueLater(n.active, n.due) RETURN n.name AS name"
+    }.into();
+    definition
+}
+
+fn scheduling_input(sequence: u64, active: bool) -> InputEnvelope {
+    let element = Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("people", "one"),
+            labels: Arc::from([Arc::from("Person")]),
+            effective_from: 1000 + sequence,
+        },
+        properties: ElementPropertyMap::from(serde_json::json!({
+            "name":"scheduled", "active":active, "due":2000, "visible":false
+        })),
+    };
+    InputEnvelope {
+        port: PortId::try_new("in").unwrap(),
+        envelope: GraphChangeCodec::encode_change(
+            if sequence == 1 {
+                SourceChange::Insert { element }
+            } else {
+                SourceChange::Update { element }
+            },
+            StreamId::try_new("source/out").unwrap(),
+            sequence,
+            None,
+        )
+        .unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly_once(
+) -> anyhow::Result<()> {
+    for backend in [Backend::Computation, Backend::OrdinaryPlugin] {
+        for entry in [EntryPoint::Direct, EntryPoint::TransactionBody] {
+            for point in [Fault::SchedulePush, Fault::ScheduleRemove, Fault::SchedulePop] {
+                let directory = tempfile::tempdir()?;
+                let base = provider_for(directory.path(), backend);
+                let fault = Injection::new(point);
+                let progress = Arc::new(QuerySourceProgress::new(
+                    "faults",
+                    ComponentId::try_new("query")?,
+                )?);
+                let query = ContinuousQueryTransformer::new(
+                    scheduling_definition(point),
+                    Arc::new(Provider {
+                        inner: base.clone(),
+                        fault: fault.clone(),
+                    }),
+                )
+                .await?
+                .with_source_progress(progress.clone())?;
+                let mut query = QueryUnderTest::new(query, entry);
+                query.start().await?;
+                if point != Fault::SchedulePush {
+                    assert!(query.transform(scheduling_input(1, true)).await?.is_empty());
+                }
+                fault.armed.store(true, Ordering::Release);
+                let result = match point {
+                    Fault::SchedulePush => query.transform(scheduling_input(1, true)).await,
+                    Fault::ScheduleRemove => query.transform(scheduling_input(2, false)).await,
+                    Fault::SchedulePop => query.on_wakeup().await,
+                    _ => unreachable!(),
+                };
+                assert!(result.is_err(), "{backend:?}/{entry:?}/{point:?}");
+                assert!(
+                    !fault.armed.load(Ordering::Acquire),
+                    "scheduled fault was not exercised"
+                );
+                assert!(query.results().snapshot()?.rows.is_empty());
+                assert!(query.transform(scheduling_input(3, true)).await.is_err());
+                query.stop().await?;
+                drop(query);
+
+                let stored = base.create_indexes("faults", "query").await?;
+                assert_eq!(
+                    stored.indexes().future_queue.peek_due_time().await?,
+                    (point != Fault::SchedulePush).then_some(2000),
+                    "{backend:?}/{entry:?}/{point:?}"
+                );
+                assert!(stored
+                    .outbox_writer()
+                    .unwrap()
+                    .read_from("query", 0)
+                    .await?
+                    .is_empty());
+                assert!(stored
+                    .live_results_writer()
+                    .unwrap()
+                    .read_snapshot("query")
+                    .await?
+                    .is_empty());
+                stored.cleanup().unwrap().shutdown().await?;
+                drop(stored);
+
+                let recovered = ContinuousQueryTransformer::new(scheduling_definition(point), base)
+                    .await?
+                    .with_source_progress(progress.clone())?;
+                let mut recovered = QueryUnderTest::new(recovered, entry);
+                recovered.start().await?;
+                if point == Fault::SchedulePush {
+                    assert!(recovered
+                        .transform(scheduling_input(1, true))
+                        .await?
+                        .is_empty());
+                } else if point == Fault::ScheduleRemove {
+                    assert!(recovered
+                        .transform(scheduling_input(2, false))
+                        .await?
+                        .is_empty());
+                }
+                let outputs = recovered.on_wakeup().await?;
+                let expected = usize::from(point != Fault::ScheduleRemove);
+                assert_eq!(outputs.len(), expected, "{backend:?}/{entry:?}/{point:?}");
+                for output in &outputs {
+                    let result = QueryChangeCodec::to_legacy_result(&output.envelope)?;
+                    assert!(matches!(&result.results[..],
+                        [drasi_lib::channels::ResultDiff::Add { data, .. }] if data["name"] == "scheduled"));
+                }
+                recovered.delivery_completed(&outputs).await?;
+                assert!(recovered.on_wakeup().await?.is_empty());
+                assert_eq!(recovered.results().snapshot()?.rows.len(), expected);
+                assert_eq!(
+                    progress.snapshot().checkpoints
+                        [&SourceProgressKey::Stream(StreamId::try_new("source/out")?)]
+                        .sequence,
+                    if point == Fault::ScheduleRemove { 2 } else { 1 }
+                );
+                recovered.stop().await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]

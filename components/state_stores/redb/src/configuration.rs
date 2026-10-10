@@ -4,7 +4,10 @@
 use std::{
     collections::BTreeMap,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
 };
 
 use anyhow::{Context, Result};
@@ -14,8 +17,8 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use drasi_lib::management::{
-    AcceptanceReceipt, CommittedConfiguration, ConfigurationSession, ConfigurationStore,
-    DesiredInstance, ManagementError,
+    AcceptanceReceipt, CommittedConfiguration, ConfigurationSession, ConfigurationSnapshotSummary,
+    ConfigurationStore, DesiredInstance, ManagementError,
 };
 use redb::{Database, Durability, ReadableTable, TableDefinition};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -28,10 +31,18 @@ const SNAPSHOTS: TableDefinition<&str, &[u8]> =
 const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("drasi.configuration.metadata");
 const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
+mod housekeeping;
+pub use housekeeping::ConfigurationStoreOptions;
+#[cfg(test)]
+mod reliability_tests;
+
 struct DatabaseOwner {
     database: Database,
-    cipher: XChaCha20Poly1305,
+    cipher: RwLock<XChaCha20Poly1305>,
     leases: Mutex<BTreeMap<String, Uuid>>,
+    options: ConfigurationStoreOptions,
+    rotating: AtomicBool,
+    key_unconfirmed: AtomicBool,
 }
 
 /// Encrypted authoritative graph configuration, separate from processing state.
@@ -92,31 +103,48 @@ impl RedbConfigurationStore {
     }
 
     pub fn new(path: impl AsRef<Path>, key: [u8; 32]) -> Result<Self> {
+        Self::new_with_options(path, key, ConfigurationStoreOptions::default())
+    }
+
+    pub fn new_with_options(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        options: ConfigurationStoreOptions,
+    ) -> Result<Self> {
         let database =
             Database::create(path.as_ref()).context("open graph configuration database")?;
         let owner = Arc::new(DatabaseOwner {
             database,
-            cipher: XChaCha20Poly1305::new((&key).into()),
+            cipher: RwLock::new(XChaCha20Poly1305::new((&key).into())),
             leases: Mutex::new(BTreeMap::new()),
+            options,
+            rotating: AtomicBool::new(false),
+            key_unconfirmed: AtomicBool::new(false),
         });
         let mut transaction = owner.database.begin_write()?;
         transaction.set_durability(Durability::Immediate);
         transaction.open_table(CURRENT)?;
         transaction.open_table(REQUESTS)?;
         transaction.open_table(SNAPSHOTS)?;
-        {
+        let version = {
             let mut metadata = transaction.open_table(METADATA)?;
             let existing = metadata
                 .get("key-check")?
                 .map(|value| value.value().to_vec());
             if let Some(bytes) = existing {
                 let version: u32 = unseal(&owner, "drasi.configuration.key-check", &bytes)?;
-                anyhow::ensure!(version == 1, "unsupported configuration database format");
+                anyhow::ensure!(
+                    matches!(version, 1 | 2),
+                    "unsupported configuration database format"
+                );
+                version
             } else {
                 let bytes = seal(&owner, "drasi.configuration.key-check", &1u32)?;
                 metadata.insert("key-check", bytes.as_slice())?;
+                1
             }
-        }
+        };
+        housekeeping::initialize_policy(&owner, &transaction, version)?;
         transaction.commit()?;
         #[cfg(unix)]
         {
@@ -190,17 +218,24 @@ fn key(instance: &str, name: &str) -> Result<String> {
 
 fn seal<T: Serialize>(owner: &DatabaseOwner, context: &str, value: &T) -> Result<Vec<u8>> {
     let plaintext = serde_json::to_vec(value)?;
+    let cipher = owner
+        .cipher
+        .read()
+        .map_err(|_| anyhow::anyhow!("configuration encryption lock poisoned"))?;
+    seal_bytes(&cipher, context, &plaintext)
+}
+
+fn seal_bytes(cipher: &XChaCha20Poly1305, context: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
     anyhow::ensure!(
         plaintext.len() <= MAX_RECORD_BYTES,
         "configuration record exceeds 64 MiB"
     );
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext = owner
-        .cipher
+    let ciphertext = cipher
         .encrypt(
             &nonce,
             Payload {
-                msg: &plaintext,
+                msg: plaintext,
                 aad: context.as_bytes(),
             },
         )
@@ -213,12 +248,20 @@ fn seal<T: Serialize>(owner: &DatabaseOwner, context: &str, value: &T) -> Result
 }
 
 fn unseal<T: DeserializeOwned>(owner: &DatabaseOwner, context: &str, bytes: &[u8]) -> Result<T> {
+    let cipher = owner
+        .cipher
+        .read()
+        .map_err(|_| anyhow::anyhow!("configuration encryption lock poisoned"))?;
+    let plaintext = unseal_bytes(&cipher, context, bytes)?;
+    serde_json::from_slice(&plaintext).context("invalid stored configuration")
+}
+
+fn unseal_bytes(cipher: &XChaCha20Poly1305, context: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     anyhow::ensure!(
         bytes.len() >= 41 && bytes.len() <= MAX_RECORD_BYTES + 41 && bytes[0] == 1,
         "invalid encrypted configuration record"
     );
-    let plaintext = owner
-        .cipher
+    cipher
         .decrypt(
             &XNonce::from(<[u8; 24]>::try_from(&bytes[1..25])?),
             Payload {
@@ -228,8 +271,7 @@ fn unseal<T: DeserializeOwned>(owner: &DatabaseOwner, context: &str, bytes: &[u8
         )
         .map_err(|_| {
             anyhow::anyhow!("configuration authentication failed: wrong key or damaged record")
-        })?;
-    serde_json::from_slice(&plaintext).context("invalid stored configuration")
+        })
 }
 
 fn current(
@@ -253,27 +295,45 @@ struct RequestRecord {
 impl ConfigurationStore for RedbConfigurationStore {
     async fn open(&self, instance_id: &str) -> Result<Arc<dyn ConfigurationSession>> {
         drasi_lib::computation::v1::ComponentId::try_new(instance_id)?;
-        let mut leases = self
-            .owner
-            .leases
-            .lock()
-            .map_err(|_| anyhow::anyhow!("configuration ownership lock poisoned"))?;
-        if leases.contains_key(instance_id) {
-            return Err(ManagementError::AlreadyOwned(instance_id.to_owned()).into());
+        let session = {
+            let mut leases = self
+                .owner
+                .leases
+                .lock()
+                .map_err(|_| anyhow::anyhow!("configuration ownership lock poisoned"))?;
+            anyhow::ensure!(
+                !self.owner.rotating.load(Ordering::Acquire),
+                "configuration encryption key rotation is in progress"
+            );
+            anyhow::ensure!(
+                !self.owner.key_unconfirmed.load(Ordering::Acquire),
+                "configuration encryption key is unconfirmed; reopen the database"
+            );
+            if leases.contains_key(instance_id) {
+                return Err(ManagementError::AlreadyOwned(instance_id.to_owned()).into());
+            }
+            let token = Uuid::new_v4();
+            leases.insert(instance_id.to_owned(), token);
+            Arc::new(Session(Arc::new(Lease {
+                owner: self.owner.clone(),
+                instance: instance_id.to_owned(),
+                token,
+                closed: Arc::new(tokio::sync::Mutex::new(false)),
+            })))
+        };
+        if self.owner.options.receipt_batch_capacity.is_some() {
+            session.run(housekeeping::validate_window).await?;
         }
-        let token = Uuid::new_v4();
-        leases.insert(instance_id.to_owned(), token);
-        Ok(Arc::new(Session(Arc::new(Lease {
-            owner: self.owner.clone(),
-            instance: instance_id.to_owned(),
-            token,
-            closed: Arc::new(tokio::sync::Mutex::new(false)),
-        }))))
+        Ok(session)
     }
 }
 
 #[async_trait]
 impl ConfigurationSession for Session {
+    async fn new_request_id(&self) -> Result<String> {
+        self.run(housekeeping::new_request_id).await
+    }
+
     async fn load(&self) -> Result<CommittedConfiguration> {
         self.run(|lease| {
             let transaction = lease.owner.database.begin_read()?;
@@ -300,6 +360,11 @@ impl ConfigurationSession for Session {
             transaction.set_durability(Durability::Immediate);
             let receipt;
             {
+                let mut window = housekeeping::check_request(
+                    lease,
+                    &transaction.open_table(METADATA)?,
+                    &request_id,
+                )?;
                 let mut requests = transaction.open_table(REQUESTS)?;
                 if let Some(value) = requests.get(record_key.as_str())? {
                     let prior: RequestRecord = unseal(
@@ -311,6 +376,9 @@ impl ConfigurationSession for Session {
                         return Err(ManagementError::RequestConflict.into());
                     }
                     return Ok(prior.receipt);
+                }
+                if let Some(window) = &mut window {
+                    window.accept(lease.owner.options)?;
                 }
                 let mut configurations = transaction.open_table(CURRENT)?;
                 let old = current(&lease.owner, &configurations, &lease.instance)?;
@@ -351,6 +419,9 @@ impl ConfigurationSession for Session {
                     },
                 )?;
                 requests.insert(record_key.as_str(), bytes.as_slice())?;
+                if let Some(window) = window {
+                    window.save(lease, &transaction)?;
+                }
             }
             transaction
                 .commit()
@@ -365,6 +436,7 @@ impl ConfigurationSession for Session {
         self.run(move |lease| {
             let record_key = key(&lease.instance, &request_id)?;
             let transaction = lease.owner.database.begin_read()?;
+            housekeeping::check_request(lease, &transaction.open_table(METADATA)?, &request_id)?;
             let table = transaction.open_table(REQUESTS)?;
             let value = table.get(record_key.as_str())?;
             value
@@ -429,6 +501,22 @@ impl ConfigurationSession for Session {
                 .transpose()
         })
         .await
+    }
+
+    async fn list_snapshots(
+        &self,
+        after: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<ConfigurationSnapshotSummary>> {
+        let after = after.map(str::to_owned);
+        self.run(move |lease| housekeeping::list_snapshots(lease, after.as_deref(), limit))
+            .await
+    }
+
+    async fn delete_snapshot(&self, name: &str, expected_revision: u64) -> Result<bool> {
+        let name = name.to_owned();
+        self.run(move |lease| housekeeping::delete_snapshot(lease, &name, expected_revision))
+            .await
     }
 
     async fn close(&self) -> Result<()> {

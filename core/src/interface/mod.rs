@@ -44,7 +44,7 @@ pub use index_backend::IndexBackendPlugin;
 pub use index_backend::IndexSet;
 pub use live_results_writer::LiveResultsWriter;
 pub use live_results_writer::RowMutation;
-pub use outbox_writer::OutboxWriter;
+pub use outbox_writer::{OutboxPageLimits, OutboxWriter};
 pub use query_clock::QueryClock;
 pub use result_index::AccumulatorIndex;
 pub use result_index::LazySortedSetStore;

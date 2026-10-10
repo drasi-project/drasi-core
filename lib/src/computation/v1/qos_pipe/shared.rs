@@ -220,8 +220,7 @@ impl TransactionGroupMutation for SharedMutation {
         channel.check().map_err(IndexError::other)?;
         if let Some(update) = self.update.take() {
             if let Some((position, envelope, floor)) = update.append {
-                state.entries.retain(|position, _| *position >= floor);
-                state.entries.insert(position, envelope);
+                state.append_committed(position, envelope, floor, None);
             }
             state.metadata = update.metadata;
         }

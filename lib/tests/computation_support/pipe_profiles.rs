@@ -14,6 +14,7 @@ use drasi_lib::computation::v1::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     Bounded,
+    ByteBounded,
     Broadcast,
     Ranked,
     RankedLossy,
@@ -24,8 +25,9 @@ pub enum Profile {
 }
 
 impl Profile {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Bounded,
+        Self::ByteBounded,
         Self::Broadcast,
         Self::Ranked,
         Self::RankedLossy,
@@ -38,7 +40,7 @@ impl Profile {
     pub fn backpressure(self) -> bool {
         matches!(
             self,
-            Self::Bounded | Self::Ranked | Self::Retained | Self::Qos
+            Self::Bounded | Self::ByteBounded | Self::Ranked | Self::Retained | Self::Qos
         )
     }
 
@@ -65,6 +67,14 @@ impl Profile {
             Self::Bounded => (
                 Box::new(BoundedPipeConfig {
                     capacity: capacity.get(),
+                }),
+                BTreeMap::new(),
+            ),
+            Self::ByteBounded => (
+                Box::new(ByteBoundedPipeConfig {
+                    capacity: capacity.get(),
+                    max_bytes: capacity.get()
+                        * BinaryEnvelopeCodec::encoded_size(&timed_event(1)).expect("fixture size"),
                 }),
                 BTreeMap::new(),
             ),
