@@ -1,0 +1,1073 @@
+diff --git a/components/reactions/workgraph-router/README.md b/components/reactions/workgraph-router/README.md
+index 1a8d124c2d4a9b4f46074a4ba2f1be01a82a9390..bd4145a2578499498e79d91b321d0b727e6cddf8 100644
+--- a/components/reactions/workgraph-router/README.md
++++ b/components/reactions/workgraph-router/README.md
+@@ -20,7 +20,9 @@ Top-level config (`camelCase`):
+ - `allowedResponsibilityTypes`, `allowedActors`
+ - `trustedRoutingAuthors`, `trustedLauncherAuthors`, `trustedAgentAuthors`, `trustedRouterAuthors`
+ - `trustedRouterAuthorNodeIds`, `trustedRouterAuthorDatabaseIds` (immutable GitHub actor IDs used for strict reconciliation trust)
+-- `githubGraphqlUrl`, `githubRestUrl`, `githubTokenEnv`
++- `githubGraphqlUrl` (defaults to `https://api.github.com/graphql`)
++- `githubRestUrl` (defaults to `https://api.github.com`)
++- `githubTokenEnv` (defaults to `GITHUB_TOKEN`)
+ - `projectStatusFieldName` (defaults to `Status`)
+ - `timeoutSecs`
+ - `reservationLeaseSecs` (defaults to `120`; must be `>= 3 * timeoutSecs`)
+diff --git a/components/reactions/workgraph-router/src/decision.rs b/components/reactions/workgraph-router/src/decision.rs
+index fd8a4ccf78fd3f41657147ab15cb560e4d7062e5..0e36e77dc0c5cd97c16690ea402a0fa2615373f1 100644
+--- a/components/reactions/workgraph-router/src/decision.rs
++++ b/components/reactions/workgraph-router/src/decision.rs
+@@ -106,13 +106,41 @@ pub struct DecisionTransition {
+ }
+ 
+ impl RoutingDecision {
++    pub fn validate_allowlists(
++        &self,
++        config: &WorkgraphRouterReactionConfig,
++    ) -> anyhow::Result<()> {
++        if !config
++            .allowed_responsibility_types
++            .iter()
++            .any(|allowed| allowed == &self.next_responsibility_type)
++        {
++            anyhow::bail!(
++                "policy output nextResponsibilityType '{}' is not in allowedResponsibilityTypes",
++                self.next_responsibility_type
++            );
++        }
++        if !config.allowed_actors.is_empty()
++            && !config
++                .allowed_actors
++                .iter()
++                .any(|allowed| allowed == &self.next_responsibility_owner)
++        {
++            anyhow::bail!(
++                "policy output nextResponsibilityOwner '{}' is not in allowedActors",
++                self.next_responsibility_owner
++            );
++        }
++        Ok(())
++    }
++
+     pub fn from_policy(
+         config: &WorkgraphRouterReactionConfig,
+         candidate: &RoutingCandidate,
+         policy: PolicyOutcome,
+-    ) -> Self {
++    ) -> anyhow::Result<Self> {
+         let decision_id = deterministic_decision_id(config, candidate, &policy).to_string();
+-        Self {
++        let decision = Self {
+             decision_id,
+             policy_id: config.policy_id.clone(),
+             policy_type: config.policy_type.clone(),
+@@ -123,7 +151,9 @@ impl RoutingDecision {
+             next_responsibility_owner: policy.next_responsibility_owner,
+             marker_request: policy.marker_request,
+             reason: policy.reason,
+-        }
++        };
++        decision.validate_allowlists(config)?;
++        Ok(decision)
+     }
+ 
+     pub fn decision_comment(&self, candidate: &RoutingCandidate) -> anyhow::Result<String> {
+diff --git a/components/reactions/workgraph-router/src/descriptor.rs b/components/reactions/workgraph-router/src/descriptor.rs
+index c87ef63e332810c65052d5a95a0004ac6724fdd3..edcf4acac5f30e807725322ee2526f3515da3643 100644
+--- a/components/reactions/workgraph-router/src/descriptor.rs
++++ b/components/reactions/workgraph-router/src/descriptor.rs
+@@ -48,9 +48,9 @@ pub struct WorkgraphRouterReactionConfigDto {
+     pub allowed_event_types: Vec<ConfigValue<String>>,
+     #[serde(default)]
+     pub allowed_status_transitions: Vec<StatusTransitionDto>,
+-    #[serde(default)]
+-    #[schema(value_type = Vec<ConfigValueString>)]
+-    pub allowed_responsibility_types: Vec<ConfigValue<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<Vec<ConfigValueString>>)]
++    pub allowed_responsibility_types: Option<Vec<ConfigValue<String>>>,
+     #[serde(default)]
+     #[schema(value_type = Vec<ConfigValueString>)]
+     pub allowed_actors: Vec<ConfigValue<String>>,
+@@ -72,12 +72,15 @@ pub struct WorkgraphRouterReactionConfigDto {
+     #[serde(default)]
+     #[schema(value_type = Vec<ConfigValueU64>)]
+     pub trusted_router_author_database_ids: Vec<ConfigValue<u64>>,
+-    #[schema(value_type = ConfigValueString)]
+-    pub github_graphql_url: ConfigValue<String>,
+-    #[schema(value_type = ConfigValueString)]
+-    pub github_rest_url: ConfigValue<String>,
+-    #[schema(value_type = ConfigValueString)]
+-    pub github_token_env: ConfigValue<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub github_graphql_url: Option<ConfigValue<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub github_rest_url: Option<ConfigValue<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub github_token_env: Option<ConfigValue<String>>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[schema(value_type = Option<ConfigValueString>)]
+     pub project_status_field_name: Option<ConfigValue<String>>,
+@@ -127,12 +130,14 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
+                     to: s.to.clone(),
+                 })
+                 .collect(),
+-            allowed_responsibility_types: config
+-                .allowed_responsibility_types
+-                .iter()
+-                .cloned()
+-                .map(ConfigValue::Static)
+-                .collect(),
++            allowed_responsibility_types: Some(
++                config
++                    .allowed_responsibility_types
++                    .iter()
++                    .cloned()
++                    .map(ConfigValue::Static)
++                    .collect(),
++            ),
+             allowed_actors: config
+                 .allowed_actors
+                 .iter()
+@@ -175,9 +180,9 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
+                 .copied()
+                 .map(ConfigValue::Static)
+                 .collect(),
+-            github_graphql_url: ConfigValue::Static(config.github_graphql_url.clone()),
+-            github_rest_url: ConfigValue::Static(config.github_rest_url.clone()),
+-            github_token_env: ConfigValue::Static(config.github_token_env.clone()),
++            github_graphql_url: Some(ConfigValue::Static(config.github_graphql_url.clone())),
++            github_rest_url: Some(ConfigValue::Static(config.github_rest_url.clone())),
++            github_token_env: Some(ConfigValue::Static(config.github_token_env.clone())),
+             project_status_field_name: Some(ConfigValue::Static(
+                 config.project_status_field_name.clone(),
+             )),
+@@ -242,6 +247,7 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
+     ) -> anyhow::Result<Box<dyn Reaction>> {
+         let dto: WorkgraphRouterReactionConfigDto = serde_json::from_value(config_json.clone())?;
+         let mapper = DtoMapper::new();
++        let default_config = WorkgraphRouterReactionConfig::default();
+ 
+         let mut builder = WorkgraphRouterReactionBuilder::new(id)
+             .with_queries(query_ids)
+@@ -252,11 +258,6 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
+             .with_allowed_projects(mapper.resolve_string_vec(&dto.allowed_projects).await?)
+             .with_allowed_repos(mapper.resolve_string_vec(&dto.allowed_repos).await?)
+             .with_allowed_event_types(mapper.resolve_string_vec(&dto.allowed_event_types).await?)
+-            .with_allowed_responsibility_types(
+-                mapper
+-                    .resolve_string_vec(&dto.allowed_responsibility_types)
+-                    .await?,
+-            )
+             .with_allowed_actors(mapper.resolve_string_vec(&dto.allowed_actors).await?)
+             .with_trusted_routing_authors(
+                 mapper
+@@ -283,9 +284,26 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
+                     .resolve_string_vec(&dto.trusted_router_author_node_ids)
+                     .await?,
+             )
+-            .with_github_graphql_url(mapper.resolve_string(&dto.github_graphql_url).await?)
+-            .with_github_rest_url(mapper.resolve_string(&dto.github_rest_url).await?)
+-            .with_github_token_env(mapper.resolve_string(&dto.github_token_env).await?);
++            .with_github_graphql_url(match dto.github_graphql_url.as_ref() {
++                Some(value) => mapper.resolve_string(value).await?,
++                None => default_config.github_graphql_url.clone(),
++            })
++            .with_github_rest_url(match dto.github_rest_url.as_ref() {
++                Some(value) => mapper.resolve_string(value).await?,
++                None => default_config.github_rest_url.clone(),
++            })
++            .with_github_token_env(match dto.github_token_env.as_ref() {
++                Some(value) => mapper.resolve_string(value).await?,
++                None => default_config.github_token_env.clone(),
++            });
++
++        if let Some(allowed_responsibility_types) = dto.allowed_responsibility_types.as_ref() {
++            builder = builder.with_allowed_responsibility_types(
++                mapper
++                    .resolve_string_vec(allowed_responsibility_types)
++                    .await?,
++            );
++        }
+ 
+         if !dto.trusted_router_author_database_ids.is_empty() {
+             let mut ids = Vec::with_capacity(dto.trusted_router_author_database_ids.len());
+@@ -394,6 +412,33 @@ mod tests {
+         assert_eq!(dto.reservation_lease_secs, Some(ConfigValue::Static(300)));
+     }
+ 
++    #[test]
++    fn dto_deserialization_allows_omitted_github_fields() {
++        let json = json!({
++            "policyId": "policy",
++            "policyType": "rules_v1",
++            "policyVersion": "1.0.0",
++            "allowedProjects": [],
++            "allowedRepos": [],
++            "allowedEventTypes": [],
++            "allowedStatusTransitions": [],
++            "allowedResponsibilityTypes": [],
++            "allowedActors": [],
++            "trustedRoutingAuthors": [],
++            "trustedLauncherAuthors": [],
++            "trustedAgentAuthors": [],
++            "trustedRouterAuthors": [],
++            "trustedRouterAuthorNodeIds": [],
++            "trustedRouterAuthorDatabaseIds": []
++        });
++
++        let dto: WorkgraphRouterReactionConfigDto =
++            serde_json::from_value(json).expect("DTO should parse");
++        assert!(dto.github_graphql_url.is_none());
++        assert!(dto.github_rest_url.is_none());
++        assert!(dto.github_token_env.is_none());
++    }
++
+     #[test]
+     fn dto_deserialization_rejects_unknown_field() {
+         let json = json!({
+diff --git a/components/reactions/workgraph-router/src/github_client.rs b/components/reactions/workgraph-router/src/github_client.rs
+index 1a9337a72247133fdd51463c539ee7eb45020161..43fd85939af162803f66c3fc2e5fde6aa18bce11 100644
+--- a/components/reactions/workgraph-router/src/github_client.rs
++++ b/components/reactions/workgraph-router/src/github_client.rs
+@@ -15,7 +15,7 @@
+ use std::collections::HashMap;
+ 
+ use anyhow::Context;
+-use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
++use reqwest::header::{ACCEPT, USER_AGENT};
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ 
+@@ -153,7 +153,7 @@ impl GithubClient {
+             .get(url)
+             .header(USER_AGENT, "drasi-workgraph-router")
+             .header(ACCEPT, "application/vnd.github+json")
+-            .header(AUTHORIZATION, format!("Bearer {token}"))
++            .bearer_auth(&token)
+             .send()
+             .await
+             .context("GitHub issue preflight request failed")?;
+@@ -279,7 +279,7 @@ impl GithubClient {
+             .post(url)
+             .header(USER_AGENT, "drasi-workgraph-router")
+             .header(ACCEPT, "application/vnd.github+json")
+-            .header(AUTHORIZATION, format!("Bearer {token}"))
++            .bearer_auth(&token)
+             .json(&serde_json::json!({ "body": body }))
+             .send()
+             .await
+@@ -318,7 +318,7 @@ impl GithubClient {
+                 .get(url)
+                 .header(USER_AGENT, "drasi-workgraph-router")
+                 .header(ACCEPT, "application/vnd.github+json")
+-                .header(AUTHORIZATION, format!("Bearer {token}"))
++                .bearer_auth(&token)
+                 .send()
+                 .await
+                 .context("GitHub list comments request failed")?;
+@@ -357,7 +357,7 @@ impl GithubClient {
+             .post(&self.graphql_url)
+             .header(USER_AGENT, "drasi-workgraph-router")
+             .header(ACCEPT, "application/vnd.github+json")
+-            .header(AUTHORIZATION, format!("Bearer {token}"))
++            .bearer_auth(&token)
+             .json(&serde_json::json!({
+                 "query": query,
+                 "variables": variables
+diff --git a/components/reactions/workgraph-router/src/reaction.rs b/components/reactions/workgraph-router/src/reaction.rs
+index be986ccfea8630bda71ebeb47519db340fda6f0c..7ac8dd166dd4f9fe0db95470ac874fb2b81a966a 100644
+--- a/components/reactions/workgraph-router/src/reaction.rs
++++ b/components/reactions/workgraph-router/src/reaction.rs
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-use std::collections::HashMap;
++use std::collections::{BTreeSet, HashMap};
+ use std::sync::Arc;
+ 
+ use anyhow::Context;
+@@ -66,6 +66,66 @@ struct QueryResultProcessingOutcome {
+     has_unresolved_nonterminal: bool,
+ }
+ 
++#[derive(Debug, Clone)]
++struct SequenceCheckpointBarrier {
++    unresolved_sequences: BTreeSet<u64>,
++    completed_sequences: BTreeSet<u64>,
++}
++
++impl SequenceCheckpointBarrier {
++    fn new() -> Self {
++        Self {
++            unresolved_sequences: BTreeSet::new(),
++            completed_sequences: BTreeSet::new(),
++        }
++    }
++
++    fn mark_completed(&mut self, sequence: u64) {
++        self.unresolved_sequences.remove(&sequence);
++        self.completed_sequences.insert(sequence);
++    }
++
++    fn mark_unresolved(&mut self, sequence: u64) {
++        self.unresolved_sequences.insert(sequence);
++        self.completed_sequences.remove(&sequence);
++    }
++
++    fn has_unresolved_before(&self, sequence: u64) -> bool {
++        self.unresolved_sequences
++            .iter()
++            .next()
++            .is_some_and(|blocked| *blocked < sequence)
++    }
++
++    async fn advance_ready(
++        &mut self,
++        base: &ReactionBase,
++        checkpoint_state: &mut CheckpointState,
++        query_id: &str,
++    ) -> anyhow::Result<()> {
++        while let Some(next_sequence) = self.completed_sequences.iter().next().copied() {
++            if self
++                .unresolved_sequences
++                .iter()
++                .next()
++                .is_some_and(|blocked| *blocked < next_sequence)
++            {
++                break;
++            }
++            self.completed_sequences.remove(&next_sequence);
++            checkpoint_state
++                .advance(base, query_id, next_sequence)
++                .await
++                .with_context(|| {
++                    format!(
++                        "failed to advance checkpoint for query '{query_id}' to {next_sequence}"
++                    )
++                })?;
++        }
++        Ok(())
++    }
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum PreflightStatus {
+     Source,
+@@ -215,6 +275,8 @@ async fn run_processing_loop(
+     checkpoint_state: &mut CheckpointState,
+     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+ ) {
++    let mut checkpoint_barrier = SequenceCheckpointBarrier::new();
++
+     loop {
+         let event = tokio::select! {
+             biased;
+@@ -229,6 +291,24 @@ async fn run_processing_loop(
+             );
+             continue;
+         }
++        if checkpoint_barrier.has_unresolved_before(event.sequence) {
++            info!(
++                "[{}] deferring query '{}' sequence {} because earlier unresolved sequence exists",
++                reaction_name, event.query_id, event.sequence
++            );
++            let requeued = base.priority_queue.enqueue(event.clone()).await;
++            if !requeued {
++                let message = format!(
++                    "failed to requeue deferred query result {}:{}",
++                    event.query_id, event.sequence
++                );
++                error!("[{reaction_name}] {message}");
++                base.set_status(ComponentStatus::Error, Some(message)).await;
++                return;
++            }
++            tokio::time::sleep(unresolved_retry_delay(&config)).await;
++            continue;
++        }
+ 
+         let processing = match process_query_result(
+             reaction_name,
+@@ -254,11 +334,24 @@ async fn run_processing_loop(
+                 if config.strict_recovery {
+                     return;
+                 }
++                checkpoint_barrier.mark_unresolved(event.sequence);
++                let requeued = base.priority_queue.enqueue(event.clone()).await;
++                if !requeued {
++                    let message = format!(
++                        "failed to requeue failed query result {}:{}",
++                        event.query_id, event.sequence
++                    );
++                    error!("[{reaction_name}] {message}");
++                    base.set_status(ComponentStatus::Error, Some(message)).await;
++                    return;
++                }
++                tokio::time::sleep(unresolved_retry_delay(&config)).await;
+                 continue;
+             }
+         };
+ 
+         if processing.has_unresolved_nonterminal {
++            checkpoint_barrier.mark_unresolved(event.sequence);
+             info!(
+                 "[{}] query '{}' sequence {} has unresolved fenced candidates; requeuing before checkpoint advance",
+                 reaction_name, event.query_id, event.sequence
+@@ -277,12 +370,13 @@ async fn run_processing_loop(
+             continue;
+         }
+ 
+-        if let Err(error) = checkpoint_state
+-            .advance(&base, &event.query_id, event.sequence)
++        checkpoint_barrier.mark_completed(event.sequence);
++        if let Err(error) = checkpoint_barrier
++            .advance_ready(&base, checkpoint_state, &event.query_id)
+             .await
+         {
+             error!(
+-                "[{}] checkpoint update failed for sequence {}: {error:#}",
++                "[{}] checkpoint update failed while evaluating sequence {}: {error:#}",
+                 reaction_name, event.sequence
+             );
+             base.set_status(
+@@ -447,7 +541,8 @@ async fn process_candidate(
+                 outcome.to_status
+             );
+         }
+-        let decision = RoutingDecision::from_policy(config, candidate, outcome);
++        let decision = RoutingDecision::from_policy(config, candidate, outcome)
++            .context("policy output failed allowlist validation")?;
+         state.selected_transition =
+             Some((decision.from_status.clone(), decision.to_status.clone()));
+         state.decision = Some(decision.clone());
+@@ -465,10 +560,14 @@ async fn process_candidate(
+         decision
+     };
+ 
+-    let mut progress =
++    let mut progress = {
++        decision
++            .validate_allowlists(config)
++            .context("decision allowlist validation failed before side effects")?;
+         reconcile_progress(github, candidate, &decision, config, state.progress.clone())
+-            .await
+-            .context("failed to reconcile existing side effects")?;
++    }
++    .await
++    .context("failed to reconcile existing side effects")?;
+     state.mark_progress(progress.clone());
+ 
+     if !progress.decision_comment_written {
+@@ -1451,6 +1550,40 @@ mod tests {
+             .expect("reaction build")
+     }
+ 
++    async fn seed_completed_candidate_state(
++        store: Arc<dyn StateStoreProvider>,
++        store_id: &str,
++        config: &WorkgraphRouterReactionConfig,
++        candidate: &RoutingCandidate,
++    ) {
++        let reservation = ReservationRecord {
++            reservation_key: candidate.reservation_key(),
++            execution_id: candidate.execution_id.clone(),
++            required_event_type: candidate.required_event_type.clone(),
++            owner_instance_id: Some("completed-owner".to_string()),
++            fencing_epoch: 1,
++            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
++            policy_id: config.policy_id.clone(),
++            policy_type: config.policy_type.clone(),
++            policy_version: config.policy_version.clone(),
++            decision_id: Some("done".to_string()),
++            created_at: chrono::Utc::now().to_rfc3339(),
++            completed: true,
++        };
++        crate::state::save_reservation(store.clone(), store_id, &reservation)
++            .await
++            .expect("seed completed reservation");
++        let mut state = RoutingStateRecord::new(candidate, &reservation);
++        state.mark_progress(SideEffectProgress {
++            decision_comment_written: true,
++            responsibility_written: true,
++            project_status_updated: true,
++        });
++        save_routing_state(store, store_id, &state)
++            .await
++            .expect("seed completed state");
++    }
++
+     async fn initialize_reaction_for_test(
+         reaction: &WorkgraphRouterReaction,
+         store: Arc<dyn StateStoreProvider>,
+@@ -1726,6 +1859,71 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn persisted_decision_must_still_pass_output_allowlists() {
++        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++        let mut runtime_config = sample_config();
++        runtime_config.allowed_responsibility_types = vec!["issue-validation".to_string()];
++        runtime_config.allowed_actors = vec!["bot-user".to_string(), "submitter-user".to_string()];
++        let reaction = make_reaction("router-persisted-allowlist", &runtime_config);
++        initialize_reaction_for_test(&reaction, store.clone()).await;
++
++        let candidate = sample_candidate();
++        let mut reservation = ReservationRecord {
++            reservation_key: candidate.reservation_key(),
++            execution_id: candidate.execution_id.clone(),
++            required_event_type: candidate.required_event_type.clone(),
++            owner_instance_id: Some(reaction.runner_instance_id.clone()),
++            fencing_epoch: 1,
++            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
++            policy_id: runtime_config.policy_id.clone(),
++            policy_type: runtime_config.policy_type.clone(),
++            policy_version: runtime_config.policy_version.clone(),
++            decision_id: None,
++            created_at: chrono::Utc::now().to_rfc3339(),
++            completed: false,
++        };
++        let decision = RoutingDecision::from_policy(
++            &sample_config(),
++            &candidate,
++            RulesV1PolicyEngine
++                .evaluate(&candidate)
++                .expect("rules evaluation"),
++        )
++        .expect("decision");
++        reservation.decision_id = Some(decision.decision_id.clone());
++        crate::state::save_reservation(store.clone(), "router-persisted-allowlist", &reservation)
++            .await
++            .expect("seed reservation");
++
++        let mut state = RoutingStateRecord::new(&candidate, &reservation);
++        state.decision = Some(decision);
++        state.selected_transition = Some((
++            "AwaitingRouting".to_string(),
++            "AwaitingIssueRiskProfiling".to_string(),
++        ));
++        save_routing_state(store, "router-persisted-allowlist", &state)
++            .await
++            .expect("seed state");
++
++        let github = GithubClient::from_config(&runtime_config).expect("github client");
++        let err = process_candidate(
++            "router-persisted-allowlist",
++            &reaction.base,
++            &runtime_config,
++            &github,
++            &reaction.runner_instance_id,
++            &candidate,
++        )
++        .await
++        .expect_err("persisted decision should be blocked by output allowlist validation");
++        assert!(
++            err.to_string()
++                .contains("decision allowlist validation failed before side effects"),
++            "unexpected error: {err:#}"
++        );
++    }
++
+     #[tokio::test]
+     async fn unresolved_result_does_not_advance_checkpoint_past_later_sequence() {
+         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+@@ -1829,6 +2027,213 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn nonstrict_failed_sequence_blocks_checkpoint_advance() {
++        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++        let mut config = sample_config();
++        config.strict_recovery = false;
++        let reaction = make_reaction("router-nonstrict-failure-gap", &config);
++        initialize_reaction_for_test(&reaction, store.clone()).await;
++
++        let mut failed_candidate = sample_candidate();
++        failed_candidate.execution_id = "exec-failure-gap".to_string();
++        failed_candidate.comment_edited = true;
++
++        let mut completed_candidate = sample_candidate();
++        completed_candidate.execution_id = "exec-nonstrict-complete".to_string();
++        seed_completed_candidate_state(
++            store.clone(),
++            "router-nonstrict-failure-gap",
++            &config,
++            &completed_candidate,
++        )
++        .await;
++
++        reaction.start().await.expect("reaction start");
++        reaction
++            .enqueue_query_result(QueryResult::new(
++                ROUTE_QUERY_ID.to_string(),
++                1,
++                chrono::Utc::now(),
++                vec![ResultDiff::Add {
++                    data: serde_json::to_value(&failed_candidate).expect("failed row json"),
++                    row_signature: 1,
++                }],
++                HashMap::new(),
++            ))
++            .await
++            .expect("enqueue failed row");
++        reaction
++            .enqueue_query_result(QueryResult::new(
++                ROUTE_QUERY_ID.to_string(),
++                2,
++                chrono::Utc::now() + chrono::Duration::milliseconds(1),
++                vec![ResultDiff::Add {
++                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
++                    row_signature: 2,
++                }],
++                HashMap::new(),
++            ))
++            .await
++            .expect("enqueue completed row");
++        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
++        reaction.stop().await.expect("reaction stop");
++
++        let checkpoint = reaction
++            .base
++            .read_checkpoint(ROUTE_QUERY_ID)
++            .await
++            .expect("read checkpoint");
++        let sequence = checkpoint.map(|cp| cp.sequence).unwrap_or(0);
++        assert!(
++            sequence < 2,
++            "nonstrict checkpoint advanced past failed sequence: got {sequence}"
++        );
++    }
++
++    #[tokio::test]
++    async fn nonstrict_unresolved_sequence_is_recoverable_before_checkpoint_advances() {
++        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++        let mut config = sample_config();
++        config.strict_recovery = false;
++        let reaction = make_reaction("router-nonstrict-recoverable", &config);
++        initialize_reaction_for_test(&reaction, store.clone()).await;
++
++        let mut fenced_candidate = sample_candidate();
++        fenced_candidate.execution_id = "exec-nonstrict-fenced".to_string();
++        let fenced_reservation = ReservationRecord {
++            reservation_key: fenced_candidate.reservation_key(),
++            execution_id: fenced_candidate.execution_id.clone(),
++            required_event_type: fenced_candidate.required_event_type.clone(),
++            owner_instance_id: Some("other-owner".to_string()),
++            fencing_epoch: 1,
++            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
++            policy_id: config.policy_id.clone(),
++            policy_type: config.policy_type.clone(),
++            policy_version: config.policy_version.clone(),
++            decision_id: None,
++            created_at: chrono::Utc::now().to_rfc3339(),
++            completed: false,
++        };
++        crate::state::save_reservation(
++            store.clone(),
++            "router-nonstrict-recoverable",
++            &fenced_reservation,
++        )
++        .await
++        .expect("seed fenced reservation");
++
++        let mut completed_candidate = sample_candidate();
++        completed_candidate.execution_id = "exec-nonstrict-complete-2".to_string();
++        seed_completed_candidate_state(
++            store.clone(),
++            "router-nonstrict-recoverable",
++            &config,
++            &completed_candidate,
++        )
++        .await;
++
++        reaction.start().await.expect("reaction start");
++        reaction
++            .enqueue_query_result(QueryResult::new(
++                ROUTE_QUERY_ID.to_string(),
++                1,
++                chrono::Utc::now(),
++                vec![ResultDiff::Add {
++                    data: serde_json::to_value(&fenced_candidate).expect("fenced row json"),
++                    row_signature: 1,
++                }],
++                HashMap::new(),
++            ))
++            .await
++            .expect("enqueue fenced row");
++        reaction
++            .enqueue_query_result(QueryResult::new(
++                ROUTE_QUERY_ID.to_string(),
++                2,
++                chrono::Utc::now() + chrono::Duration::milliseconds(1),
++                vec![ResultDiff::Add {
++                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
++                    row_signature: 2,
++                }],
++                HashMap::new(),
++            ))
++            .await
++            .expect("enqueue completed row");
++        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
++        reaction.stop().await.expect("reaction stop");
++
++        let first_checkpoint = reaction
++            .base
++            .read_checkpoint(ROUTE_QUERY_ID)
++            .await
++            .expect("read first checkpoint")
++            .map(|cp| cp.sequence)
++            .unwrap_or(0);
++        assert!(
++            first_checkpoint < 2,
++            "checkpoint advanced past unresolved sequence before recovery: got {first_checkpoint}"
++        );
++
++        seed_completed_candidate_state(
++            store.clone(),
++            "router-nonstrict-recoverable",
++            &config,
++            &fenced_candidate,
++        )
++        .await;
++
++        let resumed_reaction = make_reaction("router-nonstrict-recoverable", &config);
++        initialize_reaction_for_test(&resumed_reaction, store).await;
++        resumed_reaction
++            .start()
++            .await
++            .expect("resumed reaction start");
++        resumed_reaction
++            .enqueue_query_result(QueryResult::new(
++                ROUTE_QUERY_ID.to_string(),
++                1,
++                chrono::Utc::now(),
++                vec![ResultDiff::Add {
++                    data: serde_json::to_value(&fenced_candidate).expect("fenced row json"),
++                    row_signature: 1,
++                }],
++                HashMap::new(),
++            ))
++            .await
++            .expect("enqueue recovered fenced row");
++        resumed_reaction
++            .enqueue_query_result(QueryResult::new(
++                ROUTE_QUERY_ID.to_string(),
++                2,
++                chrono::Utc::now() + chrono::Duration::milliseconds(1),
++                vec![ResultDiff::Add {
++                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
++                    row_signature: 2,
++                }],
++                HashMap::new(),
++            ))
++            .await
++            .expect("enqueue completed row");
++        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
++        resumed_reaction
++            .stop()
++            .await
++            .expect("resumed reaction stop");
++
++        let recovered_checkpoint = resumed_reaction
++            .base
++            .read_checkpoint(ROUTE_QUERY_ID)
++            .await
++            .expect("read recovered checkpoint")
++            .map(|cp| cp.sequence)
++            .unwrap_or(0);
++        assert!(
++            recovered_checkpoint >= 2,
++            "checkpoint did not advance after unresolved sequence became recoverable: got {recovered_checkpoint}"
++        );
++    }
++
+     #[tokio::test]
+     async fn stale_owner_routing_state_cas_rejected_after_takeover() {
+         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+diff --git a/components/reactions/workgraph-router/src/reconciliation.rs b/components/reactions/workgraph-router/src/reconciliation.rs
+index f45d03165e4b2a1697bc5bf255120906c4b66edf..77121334ef9d0d26968ee64839bdc1774387e122 100644
+--- a/components/reactions/workgraph-router/src/reconciliation.rs
++++ b/components/reactions/workgraph-router/src/reconciliation.rs
+@@ -238,7 +238,7 @@ mod tests {
+         let policy = RulesV1PolicyEngine
+             .evaluate(candidate)
+             .expect("rules evaluation");
+-        RoutingDecision::from_policy(config, candidate, policy)
++        RoutingDecision::from_policy(config, candidate, policy).expect("decision")
+     }
+ 
+     fn decision_comment(
+diff --git a/components/reactions/workgraph-router/src/tests.rs b/components/reactions/workgraph-router/src/tests.rs
+index 2314ca99855456043e475daa26114c882a2ea34c..cfe3a6c7a248e23470ca05b7243fb39d5e34edf9 100644
+--- a/components/reactions/workgraph-router/src/tests.rs
++++ b/components/reactions/workgraph-router/src/tests.rs
+@@ -96,6 +96,24 @@ fn sample_config() -> WorkgraphRouterReactionConfig {
+     }
+ }
+ 
++fn github_client_for_test(
++    server: &wiremock::MockServer,
++    token_env: &str,
++    token_value: &str,
++) -> GithubClient {
++    std::env::set_var(token_env, token_value);
++    let config = WorkgraphRouterReactionConfig {
++        policy_id: "policy".to_string(),
++        policy_type: "rules_v1".to_string(),
++        policy_version: "1.0.0".to_string(),
++        github_rest_url: server.uri(),
++        github_graphql_url: format!("{}/graphql", server.uri()),
++        github_token_env: token_env.to_string(),
++        ..sample_config()
++    };
++    GithubClient::from_config(&config).expect("client")
++}
++
+ #[test]
+ fn rules_v1_pass_routes_to_risk_profiling() {
+     let candidate = sample_candidate();
+@@ -154,7 +172,7 @@ fn decision_comment_is_pure_json() {
+     let policy = RulesV1PolicyEngine
+         .evaluate(&candidate)
+         .expect("rules evaluation");
+-    let decision = RoutingDecision::from_policy(&config, &candidate, policy);
++    let decision = RoutingDecision::from_policy(&config, &candidate, policy).expect("decision");
+     let comment = decision
+         .decision_comment(&candidate)
+         .expect("decision comment");
+@@ -165,6 +183,167 @@ fn decision_comment_is_pure_json() {
+     );
+ }
+ 
++#[tokio::test]
++async fn github_issue_preflight_sends_bearer_authorization() {
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    let token = "token-issue-open";
++    let expected_auth = format!("{} {}", "Bearer", token);
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/repos/drasi-project/drasi-core/issues/42"))
++        .and(header("authorization", expected_auth.as_str()))
++        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
++            "state":"open"
++        })))
++        .expect(1)
++        .mount(&server)
++        .await;
++
++    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_ISSUE_OPEN", token);
++    let is_open = client
++        .issue_is_open("drasi-project/drasi-core", 42)
++        .await
++        .expect("issue preflight");
++    assert!(is_open);
++}
++
++#[tokio::test]
++async fn github_create_comment_sends_bearer_authorization() {
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    let token = "token-comment-create";
++    let expected_auth = format!("{} {}", "Bearer", token);
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
++        .and(header("authorization", expected_auth.as_str()))
++        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
++            "id": 1,
++            "body": "ok",
++            "user": {"login":"router-user"}
++        })))
++        .expect(1)
++        .mount(&server)
++        .await;
++
++    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_CREATE_COMMENT", token);
++    let comment = client
++        .create_issue_comment("drasi-project/drasi-core", 42, "{\"ok\":true}")
++        .await
++        .expect("create comment");
++    assert_eq!(comment.id, 1);
++}
++
++#[tokio::test]
++async fn github_list_comments_sends_bearer_authorization() {
++    use wiremock::matchers::{header, method, path, query_param};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    let token = "token-list-comments";
++    let expected_auth = format!("{} {}", "Bearer", token);
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
++        .and(query_param("per_page", "100"))
++        .and(query_param("page", "1"))
++        .and(header("authorization", expected_auth.as_str()))
++        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
++        .expect(1)
++        .mount(&server)
++        .await;
++
++    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_LIST_COMMENTS", token);
++    let comments = client
++        .list_issue_comments("drasi-project/drasi-core", 42)
++        .await
++        .expect("list comments");
++    assert!(comments.is_empty());
++}
++
++#[tokio::test]
++async fn github_graphql_sends_bearer_authorization() {
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    let token = "token-graphql";
++    let expected_auth = format!("{} {}", "Bearer", token);
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .and(path("/graphql"))
++        .and(header("authorization", expected_auth.as_str()))
++        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
++            "data": {"viewer": {"login": "octocat"}}
++        })))
++        .expect(1)
++        .mount(&server)
++        .await;
++
++    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_GRAPHQL", token);
++    let data = client
++        .graphql("query Q { viewer { login } }", serde_json::json!({}))
++        .await
++        .expect("graphql");
++    assert_eq!(
++        data.pointer("/viewer/login").and_then(|v| v.as_str()),
++        Some("octocat")
++    );
++}
++
++#[test]
++fn policy_output_rejected_when_next_responsibility_type_not_allowlisted() {
++    let mut config = sample_config();
++    config.allowed_responsibility_types = vec!["issue-validation".to_string()];
++    let candidate = sample_candidate();
++    let policy = RulesV1PolicyEngine
++        .evaluate(&candidate)
++        .expect("rules evaluation");
++    let err = RoutingDecision::from_policy(&config, &candidate, policy)
++        .expect_err("decision should reject policy output type");
++    assert!(
++        err.to_string()
++            .contains("nextResponsibilityType 'issue-risk-profiling'"),
++        "unexpected error: {err:#}"
++    );
++}
++
++#[test]
++fn policy_output_rejected_when_issue_correction_not_allowlisted() {
++    let mut config = sample_config();
++    config.allowed_responsibility_types = vec!["issue-validation".to_string()];
++    let mut candidate = sample_candidate();
++    candidate.outcome = "failed".to_string();
++    let policy = RulesV1PolicyEngine
++        .evaluate(&candidate)
++        .expect("rules evaluation");
++    let err = RoutingDecision::from_policy(&config, &candidate, policy)
++        .expect_err("decision should reject issue-correction output type");
++    assert!(
++        err.to_string()
++            .contains("nextResponsibilityType 'issue-correction'"),
++        "unexpected error: {err:#}"
++    );
++}
++
++#[test]
++fn policy_output_rejected_when_owner_not_allowlisted() {
++    let mut config = sample_config();
++    config.allowed_actors = vec!["submitter-user".to_string()];
++    let candidate = sample_candidate();
++    let policy = RulesV1PolicyEngine
++        .evaluate(&candidate)
++        .expect("rules evaluation");
++    let err = RoutingDecision::from_policy(&config, &candidate, policy)
++        .expect_err("decision should reject policy output owner");
++    assert!(
++        err.to_string()
++            .contains("nextResponsibilityOwner 'bot-user'"),
++        "unexpected error: {err:#}"
++    );
++}
++
+ #[tokio::test]
+ async fn github_errors_do_not_leak_token_value() {
+     use wiremock::matchers::{method, path};
+@@ -203,3 +382,28 @@ async fn github_errors_do_not_leak_token_value() {
+         "error output leaked token value"
+     );
+ }
++
++#[tokio::test]
++async fn github_transport_errors_do_not_leak_token_value() {
++    let token_value = "transport-secret-token";
++    std::env::set_var("WG_ROUTER_TEST_TOKEN_TRANSPORT_REDACTION", token_value);
++    let config = WorkgraphRouterReactionConfig {
++        policy_id: "policy".to_string(),
++        policy_type: "rules_v1".to_string(),
++        policy_version: "1.0.0".to_string(),
++        github_rest_url: "http://127.0.0.1:1".to_string(),
++        github_graphql_url: "http://127.0.0.1:1/graphql".to_string(),
++        github_token_env: "WG_ROUTER_TEST_TOKEN_TRANSPORT_REDACTION".to_string(),
++        ..sample_config()
++    };
++    let client = GithubClient::from_config(&config).expect("client");
++    let error = client
++        .issue_is_open("drasi-project/drasi-core", 42)
++        .await
++        .expect_err("transport should fail");
++    let rendered = format!("{error:#}");
++    assert!(
++        !rendered.contains(token_value),
++        "transport error output leaked token value"
++    );
++}
+diff --git a/components/reactions/workgraph-router/tests/integration_test.rs b/components/reactions/workgraph-router/tests/integration_test.rs
+index e31e53c5b169d7865aeeb43f48a42be67ebaa6a4..0e9a13dcb01fb6d0fa4db53527b05443a57d082a 100644
+--- a/components/reactions/workgraph-router/tests/integration_test.rs
++++ b/components/reactions/workgraph-router/tests/integration_test.rs
+@@ -327,7 +327,8 @@ async fn seed_failed_reservation_state(
+         .evaluate(candidate)
+         .expect("rules evaluation");
+     let decision =
+-        RoutingDecision::from_policy(&policy_identity_config(policy_version), candidate, outcome);
++        RoutingDecision::from_policy(&policy_identity_config(policy_version), candidate, outcome)
++            .expect("decision");
+ 
+     let mut state = RoutingStateRecord::new(candidate, &reservation);
+     state.decision = Some(decision.clone());
+@@ -1302,7 +1303,8 @@ async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_cont
+         RulesV1PolicyEngine
+             .evaluate(&failed_outcome_candidate)
+             .expect("rules evaluation"),
+-    );
++    )
++    .expect("old decision");
+ 
+     let reservation = ReservationRecord {
+         reservation_key: candidate.reservation_key(),
+@@ -1524,7 +1526,8 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
+         },
+         &candidate,
+         outcome,
+-    );
++    )
++    .expect("decision");
+     let decision_comment = decision
+         .decision_comment(&candidate)
+         .expect("decision body");
