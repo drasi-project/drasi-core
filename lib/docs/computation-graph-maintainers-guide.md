@@ -8,6 +8,9 @@ solution *with* Drasi, use the [application developer guide](developer-guide/REA
 For exact signatures and configuration fields, use the
 [implementation reference](computation-graph-reference.md).
 
+For current priorities and completion criteria, see the
+[remaining-work inventory](computation-graph-remaining-work.md).
+
 ComputationGraph makes the processing topology an executable, owned structure.
 It decides which component instances exist, which connections they use, when
 their work runs, and what must finish before they can be replaced. That common

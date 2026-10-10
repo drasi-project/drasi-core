@@ -5,6 +5,11 @@ remain useful for tracking, but implemented framework capabilities are not open
 feature work. The active phase is core-only: no plugin additions, removals,
 porting, SDK expansion or observability work.
 
+For the consolidated current priorities, including shared-engine correctness
+findings and the source-time merger's remaining qualification, read the
+[remaining-work inventory](computation-graph-remaining-work.md). This backlog
+retains the detailed CG identifiers and historical evidence.
+
 ## Active core-only work
 
 | Work | Status and boundary |
