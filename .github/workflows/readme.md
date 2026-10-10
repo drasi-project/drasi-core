@@ -207,7 +207,7 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
 ### [publish-plugins.yml](publish-plugins.yml)
 - **Purpose**: Builds and publishes the plugin architecture matrix and verifies public GHCR package visibility without changing it.
 - **Triggers**: Called by `release-plz.yml` after crate publication, called by `nightly.yml`, or dispatched manually.
-- **Inputs**: `sign` controls cosign signing; `dry_run` skips publication and visibility checks; `skip_visibility` skips the visibility preflight, package listing, and final verification.
+- **Inputs**: `sign` controls cosign signing; `dry_run` skips publication and visibility checks; `skip_visibility` skips the visibility preflight, package listing, and final verification. Optional `plugin` (crate name or `type/kind`, empty for all) limits build, publish, and package listing to one plugin. Callers that omit it keep the publish-all path. Repair still rejects any non-default publication input, including `plugin`.
 - **Nightly behavior**: `nightly.yml` runs `release-plz update` (no crate publication), then publishes unsigned plugins with `sign: false`, `dry_run: false`, `skip_visibility: true`, and a fixed `drasi-nightly-test` tag by default. A passing nightly does not validate the signed, versioned release's visibility checks.
 
 ### [scorecard.yaml](scorecard.yaml)
