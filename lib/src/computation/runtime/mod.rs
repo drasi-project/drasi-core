@@ -243,6 +243,29 @@ fn needs_stop(observed: &ObservedComponent) -> bool {
     }
 }
 
+/// Rejects an explicit stop of a component that has nothing to stop.
+///
+/// A failed component is stoppable, so the stop can release what it retains
+/// and acknowledge the failure.
+fn ensure_stoppable(kind: &str, id: &str, observed: &ObservedComponent) -> anyhow::Result<()> {
+    let stoppable = matches!(
+        observed.lifecycle,
+        ComponentLifecycle::Running | ComponentLifecycle::Starting | ComponentLifecycle::Failed
+    ) || observed.failure.is_some()
+        || matches!(
+            observed.realization,
+            RealizationState::Pending | RealizationState::Creating
+        );
+    match observed.lifecycle {
+        _ if stoppable => Ok(()),
+        ComponentLifecycle::Stopped => {
+            anyhow::bail!("Cannot stop {kind} '{id}': it is already stopped")
+        }
+        ComponentLifecycle::Stopping => anyhow::bail!("The {kind} '{id}' is already stopping"),
+        lifecycle => anyhow::bail!("Cannot stop {kind} '{id}' while it is {lifecycle:?}"),
+    }
+}
+
 fn is_active(observed: &ObservedComponent) -> bool {
     matches!(
         observed.lifecycle,
@@ -1221,20 +1244,7 @@ impl Runtime {
             if kind == "query" {
                 return native_query::stop_query(&control, &ComponentId::try_new(id)?, None).await;
             }
-            anyhow::ensure!(
-                matches!(
-                    observed.lifecycle,
-                    ComponentLifecycle::Running
-                        | ComponentLifecycle::Starting
-                        | ComponentLifecycle::Failed
-                ) || observed.failure.is_some()
-                    || matches!(
-                        observed.realization,
-                        RealizationState::Pending | RealizationState::Creating
-                    ),
-                "Component '{id}' cannot stop while it is {:?}",
-                observed.lifecycle
-            );
+            ensure_stoppable(kind, id, observed)?;
             let handle = control.component_handle(&ComponentId::try_new(id)?)?;
             anyhow::ensure!(
                 handle.generation() == observed.generation,
@@ -1247,20 +1257,7 @@ impl Runtime {
             return Err(GraphError::StaleGeneration.into());
         }
         let (_, _, observed) = self.control_for(&record)?;
-        if !matches!(
-            observed.lifecycle,
-            ComponentLifecycle::Running | ComponentLifecycle::Starting | ComponentLifecycle::Failed
-        ) && observed.failure.is_none()
-            && !matches!(
-                observed.realization,
-                RealizationState::Pending | RealizationState::Creating
-            )
-        {
-            anyhow::bail!(
-                "Component '{id}' cannot stop while it is {:?}",
-                observed.lifecycle
-            );
-        }
+        ensure_stoppable(kind, id, &observed)?;
         self.stop_record(&record).await
     }
     pub(crate) async fn remove_component(

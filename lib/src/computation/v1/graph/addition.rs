@@ -342,6 +342,13 @@ impl ComponentHandle {
                     cause: failure.cause.clone(),
                 });
             }
+            // A stop acknowledges a cancelled or retryable creation failure without retrying
+            // it, so this generation cannot progress until an explicit start.
+            if node.realization == RealizationState::CreationFailed {
+                return Err(GraphError::CreationStopped {
+                    component: self.id.clone(),
+                });
+            }
             tokio::select! {
                 biased;
                 changed = changes.changed() => changed.map_err(|_| GraphError::ControllerClosed)?,

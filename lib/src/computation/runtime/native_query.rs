@@ -123,18 +123,7 @@ pub(super) async fn stop_query(
         expected.map_or(true, |expected| expected == state.generation),
         GraphError::StaleGeneration
     );
-    anyhow::ensure!(
-        matches!(
-            state.lifecycle,
-            ComponentLifecycle::Running | ComponentLifecycle::Starting | ComponentLifecycle::Failed
-        ) || state.failure.is_some()
-            || matches!(
-                state.realization,
-                RealizationState::Pending | RealizationState::Creating
-            ),
-        "Query '{id}' cannot stop while it is {:?}",
-        state.lifecycle
-    );
+    super::ensure_stoppable("query", id.as_str(), state)?;
     let report = control
         .stop_members(query_members(&publication, id))
         .await?;
@@ -776,6 +765,9 @@ impl Query for NativeQuery {
         .await
     }
     async fn stop(&self) -> anyhow::Result<()> {
+        if self.status_now() == ComponentStatus::Stopped {
+            return Ok(());
+        }
         stop_query(
             &self.control,
             self.handle.id(),

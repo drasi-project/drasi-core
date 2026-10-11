@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
     task::Poll,
@@ -1413,6 +1413,114 @@ struct Stopping {
     reply: oneshot::Sender<GraphResult<StopReport>>,
 }
 
+/// A single-component start or stop waiting behind a conflicting lifecycle
+/// operation. Requests for the same component begin in arrival order.
+enum HandleRequest {
+    Start {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        reply: oneshot::Sender<GraphResult<StartReport>>,
+    },
+    Stop {
+        component: ComponentId,
+        generation: ComponentGeneration,
+        /// Keeps a component stopped during construction from being activated
+        /// by the reconciliation that is creating it.
+        defer_restart: bool,
+        reply: oneshot::Sender<GraphResult<StopReport>>,
+    },
+}
+
+impl HandleRequest {
+    fn component(&self) -> &ComponentId {
+        match self {
+            Self::Start { component, .. } | Self::Stop { component, .. } => component,
+        }
+    }
+
+    fn abandoned(&self) -> bool {
+        match self {
+            Self::Start { reply, .. } => reply.is_closed(),
+            Self::Stop { reply, .. } => reply.is_closed(),
+        }
+    }
+
+    /// A stop may interrupt an in-flight start; a start needs the controller
+    /// free of both.
+    fn ready(&self, operations: &Operations) -> bool {
+        match self {
+            Self::Start { .. } => operations.starting.is_none() && operations.stopping.is_none(),
+            Self::Stop { .. } => operations.stopping.is_none(),
+        }
+    }
+
+    fn validate(&self, graph: &ComputationGraph) -> GraphResult<usize> {
+        let (component, generation) = match self {
+            Self::Start {
+                component,
+                generation,
+                ..
+            }
+            | Self::Stop {
+                component,
+                generation,
+                ..
+            } => (component, *generation),
+        };
+        let index = graph
+            .ids
+            .get(component)
+            .filter(|index| graph.components[**index].generation == generation)
+            .copied()
+            .ok_or(GraphError::StaleGeneration)?;
+        if matches!(self, Self::Start { .. }) && graph.retirement_active() {
+            return Err(GraphError::OperationInProgress);
+        }
+        Ok(index)
+    }
+
+    fn reject(self, error: GraphError) {
+        match self {
+            Self::Start { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Stop { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+
+    fn begin(self, graph: &mut ComputationGraph, operations: &mut Operations) -> GraphResult<()> {
+        let index = match self.validate(graph) {
+            Ok(index) => index,
+            Err(error) => {
+                self.reject(error);
+                return Ok(());
+            }
+        };
+        match self {
+            Self::Start {
+                component, reply, ..
+            } => {
+                graph.deferred_activation.remove(&component);
+                operations.begin_start(graph, BTreeSet::from([index]), Some(reply), true);
+                Ok(())
+            }
+            Self::Stop {
+                component,
+                defer_restart,
+                reply,
+                ..
+            } => {
+                if defer_restart {
+                    graph.deferred_activation.insert(component);
+                }
+                operations.begin_stop(graph, BTreeSet::from([index]), reply)
+            }
+        }
+    }
+}
+
 struct ControlCompletion {
     component: ComponentId,
     generation: ComponentGeneration,
@@ -1425,6 +1533,8 @@ struct Operations {
     active: BTreeMap<usize, Active>,
     starting: Option<Starting>,
     stopping: Option<Stopping>,
+    /// Handle starts and stops waiting for a conflicting operation, in arrival order.
+    handle_requests: VecDeque<HandleRequest>,
     stop_after_abort: BTreeSet<usize>,
     propagated_stop: BTreeSet<usize>,
     exhausted: BTreeSet<usize>,
@@ -2233,6 +2343,27 @@ impl Operations {
         Ok(())
     }
 
+    /// Rejects queued handle starts for `component`, which a later stop
+    /// supersedes; otherwise they would restart the component afterwards.
+    fn supersede_queued_starts(&mut self, component: &ComponentId) {
+        let is_superseded = |queued: &HandleRequest| {
+            matches!(queued, HandleRequest::Start { .. }) && queued.component() == component
+        };
+        if !self.handle_requests.iter().any(is_superseded) {
+            return;
+        }
+        let (superseded, retained): (VecDeque<_>, VecDeque<_>) =
+            std::mem::take(&mut self.handle_requests)
+                .into_iter()
+                .partition(is_superseded);
+        self.handle_requests = retained;
+        for start in superseded {
+            start.reject(GraphError::StartSuperseded {
+                component: component.clone(),
+            });
+        }
+    }
+
     fn begin_stop(
         &mut self,
         graph: &ComputationGraph,
@@ -2261,6 +2392,7 @@ impl Operations {
             }
             self.propagated_stop.remove(&index);
             let id = graph.nodes[index].descriptor.id();
+            self.supersede_queued_starts(id);
             if let Some(starting) = &mut self.starting {
                 if starting.pending.remove(&index) {
                     starting
@@ -2285,12 +2417,23 @@ impl Operations {
                 group.pending.insert(index);
             } else if graph.components[index].take()?.attempted {
                 group.pending.insert(index);
-            } else if graph.observed().components[id].realization != RealizationState::Created {
-                group.outcomes.insert(id.clone(), StopOutcome::NotCreated);
             } else {
-                group
-                    .outcomes
-                    .insert(id.clone(), StopOutcome::AlreadyStopped);
+                let mut acknowledged = false;
+                update(graph, |state| {
+                    acknowledged = state
+                        .components
+                        .get_mut(id)
+                        .expect("selected component")
+                        .acknowledge_stopped();
+                });
+                let outcome = if acknowledged {
+                    StopOutcome::Stopped
+                } else if graph.observed().components[id].realization != RealizationState::Created {
+                    StopOutcome::NotCreated
+                } else {
+                    StopOutcome::AlreadyStopped
+                };
+                group.outcomes.insert(id.clone(), outcome);
             }
         }
         self.stopping = Some(group);
@@ -2767,39 +2910,57 @@ fn accept_addition(
     }
 }
 
-fn stop_handle(
+/// Accepts a single-component start or stop. A request that conflicts only
+/// with the operation in flight, or follows a queued request for the same
+/// component, is queued for the controller loop instead of failing. A stop
+/// supersedes the same component's queued starts.
+fn submit_handle_request(
     graph: &mut ComputationGraph,
     operations: &mut Operations,
-    component: ComponentId,
-    generation: ComponentGeneration,
-    defer_restart: bool,
-    reply: oneshot::Sender<GraphResult<StopReport>>,
+    request: HandleRequest,
 ) -> GraphResult<()> {
-    let valid = graph
-        .ids
-        .get(&component)
-        .filter(|index| graph.components[**index].generation == generation)
-        .copied()
-        .ok_or(GraphError::StaleGeneration)
-        .and_then(|index| {
-            if operations.stopping.is_some() {
-                Err(GraphError::OperationInProgress)
-            } else {
-                Ok(index)
-            }
-        });
-    match valid {
-        Ok(index) => {
-            if defer_restart {
-                graph.deferred_activation.insert(component);
-            }
-            operations.begin_stop(graph, BTreeSet::from([index]), reply)?;
-        }
-        Err(error) => {
-            let _ = reply.send(Err(error));
+    if let Err(error) = request.validate(graph) {
+        request.reject(error);
+        return Ok(());
+    }
+    if let HandleRequest::Stop { component, .. } = &request {
+        operations.supersede_queued_starts(component);
+    }
+    let follows_queued = operations
+        .handle_requests
+        .iter()
+        .any(|queued| queued.component() == request.component());
+    if follows_queued || !request.ready(operations) {
+        operations.handle_requests.push_back(request);
+        Ok(())
+    } else {
+        request.begin(graph, operations)
+    }
+}
+
+/// Begins every queued handle request that no longer conflicts, keeping each
+/// component's requests in arrival order. Requests are revalidated when they
+/// begin, and those whose caller has gone are dropped. Returns whether any
+/// request began.
+fn begin_handle_requests(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+) -> GraphResult<bool> {
+    let mut began = false;
+    let mut blocked = BTreeSet::new();
+    let mut position = 0;
+    while let Some(request) = operations.handle_requests.get(position) {
+        if request.abandoned() {
+            operations.handle_requests.remove(position);
+        } else if blocked.contains(request.component()) || !request.ready(operations) {
+            blocked.insert(request.component().clone());
+            position += 1;
+        } else if let Some(request) = operations.handle_requests.remove(position) {
+            request.begin(graph, operations)?;
+            began = true;
         }
     }
-    Ok(())
+    Ok(began)
 }
 
 async fn settle_pending_stop(
@@ -2874,8 +3035,15 @@ pub(super) async fn run(
             return Err(GraphError::Cancelled);
         }
         operations.advance_additions(graph)?;
-        operations.advance_start(graph)?;
-        operations.advance_stop(graph)?;
+        // Finished groups free the controller for queued requests, and a
+        // request that begins may finish at once, so repeat until none begins.
+        loop {
+            operations.advance_start(graph)?;
+            operations.advance_stop(graph)?;
+            if !begin_handle_requests(graph, &mut operations)? {
+                break;
+            }
+        }
         if auto_start
             && operations.active.is_empty()
             && operations.starting.is_none()
@@ -3197,23 +3365,7 @@ pub(super) async fn run(
                     let _ = reply.send(result);
                 }
                 Some(Command::HandleStart { component, generation, reply }) => {
-                    let valid = graph.ids.get(&component)
-                        .filter(|index| graph.components[**index].generation == generation)
-                        .copied().ok_or(GraphError::StaleGeneration)
-                        .and_then(|index| {
-                            if graph.retirement_active() || operations.starting.is_some() || operations.stopping.is_some() {
-                                Err(GraphError::OperationInProgress)
-                            } else {
-                                Ok(index)
-                            }
-                        });
-                    match valid {
-                        Ok(index) => {
-                            graph.deferred_activation.remove(&component);
-                            operations.begin_start(graph, BTreeSet::from([index]), Some(reply), true);
-                        }
-                        Err(error) => { let _ = reply.send(Err(error)); }
-                    }
+                    submit_handle_request(graph, &mut operations, HandleRequest::Start { component, generation, reply })?;
                 }
                 Some(Command::StartMembers { members, reply }) => {
                     let selected = member_indices(graph, &members).and_then(|selected| {
@@ -3251,7 +3403,7 @@ pub(super) async fn run(
                     if cancelled { return Err(GraphError::Cancelled); }
                 }
                 Some(Command::HandleStop { component, generation, reply }) => {
-                    stop_handle(graph, &mut operations, component, generation, false, reply)?;
+                    submit_handle_request(graph, &mut operations, HandleRequest::Stop { component, generation, defer_restart: false, reply })?;
                 }
                 Some(Command::MutateMembers { members, changes, bindings, deprovision, management_access, reply }) => {
                     let result = async {

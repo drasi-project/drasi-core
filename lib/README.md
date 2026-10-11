@@ -448,6 +448,19 @@ core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
 ```
 
+`stop_query()` also cleans up queries in `Error`, including failures during
+startup or bootstrap. It releases active subscriptions and processing tasks before
+reporting `Stopped`, while preserving the query configuration and persisted state.
+Stopping acknowledges the failure; its details remain in the component events,
+and the next start retries the query, including a failed construction. A terminal
+construction failure stays in `Error` until the query is updated or removed.
+The managed `stop_query()` command rejects an already stopped query with an
+"already stopped" error. In contrast, calling a query runtime's `Query::stop()`
+directly is idempotent and returns `Ok(())` when already stopped.
+Updating or removing a failed query, and stopping the instance, also release its
+active lifecycle resources. Updating a failed query leaves its replacement stopped
+until explicitly started.
+
 ### Inspecting Components
 
 ```rust
@@ -473,6 +486,14 @@ let config: QueryConfig = core.get_query_config("my-query").await?;
 // Export full DrasiLib configuration
 let config: DrasiLibConfig = core.get_current_config().await?;
 ```
+
+Aggregate snapshots use the engine's grouping identity even when an ordinary
+`RETURN` follows an aggregating `WITH`. Changes to numeric grouping identity,
+lazy extrema keys, or older contributor-keyed output require explicit complete
+reconstruction of affected queries; upgrading does not automatically rekey
+persisted state. See
+[aggregate result identity and migration boundaries](../docs/aggregate-result-identity.md)
+for regression coverage, empty-group semantics, and compatibility limits.
 
 ### `ComponentStatus` Values
 
@@ -1000,6 +1021,19 @@ let query = Query::cypher("q1")
 ```
 
 If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap** — and the recovery policy activates.
+
+#### Persisted Outbox Compatibility
+
+Retained query output uses the ComputationGraph binary envelope codec, which
+writes named-field MessagePack. Omitted optional fields, such as
+`Update.grouping_keys`, therefore cannot shift later values.
+
+ComputationGraph does not read outbox records written by the earlier runtime.
+A retained record that cannot be decoded makes query recovery report an
+inconsistent history; it is not dropped or reconstructed. Under `Strict` the
+query fails visibly. `AutoReset`, with a declared bootstrap provider, rebuilds
+the output **and** the indexes and checkpoints. Clearing only the outbox is not
+a safe migration.
 
 ### Result Format
 

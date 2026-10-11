@@ -93,7 +93,12 @@ pub(super) fn observed_status(
         ComponentStatus::Starting
     } else if observed.lifecycle == ComponentLifecycle::Stopping {
         ComponentStatus::Stopping
-    } else if !observed.lifecycle_requested || observed.realization != RealizationState::Created {
+    } else if !observed.lifecycle_requested {
+        initial
+    } else if observed.realization == RealizationState::CreationFailed {
+        // An explicit stop acknowledged the creation failure.
+        ComponentStatus::Stopped
+    } else if observed.realization != RealizationState::Created {
         initial
     } else if observed.exhausted || observed.lifecycle == ComponentLifecycle::Stopped {
         ComponentStatus::Stopped

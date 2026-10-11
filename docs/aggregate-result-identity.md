@@ -107,7 +107,8 @@ ComputationGraph has a separate processing namespace and typed output format.
 It does not adopt legacy positional outbox records or contributor-keyed rows.
 The current query processing identity includes the execution-format version;
 synthetic-join identities also require reconstruction rather than guessing how
-old keys map to new ones. See [pipe QoS and recovery](../lib/docs/computation-graph-qos.md).
+old keys map to new ones. See [pipe QoS and recovery](../lib/docs/computation-graph-qos.md)
+and [persisted outbox compatibility](../lib/README.md#persisted-outbox-compatibility).
 
 ## Regression navigation
 

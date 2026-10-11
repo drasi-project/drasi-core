@@ -377,7 +377,9 @@ impl QueryInstance {
                     }
                     ComponentLifecycle::Stopping => return ComponentStatus::Stopping,
                     ComponentLifecycle::Stopped => {
-                        return if self.started.load(Ordering::Acquire) {
+                        return if self.started.load(Ordering::Acquire)
+                            || parent.realization == RealizationState::CreationFailed
+                        {
                             ComponentStatus::Stopped
                         } else {
                             binding.initial_status
@@ -780,6 +782,9 @@ impl Query for QueryInstance {
     }
     async fn stop(&self) -> anyhow::Result<()> {
         self.require_current()?;
+        if self.read_status() == ComponentStatus::Stopped {
+            return Ok(());
+        }
         self.owner
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("native runtime is gone"))?

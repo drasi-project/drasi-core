@@ -1544,6 +1544,13 @@ tokio::time::timeout(Duration::from_secs(10), handle.wait_started()).await??;
 ```
 
 A failed addition remains visible and retryable when its failure permits retry.
+Stopping a component whose construction failed or was still in progress
+acknowledges that outcome: the component reports Stopped, pending waits return
+`CreationStopped`, and the next start retries construction.
+Concurrent starts and stops of individual components are queued and run in
+turn; a stop that reaches a component with a queued start cancels that start
+with `StartSuperseded`. Graph-wide operations issued while another lifecycle
+operation is running return `OperationInProgress`.
 Inspect returned lifecycle/deployment reports: a graph handle can exist while
 one component is CreationFailed, another is Running, and an edge is unbound.
 `OperationSummary::CompletedWithFailures` is not a successful start of every

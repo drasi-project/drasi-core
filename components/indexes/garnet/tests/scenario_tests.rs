@@ -109,8 +109,8 @@ impl QueryTestConfig for GarnetQueryConfig {
         *self.element_index.lock().unwrap() = Some(element_index.clone());
 
         if self.use_cache {
-            let element_index = Arc::new(CachedElementIndex::new(element_index, 3).unwrap());
-            let ari = CachedResultIndex::new(Arc::new(ari), 3).unwrap();
+            let element_index = Arc::new(CachedElementIndex::new(element_index, 3));
+            let ari = CachedResultIndex::new(Arc::new(ari), 3);
 
             builder
                 .with_element_index(element_index)

@@ -201,6 +201,9 @@ struct SourceControl {
     pending_initialize: AtomicBool,
     entered: Notify,
     release: Notify,
+    pending_stop: AtomicBool,
+    stop_entered: Notify,
+    stop_release: Notify,
 }
 
 #[tokio::test]
@@ -864,6 +867,10 @@ impl Source for ControlledSource {
     }
     async fn stop(&self) -> anyhow::Result<()> {
         self.control.stops.fetch_add(1, Ordering::AcqRel);
+        if self.control.pending_stop.load(Ordering::Acquire) {
+            self.control.stop_entered.notify_one();
+            self.control.stop_release.notified().await;
+        }
         if self.control.fail_stop.load(Ordering::Acquire) {
             anyhow::bail!("injected stop failure");
         }
@@ -1619,7 +1626,10 @@ async fn instance_stop_cancels_pending_auto_start_and_restart_can_retry_creation
         .await
         .expect("instance stop must cancel a pending initializer")
         .unwrap();
-    assert!(handle.wait_created().await.is_err());
+    assert!(matches!(
+        handle.wait_created().await,
+        Err(GraphError::CreationStopped { .. })
+    ));
     assert_eq!(control.starts.load(Ordering::Acquire), 0);
     control.pending_initialize.store(false, Ordering::Release);
     core.start().await.unwrap();
@@ -1659,7 +1669,7 @@ async fn replacement_cancels_pending_creation_and_fences_existing_waiters() {
     let wait_error = wait.await.unwrap().unwrap_err();
     assert!(matches!(
         wait_error.underlying(),
-        GraphError::Cancelled | GraphError::StaleGeneration
+        GraphError::Cancelled | GraphError::CreationStopped { .. } | GraphError::StaleGeneration
     ));
     assert!(matches!(
         old.start().await,
@@ -3113,6 +3123,144 @@ async fn stop_interrupts_a_pending_component_start() {
         core.get_source_status("source").await.unwrap(),
         ComponentStatus::Stopped
     );
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
+    let (first, first_control) = ControlledSource::new("first");
+    let (second, second_control) = ControlledSource::new("second");
+    let (third, third_control) = ControlledSource::new("third");
+    let core = Arc::new(
+        builder()
+            .with_source(first)
+            .with_source(second)
+            .with_source(third)
+            .build()
+            .await
+            .unwrap(),
+    );
+    for id in ["first", "second", "third"] {
+        core.start_source(id).await.unwrap();
+    }
+    first_control.pending_stop.store(true, Ordering::Release);
+    let first_stop = tokio::spawn({
+        let core = core.clone();
+        async move { core.stop_source("first").await }
+    });
+    first_control.stop_entered.notified().await;
+
+    // An abandoned queued stop is dropped rather than run later.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), core.stop_source("third"))
+            .await
+            .is_err(),
+        "a stop behind an in-flight stop waits for it"
+    );
+    let second_stop = tokio::spawn({
+        let core = core.clone();
+        async move { core.stop_source("second").await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !second_stop.is_finished(),
+        "the second stop must queue, not fail"
+    );
+    assert_eq!(second_control.stops.load(Ordering::Acquire), 0);
+
+    first_control.stop_release.notify_one();
+    first_stop.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), second_stop)
+        .await
+        .expect("the queued stop runs once the in-flight stop completes")
+        .unwrap()
+        .unwrap();
+    for (id, status) in [
+        ("first", ComponentStatus::Stopped),
+        ("second", ComponentStatus::Stopped),
+        ("third", ComponentStatus::Running),
+    ] {
+        assert_eq!(core.get_source_status(id).await.unwrap(), status, "{id}");
+    }
+    assert_eq!(second_control.stops.load(Ordering::Acquire), 1);
+    assert_eq!(third_control.stops.load(Ordering::Acquire), 0);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn component_starts_queue_and_a_later_stop_supersedes_a_queued_start() {
+    let (hung, hung_control) = ControlledSource::new("hung");
+    let (superseded, superseded_control) = ControlledSource::new("superseded");
+    let (queued, queued_control) = ControlledSource::new("queued");
+    let core = Arc::new(
+        builder()
+            .with_source(hung)
+            .with_source(superseded)
+            .with_source(queued)
+            .build()
+            .await
+            .unwrap(),
+    );
+    hung_control.pending_start.store(true, Ordering::Release);
+    let start = |id: &'static str| {
+        let core = core.clone();
+        tokio::spawn(async move { core.start_source(id).await })
+    };
+    let hung_start = start("hung");
+    hung_control.entered.notified().await;
+    let superseded_start = start("superseded");
+    let queued_start = start("queued");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !superseded_start.is_finished(),
+        "a start behind a start must queue, not fail"
+    );
+    assert!(
+        !queued_start.is_finished(),
+        "a start behind a start must queue, not fail"
+    );
+
+    // The API checks status before reaching the controller, and the queued
+    // start has not begun, so ordering this stop first is valid.
+    let error = core.stop_source("superseded").await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("already stopped"),
+        "{error:#}"
+    );
+    // A stop that reaches the controller supersedes the queued start without
+    // waiting for the hung one.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        core.computation_component("superseded").unwrap().stop(),
+    )
+    .await
+    .expect("a stop is not queued behind an in-flight start")
+    .unwrap();
+    let error = superseded_start.await.unwrap().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("superseded by a later stop"),
+        "{error:#}"
+    );
+    assert_eq!(superseded_control.starts.load(Ordering::Acquire), 0);
+
+    tokio::time::timeout(Duration::from_secs(2), core.stop_source("hung"))
+        .await
+        .expect("a stop interrupts the hung start")
+        .unwrap();
+    assert!(hung_start.await.unwrap().is_err());
+    tokio::time::timeout(Duration::from_secs(5), queued_start)
+        .await
+        .expect("the queued start begins once the controller is free")
+        .unwrap()
+        .unwrap();
+    for (id, status) in [
+        ("hung", ComponentStatus::Stopped),
+        ("superseded", ComponentStatus::Stopped),
+        ("queued", ComponentStatus::Running),
+    ] {
+        assert_eq!(core.get_source_status(id).await.unwrap(), status, "{id}");
+    }
+    assert_eq!(queued_control.starts.load(Ordering::Acquire), 1);
     core.shutdown().await.unwrap();
 }
 

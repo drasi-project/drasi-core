@@ -111,6 +111,10 @@ pub enum GraphError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("component {component} was stopped before its construction completed; start it to retry construction")]
+    CreationStopped { component: ComponentId },
+    #[error("start of component {component} was superseded by a later stop before it began")]
+    StartSuperseded { component: ComponentId },
     #[error("resource {resource} cleanup failed: {source}")]
     ResourceCleanup {
         resource: ResourceId,

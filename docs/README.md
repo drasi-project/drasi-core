@@ -26,3 +26,5 @@ documents how to regenerate and compare the artifacts during architecture review
 The [ComputationGraph backlog](../lib/docs/computation-graph-backlog.md) explains
 the known issues, incomplete capabilities, and remaining qualification work,
 including suggested priorities, implementation complexity, and disruption risk.
+
+Release operators: [repairing signatures on existing plugin releases](./contributing/plugin-signature-repair.md).

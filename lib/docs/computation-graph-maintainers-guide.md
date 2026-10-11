@@ -810,6 +810,16 @@ controller, components marked for automatic start are queued in
 must therefore read the report, not just the `Result`, to learn whether the
 change was applied in full.
 
+The controller runs one start group and one stop group at a time; a stop
+may interrupt a start. Single-component starts and stops from
+`ComponentHandle` that conflict with an in-flight group are queued in
+`handle_requests` rather than failed. Each component's requests begin in
+arrival order, are revalidated against its current generation, and are
+dropped if their caller has gone. Any stop that reaches the controller rejects
+the same component's queued starts with `StartSuperseded`, so a completed stop
+is never undone by an older start. Graph-wide start, stop, policy and
+recovery-freeze commands still return `OperationInProgress`.
+
 ### Durable acceptance precedes realization
 
 Optional management persists *what the instance should contain*. Its

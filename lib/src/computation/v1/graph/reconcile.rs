@@ -635,9 +635,17 @@ pub(super) fn preview(
             DesiredMutation::Retry(selection) => {
                 for id in selected_ids(graph, selection)? {
                     let observed = &graph.observed().components[&id];
-                    let error = observed.failure.as_ref().ok_or_else(|| {
-                        topology(format!("component {id} has no visible failure to retry"))
-                    })?;
+                    let Some(error) = observed.failure.as_ref() else {
+                        // An explicit stop acknowledged a retryable creation
+                        // failure; the component still needs constructing.
+                        if observed.realization == RealizationState::CreationFailed {
+                            forced.insert(id);
+                            continue;
+                        }
+                        return Err(topology(format!(
+                            "component {id} has no visible failure to retry"
+                        )));
+                    };
                     if error.disposition != FailureDisposition::Retryable {
                         return Err(topology(
                             "terminal failure requires a specification change or removal",
@@ -2756,7 +2764,7 @@ async fn create_component(
                     accept_addition(graph, operations, addition, management_access, reply);
                 }
                 Some(Command::HandleStop { component, generation, reply }) => {
-                    stop_handle(graph, operations, component, generation, true, reply)?;
+                    submit_handle_request(graph, operations, HandleRequest::Stop { component, generation, defer_restart: true, reply })?;
                 }
                 Some(_) => unreachable!("construction channel only accepts additions and handle stops"),
                 None => return Err(GraphError::ControllerClosed),

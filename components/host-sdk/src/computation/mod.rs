@@ -22,6 +22,8 @@ mod transaction;
 
 pub use bootstrap::{NativeBootstrapFactories, NativeBootstrapFactory, NativeBootstrapProxy};
 pub use consumer::{NativeConsumerProxy, NativeConsumerResource};
+/// Native computation ABI version this host loads.
+pub use drasi_computation_plugin_abi::ABI_VERSION;
 pub use drasi_computation_plugin_sdk::bootstrap::BootstrapFactoryMetadata;
 pub use drasi_computation_plugin_sdk::metadata::{
     Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, PluginMetadata,

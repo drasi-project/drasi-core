@@ -29,6 +29,12 @@ use crate::{
 #[async_trait]
 pub trait Query: Send + Sync {
     async fn start(&self) -> Result<()>;
+    /// Stop the query and release its active subscriptions and processing tasks.
+    ///
+    /// This must also clean up queries in `Error`, because failed starts and
+    /// processing errors can leave resources behind. Calling it on an already
+    /// stopped query is a no-op, whereas [`crate::DrasiLib::stop_query`] rejects
+    /// an already stopped query.
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;

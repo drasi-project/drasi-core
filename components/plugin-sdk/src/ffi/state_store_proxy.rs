@@ -409,4 +409,26 @@ mod tests {
         assert!(proxy.delete("store", "error").await.is_err());
         assert!(proxy.delete("store", "invalid").await.is_err());
     }
+
+    extern "C" fn release_boxed_arc(state: *mut c_void) {
+        // Mirrors the host's `ss_drop`, which reclaims the boxed provider `Arc`.
+        drop(unsafe { Box::from_raw(state.cast::<std::sync::Arc<()>>()) });
+    }
+
+    #[test]
+    fn drop_releases_the_transferred_vtable_and_its_state() {
+        let provider = std::sync::Arc::new(());
+        let mut table = test_table();
+        table.state = Box::into_raw(Box::new(provider.clone())).cast();
+        table.drop_fn = release_boxed_arc;
+        assert_eq!(std::sync::Arc::strong_count(&provider), 2);
+
+        drop(unsafe { FfiStateStoreProxy::new(Box::into_raw(Box::new(table))) });
+
+        assert_eq!(
+            std::sync::Arc::strong_count(&provider),
+            1,
+            "the provider reference must be released with the proxy"
+        );
+    }
 }

@@ -289,6 +289,10 @@ impl Reaction for ReactionProxy {
         let instance_id_ffi = FfiStr::from_str(&instance_id_str);
         let component_id_ffi = FfiStr::from_str(&component_id_str);
 
+        // Ownership of this allocation transfers to the plugin. ABI 0.17
+        // `FfiStateStoreProxy` frees the vtable and its state on `Drop`; ABI 0.16
+        // plugins retain it (see `FfiRuntimeContext::state_store`). The host must
+        // not free it.
         let ss_ptr = state_store_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
             .unwrap_or(std::ptr::null());

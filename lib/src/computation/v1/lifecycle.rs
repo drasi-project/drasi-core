@@ -101,6 +101,23 @@ pub struct ComponentFailure {
     pub timestamp: DateTime<Utc>,
 }
 
+impl ComponentFailure {
+    /// Whether an explicit stop acknowledges this failure.
+    ///
+    /// Activation, processing, and stop failures belong to one run, and the
+    /// next start begins a new one. A retryable creation failure is retried by
+    /// the next start. Terminal creation failures and validation, binding,
+    /// removal, and control failures need a specification or topology change,
+    /// so stopping cannot resolve them.
+    pub(crate) fn cleared_by_stop(&self) -> bool {
+        match self.phase {
+            FailurePhase::Activation | FailurePhase::Processing | FailurePhase::Stop => true,
+            FailurePhase::Creation => self.disposition == FailureDisposition::Retryable,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObservedComponent {
     pub generation: ComponentGeneration,
@@ -121,19 +138,39 @@ pub struct ObservedComponent {
 impl ObservedComponent {
     /// Records that the component stopped successfully.
     ///
-    /// A successful stop supersedes an earlier stop failure, because the
-    /// component is now stopped. Failures from any other phase stay visible
-    /// until the component next starts, so the reason it failed is not lost.
+    /// `Stopped` is an explicit stop, which acknowledges any failure that
+    /// [`ComponentFailure::cleared_by_stop`]; the component events keep its
+    /// details. `Failed` records a stop propagated from a failed dependency
+    /// and supersedes only an earlier stop failure. Other failures stay
+    /// visible until the component next starts.
     pub(crate) fn record_stopped(&mut self, lifecycle: ComponentLifecycle) {
         self.lifecycle = lifecycle;
-        if self
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.phase == FailurePhase::Stop)
-        {
+        if self.failure.as_ref().is_some_and(|failure| {
+            failure.phase == FailurePhase::Stop
+                || (lifecycle == ComponentLifecycle::Stopped && failure.cleared_by_stop())
+        }) {
             self.failure = None;
         }
         self.transition_time = Utc::now();
+    }
+
+    /// Acknowledges the failure of a component that has nothing left to stop.
+    ///
+    /// An explicit stop of a component whose creation, start, or processing
+    /// failed finds it already inactive, but must still leave it stopped. A
+    /// creation failure keeps `RealizationState::CreationFailed`, so the next
+    /// start retries creation.
+    /// Returns whether a failure was acknowledged.
+    pub(crate) fn acknowledge_stopped(&mut self) -> bool {
+        if !self
+            .failure
+            .as_ref()
+            .is_some_and(ComponentFailure::cleared_by_stop)
+        {
+            return false;
+        }
+        self.record_stopped(ComponentLifecycle::Stopped);
+        true
     }
 }
 
@@ -349,4 +386,118 @@ pub enum GraphSelection {
     Dependencies(Vec<ComponentId>),
     Dependents(Vec<ComponentId>),
     All,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failure(phase: FailurePhase, disposition: FailureDisposition) -> ComponentFailure {
+        ComponentFailure {
+            phase,
+            disposition,
+            cause: Arc::new(GraphError::Cancelled),
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn observed(
+        realization: RealizationState,
+        lifecycle: ComponentLifecycle,
+        failure: Option<ComponentFailure>,
+    ) -> ObservedComponent {
+        ObservedComponent {
+            generation: ComponentGeneration(1),
+            operation: OperationEpoch(1),
+            revision: GraphRevision(1),
+            realization,
+            lifecycle,
+            health: ComponentHealth::Unknown,
+            failure,
+            exhausted: false,
+            started: false,
+            lifecycle_requested: true,
+            transition_time: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn explicit_stop_clears_only_failures_a_restart_can_resolve() {
+        use FailureDisposition::{Retryable, Terminal};
+        use FailurePhase::*;
+        for (phase, disposition, cleared) in [
+            (Activation, Terminal, true),
+            (Processing, Terminal, true),
+            (Stop, Retryable, true),
+            (Creation, Retryable, true),
+            (Creation, Terminal, false),
+            (Validation, Retryable, false),
+            (Binding, Retryable, false),
+            (Removal, Retryable, false),
+            (Control, Retryable, false),
+        ] {
+            let mut node = observed(
+                RealizationState::Created,
+                ComponentLifecycle::Failed,
+                Some(failure(phase, disposition)),
+            );
+            node.record_stopped(ComponentLifecycle::Stopped);
+            assert_eq!(node.lifecycle, ComponentLifecycle::Stopped);
+            assert_eq!(
+                node.failure.is_none(),
+                cleared,
+                "{phase:?}/{disposition:?} after an explicit stop"
+            );
+        }
+    }
+
+    #[test]
+    fn propagated_stop_keeps_the_failure_that_explains_it() {
+        let mut node = observed(
+            RealizationState::Created,
+            ComponentLifecycle::Running,
+            Some(failure(
+                FailurePhase::Processing,
+                FailureDisposition::Retryable,
+            )),
+        );
+        node.record_stopped(ComponentLifecycle::Failed);
+        assert_eq!(node.lifecycle, ComponentLifecycle::Failed);
+        assert!(node.failure.is_some());
+
+        node.failure = Some(failure(FailurePhase::Stop, FailureDisposition::Retryable));
+        node.record_stopped(ComponentLifecycle::Failed);
+        assert!(
+            node.failure.is_none(),
+            "a successful stop supersedes a stop failure"
+        );
+    }
+
+    #[test]
+    fn acknowledging_an_inactive_failure_leaves_creation_to_be_retried() {
+        let mut node = observed(
+            RealizationState::CreationFailed,
+            ComponentLifecycle::Stopped,
+            Some(failure(
+                FailurePhase::Creation,
+                FailureDisposition::Retryable,
+            )),
+        );
+        assert!(node.acknowledge_stopped());
+        assert!(node.failure.is_none());
+        assert_eq!(node.lifecycle, ComponentLifecycle::Stopped);
+        assert_eq!(node.realization, RealizationState::CreationFailed);
+        assert!(!node.acknowledge_stopped(), "nothing left to acknowledge");
+
+        let mut terminal = observed(
+            RealizationState::CreationFailed,
+            ComponentLifecycle::Stopped,
+            Some(failure(
+                FailurePhase::Creation,
+                FailureDisposition::Terminal,
+            )),
+        );
+        assert!(!terminal.acknowledge_stopped());
+        assert!(terminal.failure.is_some());
+    }
 }

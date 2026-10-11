@@ -362,18 +362,16 @@ impl Runtime {
         kind: &'static str,
     ) -> anyhow::Result<ComponentStatus> {
         let publication = self.control()?.registry_snapshot();
-        if kind != "query" {
-            if let Some(record) = self
-                .records_at(&publication)
-                .await?
-                .get(id)
-                .filter(|record| record.value.instance().kind() == kind)
-            {
-                return Ok(status(
-                    record,
-                    self.component_observation_at(&publication, id, kind)?,
-                ));
-            }
+        if let Some(record) = self
+            .records_at(&publication)
+            .await?
+            .get(id)
+            .filter(|record| record.value.instance().kind() == kind)
+        {
+            return Ok(status(
+                record,
+                self.component_observation_at(&publication, id, kind)?,
+            ));
         }
         Ok(events::observed_status(
             self.component_observation_at(&publication, id, kind)?,
