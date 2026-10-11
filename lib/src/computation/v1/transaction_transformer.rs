@@ -787,6 +787,22 @@ impl TransactionTransformer {
         }
     }
 
+    /// Attach the native test clock to a query body, never to linear domain steps.
+    #[cfg(feature = "test-support")]
+    pub fn with_test_control(
+        self,
+        control: crate::test_support::QueryTestControl,
+    ) -> anyhow::Result<Self> {
+        match self.body {
+            TransactionBody::Query(query) => Ok(Self {
+                body: TransactionBody::Query(Box::new(query.with_test_control(control)?)),
+            }),
+            TransactionBody::Linear(_) => {
+                anyhow::bail!("linear transaction steps do not own scheduled query work")
+            }
+        }
+    }
+
     pub fn with_scheduling(self, scheduling: Arc<QuerySchedulingResource>) -> anyhow::Result<Self> {
         match self.body {
             TransactionBody::Query(query) => Ok(Self {
@@ -834,6 +850,16 @@ impl TransactionTransformer {
 
 #[async_trait]
 impl ComputationComponent for TransactionTransformer {
+    #[cfg(feature = "test-support")]
+    fn bind_query_test_support(
+        &mut self,
+        inspector: &super::ComputationInspector,
+        generation: super::ComponentGeneration,
+    ) {
+        self.processor_mut()
+            .bind_query_test_support(inspector, generation);
+    }
+
     fn recovery_contract(&self) -> super::ComponentRecovery {
         self.processor().recovery_contract()
     }

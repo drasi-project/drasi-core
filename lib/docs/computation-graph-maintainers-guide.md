@@ -530,6 +530,10 @@ advance live source checkpoints. Source time, timer due time and local time
 used to wait are distinct. Timer sleeps periodically recheck the wall clock;
 this is not a general deterministic clock-injection framework.
 
+Integration tests can opt into the separate `test-support`
+[query clock and output frontier](query-test-control.md), without changing
+uncontrolled queries or treating immediate pipe acceptance as downstream handling.
+
 Start in [`query_scheduling.rs`](../src/computation/v1/query_scheduling.rs),
 then the core adapter's `evaluate_due_future` and the query's `on_wakeup`.
 [Temporal-retraction tests](../tests/computation_temporal_retractions.rs)

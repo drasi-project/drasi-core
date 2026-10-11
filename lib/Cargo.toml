@@ -32,6 +32,8 @@ default = []
 
 # Transitional build-name alias. ComputationGraph is always the runtime.
 computation = []
+# Explicit per-query clock and native output-frontier controls for integration tests.
+test-support = []
 # Explicit integration-test wiring; does not enable a backend in the default runtime.
 computation-rocksdb-tests = ["computation", "drasi-index-rocksdb/computation"]
 

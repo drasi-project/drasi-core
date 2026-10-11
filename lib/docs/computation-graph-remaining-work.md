@@ -206,12 +206,14 @@ rows, replayed work, saved progress and released resources.
 | Retained and multicast journals | Broaden damaged-record/history combinations and prolonged disconnected-consumer scenarios. Required history must remain available, and corruption must remain an error rather than an empty journal. Check real whole-pipeline/provider combinations, not only individual pipe declarations. Ledger: Q01, Q07, Q08. |
 | Consumer recovery | Combine successful remote effects, lost replies, caller cancellation and failed progress writes. Verify that retry resumes unfinished work without skipping later operations. Combine consumers that trigger only on new changes with consumers that maintain a complete current snapshot. Ledger: R01, R03. |
 | Long-running behavior | Run sustained persistent workloads and measure throughput, slowest-response behavior, disk growth, process memory, native allocations, tasks and file/socket handles. Existing bounded soaks do not establish many-day stability or production latency targets. Ledger: G06, Q08, T07. |
-| Deterministic test controls | Adapt the query-clock controls from the timing branch and replace remaining fixed sleep/poll budgets with actual processing and checkpoint completion. A test should advance a five-minute deadline without sleeping five minutes, and wait for the boundary it is asserting. |
+| Deterministic test controls | Use the integrated opt-in query-clock controls to replace remaining fixed sleep/poll budgets with actual processing and checkpoint completion. A test should advance a five-minute deadline without sleeping five minutes, and wait for the boundary it is asserting. |
 
-The inspected timing implementation is documented at
-[`b8d1f38a`](https://github.com/drasi-project/drasi-core/blob/b8d1f38a63d53a134b069546d349800d18b0571b/lib/docs/query-test-control.md).
-It has not been integrated into this branch. Its query-completion boundary
-does not prove that every downstream external effect has completed.
+The timing implementation originally documented at
+[`b8d1f38a`](https://github.com/drasi-project/drasi-core/blob/b8d1f38a63d53a134b069546d349800d18b0571b/lib/docs/query-test-control.md)
+is integrated behind the non-default `test-support` feature for ordinary and
+directly assembled native queries. See the current
+[query timing guide](query-test-control.md). Its query-completion boundary does
+not prove that every downstream external effect has completed.
 Related reaction-test work exists in
 [PR #887](https://github.com/drasi-project/drasi-core/pull/887); adapting its
 completion assertions must preserve the current graph lifecycle and ordering.

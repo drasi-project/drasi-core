@@ -70,6 +70,7 @@ Start with the guide for your task:
 | [Remaining-work inventory](docs/computation-graph-remaining-work.md) | Current correctness work, qualification gaps, performance improvements and separately scoped integrations, with plain-language completion criteria |
 | [Issues, gaps and next-phase work](docs/computation-graph-backlog.md) | Plain-English explanations of unfinished work, suggested priorities, complexity and disruption risk |
 | [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
+| [Deterministic query tests](docs/query-test-control.md) | Opt-in clocks for builder and native batch queries; exact committed-output/pipe-acceptance frontier and separate outlet fence |
 
 From the drasi-core repository root, run a complete in-process example:
 

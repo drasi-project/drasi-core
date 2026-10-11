@@ -55,6 +55,8 @@ pub mod error;
 /// Computation contracts and the authoritative DAG runtime.
 pub mod computation;
 pub mod management;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 /// Identity providers for authentication credentials
 pub mod identity;
