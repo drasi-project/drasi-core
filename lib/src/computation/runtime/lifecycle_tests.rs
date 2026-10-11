@@ -560,6 +560,99 @@ async fn stop_all_components_stops_running() {
 }
 
 #[tokio::test]
+async fn stop_sweep_continues_past_a_record_superseded_after_it_was_listed() {
+    let (source, source_control) = ControlledSource::new("source");
+    let (first, first_control, _) = ControlledReaction::new("a-reaction", &["query"]);
+    let (second, second_control, _) = ControlledReaction::new("b-reaction", &["query"]);
+    let core = builder()
+        .with_source(source)
+        .with_query(config("query", Some("source")))
+        .with_reaction(first)
+        .with_reaction(second)
+        .build()
+        .await
+        .unwrap();
+    core.start().await.unwrap();
+    core.start_source("source").await.unwrap();
+    core.start_query("query").await.unwrap();
+    core.start_reaction("a-reaction").await.unwrap();
+    core.start_reaction("b-reaction").await.unwrap();
+    for id in ["source", "query", "a-reaction", "b-reaction"] {
+        core.computation_component(id)
+            .unwrap()
+            .wait_started()
+            .await
+            .unwrap();
+    }
+
+    // A sweep lists its records before stopping them, and a concurrent
+    // removal may commit in between. The superseded record is listed first,
+    // so the sweep must step past it to reach the live one.
+    let runtime = &core.computation_runtime;
+    let listed = runtime.current_records().await.unwrap();
+    core.remove_reaction("a-reaction", false).await.unwrap();
+    let failures = runtime
+        .stop_records(
+            listed
+                .values()
+                .filter(|record| record.value.instance().kind() == "reaction"),
+        )
+        .await;
+
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(
+        first_control.stops.load(Ordering::Acquire),
+        1,
+        "the removal stopped its own component; the sweep left it alone"
+    );
+    assert_eq!(second_control.stops.load(Ordering::Acquire), 1);
+    core.stop().await.unwrap();
+    assert_eq!(
+        core.get_query_status("query").await.unwrap(),
+        ComponentStatus::Stopped
+    );
+    assert_eq!(source_control.stops.load(Ordering::Acquire), 1);
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn incomplete_instance_stop_is_retried_until_every_component_stops() {
+    let (source, control) = ControlledSource::new("source");
+    let core = builder().with_source(source).build().await.unwrap();
+    core.start().await.unwrap();
+    core.start_source("source").await.unwrap();
+    core.computation_component("source")
+        .unwrap()
+        .wait_started()
+        .await
+        .unwrap();
+
+    control.fail_stop.store(true, Ordering::Release);
+    core.stop()
+        .await
+        .expect_err("the source's stop failure is reported");
+    assert!(!core.is_running().await);
+
+    control.fail_stop.store(false, Ordering::Release);
+    core.stop()
+        .await
+        .expect("an incomplete stop is retried rather than reported as already stopped");
+    assert_eq!(control.stops.load(Ordering::Acquire), 2);
+    assert_eq!(
+        core.get_source_status("source").await.unwrap(),
+        ComponentStatus::Stopped
+    );
+    assert!(
+        matches!(
+            core.stop().await,
+            Err(crate::DrasiError::InvalidState { .. })
+        ),
+        "a completed stop is not repeated"
+    );
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn stop_all_components_handles_already_stopped() {
     let core = source_core("idle-src", false).await;
     core.start().await.unwrap();

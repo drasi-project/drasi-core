@@ -476,8 +476,20 @@ impl ComputationHandle {
     }
 }
 
+/// Instance lifecycle state that is read and changed only while
+/// [`InstanceGraph::lifecycle`] is held.
+#[derive(Debug, Default)]
+pub(crate) struct InstanceLifecycle {
+    /// The last `stop()` did not stop every component. The instance reports
+    /// itself stopped, yet some components may still be active, so the next
+    /// `stop()` sweeps them again rather than reporting the instance already
+    /// stopped.
+    pub(crate) stop_incomplete: bool,
+}
+
 pub(crate) struct InstanceGraph {
-    pub(crate) lifecycle: tokio::sync::Mutex<()>,
+    /// Serializes instance-wide lifecycle operations.
+    pub(crate) lifecycle: tokio::sync::Mutex<InstanceLifecycle>,
     instance_id: String,
     entry: Mutex<Option<Arc<Entry>>>,
     pending: Mutex<Vec<Arc<PendingComponents>>>,
@@ -487,7 +499,7 @@ pub(crate) struct InstanceGraph {
 impl InstanceGraph {
     pub(crate) fn new(instance_id: String) -> Self {
         Self {
-            lifecycle: tokio::sync::Mutex::new(()),
+            lifecycle: tokio::sync::Mutex::default(),
             instance_id,
             entry: Mutex::new(None),
             pending: Mutex::new(Vec::new()),

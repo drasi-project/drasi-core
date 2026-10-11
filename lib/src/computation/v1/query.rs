@@ -822,14 +822,16 @@ impl ContinuousQueryTransformer {
         }
         if self.runtime_compatibility && checkpoint.is_persistent() {
             if let Some(expected) = self.legacy_hash {
-                match checkpoint.read_config_hash().await {
-                    Ok(Some(actual)) if actual == expected => {}
-                    Ok(_) => return Err(QueryRecoveryError::ConfigurationChanged.into()),
-                    Err(error) => {
-                        log::warn!("Query {} cannot read its configuration hash; rebootstrap is required: {error}", self.definition.id);
-                        return Err(anyhow::Error::new(QueryRecoveryError::ConfigurationChanged)
-                            .context(error.to_string()));
-                    }
+                // Only a readable, absent or different hash is a configuration
+                // change; a storage fault must never authorise a reset.
+                let stored = checkpoint.read_config_hash().await.with_context(|| {
+                    format!(
+                        "query {} cannot read its configuration hash",
+                        self.definition.id
+                    )
+                })?;
+                if stored != Some(expected) {
+                    return Err(QueryRecoveryError::ConfigurationChanged.into());
                 }
             }
         }

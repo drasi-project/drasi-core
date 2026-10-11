@@ -515,10 +515,17 @@ mod durable {
     }
 
     async fn shared_journal(group: &SharedStorageGroup) -> Result<Arc<QosChannel>> {
+        shared_journal_with_capacity(group, nonzero(17)).await
+    }
+
+    async fn shared_journal_with_capacity(
+        group: &SharedStorageGroup,
+        capacity: NonZeroUsize,
+    ) -> Result<Arc<QosChannel>> {
         Ok(group
             .channel_with_page_limits(
                 QosChannelDefinition {
-                    capacity: nonzero(17),
+                    capacity,
                     ..definition(true, RetentionPolicy::Backpressure)
                 },
                 "history",
@@ -637,6 +644,168 @@ mod durable {
         drop(transaction);
         assert!(shared_journal(&group).await.is_err());
         group.shutdown().await?;
+        Ok(())
+    }
+
+    const SHARED_SUBSCRIBERS: [&str; 2] = ["fast", "slow"];
+
+    fn shared_subscriber(
+        group: &Arc<SharedStorageGroup>,
+        channel: &Arc<QosChannel>,
+        subscriber: &str,
+    ) -> Result<ProvidedPipe> {
+        let journal = ResourceId::try_new("journal")?;
+        let storage = ResourceId::try_new("storage")?;
+        Ok(channel
+            .definition()
+            .pipe(journal.clone(), subscriber)
+            .with_shared_storage(storage.clone())
+            .create_with_resources(&BTreeMap::from([
+                (journal, channel.resource()),
+                (storage, group.resource()),
+            ]))?)
+    }
+
+    /// Asserts the journal window against a model of accepted and completed positions.
+    async fn assert_shared_window(
+        channel: &QosChannel,
+        capacity: NonZeroUsize,
+        accepted: u64,
+        completed: [u64; 2],
+    ) -> Result<()> {
+        let progress = channel.progress().await?;
+        assert_eq!(progress.accepted, accepted);
+        for (subscriber, position) in SHARED_SUBSCRIBERS.iter().zip(completed) {
+            assert_eq!(progress.processed[*subscriber], position);
+        }
+        if let Some(earliest) = progress.earliest_available {
+            let slowest = completed.into_iter().min().unwrap_or_default();
+            assert!(
+                earliest <= slowest + 1,
+                "position {} was trimmed before every subscriber completed it",
+                earliest - 1
+            );
+            assert!(
+                accepted + 1 - earliest <= capacity.get() as u64,
+                "journal retains more than its capacity"
+            );
+        }
+        Ok(())
+    }
+
+    /// Regression: the shared append path once took its trim floor from the
+    /// decoded page cache rather than the journal window.
+    #[tokio::test]
+    async fn paged_shared_append_retains_history_outside_the_page_cache() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let inputs = admitted_outputs(&directory.path().join("inputs")).await?;
+        let path = directory.path().join("shared");
+        let capacity = nonzero(4);
+        let group =
+            SharedStorageGroup::new("shared", component("producer"), indexes(&path).await?)?;
+        let channel = shared_journal_with_capacity(&group, capacity).await?;
+        for input in &inputs[..4] {
+            channel.publish(input).await?;
+        }
+        let mut pipes = Vec::new();
+        let mut receivers = Vec::new();
+        for subscriber in SHARED_SUBSCRIBERS {
+            let mut pipe = shared_subscriber(&group, &channel, subscriber)?;
+            receivers.push(pipe.pipe.take_receiver()?);
+            pipes.push(pipe);
+        }
+        let [fast, slow] = receivers.as_mut_slice() else {
+            unreachable!("two subscribers");
+        };
+        // The slow reader caches page [1, 2]; the fast reader replaces it with [3, 4].
+        handle(slow.as_mut(), 1).await?;
+        for sequence in 1..=4 {
+            handle(fast.as_mut(), sequence).await?;
+        }
+        assert_eq!(channel.publish(&inputs[4]).await?.position(), Some(5));
+        assert_shared_window(&channel, capacity, 5, [4, 1]).await?;
+        assert_eq!(channel.progress().await?.earliest_available, Some(2));
+        for sequence in 2..=5 {
+            handle(slow.as_mut(), sequence).await?;
+        }
+        handle(fast.as_mut(), 5).await?;
+        for pipe in &pipes {
+            pipe.control.cancel();
+        }
+        channel.shutdown().await?;
+        group.shutdown().await?;
+        drop((receivers, pipes, channel, group));
+
+        let group =
+            SharedStorageGroup::new("shared", component("producer"), indexes(&path).await?)?;
+        let channel = shared_journal_with_capacity(&group, capacity).await?;
+        assert_shared_window(&channel, capacity, 5, [5, 5]).await?;
+        assert_eq!(channel.progress().await?.earliest_available, Some(2));
+        channel.shutdown().await?;
+        group.shutdown().await?;
+        Ok(())
+    }
+
+    /// Drives deterministic interleavings of appends and per-subscriber
+    /// completions across a reopen, checking the retained window after every step.
+    #[tokio::test]
+    async fn paged_shared_journal_window_follows_every_subscriber_across_reopen() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let inputs = admitted_outputs(&directory.path().join("inputs")).await?;
+        let capacity = nonzero(4);
+        for seed in [1u64, 7, 42, 1009] {
+            let path = directory.path().join(format!("shared-{seed}"));
+            let mut random = seed;
+            let mut accepted = 0u64;
+            let mut completed = [0u64; 2];
+            for (session, until) in [inputs.len() / 2, inputs.len()].into_iter().enumerate() {
+                let last = session == 1;
+                let group = SharedStorageGroup::new(
+                    "shared",
+                    component("producer"),
+                    indexes(&path).await?,
+                )?;
+                let channel = shared_journal_with_capacity(&group, capacity).await?;
+                assert_shared_window(&channel, capacity, accepted, completed).await?;
+                let mut pipes = Vec::new();
+                let mut receivers = Vec::new();
+                for subscriber in SHARED_SUBSCRIBERS {
+                    let mut pipe = shared_subscriber(&group, &channel, subscriber)?;
+                    receivers.push(pipe.pipe.take_receiver()?);
+                    pipes.push(pipe);
+                }
+                while (accepted as usize) < until
+                    || last && completed.iter().any(|position| *position < accepted)
+                {
+                    random = random
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let slowest = completed.into_iter().min().unwrap_or_default();
+                    match (random >> 33) % 3 {
+                        0 if (accepted as usize) < until
+                            && accepted - slowest < capacity.get() as u64 =>
+                        {
+                            channel.publish(&inputs[accepted as usize]).await?;
+                            accepted += 1;
+                        }
+                        choice @ (1 | 2) => {
+                            let index = choice as usize - 1;
+                            if completed[index] < accepted {
+                                completed[index] += 1;
+                                handle(receivers[index].as_mut(), completed[index]).await?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    assert_shared_window(&channel, capacity, accepted, completed).await?;
+                }
+                for pipe in &pipes {
+                    pipe.control.cancel();
+                }
+                channel.shutdown().await?;
+                group.shutdown().await?;
+            }
+        }
         Ok(())
     }
 

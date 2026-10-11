@@ -19,10 +19,10 @@ use async_trait::async_trait;
 use super::{
     ComponentCreationError, ComponentDescriptor, ComponentFactory, ComponentId, ComponentRole,
     ComponentSpecification, ComputationComponent, ConfigurationSchema, ConstructedComponent,
-    ConstructionContext, ContextEntry, ContextValue, EnvelopeSink, FactoryDescriptor,
-    ImplementationIdentity, InputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    QueryChangeCodec, ResourceHandle, ResourceId, ResourceOwnership, ResourceRequirement,
-    ResourceRole, ResourceSpecification, SinkCompletion,
+    ConstructionContext, EnvelopeSink, FactoryDescriptor, ImplementationIdentity, InputEnvelope,
+    PipeRequirements, PortDescriptor, PortDirection, PortId, QueryChangeCodec, ResourceHandle,
+    ResourceId, ResourceOwnership, ResourceRequirement, ResourceRole, ResourceSpecification,
+    SinkCompletion,
 };
 
 /// An explicit reference to an already managed legacy Reaction. This resource
@@ -74,18 +74,17 @@ impl EnvelopeSink for LegacyReactionSink {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Accepted
     }
-    async fn handle(&mut self, mut input: InputEnvelope) -> anyhow::Result<()> {
+    /// Hands one query-row envelope to the borrowed reaction's queue.
+    ///
+    /// The envelope is accepted once `enqueue_query_result` returns `Ok`, and
+    /// nothing may fail after that: an error would make the graph redeliver a
+    /// row the reaction already holds.
+    async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         if QueryChangeCodec::is_snapshot(&input.envelope) {
             anyhow::bail!("legacy enqueue cannot claim snapshot replacement; use an explicit bootstrap-capable boundary");
         }
         let result = QueryChangeCodec::to_legacy_result(&input.envelope)?;
-        self.resource.0.enqueue_query_result(result).await?;
-        input.envelope.append_annotation(ContextEntry::try_new(
-            self.descriptor.id().clone(),
-            "drasi.legacy-reaction.accepted",
-            ContextValue::Bool(true),
-        )?)?;
-        Ok(())
+        self.resource.0.enqueue_query_result(result).await
     }
 }
 
@@ -156,5 +155,130 @@ impl ComponentFactory for LegacyReactionFactory {
             descriptor: descriptor(context.component_id),
             resource,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Mutex,
+        },
+    };
+
+    use drasi_core::evaluation::{
+        context::QueryPartEvaluationContext, variable_value::VariableValue,
+    };
+
+    use super::*;
+    use crate::{
+        channels::{ComponentStatus, QueryResult, ResultDiff},
+        computation::v1::{QueryOutputMetadata, StreamId, SystemMetadata},
+        context::ReactionRuntimeContext,
+    };
+
+    #[derive(Default)]
+    struct RecordingReaction {
+        reject: AtomicBool,
+        attempts: Mutex<Vec<QueryResult>>,
+    }
+
+    #[async_trait]
+    impl crate::Reaction for RecordingReaction {
+        fn id(&self) -> &str {
+            "reaction"
+        }
+        fn type_name(&self) -> &str {
+            "recording"
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        fn query_ids(&self) -> Vec<String> {
+            vec!["query".into()]
+        }
+        async fn initialize(&self, _context: ReactionRuntimeContext) {}
+        async fn start(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Running
+        }
+        async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
+            self.attempts.lock().expect("attempts").push(result);
+            if self.reject.load(Ordering::Acquire) {
+                anyhow::bail!("reaction queue closed");
+            }
+            Ok(())
+        }
+    }
+
+    fn sink(reaction: &Arc<RecordingReaction>) -> LegacyReactionSink {
+        LegacyReactionSink::borrowed(ComponentId::try_new("sink").expect("id"), reaction.clone())
+    }
+
+    fn added_row(sequence: u64) -> InputEnvelope {
+        let envelope = QueryChangeCodec::encode_evaluation(
+            None,
+            &ComponentId::try_new("query").expect("id"),
+            SystemMetadata::new(StreamId::try_new("query/out").expect("stream"), sequence),
+            &[QueryPartEvaluationContext::Adding {
+                after: BTreeMap::from([(Box::<str>::from("value"), VariableValue::from(1))]),
+                row_signature: 1,
+            }],
+            QueryOutputMetadata {
+                query_id: "query".into(),
+                source_id: None,
+                timestamp: chrono::Utc::now(),
+                metadata: HashMap::new(),
+                profiling: None,
+            },
+        )
+        .expect("encode")
+        .expect("one row");
+        InputEnvelope {
+            port: PortId::try_new("in").expect("port"),
+            envelope,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_accepted_row_is_enqueued_exactly_once() {
+        let reaction = Arc::new(RecordingReaction::default());
+
+        sink(&reaction)
+            .handle(added_row(7))
+            .await
+            .expect("accepted");
+
+        let attempts = reaction.attempts.lock().expect("attempts");
+        let [result] = attempts.as_slice() else {
+            panic!("expected one enqueue, got {}", attempts.len());
+        };
+        assert_eq!(result.query_id, "query");
+        assert_eq!(result.sequence, 7);
+        assert!(matches!(
+            result.results.as_slice(),
+            [ResultDiff::Add { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_row_is_reported_unaccepted_so_it_is_redelivered() {
+        let reaction = Arc::new(RecordingReaction::default());
+        reaction.reject.store(true, Ordering::Release);
+
+        let error = sink(&reaction)
+            .handle(added_row(7))
+            .await
+            .expect_err("the reaction refused the row");
+
+        assert_eq!(error.to_string(), "reaction queue closed");
+        assert_eq!(reaction.attempts.lock().expect("attempts").len(), 1);
     }
 }

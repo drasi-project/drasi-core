@@ -377,7 +377,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start(&self) -> crate::error::Result<()> {
-        let _lifecycle = self.instance_graph.lifecycle.lock().await;
+        let mut lifecycle = self.instance_graph.lifecycle.lock().await;
         // Reject start after permanent shutdown
         if self.is_shutdown.load(std::sync::atomic::Ordering::Acquire) {
             return Err(DrasiError::invalid_state(
@@ -407,7 +407,8 @@ impl DrasiLib {
 
         // Brief write lock to set the flag
         *self.running.write().await = true;
-        drop(_lifecycle);
+        lifecycle.stop_incomplete = false;
+        drop(lifecycle);
         if let Some(management) = self.management.get() {
             let report = management.reconcile().await?;
             if !report.converged() {
@@ -431,8 +432,10 @@ impl DrasiLib {
     /// # Errors
     ///
     /// Returns an error if:
-    /// * The server is not running (`DrasiError::InvalidState`)
-    /// * Any component fails to stop (logged as error, but doesn't prevent other components from stopping)
+    /// * The server is already stopped (`DrasiError::InvalidState`)
+    /// * Any component fails to stop. Every other component is still stopped and
+    ///   the server reports itself stopped, but `stop()` may be called again to
+    ///   retry the components that did not stop.
     ///
     /// # Examples
     ///
@@ -452,15 +455,18 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop(&self) -> crate::error::Result<()> {
-        let _lifecycle = self.instance_graph.lifecycle.lock().await;
-        self.stop_unlocked().await
+        let mut lifecycle = self.instance_graph.lifecycle.lock().await;
+        self.stop_unlocked(&mut lifecycle).await
     }
 
-    async fn stop_unlocked(&self) -> crate::error::Result<()> {
+    async fn stop_unlocked(
+        &self,
+        lifecycle: &mut crate::computation::instance::InstanceLifecycle,
+    ) -> crate::error::Result<()> {
         // Check precondition under a brief read lock, then release before heavy work.
         {
             let running = self.running.read().await;
-            if !*running {
+            if !*running && !lifecycle.stop_incomplete {
                 warn!("Server is already stopped");
                 return Err(DrasiError::invalid_state("Server is already stopped"));
             }
@@ -471,10 +477,12 @@ impl DrasiLib {
         // Stop all components (no lock held during this await).
         // Capture the result but always mark as stopped — partial shutdown is
         // preferable to leaving the running flag set after a partial failure.
+        // A failure is remembered instead, so that stop() can be retried.
         let result = self.computation_runtime.stop_all().await;
 
         // Brief write lock to clear the flag
         *self.running.write().await = false;
+        lifecycle.stop_incomplete = result.is_err();
 
         match result {
             Ok(()) => {
@@ -482,7 +490,7 @@ impl DrasiLib {
                 Ok(())
             }
             Err(e) => {
-                warn!("drasi-lib stopped with errors: {e}");
+                warn!("drasi-lib stopped with errors; stop() again to retry: {e:#}");
                 Err(DrasiError::Internal(e))
             }
         }

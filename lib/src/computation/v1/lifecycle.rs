@@ -118,6 +118,25 @@ pub struct ObservedComponent {
     pub transition_time: DateTime<Utc>,
 }
 
+impl ObservedComponent {
+    /// Records that the component stopped successfully.
+    ///
+    /// A successful stop supersedes an earlier stop failure, because the
+    /// component is now stopped. Failures from any other phase stay visible
+    /// until the component next starts, so the reason it failed is not lost.
+    pub(crate) fn record_stopped(&mut self, lifecycle: ComponentLifecycle) {
+        self.lifecycle = lifecycle;
+        if self
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.phase == FailurePhase::Stop)
+        {
+            self.failure = None;
+        }
+        self.transition_time = Utc::now();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObservedRelationship {
     pub binding: BindingState,

@@ -238,38 +238,61 @@ impl State {
         definition: &QosChannelDefinition,
         envelope: &ChangeEnvelope,
     ) -> Result<(u64, Option<JournalAppend>), PipeError> {
-        let remove = self.retained.saturating_sub(definition.capacity.get() - 1);
+        let remove = self.capacity_removal(definition.capacity);
         let budget = self
             .budget
             .as_ref()
             .map(|budget| budget.prepare(envelope, remove))
             .transpose()?;
         let remove = budget.as_ref().map_or(remove, |append| append.remove);
-        if remove > 0 && definition.retention == RetentionPolicy::Backpressure {
-            let last_removed = self
-                .oldest
-                .and_then(|oldest| oldest.checked_add(remove as u64 - 1))
-                .ok_or_else(|| backend("invalid QoS capacity accounting"))?;
-            if self
-                .metadata
-                .cursors
-                .values()
-                .any(|cursor| !cursor.retired && cursor.position < last_removed)
-            {
-                return Err(PipeError::CapacityExhausted);
-            }
-        }
-        let position = self
+        Ok((self.retain_from(definition.retention, remove)?, budget))
+    }
+
+    /// Plans an append to a shared journal, which has no byte budget.
+    fn prepare_shared_append(&self, definition: &QosChannelDefinition) -> Result<u64, PipeError> {
+        self.retain_from(
+            definition.retention,
+            self.capacity_removal(definition.capacity),
+        )
+    }
+
+    /// The fewest oldest records one append must drop to stay within capacity.
+    fn capacity_removal(&self, capacity: NonZeroUsize) -> usize {
+        self.retained.saturating_sub(capacity.get() - 1)
+    }
+
+    /// The first position retained after dropping the `remove` oldest records
+    /// for the next append.
+    ///
+    /// The window comes from journal metadata (`oldest`, `retained`), never from
+    /// `entries`, which is only a page cache when page limits are configured.
+    /// Lossless retention reports `CapacityExhausted` instead of dropping a
+    /// record that an active subscriber has not completed.
+    fn retain_from(&self, retention: RetentionPolicy, remove: usize) -> Result<u64, PipeError> {
+        let next = self
             .metadata
             .head
             .checked_add(1)
             .ok_or_else(|| backend("QoS journal sequence exhausted"))?;
-        Ok((
-            self.oldest
-                .and_then(|oldest| oldest.checked_add(remove as u64))
-                .unwrap_or(position),
-            budget,
-        ))
+        if remove == 0 {
+            return Ok(self.oldest.unwrap_or(next));
+        }
+        let retain_from = self
+            .oldest
+            .filter(|_| remove <= self.retained)
+            .and_then(|oldest| oldest.checked_add(remove as u64))
+            .ok_or_else(|| backend("invalid QoS capacity accounting"))?;
+        let last_removed = retain_from - 1;
+        if retention == RetentionPolicy::Backpressure
+            && self
+                .metadata
+                .cursors
+                .values()
+                .any(|cursor| !cursor.retired && cursor.position < last_removed)
+        {
+            return Err(PipeError::CapacityExhausted);
+        }
+        Ok(retain_from)
     }
 
     fn append_committed(

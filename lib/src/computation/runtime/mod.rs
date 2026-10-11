@@ -233,6 +233,33 @@ fn record_token(snapshot: &GraphSnapshot, node: &ComponentId) -> Option<u64> {
     }
 }
 
+/// Whether a component may still hold resources or process data, so stopping
+/// the instance, or removing or replacing its record, must stop it first.
+fn needs_stop(observed: &ObservedComponent) -> bool {
+    match observed.realization {
+        RealizationState::Pending | RealizationState::Creating => true,
+        RealizationState::Created => is_active(observed) || observed.failure.is_some(),
+        _ => false,
+    }
+}
+
+fn is_active(observed: &ObservedComponent) -> bool {
+    matches!(
+        observed.lifecycle,
+        ComponentLifecycle::Starting | ComponentLifecycle::Running
+    ) && !observed.exhausted
+}
+
+/// Whether `error` reports that a concurrent configuration change replaced or
+/// removed the record an operation was given, so the change, not the caller,
+/// now owns that component's lifecycle.
+fn superseded(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<GraphError>(),
+        Some(GraphError::StaleGeneration)
+    )
+}
+
 fn index_resource_id(name: &str) -> GraphResult<ResourceId> {
     let encoded: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
     Ok(ResourceId::try_new(format!("instance.index/{encoded}"))?)
@@ -964,10 +991,7 @@ impl Runtime {
 
     fn active(&self, record: &Record) -> anyhow::Result<bool> {
         let (_, _, observed) = self.control_for(record)?;
-        Ok(matches!(
-            observed.lifecycle,
-            ComponentLifecycle::Starting | ComponentLifecycle::Running
-        ) && !observed.exhausted)
+        Ok(is_active(&observed))
     }
 
     fn needs_resume(&self, record: &Record) -> anyhow::Result<bool> {
@@ -1137,6 +1161,40 @@ impl Runtime {
         result?;
         Ok(())
     }
+
+    /// Stops every listed record whose component may still be active and
+    /// returns all the failures, so one component cannot keep the others
+    /// running.
+    ///
+    /// The records are a listing taken before the sweep, and lifecycle
+    /// sweeps are not serialized with configuration changes. A record that a
+    /// concurrent change has since replaced or removed is skipped: the
+    /// change owns that component's lifecycle.
+    async fn stop_records<'a>(
+        &self,
+        records: impl IntoIterator<Item = &'a Record>,
+    ) -> Vec<anyhow::Error> {
+        let mut failures = Vec::new();
+        for record in records {
+            let result = async {
+                let (_, _, observed) = self.control_for(record)?;
+                if needs_stop(&observed) {
+                    self.stop_record(record).await?;
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => {}
+                Err(error) if superseded(&error) => log::debug!(
+                    "{} was replaced or removed concurrently; its lifecycle is no longer this sweep's",
+                    record.node
+                ),
+                Err(error) => failures.push(error.context(record.node.to_string())),
+            }
+        }
+        failures
+    }
     pub(crate) async fn stop_component(&self, id: &str, kind: &str) -> anyhow::Result<()> {
         self.stop_component_checked(id, kind, None).await
     }
@@ -1229,12 +1287,7 @@ impl Runtime {
             anyhow::bail!("Depended on by: {}", dependents.join(", "));
         }
         let (_, _, observed) = self.control_for(&record)?;
-        if matches!(
-            observed.realization,
-            RealizationState::Pending | RealizationState::Creating
-        ) || observed.realization == RealizationState::Created
-            && (self.active(&record)? || observed.failure.is_some())
-        {
+        if needs_stop(&observed) {
             self.stop_record(&record).await?;
         }
         let (control, _, observed) = self.control_for(&record)?;
@@ -1291,12 +1344,7 @@ impl Runtime {
         let component = value.instance();
         let id = component.id().to_owned();
         let (_, _, observed) = self.control_for(&old)?;
-        if matches!(
-            observed.realization,
-            RealizationState::Pending | RealizationState::Creating
-        ) || observed.realization == RealizationState::Created
-            && (self.active(&old)? || observed.failure.is_some())
-        {
+        if needs_stop(&observed) {
             self.stop_record(&old).await?;
         }
         let (control, revision, _) = self.control_for(&old)?;
@@ -1622,20 +1670,22 @@ impl Runtime {
             .collect();
         let mut failures = Vec::new();
         for record in records {
-            if self.active(&record)? {
-                continue;
+            let result = async {
+                if self.active(&record)? {
+                    return Ok(());
+                }
+                self.start_component_checked(record.value.instance().id(), kind, Some(record.token))
+                    .await
             }
-            let result = self
-                .start_component_checked(record.value.instance().id(), kind, Some(record.token))
-                .await;
-            if kind == "query" {
-                if let Err(error) = result {
-                    log::warn!("Query startup failed: {error:#}");
-                }
-            } else {
-                if let Err(error) = result {
-                    failures.push(error);
-                }
+            .await;
+            match result {
+                Ok(()) => {}
+                Err(error) if superseded(&error) => log::debug!(
+                    "{} was replaced or removed concurrently; its lifecycle is no longer this sweep's",
+                    record.node
+                ),
+                Err(error) if kind == "query" => log::warn!("Query startup failed: {error:#}"),
+                Err(error) => failures.push(error),
             }
         }
         if !failures.is_empty() {
@@ -1774,37 +1824,32 @@ impl Runtime {
         let control = self.control()?;
         let publication = control.registry_snapshot();
         let desired = &publication.desired;
-        let native = self.native_component_ids(&publication).await?;
-        if !native.is_empty() {
-            match control
+        match self.native_component_ids(&publication).await {
+            Ok(native) if native.is_empty() => {}
+            Ok(native) => match control
                 .stop_components(desired.revision, GraphSelection::Exact(native))
                 .await
             {
                 Ok(report) if report.summary == OperationSummary::Completed => {}
                 Ok(report) => failures.push(super::v1::LifecycleReportError::Stop(report).into()),
                 Err(error) => failures.push(anyhow::Error::new(error)),
-            }
+            },
+            Err(error) => failures.push(error.context("listing native components")),
         }
+        // Consumers stop before their producers, and each kind is listed
+        // afresh so the sweep sees the configuration as it is when it starts
+        // that kind.
         for kind in ["reaction", "query", "source"] {
-            let records: Vec<_> = self
-                .current_records()
-                .await?
-                .values()
-                .filter(|record| record.value.instance().kind() == kind)
-                .cloned()
-                .collect();
-            for record in records {
-                let (_, _, observed) = self.control_for(&record)?;
-                if matches!(
-                    observed.realization,
-                    RealizationState::Pending | RealizationState::Creating
-                ) || observed.realization == RealizationState::Created
-                    && (self.active(&record)? || observed.failure.is_some())
-                {
-                    if let Err(error) = self.stop_record(&record).await {
-                        failures.push(error);
-                    }
-                }
+            match self.current_records().await {
+                Ok(records) => failures.extend(
+                    self.stop_records(
+                        records
+                            .values()
+                            .filter(|record| record.value.instance().kind() == kind),
+                    )
+                    .await,
+                ),
+                Err(error) => failures.push(error.context(format!("listing {kind} components"))),
             }
         }
         if !failures.is_empty() {
@@ -1816,23 +1861,13 @@ impl Runtime {
     }
     pub(crate) async fn stop_kind(&self, kind: &str) -> anyhow::Result<()> {
         let records = self.current_records().await?;
-        let mut failures = Vec::new();
-        for record in records
-            .values()
-            .filter(|record| record.value.instance().kind() == kind)
-        {
-            let (_, _, observed) = self.control_for(record)?;
-            if matches!(
-                observed.realization,
-                RealizationState::Pending | RealizationState::Creating
-            ) || observed.realization == RealizationState::Created
-                && (self.active(record)? || observed.failure.is_some())
-            {
-                if let Err(error) = self.stop_record(record).await {
-                    failures.push(error.context(record.node.to_string()));
-                }
-            }
-        }
+        let failures = self
+            .stop_records(
+                records
+                    .values()
+                    .filter(|record| record.value.instance().kind() == kind),
+            )
+            .await;
         if !failures.is_empty() {
             return Err(crate::error::OperationFailures::new(
                 format!("stopping {kind} components failed"),

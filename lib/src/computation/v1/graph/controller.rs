@@ -2601,17 +2601,16 @@ impl Operations {
                 let propagated = self.propagated_stop.remove(&completion.index);
                 update(graph, |state| {
                     let node = state.components.get_mut(id).expect("component");
-                    node.lifecycle = if propagated {
+                    node.record_stopped(if propagated {
                         ComponentLifecycle::Failed
                     } else {
                         ComponentLifecycle::Stopped
-                    };
+                    });
                     node.health = if propagated {
                         ComponentHealth::Unavailable
                     } else {
                         ComponentHealth::Unknown
                     };
-                    node.transition_time = Utc::now();
                     for (edge, observed) in &mut state.relationships {
                         if edge.from.component == *id
                             && observed.binding == BindingState::Bound
@@ -3423,12 +3422,11 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph) -> Vec<GraphError> {
                 Ok(Ok(())) => {
                     lease.attempted = false;
                     update(graph, |state| {
-                        let observed = state
+                        state
                             .components
                             .get_mut(node.descriptor.id())
-                            .expect("component");
-                        observed.lifecycle = ComponentLifecycle::Stopped;
-                        observed.transition_time = Utc::now();
+                            .expect("component")
+                            .record_stopped(ComponentLifecycle::Stopped);
                     });
                 }
                 other => {

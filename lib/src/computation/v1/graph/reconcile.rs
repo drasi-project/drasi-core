@@ -121,14 +121,26 @@ impl ReconciliationPreview {
     }
 }
 
+/// Outcome of [`GraphControl::reconcile`].
+///
+/// Once a reconciliation commits, its report is always returned: post-commit
+/// failures (creation, recovery validation, activation, deadlines) are recorded
+/// in `failures` with `summary == CompletedWithFailures`, never surfaced as an
+/// `Err`. Only controller cancellation aborts a committed reconciliation.
 #[derive(Debug, Clone)]
 pub struct ReconciliationReport {
     pub revision: GraphRevision,
     pub summary: OperationSummary,
-    /// Cleanup failure leaves the previous desired topology intact. Successfully
-    /// stopped components remain stopped; this is not a rollback claim.
+    /// Whether `revision` is now the graph's desired topology.
+    ///
+    /// When false, cleanup failure left the previous desired topology intact.
+    /// Successfully stopped components remain stopped; this is not a rollback
+    /// claim.
     pub committed: bool,
     pub creation: BTreeMap<ComponentId, CreationOutcome>,
+    /// Absent when nothing was started, or when startup did not finish within
+    /// the deadline. If the graph had not settled, eligible components are
+    /// queued and start automatically once in-flight lifecycle work completes.
     pub startup: Option<StartReport>,
     pub removed: BTreeSet<ComponentId>,
     pub failures: Vec<ComponentFailure>,
@@ -1783,16 +1795,22 @@ async fn stop_instance(
     }
     update(graph, |state| {
         let observed = state.components.get_mut(&slot.id).expect("component");
-        observed.lifecycle = if result.is_ok() {
-            ComponentLifecycle::Stopped
+        if result.is_ok() {
+            observed.record_stopped(ComponentLifecycle::Stopped);
         } else {
-            ComponentLifecycle::Failed
-        };
-        observed.transition_time = Utc::now();
+            observed.lifecycle = ComponentLifecycle::Failed;
+            observed.transition_time = Utc::now();
+        }
     });
     result
 }
 
+/// Applies a previewed topology change.
+///
+/// Before `commit_desired`, an error leaves the previous desired topology in
+/// place. After it, the change is observable, so the only error is
+/// [`GraphError::Cancelled`]; everything else is recorded on the returned
+/// report (see [`ReconciliationReport`]).
 pub(super) async fn execute(
     graph: &mut ComputationGraph,
     operations: &mut Operations,
@@ -2073,7 +2091,10 @@ pub(super) async fn execute(
     report.revision = graph.snapshot.revision;
     report.committed = true;
     report.removed = plan.remove.clone();
-    realize_resources(
+    // The desired topology is now published and observable, so the caller must
+    // receive this report: from here on only controller cancellation aborts, and
+    // every other failure is recorded against the committed revision.
+    let resources = realize_resources(
         graph,
         operations,
         controls,
@@ -2081,17 +2102,97 @@ pub(super) async fn execute(
         &mut prepared,
         &mut report,
     )
-    .await?;
-    realize(
-        graph,
-        operations,
-        controls,
-        cancel,
-        &plan,
-        &mut report,
-        commands,
-    )
-    .await?;
+    .await;
+    let mut realized = record_committed(&mut report, FailurePhase::Creation, resources)?.is_some();
+    if realized {
+        let components = realize(
+            graph,
+            operations,
+            controls,
+            cancel,
+            &plan,
+            &mut report,
+            commands,
+        )
+        .await;
+        realized = record_committed(&mut report, FailurePhase::Creation, components)?.is_some();
+    }
+    verify_recovery(graph, &plan, &mut report);
+    let settled = settle(graph, operations, controls, cancel).await;
+    let settled = record_committed(&mut report, FailurePhase::Activation, settled)?.is_some();
+    // Producers paused for the commit are resumed even when the graph did not
+    // settle; leaving them paused would silently stall every downstream reader.
+    let resumed = resume(graph, operations, &plan.pause);
+    record_committed(&mut report, FailurePhase::Activation, resumed)?;
+    let start: BTreeSet<_> = plan
+        .create
+        .iter()
+        .chain(&plan.replace)
+        .chain(&plan.restart)
+        .chain(&activate_blocked)
+        .filter_map(|id| graph.ids.get(id).copied())
+        .collect();
+    if !start.is_empty() && realized {
+        if settled {
+            let (reply, receiver) = oneshot::channel();
+            operations.begin_start(graph, start, Some(reply), false);
+            let startup = drive(graph, operations, controls, cancel, async {
+                receiver.await.map_err(|_| GraphError::ControllerClosed)?
+            })
+            .await;
+            if let Some(startup) = record_committed(&mut report, FailurePhase::Activation, startup)?
+            {
+                report.startup = Some(startup);
+            }
+        } else {
+            // Another lifecycle group still owns `starting`/`stopping`; starting
+            // now would displace it. Defer to the controller's auto-start queue,
+            // which begins these components once that group completes.
+            defer_startup(graph, operations, start);
+        }
+    }
+    if !report.failures.is_empty()
+        || report
+            .creation
+            .values()
+            .any(|outcome| !matches!(outcome, CreationOutcome::Created))
+        || report
+            .startup
+            .as_ref()
+            .is_some_and(|report| report.summary != OperationSummary::Completed)
+    {
+        report.summary = OperationSummary::CompletedWithFailures;
+    }
+    Ok(report)
+}
+
+/// Records a post-commit step's failure on the committed report.
+///
+/// Returns the step's value, or `None` once its failure is recorded. Only
+/// [`GraphError::Cancelled`] propagates: it means the controller is shutting
+/// down, and the caller replies with it before tearing the graph down.
+fn record_committed<T>(
+    report: &mut ReconciliationReport,
+    phase: FailurePhase,
+    result: GraphResult<T>,
+) -> GraphResult<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(GraphError::Cancelled) => Err(GraphError::Cancelled),
+        Err(error) => {
+            report.failures.push(failure(error, phase));
+            Ok(None)
+        }
+    }
+}
+
+/// Records every recovery requirement that this reconciliation touched and that
+/// the committed topology no longer satisfies.
+fn verify_recovery(
+    graph: &ComputationGraph,
+    plan: &ReconciliationPreview,
+    report: &mut ReconciliationReport,
+) {
     for requirement in &graph.snapshot.recovery_requirements {
         let participants =
             recovery::participants(&requirement.consumer, graph.snapshot.data_connections());
@@ -2101,14 +2202,25 @@ pub(super) async fn execute(
         {
             continue;
         }
-        let assessment = graph.recovery_report(requirement)?;
-        if !assessment.satisfied() {
-            report.failures.push(failure(
-                GraphError::Recovery(assessment.validate().expect_err("unsatisfied assessment")),
-                FailurePhase::Validation,
-            ));
+        let verified = graph
+            .recovery_report(requirement)
+            .and_then(|assessment| assessment.validate().map_err(GraphError::Recovery));
+        if let Err(error) = verified {
+            report
+                .failures
+                .push(failure(error, FailurePhase::Validation));
         }
     }
+}
+
+/// Waits, within the cleanup deadline, for lifecycle groups that began while
+/// this reconciliation was realizing components.
+async fn settle(
+    graph: &ComputationGraph,
+    operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+) -> GraphResult<()> {
     let deadline = tokio::time::sleep(graph.cleanup_timeout);
     tokio::pin!(deadline);
     while operations.starting.is_some() || operations.stopping.is_some() {
@@ -2129,38 +2241,23 @@ pub(super) async fn execute(
             }
         }
     }
-    resume(graph, operations, &plan.pause)?;
-    let start: BTreeSet<_> = plan
-        .create
-        .iter()
-        .chain(&plan.replace)
-        .chain(&plan.restart)
-        .chain(&activate_blocked)
-        .filter_map(|id| graph.ids.get(id).copied())
-        .collect();
-    if !start.is_empty() {
-        let (reply, receiver) = oneshot::channel();
-        operations.begin_start(graph, start, Some(reply), false);
-        report.startup = Some(
-            drive(graph, operations, controls, cancel, async {
-                receiver.await.map_err(|_| GraphError::ControllerClosed)?
-            })
-            .await?,
-        );
+    Ok(())
+}
+
+/// Queues the components that a reconciliation would have started, applying
+/// the same eligibility as an immediate startup, so they start automatically
+/// once the in-flight lifecycle group completes.
+fn defer_startup(graph: &ComputationGraph, operations: &mut Operations, start: BTreeSet<usize>) {
+    let observed = graph.observed();
+    for index in start {
+        let id = graph.nodes[index].descriptor.id();
+        if graph.snapshot.lifecycle_policies[id].auto_start
+            && !graph.deferred_activation.contains(id)
+            && observed.components[id].realization == RealizationState::Created
+        {
+            operations.pending_auto_start.insert(index, false);
+        }
     }
-    if !report.failures.is_empty()
-        || report
-            .creation
-            .values()
-            .any(|outcome| !matches!(outcome, CreationOutcome::Created))
-        || report
-            .startup
-            .as_ref()
-            .is_some_and(|report| report.summary != OperationSummary::Completed)
-    {
-        report.summary = OperationSummary::CompletedWithFailures;
-    }
-    Ok(report)
 }
 
 async fn realize_resources(

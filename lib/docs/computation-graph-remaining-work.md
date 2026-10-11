@@ -175,6 +175,22 @@ See [#919](https://github.com/drasi-project/drasi-core/issues/919).
 related receiver-readiness problem; it does not fix missing source history or
 the crossed-filter race.
 
+### Close the remaining runtime-hardening gaps
+
+A design and code review of the runtime found several places where a failure
+is handled too optimistically. The most serious were fixed with regression
+tests: shared-journal trimming, query-reset classification and output
+generations, retryable instance stop, reconciliation results after commit, and
+undecodable plugin change events. These related gaps remain:
+
+| Gap | What can go wrong, and what done means |
+|---|---|
+| Undecodable initial-data events | An ordinary plugin's initial snapshot still skips an event the host cannot decode, so a query can start with rows missing. The snapshot must fail instead, without racing its completion signal. |
+| Partial topology commit | Committing a new desired topology can fail partway (for example, exhausted generations) after the graph has already been changed, yet report a rejection. Commit must validate first and then apply changes that cannot fail. |
+| Resuming paused producers | After a reconciliation, resuming stops at the first producer that fails to relaunch, leaving later producers paused. Every producer must be attempted and every failure reported. |
+| Shared deadline | Settling and startup share the cleanup timeout (five seconds by default). Each phase needs its own configurable deadline so a slow cleanup cannot consume the startup budget. |
+| Lost-event visibility | A plugin event the host cannot decode is logged, but not counted. Expose a counter so operators can detect version skew before it causes restarts. |
+
 ## Recovery and operational qualification
 
 The mechanisms in this section already exist. The task is to combine more

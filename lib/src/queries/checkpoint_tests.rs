@@ -2399,16 +2399,16 @@ mod tests {
         )
     }
 
-    /// Test: when read_config_hash() fails, the query should still start
-    /// (falling through to full bootstrap) and NOT use stale checkpoints.
+    /// Test: a failure to *read* the configuration hash is a storage fault, not
+    /// evidence of a configuration change. Start must fail without touching
+    /// durable state, and a retry after the fault clears must resume it.
     #[tokio::test]
-    async fn test_config_hash_read_failure_falls_through() {
+    async fn test_config_hash_read_failure_fails_start_without_wiping_state() {
         let plugin = Arc::new(FailablePlugin::new());
         let (query_manager, source_manager, graph) =
             create_test_env_with_failable_backend(plugin.clone()).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        // Add and start source
         let source = CheckpointTestSource::new("fail-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
@@ -2423,15 +2423,6 @@ mod tests {
         )
         .await;
 
-        // Pre-seed a checkpoint to simulate prior state
-        let store = plugin.get_store("fail-query").await;
-        store.stage_checkpoint("fail-src", 42, None).await.unwrap();
-        store.write_config_hash(12345).await.unwrap();
-
-        // Make read_config_hash fail
-        store.set_fail_read_config_hash(true);
-
-        // Start query — should handle the error gracefully
         let config = create_persistent_query_config("fail-query", vec!["fail-src".to_string()]);
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
@@ -2445,22 +2436,70 @@ mod tests {
             std::time::Duration::from_secs(5),
         )
         .await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        query_manager
+            .stop_query("fail-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "fail-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
-        // After startup, the stale checkpoint should have been cleared
-        // (because hash read failure triggers clear_checkpoints)
-        let cp = store.read_checkpoint("fail-src").await.unwrap();
+        let store = plugin.get_store("fail-query").await;
+        let configured_hash = store
+            .read_config_hash()
+            .await
+            .unwrap()
+            .expect("first start persists the configuration hash");
+        store.stage_checkpoint("fail-src", 42, None).await.unwrap();
+
+        store.set_fail_read_config_hash(true);
+        let error = query_manager
+            .start_query("fail-query".to_string())
+            .await
+            .expect_err("an unreadable configuration hash must fail start");
         assert!(
-            cp.is_none(),
-            "Stale checkpoint should be cleared after config hash read failure"
+            format!("{error:#}").contains("fail-query cannot read its configuration hash"),
+            "start must report the storage fault, got: {error:#}"
         );
-
         store.set_fail_read_config_hash(false);
-        let stored_hash = store.read_config_hash().await.unwrap();
-        assert!(
-            stored_hash.is_some(),
-            "hash-read-failure wipe must persist the new config hash so the next start is not another first-run wipe"
-        );
+
+        let preserved = |label: &'static str| {
+            let store = store.clone();
+            async move {
+                assert_eq!(
+                    store
+                        .read_checkpoint("fail-src")
+                        .await
+                        .unwrap()
+                        .map(|checkpoint| checkpoint.sequence),
+                    Some(42),
+                    "{label}: committed checkpoints must survive a hash read fault"
+                );
+                assert_eq!(
+                    store.read_config_hash().await.unwrap(),
+                    Some(configured_hash),
+                    "{label}: the stored configuration hash must not be rewritten"
+                );
+            }
+        };
+        preserved("after the failed start").await;
+
+        query_manager
+            .start_query("fail-query".to_string())
+            .await
+            .expect("start is retryable once storage recovers");
+        wait_for_component_status(
+            &mut event_rx,
+            "fail-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        preserved("after the retried start").await;
     }
 
     /// Test: when clear_checkpoints() fails on config hash mismatch,

@@ -281,19 +281,18 @@ impl SharedMutation {
                         .into());
                     }
                 }
-                if !has_capacity(&state, channel.definition.capacity.get()) {
-                    return Err(backend("reserved shared QoS capacity is unavailable"));
-                }
+                let retain_from = state.prepare_shared_append(&channel.definition).map_err(
+                    |error| match error {
+                        PipeError::CapacityExhausted => {
+                            backend("reserved shared QoS capacity is unavailable")
+                        }
+                        error => error,
+                    },
+                )?;
                 let position = metadata
                     .head
                     .checked_add(1)
                     .ok_or_else(|| backend("QoS journal sequence exhausted"))?;
-                let floor = state.entries.keys().next().copied().unwrap_or(1);
-                let retain_from = if state.entries.len() == channel.definition.capacity.get() {
-                    floor + 1
-                } else {
-                    floor
-                };
                 replay.record(candidate, position);
                 metadata.head = position;
                 metadata.producer_sequence = Some(envelope.system().sequence());
@@ -377,16 +376,12 @@ impl SharedMutation {
     }
 }
 
-fn has_capacity(state: &State, capacity: usize) -> bool {
-    let completed = state
-        .metadata
-        .cursors
-        .values()
-        .filter(|cursor| !cursor.retired)
-        .map(|cursor| cursor.position)
-        .min()
-        .unwrap_or(state.metadata.head);
-    state.metadata.head - completed < capacity as u64
+fn has_capacity(state: &State, definition: &QosChannelDefinition) -> Result<bool, PipeError> {
+    match state.prepare_shared_append(definition) {
+        Ok(_) => Ok(true),
+        Err(PipeError::CapacityExhausted) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 impl QosChannel {
@@ -522,7 +517,7 @@ impl QosChannel {
             if let Some(endpoint) = endpoint {
                 endpoint.check_writable()?;
             }
-            if has_capacity(&state, self.definition.capacity.get()) {
+            if has_capacity(&state, &self.definition)? {
                 return Ok(QosReservation {
                     channel: shared.owner.clone(),
                     _publisher: publisher,

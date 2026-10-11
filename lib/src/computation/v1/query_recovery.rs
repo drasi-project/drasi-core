@@ -29,6 +29,16 @@ pub(super) struct ResetMarker {
 }
 
 impl ContinuousQueryTransformer {
+    /// Wipes every durable trace of the query's output so a recreated query
+    /// starts a new incarnation at sequence 1.
+    ///
+    /// The restarted sequence space is published under a newer output
+    /// generation, so a consumer position held for an earlier incarnation can
+    /// never match it. The wipe is recorded before it starts: an interrupted
+    /// deprovision is an incomplete reset that recovery refuses to resume,
+    /// never a partially cleared query. Completion leaves a baseline reset
+    /// marker that carries the generation even for checkpoint stores whose
+    /// `write_output_generation` is a no-op.
     pub(super) async fn deprovision_state(&mut self) -> anyhow::Result<()> {
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
@@ -37,8 +47,30 @@ impl ContinuousQueryTransformer {
             self.build().await?;
         }
         let query = self.query()?;
+        let previous = self.read_reset_marker().await?;
+        let generation = self.next_output_generation(previous.as_ref()).await?;
         if !self.provider.is_volatile() {
+            let id = self.definition.id.as_str();
             let resources = query.resources();
+            let marker = |in_progress| {
+                serde_json::to_vec(&ResetMarker {
+                    sequence: 0,
+                    in_progress,
+                    generation,
+                })
+            };
+            if let Some(outbox) = resources.outbox_writer() {
+                let started = marker(true)?;
+                query
+                    .resource_transaction(|| async {
+                        outbox.append(&self.reset_key(), 1, &started).await
+                    })
+                    .await?;
+            }
+            if let Some(store) = resources.checkpoint_store() {
+                store.write_output_generation(id, generation).await?;
+            }
+            let baseline = marker(false)?;
             query
                 .resource_transaction(|| async {
                     resources.indexes().element_index.clear().await?;
@@ -47,16 +79,14 @@ impl ContinuousQueryTransformer {
                     query.future_queue().clear().await?;
                     if let Some(store) = resources.checkpoint_store() {
                         store.clear_checkpoints().await?;
-                        store
-                            .stage_result_sequence(self.definition.id.as_str(), 0)
-                            .await?;
+                        store.stage_result_sequence(id, 0).await?;
                     }
                     if let Some(outbox) = resources.outbox_writer() {
-                        outbox.clear(self.definition.id.as_str()).await?;
-                        outbox.clear(&self.reset_key()).await?;
+                        outbox.clear(id).await?;
+                        outbox.append(&self.reset_key(), 1, &baseline).await?;
                     }
                     if let Some(live) = resources.live_results_writer() {
-                        live.clear(self.definition.id.as_str()).await?;
+                        live.clear(id).await?;
                     }
                     Ok(())
                 })
@@ -69,8 +99,28 @@ impl ContinuousQueryTransformer {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .reset_to_sequence(0, 0);
+            .reset_to_sequence(0, generation);
         Ok(())
+    }
+
+    /// The generation for the query's next output incarnation: strictly newer
+    /// than every generation it has published, persisted or recorded in
+    /// `marker`.
+    async fn next_output_generation(&self, marker: Option<&ResetMarker>) -> anyhow::Result<u64> {
+        let persisted = match self.query()?.resources().checkpoint_store() {
+            Some(store) => store
+                .read_output_generation(self.definition.id.as_str())
+                .await?
+                .unwrap_or(0),
+            None => 0,
+        };
+        self.results
+            .snapshot()?
+            .generation
+            .max(marker.map_or(0, |marker| marker.generation))
+            .max(persisted)
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("query output generation exhausted"))
     }
 
     fn reset_key(&self) -> String {
@@ -171,27 +221,7 @@ impl ContinuousQueryTransformer {
             }
         }
         let old_marker = self.read_reset_marker().await?;
-        let persisted_generation = if let Some(checkpoint) = resources.checkpoint_store() {
-            checkpoint
-                .read_output_generation(self.definition.id.as_str())
-                .await?
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let generation = self
-            .results
-            .snapshot()?
-            .generation
-            .max(
-                old_marker
-                    .as_ref()
-                    .map(|marker| marker.generation)
-                    .unwrap_or(0),
-            )
-            .max(persisted_generation)
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("query reset generation exhausted"))?;
+        let generation = self.next_output_generation(old_marker.as_ref()).await?;
         if self.provider.is_volatile() {
             query.shutdown().await?;
             self.release_query()?;

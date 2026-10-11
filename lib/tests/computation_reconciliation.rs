@@ -82,6 +82,7 @@ struct Sink {
     received: mpsc::Sender<(String, u64)>,
     label: String,
     gate: Option<Arc<Gate>>,
+    start_gate: Option<Arc<Gate>>,
     accepted: bool,
 }
 impl Drop for Sink {
@@ -95,6 +96,10 @@ impl ComputationComponent for Sink {
         &self.descriptor
     }
     async fn start(&mut self) -> anyhow::Result<()> {
+        if let Some(gate) = self.start_gate.take() {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         self.calls.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -153,6 +158,7 @@ fn sink(id: &str, label: &str, calls: Arc<Calls>, received: mpsc::Sender<(String
         received,
         label: label.into(),
         gate: None,
+        start_gate: None,
         accepted: false,
     }
 }
@@ -1661,3 +1667,271 @@ async fn binding_generations_do_not_regress_after_live_rebinds_and_a_new_run() {
     graph.start().expect("next run").await.expect("completion");
     assert!(graph.observed().relationships[&edge("source", "sink")].generation > previous);
 }
+
+/// A committed reconciliation that cannot finish within its deadline must still
+/// hand back its report: the topology changed, so the caller has to see an
+/// applied-but-incomplete outcome rather than an error it would read as "nothing
+/// happened".
+fn assert_timed_out_after_commit(report: &ReconciliationReport) {
+    assert!(report.committed, "{report:?}");
+    assert_eq!(
+        report.summary,
+        OperationSummary::CompletedWithFailures,
+        "{report:?}"
+    );
+    assert!(report.startup.is_none(), "{report:?}");
+    assert!(
+        matches!(
+            report.failures.as_slice(),
+            [failure] if failure.phase == FailurePhase::Activation
+                && matches!(failure.cause.as_ref(), GraphError::ReconciliationTimeout)
+        ),
+        "{report:?}"
+    );
+}
+
+async fn startup_timeout_after_commit_returns_the_committed_report() {
+    let new = Arc::new(Calls::default());
+    let (source, input) = source(Arc::new(Calls::default()));
+    let (received, mut output_rx) = mpsc::channel(16);
+    let mut graph = ComputationGraph::builder("committed-startup")
+        .source(source)
+        .sink(Box::new(sink(
+            "sink",
+            "old",
+            Arc::new(Calls::default()),
+            received.clone(),
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .cleanup_timeout(Duration::from_millis(200))
+        .build()
+        .expect("graph");
+    let run = graph.run().expect("scope");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        let start = Arc::new(Gate::default());
+        let mut replacement = sink("sink", "new", new.clone(), received);
+        replacement.start_gate = Some(start.clone());
+        let preview = control
+            .preview(
+                GraphRevision(1),
+                vec![DesiredMutation::ReplaceComponent(definition("sink"))],
+            )
+            .await
+            .expect("preview");
+        let report = control
+            .reconcile(preview, bind_sink(replacement))
+            .await
+            .expect("a committed reconciliation returns its report");
+        assert_timed_out_after_commit(&report);
+        assert_eq!(report.revision, control.desired_snapshot().revision);
+
+        // The start that overran the deadline is still owned by the controller
+        // and completes once the component is released.
+        start.release.notify_one();
+        control
+            .subscribe_observed()
+            .wait_for(|state| {
+                state.components[&component("sink")].lifecycle == ComponentLifecycle::Running
+            })
+            .await
+            .expect("replacement starts");
+        input
+            .send(output(root("source", 1, &[1])))
+            .await
+            .expect("input");
+        assert_eq!(output_rx.recv().await, Some(("new".into(), 1)));
+        assert_eq!(new.starts.load(Ordering::SeqCst), 1);
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    committed_startup_timeout,
+    startup_timeout_after_commit_returns_the_committed_report
+);
+
+/// Constructs the `late` sink only once the test releases `gate`.
+struct GatedFactory {
+    descriptor: FactoryDescriptor,
+    gate: Arc<Gate>,
+    calls: Arc<Calls>,
+    received: mpsc::Sender<(String, u64)>,
+}
+impl GatedFactory {
+    fn specification(&self) -> ComponentSpecification {
+        ComponentSpecification {
+            descriptor: descriptor("late", &["in"], &[]),
+            role: ComponentRole::Sink,
+            completion: Some(SinkCompletion::Handled),
+            implementation: self.descriptor.implementation.clone(),
+            configuration_version: 1,
+            configuration: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+        }
+    }
+}
+#[async_trait]
+impl ComponentFactory for GatedFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn create(
+        &self,
+        _: ConstructionContext,
+    ) -> Result<ConstructedComponent, ComponentCreationError> {
+        self.gate.entered.notify_one();
+        self.gate.release.notified().await;
+        Ok(ConstructedComponent::sink(Box::new(sink(
+            "late",
+            "late",
+            self.calls.clone(),
+            self.received.clone(),
+        ))))
+    }
+}
+
+/// A service whose start does not return until the test releases `gate`.
+struct StallingService {
+    descriptor: ComponentDescriptor,
+    gate: Arc<Gate>,
+}
+#[async_trait]
+impl ComputationComponent for StallingService {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        self.gate.entered.notify_one();
+        self.gate.release.notified().await;
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+#[async_trait]
+impl ComputationService for StallingService {
+    async fn run(&mut self) -> anyhow::Result<()> {
+        std::future::pending().await
+    }
+}
+
+async fn settle_timeout_after_commit_resumes_paused_producers() {
+    let late = Arc::new(Calls::default());
+    let (source, input) = source(Arc::new(Calls::default()));
+    let (received, mut output_rx) = mpsc::channel(16);
+    let construction = Arc::new(Gate::default());
+    let factory = Arc::new(GatedFactory {
+        descriptor: FactoryDescriptor {
+            implementation: ImplementationIdentity::try_new("gated-sink", "1")
+                .expect("implementation"),
+            role: ComponentRole::Sink,
+            configuration_version: 1,
+            configuration: ConfigurationSchema::default(),
+            dependencies: BTreeMap::new(),
+        },
+        gate: construction.clone(),
+        calls: late.clone(),
+        received: received.clone(),
+    });
+    let mut graph = ComputationGraph::builder("committed-settle")
+        .source(source)
+        .sink(Box::new(sink(
+            "sink",
+            "sink",
+            Arc::new(Calls::default()),
+            received,
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .cleanup_timeout(Duration::from_millis(200))
+        .build()
+        .expect("graph");
+    let run = graph.run().expect("scope");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        let mut added = definition("late");
+        added.construction = ComponentConstruction::Factory(factory.specification());
+        let preview = control
+            .preview(
+                GraphRevision(1),
+                vec![
+                    DesiredMutation::PutComponent(added),
+                    DesiredMutation::Bind(relationship("late")),
+                ],
+            )
+            .await
+            .expect("preview");
+        assert!(preview.paused().contains(&component("source")));
+
+        // While `late` is being constructed, a concurrently added service
+        // begins a start that outlives the reconciliation's settle deadline.
+        let mut bindings = TopologyBindings::default();
+        bindings
+            .factories
+            .register(factory.clone())
+            .expect("factory");
+        let start = Arc::new(Gate::default());
+        let (report, stalled) = tokio::join!(control.reconcile(preview, bindings), async {
+            construction.entered.notified().await;
+            let stalled = control
+                .add_component(ComponentAddition::new(ConstructedComponent::service(
+                    Box::new(StallingService {
+                        descriptor: descriptor("stalled", &[], &[]),
+                        gate: start.clone(),
+                    }),
+                )))
+                .await
+                .expect("addition during construction");
+            start.entered.notified().await;
+            construction.release.notify_one();
+            stalled
+        });
+        let report = report.expect("a committed reconciliation returns its report");
+        assert_timed_out_after_commit(&report);
+        assert_eq!(
+            control.observed().components[&component("source")].lifecycle,
+            ComponentLifecycle::Running,
+            "the producer paused for the commit must be resumed"
+        );
+        input
+            .send(output(root("source", 1, &[1])))
+            .await
+            .expect("input");
+        assert_eq!(output_rx.recv().await, Some(("sink".into(), 1)));
+
+        // Startup was deferred because the graph had not settled. Once the
+        // in-flight start completes, the committed component starts on its own
+        // and receives the data queued for it.
+        assert_eq!(
+            control.observed().components[&component("late")].lifecycle,
+            ComponentLifecycle::Stopped
+        );
+        start.release.notify_one();
+        stalled
+            .wait_started()
+            .await
+            .expect("stalled service starts");
+        assert_eq!(output_rx.recv().await, Some(("late".into(), 1)));
+        assert_eq!(late.starts.load(Ordering::SeqCst), 1);
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    committed_settle_timeout,
+    settle_timeout_after_commit_resumes_paused_producers
+);

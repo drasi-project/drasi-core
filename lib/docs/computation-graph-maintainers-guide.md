@@ -294,6 +294,15 @@ cleanup needed for the component's supported restart behavior. Permanent
 deprovisioning is a separate, explicit state-erasure operation. These are not
 interchangeable implementations of "make it inactive."
 
+Stopping the whole instance is a sweep, not a transaction. `DrasiLib::stop()`
+stops consumers before producers and attempts every component even when one
+fails, then reports all failures together. A record that a concurrent
+configuration change replaced or removed is skipped, because that change now
+owns the component's lifecycle. An incomplete stop is remembered, so calling
+`stop()` again retries the remaining components instead of reporting "already
+stopped." See `stop_all` in [`runtime/mod.rs`](../src/computation/runtime/mod.rs)
+and [`lib_core.rs`](../src/lib_core.rs).
+
 Ordinary processing failures are recorded on the affected component and
 relationship policy determines the impact on dependents. Contract violations
 and routing failures can terminate the graph run. Preserve failure phase and
@@ -640,6 +649,13 @@ consumer, and [`qos_pipe.rs`](../src/computation/v1/qos_pipe.rs) for multicast.
 full-envelope byte accounting. Persistent page limits bound the payload cache,
 not total startup validation: the owner still checks all retained history.
 
+With page limits, a journal's in-memory entries hold only the cached page.
+Retention and capacity decisions must therefore come from the journal's
+metadata (oldest retained position and retained count), never from the cached
+entries; otherwise an append can trim records that a subscriber has not
+acknowledged. `retain_from` in [`qos_pipe.rs`](../src/computation/v1/qos_pipe.rs)
+is the single place that plans this, for both private and shared journals.
+
 Byte quotas are not a universal RSS bound. Metadata, in-flight envelopes,
 component state and backend buffers are additional costs. Some pipe budgets
 permit a lone oversized event; the source-time merger does not. Check the
@@ -783,6 +799,17 @@ calculation and reconciliation rules;
 the lifecycle work. [Reconciliation tests](../tests/computation_reconciliation.rs)
 exercise stale previews, partial outcomes and unaffected components.
 
+Committing the desired topology is the dividing line for errors. Before
+commit, an error rejects the request. After commit, `execute` always returns
+the `ReconciliationReport` with `committed` set; only cancellation returns an
+error. Realization, recovery-validation, settle and startup failures are
+recorded in `report.failures`, and producers paused for the change are always
+resumed. If the graph has not settled, or another lifecycle operation owns the
+controller, components marked for automatic start are queued in
+`pending_auto_start` and the controller starts them once it is free. A caller
+must therefore read the report, not just the `Result`, to learn whether the
+change was applied in full.
+
 ### Durable acceptance precedes realization
 
 Optional management persists *what the instance should contain*. Its
@@ -833,6 +860,17 @@ authoritative resolution. Confirmed rejection can resume old owners; accepted
 retirement requires the affected generations to be reconstructed/removed.
 Dropping an unresolved lease does not automatically resume them.
 
+Query deprovisioning starts a new output incarnation, not a reused one. It
+records an in-progress reset before clearing anything, so an interrupted wipe
+is refused at recovery rather than resumed from partial state. The restarted
+sequence numbers are published under a strictly newer output generation, so a
+consumer that deduplicates on identity, generation and sequence cannot mistake
+new results for old ones. Recovery treats only a readable, absent or different
+configuration hash as a configuration change: a storage error while reading it
+fails recovery instead of authorizing an automatic reset. See
+[`query_recovery.rs`](../src/computation/v1/query_recovery.rs) and `recover` in
+[`query.rs`](../src/computation/v1/query.rs).
+
 Explicit data-loss authorization is revision-bound and names a complete
 recovery domain. It permits removal, not in-place reuse, data deletion or
 fabricated handling acknowledgements. It cannot excuse incomplete cleanup.
@@ -855,6 +893,13 @@ Native hosting transports operations as opaque handles with poll, wake,
 cancel and release behavior. The host drives those operations under the same
 graph lifecycle rules. The SDK supplies an owned I/O runtime for timer/socket
 drivers; it does not run another graph executor or spawn processing futures.
+
+An ordinary source change event the host cannot decode ends that change stream
+with `UndecodableSourceEvent` (see
+[`proxies/change_receiver.rs`](../../components/host-sdk/src/proxies/change_receiver.rs)).
+Skipping it would let the source confirm later positions past the lost change,
+so a restart could never replay it. The source fails instead and resumes from
+its last confirmed position.
 
 Rust futures, trait objects, `Arc`s, allocator ownership and runtime internals
 do not cross the C ABI. Producer-owned buffers are released by their producer.

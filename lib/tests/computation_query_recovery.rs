@@ -1318,6 +1318,54 @@ mod persistent {
     }
 
     #[tokio::test]
+    async fn deprovision_advances_output_generation_so_recreated_sequences_are_never_reused() {
+        let temp = tempfile::tempdir().expect("temp");
+        let provider = provider(temp.path());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut published = Vec::new();
+        for incarnation in 0..3 {
+            let mut query = query(
+                provider.clone(),
+                "MATCH (n:Person) RETURN n.name AS name",
+                QueryRecoveryPolicy::Strict,
+                false,
+                calls.clone(),
+            )
+            .await;
+            query
+                .start()
+                .await
+                .unwrap_or_else(|error| panic!("incarnation {incarnation} starts: {error:#}"));
+            let output = query
+                .transform(InputEnvelope {
+                    port: PortId::try_new("in").expect("port"),
+                    envelope: envelope(2, "Alicia", true),
+                })
+                .await
+                .expect("live");
+            assert_eq!(
+                output[0].envelope.system().sequence(),
+                1,
+                "a recreated query restarts its output sequence"
+            );
+            let generation =
+                QueryChangeCodec::query_generation(&output[0].envelope).expect("generation");
+            assert_eq!(
+                generation,
+                query.results().snapshot().expect("snapshot").generation
+            );
+            published.push(generation);
+            query.stop().await.expect("stop");
+            query.deprovision().await.expect("deprovision");
+        }
+        assert!(
+            published.windows(2).all(|pair| pair[0] < pair[1]),
+            "every incarnation must publish under a newer generation than any \
+             position a consumer could hold for an earlier one: {published:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn query_reset_retains_output_high_water_and_requires_snapshot_catchup() {
         let temp = tempfile::tempdir().expect("temp");
         let provider = provider(temp.path());
