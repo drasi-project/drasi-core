@@ -585,7 +585,7 @@ Two mechanisms ensure connection stability:
 
 The SSE Reaction handles various error conditions gracefully:
 
-- **Port binding failures**: Logged but don't prevent startup
+- **Port binding failures or timeouts**: Prevent startup; `start()` logs and returns the error, reports `Error`, and does not start background tasks. See [Lifecycle](#lifecycle) for the five-second bind timeout and retry behavior.
 - **Client disconnections**: Automatically cleaned up
 - **Broadcast channel full**: Old messages are dropped (lagging clients)
 - **No connected clients**: Messages are dropped without error
