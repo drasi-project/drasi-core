@@ -1456,11 +1456,16 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
             ));
             let position: serde_json::Value =
                 serde_json::from_slice(event.source_position.as_ref().unwrap()).unwrap();
-            assert_eq!(position["row_offset"], offset as u64);
-            assert!(
-                position["transaction_start_position"].as_u64().unwrap()
-                    < position["binlog_position"].as_u64().unwrap()
-            );
+            if offset + 1 == inserts.len() {
+                assert!(position.get("row_offset").is_none());
+                assert!(position.get("transaction_start_position").is_none());
+            } else {
+                assert_eq!(position["row_offset"], offset as u64);
+                assert!(
+                    position["transaction_start_position"].as_u64().unwrap()
+                        < position["binlog_position"].as_u64().unwrap()
+                );
+            }
             assert!(position["gtid_set"].as_str().is_some());
         }
 
@@ -1520,7 +1525,12 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
         for (offset, event) in statements.iter().enumerate() {
             let position: serde_json::Value =
                 serde_json::from_slice(event.source_position.as_ref().unwrap()).unwrap();
-            assert_eq!(position["row_offset"], offset as u64);
+            if offset + 1 == statements.len() {
+                assert!(position.get("row_offset").is_none());
+                assert!(position.get("transaction_start_position").is_none());
+            } else {
+                assert_eq!(position["row_offset"], offset as u64);
+            }
         }
 
         conn.query_drop("DELETE FROM items").await.unwrap();
@@ -1568,6 +1578,30 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
         let remaining = receive_native_changes(&mut subscription, 1).await;
         assert_eq!(native_changed_ids(&remaining), vec![6]);
         assert_eq!(remaining[0].source_position, rotated[1].source_position);
+        source.stop().await.unwrap();
+        source.start().await.unwrap();
+        subscription = source
+            .subscribe(row_resume_settings(
+                remaining[0].source_position.clone(),
+                Some(remaining[0].sequence),
+            ))
+            .await
+            .unwrap();
+        conn.query_drop("INSERT INTO items (id, name, value) VALUES (7, 'seven', 70)")
+            .await
+            .unwrap();
+        let next_transaction = receive_native_changes(&mut subscription, 1).await;
+        assert_eq!(native_changed_ids(&next_transaction), vec![7]);
+        let token: serde_json::Value =
+            serde_json::from_slice(next_transaction[0].source_position.as_ref().unwrap()).unwrap();
+        assert!(token.get("row_offset").is_none());
+        assert!(token.get("transaction_start_position").is_none());
+        assert!(token["gtid_set"].as_str().is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), subscription.receiver.recv())
+                .await
+                .is_err()
+        );
         source.stop().await.unwrap();
         conn.disconnect().await.unwrap();
     })
@@ -1664,7 +1698,12 @@ async fn test_mysql_rollback_preserves_only_nontransactional_rows_and_partial_re
         for (offset, event) in events.iter().enumerate() {
             let token: serde_json::Value =
                 serde_json::from_slice(event.source_position.as_ref().unwrap()).unwrap();
-            assert_eq!(token["row_offset"], offset as u64);
+            if offset + 1 == events.len() {
+                assert!(token.get("row_offset").is_none());
+                assert!(token.get("transaction_start_position").is_none());
+            } else {
+                assert_eq!(token["row_offset"], offset as u64);
+            }
             assert!(token["gtid_set"].is_null());
         }
         assert!(
@@ -1691,6 +1730,27 @@ async fn test_mysql_rollback_preserves_only_nontransactional_rows_and_partial_re
                 .await
                 .is_err()
         );
+        source.stop().await.unwrap();
+        source.start().await.unwrap();
+        subscription = source
+            .subscribe(settings(
+                remaining[0].source_position.clone(),
+                Some(remaining[0].sequence),
+            ))
+            .await
+            .unwrap();
+        conn.query_drop("INSERT INTO items (id, name, value) VALUES (3, 'three', 30)")
+            .await
+            .unwrap();
+        let next_transaction = receive_native_changes(&mut subscription, 1).await;
+        assert_eq!(native_changed_ids(&next_transaction), vec![3]);
+        let token: serde_json::Value =
+            serde_json::from_slice(next_transaction[0].source_position.as_ref().unwrap()).unwrap();
+        assert!(
+            token.get("row_offset").is_none(),
+            "single-row transactions finish at a boundary"
+        );
+        assert!(token.get("transaction_start_position").is_none());
         source.stop().await.unwrap();
         conn.disconnect().await.unwrap();
         admin.disconnect().await.unwrap();

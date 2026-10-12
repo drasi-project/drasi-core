@@ -151,6 +151,101 @@ mod tests {
         assert!(source.subscriber_resume_positions.read().await.is_empty());
     }
 
+    fn resume_settings(
+        position: Option<bytes::Bytes>,
+    ) -> drasi_lib::config::SourceSubscriptionSettings {
+        drasi_lib::config::SourceSubscriptionSettings {
+            source_id: "mysql-resume".into(),
+            query_id: "query".into(),
+            enable_bootstrap: false,
+            nodes: Default::default(),
+            relations: Default::default(),
+            resume_from: position,
+            resume_sequence: Some(10),
+            request_position_handle: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_checkpoint_requires_channel_dispatch() {
+        for mode in [DispatchMode::Channel, DispatchMode::Broadcast] {
+            let source = MySqlSourceBuilder::new("mysql-resume")
+                .with_database("test")
+                .with_user("test")
+                .with_dispatch_mode(mode)
+                .build()
+                .unwrap();
+            let position = ReplicationState::new("mysql-bin.000001", 200, None, 0)
+                .with_transaction_row(4, 1)
+                .unwrap()
+                .to_position_bytes();
+            let result = source.subscribe(resume_settings(Some(position))).await;
+            if mode == DispatchMode::Channel {
+                assert!(result.is_ok());
+                assert_eq!(source.subscriber_resume_positions.read().await.len(), 1);
+                assert_eq!(source.base.next_sequence(), 11);
+            } else {
+                let error = result.err().expect("Broadcast must reject partial replay");
+                assert!(error.to_string().contains("requires Channel dispatch mode"));
+                assert!(source.subscriber_resume_positions.read().await.is_empty());
+                assert_eq!(
+                    source.base.next_sequence(),
+                    1,
+                    "rejection must precede subscription"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_still_accepts_live_and_completed_boundary_subscriptions() {
+        for position in [
+            None,
+            Some(ReplicationState::new("mysql-bin.000001", 200, None, 0).to_position_bytes()),
+        ] {
+            let source = MySqlSourceBuilder::new("mysql-resume")
+                .with_database("test")
+                .with_user("test")
+                .with_dispatch_mode(DispatchMode::Broadcast)
+                .build()
+                .unwrap();
+            assert!(source.subscribe(resume_settings(position)).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_unusable_boundary_before_storing_or_subscribing() {
+        for file in ["", "mysql-bin.000001"] {
+            for position in [0, 3] {
+                for gtid in [
+                    serde_json::Value::Null,
+                    serde_json::json!(""),
+                    serde_json::json!(" \t"),
+                ] {
+                    let source = MySqlSourceBuilder::new("mysql-resume")
+                        .with_database("test")
+                        .with_user("test")
+                        .build()
+                        .unwrap();
+                    let token = serde_json::json!({
+                        "binlog_file": file,
+                        "binlog_position": position,
+                        "gtid_set": gtid,
+                        "last_processed_timestamp": 0,
+                    });
+                    let result = source
+                        .subscribe(resume_settings(Some(bytes::Bytes::from(
+                            serde_json::to_vec(&token).unwrap(),
+                        ))))
+                        .await;
+                    assert!(result.is_err(), "unusable boundary accepted: {token}");
+                    assert!(source.subscriber_resume_positions.read().await.is_empty());
+                    assert_eq!(source.base.next_sequence(), 1);
+                }
+            }
+        }
+    }
+
     mod lifecycle {
         use super::*;
         use bytes::Bytes;

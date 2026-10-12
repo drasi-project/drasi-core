@@ -34,9 +34,9 @@ pub struct ReplicationState {
     pub gtid_set: Option<String>,
     pub last_processed_timestamp: u64,
     /// Native cursor before this transaction's GTID/BEGIN/TableMap event.
-    /// Set together with row_offset by flush_transaction for per-row checkpoints.
-    /// Both are absent on bootstrap boundaries and unbuffered push_change tokens,
-    /// which represent a cursor after all rows at binlog_position.
+    /// Set together with row_offset by flush_transaction for nonfinal rows.
+    /// Both are absent on final transaction rows, bootstrap boundaries and
+    /// unbuffered push_change tokens, marking a cursor after all rows at binlog_position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transaction_start_position: Option<u32>,
     /// Zero-based ordinal of the emitted change within the committed transaction.
@@ -91,7 +91,17 @@ impl ReplicationState {
             "MySQL GTID set exceeds {MAX_GTID_SET_BYTES} bytes"
         );
         match (self.transaction_start_position, self.row_offset) {
-            (None, None) => Ok(()),
+            (None, None) => {
+                anyhow::ensure!(
+                    self.gtid_set
+                        .as_ref()
+                        .is_some_and(|gtid| !gtid.trim().is_empty())
+                        || (!self.binlog_file.trim().is_empty() && self.binlog_position >= 4),
+                    "Invalid MySQL boundary position: expected a GTID or a binlog filename \
+                     with a position at or after byte 4"
+                );
+                Ok(())
+            }
             (Some(start), Some(_)) => {
                 anyhow::ensure!(
                     !self.binlog_file.is_empty() && start >= 4 && start < self.binlog_position,
@@ -147,8 +157,9 @@ pub fn decode_position(bytes: &[u8]) -> Result<ReplicationState> {
         bytes.len() < MAX_POSITION_BYTES,
         "MySQL replication position must be smaller than {MAX_POSITION_BYTES} bytes"
     );
-    let state: ReplicationState =
+    let mut state: ReplicationState =
         serde_json::from_slice(bytes).context("Failed to decode MySQL replication position")?;
+    state.gtid_set = state.gtid_set.filter(|gtid| !gtid.trim().is_empty());
     state.validate()?;
     Ok(state)
 }
@@ -181,6 +192,37 @@ impl PositionComparator for MySqlPositionComparator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_tokens_require_a_usable_native_cursor() {
+        for file in ["", " \t", "mysql-bin.000001"] {
+            for pos in [0, 3, 4, 200] {
+                for gtid in [
+                    None,
+                    Some(""),
+                    Some(" \t"),
+                    Some("00000000-0000-0000-0000-000000000001:1-7"),
+                ] {
+                    let token = serde_json::json!({
+                        "binlog_file": file,
+                        "binlog_position": pos,
+                        "gtid_set": gtid,
+                        "last_processed_timestamp": 0,
+                    });
+                    let decoded = decode_position(&serde_json::to_vec(&token).unwrap());
+                    let usable = (!file.trim().is_empty() && pos >= 4)
+                        || gtid.is_some_and(|gtid| !gtid.trim().is_empty());
+                    assert_eq!(decoded.is_ok(), usable, "{token}");
+                    if let Ok(decoded) = decoded {
+                        assert_eq!(
+                            decoded.gtid_set.as_deref(),
+                            gtid.filter(|g| !g.trim().is_empty())
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn checkpoint_string_limits_apply_to_boundary_and_row_tokens() {

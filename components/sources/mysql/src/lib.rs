@@ -248,6 +248,14 @@ impl Source for MySqlReplicationSource {
                     self.base.id
                 )
             })?;
+            anyhow::ensure!(
+                state.row_offset().is_none()
+                    || self.base.get_dispatch_mode() == DispatchMode::Channel,
+                "MySQL partial-row resume requires Channel dispatch mode; Broadcast cannot \
+                 filter already processed rows for subscriber '{}' on source '{}'",
+                settings.query_id,
+                self.base.id
+            );
             info!(
                 "Subscriber '{}' requesting resume from {}:{} on source '{}'",
                 settings.query_id, state.binlog_file, state.binlog_position, self.base.id

@@ -73,10 +73,17 @@ protect against passive eavesdropping but not an active man-in-the-middle. Use
 ## Checkpoint positions and resuming
 
 Each emitted change carries an opaque position token used to resume replication
-after a restart. Rows in a transaction are checkpointed individually, including
-across multiple statements. Resuming replays that transaction and suppresses rows
-already processed by each subscriber, without skipping its remaining rows.
-Bootstrap boundaries instead represent a position after all rows at that cursor.
+after a restart. Nonfinal rows in a transaction are checkpointed individually,
+including across multiple statements. In the default `Channel` dispatch mode,
+partial resume replays that transaction and suppresses rows already processed by
+each subscriber, without skipping its remaining rows. Partial-row checkpoints
+are rejected in `Broadcast` mode, which cannot filter replay per subscriber;
+live and completed-boundary subscriptions retain their existing behavior.
+
+The final emitted row, including the only row in a single-row transaction, uses
+a completed boundary token, as do bootstrap boundaries. That token represents a
+position after all rows at the cursor: resume uses its GTID when present or its
+commit-end file position, rather than rewinding to the transaction start.
 The token's `transaction_start_position` and `row_offset` fields are internal,
 not source configuration options.
 
@@ -88,9 +95,12 @@ binlog renaming. Those changes, or changing the source table/key configuration,
 require a fresh bootstrap/checkpoint. GTID-based whole-transaction start positions
 remain supported; they do not make partial-row checkpoints failover-safe.
 
-Incomplete, invalid, or oversized tokens fail explicitly. Encoded tokens must be
-smaller than 64 KiB; binlog filenames are limited to 255 bytes and GTID sets to
-60 KiB. Detailed decode errors are logged rather than returned to subscribers.
+Incomplete, invalid, or oversized tokens fail explicitly. A boundary must contain
+a nonblank GTID or a nonempty binlog filename with a position of at least byte 4;
+an unusable checkpoint never falls back to the configured start position.
+Encoded tokens must be smaller than 64 KiB; binlog filenames are limited to 255
+bytes and GTID sets to 60 KiB. Detailed decode errors are logged rather than
+returned to subscribers.
 Malformed transaction boundaries fail replication with bounded reconnect attempts
 and an Error status, rather than silently discarding rows or skipping ahead.
 
