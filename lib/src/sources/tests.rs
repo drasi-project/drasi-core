@@ -694,6 +694,93 @@ mod manager_tests {
     }
 
     #[tokio::test]
+    async fn test_stop_all_cleans_failed_source() {
+        let (manager, graph) = create_test_manager().await;
+        let source = LoggingTestSource::new("failed-source").unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
+        manager.start_source("failed-source".into()).await.unwrap();
+        let runtime = manager.get_source_instance("failed-source").await.unwrap();
+        let source = runtime
+            .as_any()
+            .downcast_ref::<LoggingTestSource>()
+            .unwrap();
+        source.base.set_status(ComponentStatus::Error, None).await;
+        let task = tokio::spawn(async {});
+        let abort_handle = task.abort_handle();
+        source.base.set_task_handle(task).await;
+        let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+        crate::component_graph::wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Error],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+        manager.stop_all().await.unwrap();
+        assert!(abort_handle.is_finished());
+        assert!(source.base.task_handle.read().await.is_none());
+        crate::component_graph::wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            manager.get_source_status(source.id().into()).await.unwrap(),
+            ComponentStatus::Stopped
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_failed_source_with_already_stopped_runtime() {
+        let (manager, graph) = create_test_manager().await;
+        add_source(
+            &manager,
+            &graph,
+            LoggingTestSource::new("failed-start").unwrap(),
+        )
+        .await
+        .unwrap();
+        {
+            let mut graph = graph.write().await;
+            graph
+                .validate_and_transition("failed-start", ComponentStatus::Starting, None)
+                .unwrap();
+            graph
+                .validate_and_transition("failed-start", ComponentStatus::Error, None)
+                .unwrap();
+        }
+        assert_eq!(
+            manager
+                .get_source_instance("failed-start")
+                .await
+                .unwrap()
+                .status()
+                .await,
+            ComponentStatus::Stopped,
+        );
+        manager.stop_source("failed-start".into()).await.unwrap();
+        crate::component_graph::wait_for_status(
+            &graph,
+            "failed-start",
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_get_source_info() {
         let (manager, graph) = create_test_manager().await;
 

@@ -386,6 +386,24 @@ core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
 ```
 
+`stop_query()` also cleans up queries in `Error`, including failures during
+startup or bootstrap. It releases active subscriptions and processing tasks before
+reporting `Stopped`, while preserving the query configuration and persisted state.
+The managed `stop_query()` command rejects an already stopped query through the
+component graph's transition validation. In contrast, calling a query runtime's
+`Query::stop()` directly is idempotent and returns `Ok(())` when already stopped.
+Updating or removing a failed query, and stopping the instance, also release its
+active lifecycle resources. Updating a failed query leaves its replacement stopped
+until explicitly started.
+
+`stop_source()` likewise invokes cleanup for sources in `Error`. Source plugins
+must release their resources and report `Stopped` before returning success; a
+legacy plugin that no-ops in `Error` is rejected instead of leaving the graph at
+`Stopping`. Updating/removing failed sources and instance shutdown also invoke
+cleanup. Updating a failed source leaves its replacement stopped. Managed
+`stop_source()` rejects an already stopped source, even if its direct `stop()`
+is idempotent.
+
 ### Inspecting Components
 
 ```rust
