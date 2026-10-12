@@ -14,7 +14,12 @@
 
 use super::*;
 use crate::config::SseExtension;
+use drasi_lib::channels::ComponentStatus;
+use drasi_lib::component_graph::ComponentUpdate;
+use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
+use std::time::Duration;
+use tokio::net::TcpListener;
 
 #[test]
 fn test_sse_builder_defaults() {
@@ -417,4 +422,204 @@ fn test_recovery_trait_defaults() {
         reaction.default_recovery_policy(),
         ReactionRecoveryPolicy::AutoSkipGap
     );
+}
+
+pub(crate) async fn sse_reaction_with_reserved_port(id: &str) -> (SseReaction, TcpListener) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reaction = SseReaction::builder(id)
+        .with_host("127.0.0.1")
+        .with_port(listener.local_addr().unwrap().port())
+        .build()
+        .unwrap();
+    (reaction, listener)
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_bind_failure_reports_error_without_running() {
+    let (reaction, occupied_listener) = sse_reaction_with_reserved_port("occupied-port").await;
+    let addr = occupied_listener.local_addr().unwrap();
+    let (update_tx, mut updates) = tokio::sync::mpsc::channel(16);
+    reaction
+        .initialize(ReactionRuntimeContext::new(
+            "test-instance",
+            reaction.id(),
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
+
+    let error = reaction
+        .start()
+        .await
+        .expect_err("starting on an occupied port must fail");
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+    assert!(error.to_string().contains(&addr.to_string()));
+    assert_eq!(reaction.status().await, ComponentStatus::Error);
+    assert!(reaction.base.processing_task.read().await.is_none());
+    assert!(reaction.base.shutdown_tx.read().await.is_none());
+
+    let mut reported_statuses = Vec::new();
+    while let Ok(ComponentUpdate::Status {
+        status, message, ..
+    }) = updates.try_recv()
+    {
+        if status == ComponentStatus::Error {
+            assert!(message.unwrap().contains(&addr.to_string()));
+        }
+        reported_statuses.push(status);
+    }
+    assert_eq!(
+        reported_statuses,
+        vec![ComponentStatus::Starting, ComponentStatus::Error]
+    );
+
+    drop(occupied_listener);
+    reaction.start().await.unwrap();
+    assert_eq!(reaction.status().await, ComponentStatus::Running);
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_start_binds_before_returning() {
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("ready-listener").await;
+    let addr = reserved_listener.local_addr().unwrap();
+    drop(reserved_listener);
+
+    reaction.stop().await.unwrap();
+    reaction.stop().await.unwrap();
+    reaction.start().await.unwrap();
+    assert_eq!(reaction.status().await, ComponentStatus::Running);
+
+    // Probe synchronously so a spawned bind cannot run before this assertion.
+    let probe = std::net::TcpListener::bind(addr);
+    reaction.stop().await.unwrap();
+    assert_eq!(
+        probe
+            .expect_err("successful start must already own the configured port")
+            .kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+    assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_stop_start_reuses_configured_port() {
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("restart-listener").await;
+    let addr = reserved_listener.local_addr().unwrap();
+    drop(reserved_listener);
+    let client = reqwest::Client::new();
+
+    for _ in 0..3 {
+        reaction.start().await.unwrap();
+        let response = client
+            .get(format!("http://{addr}/events"))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+
+        let mut stream = response.bytes_stream();
+        tokio::time::timeout(Duration::from_secs(5), reaction.stop())
+            .await
+            .expect("stop must finish with an open SSE stream")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+                chunk.expect("the SSE stream must close cleanly");
+            }
+        })
+        .await
+        .expect("the old SSE stream must end, not survive a restart");
+        let probe = TcpListener::bind(addr)
+            .await
+            .expect("stop must release the listener before returning");
+        drop(probe);
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+    }
+
+    reaction.stop().await.unwrap();
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_concurrent_starts_only_start_once() {
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("concurrent-starts").await;
+    drop(reserved_listener);
+    let startup_gate = reaction.base.shutdown_tx.write().await;
+    let first = reaction.start();
+    let second = reaction.start();
+    tokio::pin!(first, second);
+    assert!(futures::poll!(&mut first).is_pending());
+    assert_eq!(reaction.status().await, ComponentStatus::Starting);
+    assert!(futures::poll!(&mut second).is_pending());
+    drop(startup_gate);
+
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .unwrap();
+    first.unwrap();
+    assert!(second.unwrap_err().to_string().contains("already started"));
+    assert_eq!(reaction.status().await, ComponentStatus::Running);
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_stop_waits_for_in_flight_start() {
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("concurrent-stop").await;
+    let addr = reserved_listener.local_addr().unwrap();
+    drop(reserved_listener);
+    let startup_gate = reaction.base.shutdown_tx.write().await;
+    let start = reaction.start();
+    let stop = reaction.stop();
+    tokio::pin!(start, stop);
+    assert!(futures::poll!(&mut start).is_pending());
+    assert_eq!(reaction.status().await, ComponentStatus::Starting);
+    assert!(futures::poll!(&mut stop).is_pending());
+    drop(startup_gate);
+
+    let (start, stop) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(start, stop) })
+            .await
+            .unwrap();
+    start.unwrap();
+    stop.unwrap();
+    assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+    assert!(reaction.base.processing_task.read().await.is_none());
+    let probe = TcpListener::bind(addr).await.unwrap();
+    drop(probe);
+    reaction.start().await.unwrap();
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_sse_lifecycle_repeated_start_preserves_running_server() {
+    let (reaction, reserved_listener) = sse_reaction_with_reserved_port("repeated-start").await;
+    let addr = reserved_listener.local_addr().unwrap();
+    drop(reserved_listener);
+
+    reaction.start().await.unwrap();
+    reaction
+        .start()
+        .await
+        .expect_err("an already started reaction must not spawn another server");
+    assert_eq!(reaction.status().await, ComponentStatus::Running);
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/events"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    reaction.stop().await.unwrap();
 }
