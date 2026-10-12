@@ -268,21 +268,23 @@ pub(crate) struct AdmissionLease {
 impl AdmissionLease {
     pub(crate) async fn process(
         &mut self,
+        quiesce: &mut tokio::sync::watch::Receiver<bool>,
         validate: impl FnOnce(&ChangeEnvelope) -> anyhow::Result<()> + Send,
-    ) -> Result<bool, PipeError> {
+    ) -> Result<Option<bool>, PipeError> {
         let request = tokio::select! {
             biased;
+            _ = quiesce.wait_for(|paused| *paused) => return Ok(None),
             _ = self.service.failed.notified() => {
                 let mut failure = self.service.failure.lock().map_err(|_| backend("source failure observation poisoned"))?;
                 return match failure.take() {
                     Some(reason) => Err(backend(format!("source worker failed: {reason}"))),
-                    None => Ok(false),
+                    None => Ok(Some(false)),
                 };
             }
             request = self.requests.recv() => request.ok_or(PipeError::Closed)?,
         };
         if request.cancelled() {
-            return Ok(false);
+            return Ok(Some(false));
         }
         let channel = &self.service.channel;
         let mut accepted = false;
@@ -313,7 +315,7 @@ impl AdmissionLease {
             }
         }
         self.service.channel.check()?;
-        Ok(accepted)
+        Ok(Some(accepted))
     }
 }
 
@@ -395,8 +397,9 @@ mod tests {
         ));
         first.report_failure("first worker failure").unwrap();
         first.report_failure("later worker failure").unwrap();
+        let (_pause, mut quiesce) = tokio::sync::watch::channel(false);
         let error = lease
-            .process(|_| panic!("failure must not validate data"))
+            .process(&mut quiesce, |_| panic!("failure must not validate data"))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("first worker failure"));
@@ -407,7 +410,9 @@ mod tests {
             .unwrap();
         let mut lease = first.bind().unwrap();
         let error = lease
-            .process(|_| panic!("startup failure must not validate data"))
+            .process(&mut quiesce, |_| {
+                panic!("startup failure must not validate data")
+            })
             .await
             .unwrap_err();
         assert!(error.to_string().contains("worker failed during startup"));

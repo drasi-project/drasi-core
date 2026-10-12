@@ -408,15 +408,40 @@ async fn native_consumers_resume_partial_fanout_with_shared_and_separate_journal
                         .map_err(|_| anyhow::anyhow!("expected two consumers"))?,
                     shared,
                 )?;
-                let result = tokio::time::timeout(TIMEOUT, graph.start()?).await?;
                 if fail {
-                    assert!(
-                        result.is_err(),
-                        "partial consumer handling must fail the graph"
-                    );
+                    let run = graph.start()?;
+                    let control = run.control();
+                    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
+                        tokio::join!(run, async {
+                            let mut observed = control.subscribe_observed();
+                            observed
+                                .wait_for(|state| {
+                                    state.components[&id("left")].failure.is_some()
+                                        && state.components[&id("right")].exhausted
+                                })
+                                .await
+                                .unwrap();
+                            let state = control.observed();
+                            let failure = state.components[&id("left")].failure.as_ref().unwrap();
+                            assert_eq!(failure.phase, FailurePhase::Processing);
+                            assert_eq!(failure.disposition, FailureDisposition::Terminal);
+                            assert_eq!(
+                                state.components[&id("left")].lifecycle,
+                                ComponentLifecycle::Failed
+                            );
+                            assert_eq!(control.state(), GraphState::Running);
+                            assert_eq!(
+                                channels[1].progress().await.unwrap().processed["target"],
+                                1
+                            );
+                            control.cancel();
+                        })
+                    })
+                    .await?;
+                    assert!(matches!(result, Err(GraphError::Cancelled)));
                     assert_eq!(channels[0].progress().await?.processed["target"], 0);
                 } else {
-                    result?;
+                    tokio::time::timeout(TIMEOUT, graph.start()?).await??;
                     for channel in &channels {
                         let progress = channel.progress().await?;
                         assert_eq!(
@@ -442,8 +467,10 @@ async fn native_consumers_resume_partial_fanout_with_shared_and_separate_journal
                     if name == "left" {
                         assert_eq!(counts.1, 3, "the confirmed prefix must not run twice");
                     } else {
-                        // Peer cancellation may interrupt one effect/progress handoff.
-                        assert!((3..=4).contains(&counts.1));
+                        assert_eq!(
+                            counts.1, 3,
+                            "the independent branch completed before cancellation"
+                        );
                     }
                 }
             }

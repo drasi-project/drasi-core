@@ -2272,8 +2272,7 @@ async fn graph_admission_mailbox_bounds_cancelled_requests_without_consuming_seq
 }
 
 #[tokio::test]
-async fn graph_admission_cancellation_fences_active_commit_and_closes_queued_requests() -> Result<()>
-{
+async fn graph_admission_drains_on_stop_and_fences_only_forced_cancellation() -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     for (before_commit, registration) in
         [(true, false), (false, false), (true, true), (false, true)]
@@ -2334,27 +2333,38 @@ async fn graph_admission_cancellation_fences_active_commit_and_closes_queued_req
                 let mut queued = Box::pin(admission.admit(&session, 2, &next));
                 assert!(futures::poll!(&mut queued).is_pending());
                 if stop_source {
-                    let stopped = control
-                        .stop_components(
-                            GraphRevision(1),
-                            GraphSelection::Exact(vec![ComponentId::try_new("source")?]),
-                        )
-                        .await?;
+                    let stop = control.stop_components(
+                        GraphRevision(1),
+                        GraphSelection::Exact(vec![ComponentId::try_new("source")?]),
+                    );
+                    tokio::pin!(stop);
+                    let source = ComponentId::try_new("source")?;
+                    let mut observed = control.subscribe_observed();
+                    tokio::select! {
+                        result = &mut stop => panic!("stop cancelled a submitted journal write: {result:?}"),
+                        state = observed.wait_for(|state| state.components[&source].lifecycle == ComponentLifecycle::Quiescing) => { state?; }
+                    }
+                    assert!(futures::poll!(&mut active).is_pending());
+                    assert!(futures::poll!(&mut queued).is_pending());
+                    gate.resume.notify_one();
+                    active.await?;
+                    let stopped = stop.await?;
                     assert_eq!(stopped.summary, OperationSummary::Completed, "{stopped:?}");
+                    channel.progress().await?;
                 } else {
                     control.cancel();
-                }
-                let error = active.await.unwrap_err();
-                if registration {
-                    assert!(matches!(error, PipeError::AcknowledgementUnknown { .. }));
-                } else {
-                    assert!(matches!(error, PipeError::AcceptanceUnknown { .. }));
+                    let error = active.await.unwrap_err();
+                    if registration {
+                        assert!(matches!(error, PipeError::AcknowledgementUnknown { .. }));
+                    } else {
+                        assert!(matches!(error, PipeError::AcceptanceUnknown { .. }));
+                    }
+                    assert!(
+                        channel.progress().await.is_err(),
+                        "cancelled transaction must fence cached state"
+                    );
                 }
                 assert!(matches!(queued.await, Err(PipeError::Closed)));
-                assert!(
-                    channel.progress().await.is_err(),
-                    "cancelled transaction must fence cached state"
-                );
                 Ok::<_, anyhow::Error>(())
             };
             let (result, client) = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2370,13 +2380,14 @@ async fn graph_admission_cancellation_fences_active_commit_and_closes_queued_req
             graph.shutdown().await?;
             channel.shutdown().await?;
             let reopened = persistent(directory.path(), desired).await?;
+            let committed = stop_source || !before_commit;
             assert_eq!(
                 reopened.admission_receipt(&session, 1).await?.is_some(),
-                !before_commit && !registration
+                committed && !registration
             );
             assert_eq!(
                 reopened
-                    .admission_receipt(&session, if before_commit || registration { 1 } else { 2 })
+                    .admission_receipt(&session, if !committed || registration { 1 } else { 2 })
                     .await?,
                 None
             );
@@ -2386,7 +2397,7 @@ async fn graph_admission_cancellation_fences_active_commit_and_closes_queued_req
                     producer: ComponentId::try_new("next-client")?,
                     epoch: session.epoch + 1,
                 };
-                if before_commit {
+                if !committed {
                     rejected(
                         reopened.producer_status(&next).await.unwrap_err(),
                         AdmissionRejection::SessionExpired,

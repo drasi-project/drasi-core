@@ -14,11 +14,13 @@
 
 //! Volatile, low-volume peer notifications on dedicated bounded control queues.
 //!
-//! Sends never await queue capacity, data operations, or handlers. They briefly
+//! Public sends never await queue capacity, data operations, or handlers. They briefly
 //! serialize against other control/topology operations and reserve capacity for
 //! every recipient before enqueueing anything. An error accepts no messages and
 //! changes no readiness state. Success means enqueue acceptance, not handling,
 //! durability, or survival of receiver cancellation.
+//! Graph-owned status notices instead coalesce per peer, direction and category,
+//! independently of command capacity, and are invalidated by the same topology tokens.
 //!
 //! Each queue bounds message count; notification contents and JSON nesting have
 //! separate limits. Caller-owned allocations and in-flight handlers are outside
@@ -144,6 +146,68 @@ impl fmt::Debug for ComponentControl {
 }
 
 impl ComponentControl {
+    /// Graph-owned state notification. Latest state is retained per peer/category,
+    /// independently of the bounded custom-command queue.
+    pub(crate) fn publish_status(
+        &self,
+        direction: ControlDirection,
+        notification: ControlNotification,
+    ) -> Result<(), ControlError> {
+        let plane = self.plane.upgrade().ok_or(ControlError::PlaneClosed)?;
+        notification.validate_payload()?;
+        let category = match notification {
+            ControlNotification::Ready | ControlNotification::NotReady => 0,
+            ControlNotification::Available | ControlNotification::Unavailable { .. } => 1,
+            ControlNotification::Custom { .. } => {
+                return self.notify(Target::Direction(direction), notification)
+            }
+        };
+        let mut state = plane.lock_open()?;
+        state.validate_attachment(&self.id, self.generation, &self.attachment)?;
+        let recipients = state.recipients(&self.id, Target::Direction(direction))?;
+        for (recipient, direction, connection) in recipients {
+            let Some(endpoint) = state.components.get(&recipient) else {
+                continue;
+            };
+            let message = PeerMessage {
+                from: self.id.clone(),
+                generation: self.generation,
+                direction,
+                notification: notification.clone(),
+                recipient: recipient.clone(),
+                recipient_generation: endpoint.generation,
+                sender_attachment: self.attachment.clone(),
+                recipient_attachment: endpoint.attachment.clone(),
+                connection,
+            };
+            let direction_key = match direction {
+                ControlDirection::Upstream => 0,
+                ControlDirection::Downstream => 2,
+            };
+            state.pending_status.insert(
+                (recipient, self.id.clone(), direction_key + category),
+                message,
+            );
+        }
+        if matches!(
+            notification,
+            ControlNotification::Ready | ControlNotification::NotReady
+        ) {
+            state
+                .components
+                .get_mut(&self.id)
+                .expect("validated attachment")
+                .ready = notification == ControlNotification::Ready;
+        }
+        drop(state);
+        plane.changed();
+        Ok(())
+    }
+
+    pub(crate) fn publish_not_ready(&self) -> Result<(), ControlError> {
+        self.publish_status(ControlDirection::Upstream, ControlNotification::NotReady)
+    }
+
     pub fn id(&self) -> &ComponentId {
         &self.id
     }
@@ -279,6 +343,7 @@ struct State {
     closed: bool,
     components: BTreeMap<ComponentId, Endpoint>,
     connections: BTreeMap<(ComponentId, ComponentId), Arc<()>>,
+    pending_status: BTreeMap<(ComponentId, ComponentId, u8), PeerMessage>,
 }
 
 enum Target<'a> {
@@ -287,6 +352,33 @@ enum Target<'a> {
 }
 
 impl State {
+    fn prune_status(&mut self) {
+        self.pending_status.retain(|_, message| {
+            let valid = |id: &ComponentId, generation, attachment: &Arc<()>| {
+                self.components.get(id).is_some_and(|endpoint| {
+                    endpoint.generation == generation
+                        && Arc::ptr_eq(&endpoint.attachment, attachment)
+                })
+            };
+            let pair = match message.direction {
+                ControlDirection::Downstream => (message.from.clone(), message.recipient.clone()),
+                ControlDirection::Upstream => (message.recipient.clone(), message.from.clone()),
+            };
+            valid(
+                &message.from,
+                message.generation,
+                &message.sender_attachment,
+            ) && valid(
+                &message.recipient,
+                message.recipient_generation,
+                &message.recipient_attachment,
+            ) && self
+                .connections
+                .get(&pair)
+                .is_some_and(|connection| Arc::ptr_eq(connection, &message.connection))
+        });
+    }
+
     fn validate_attachment(
         &self,
         id: &ComponentId,
@@ -352,7 +444,90 @@ pub(crate) struct ControlPlane {
     weak_self: Weak<Self>,
 }
 
+pub(crate) struct ControlTopologyCommit<'a> {
+    plane: &'a ControlPlane,
+    state: MutexGuard<'a, State>,
+    removed: Vec<ComponentId>,
+    connections: BTreeMap<(ComponentId, ComponentId), Arc<()>>,
+}
+
+impl ControlTopologyCommit<'_> {
+    pub(crate) fn commit(mut self) {
+        for id in &self.removed {
+            self.state.components.remove(id);
+        }
+        self.state.connections = self.connections;
+        self.state.prune_status();
+        drop(self.state);
+        self.plane.changed();
+    }
+}
+
 impl ControlPlane {
+    pub(crate) fn take_status(
+        &self,
+        id: &ComponentId,
+        generation: ComponentGeneration,
+    ) -> Result<Option<PeerMessage>, ControlError> {
+        let mut state = self.lock_open()?;
+        if !state
+            .components
+            .get(id)
+            .is_some_and(|endpoint| endpoint.generation == generation)
+        {
+            return Err(ControlError::StaleComponent {
+                id: id.clone(),
+                generation,
+            });
+        }
+        let key = state
+            .pending_status
+            .keys()
+            .find(|(recipient, _, _)| recipient == id)
+            .cloned();
+        Ok(key.and_then(|key| state.pending_status.remove(&key)))
+    }
+
+    pub(crate) fn prepare_topology_commit(
+        &self,
+        removed: &[(ComponentId, ComponentGeneration)],
+        pairs: BTreeSet<(ComponentId, ComponentId)>,
+        rebound: &BTreeSet<(ComponentId, ComponentId)>,
+    ) -> Result<ControlTopologyCommit<'_>, ControlError> {
+        Self::validate_connections(&pairs)?;
+        let state = self.lock_open()?;
+        for (id, generation) in removed {
+            if !state
+                .components
+                .get(id)
+                .is_some_and(|endpoint| endpoint.generation == *generation)
+            {
+                return Err(ControlError::StaleComponent {
+                    id: id.clone(),
+                    generation: *generation,
+                });
+            }
+        }
+        let connections = pairs
+            .into_iter()
+            .map(|pair| {
+                let token = state
+                    .connections
+                    .get(&pair)
+                    .filter(|_| !rebound.contains(&pair))
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(()));
+                (pair, token)
+            })
+            .collect();
+        Ok(ControlTopologyCommit {
+            plane: self,
+            state,
+            removed: removed.iter().map(|(id, _)| id.clone()).collect(),
+            connections,
+        })
+    }
+
     pub(crate) fn new(capacity: usize) -> Result<Arc<Self>, ControlError> {
         if capacity == 0 || capacity > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(ControlError::InvalidCapacity { capacity });
@@ -393,6 +568,7 @@ impl ControlPlane {
                 ready: false,
             },
         );
+        state.prune_status();
         let control = ComponentControl {
             id,
             generation,
@@ -448,6 +624,7 @@ impl ControlPlane {
             }
         }
         state.components.remove(id);
+        state.prune_status();
         drop(state);
         self.changed();
         Ok(())
@@ -467,6 +644,7 @@ impl ControlPlane {
         state.closed = true;
         state.components.clear();
         state.connections.clear();
+        state.pending_status.clear();
         drop(state);
         self.changed();
         Ok(())
@@ -489,6 +667,7 @@ impl ControlPlane {
         let connections = pairs.into_iter().map(|pair| (pair, Arc::new(()))).collect();
         let mut state = self.lock_open()?;
         state.connections = connections;
+        state.prune_status();
         drop(state);
         self.changed();
         Ok(())
@@ -525,6 +704,7 @@ impl ControlPlane {
             })
             .collect();
         state.connections = connections;
+        state.prune_status();
         drop(state);
         self.changed();
         Ok(())
@@ -765,6 +945,78 @@ mod tests {
                     .map(|(upstream, downstream)| (id(upstream), id(downstream))),
             )
             .expect("connect components");
+    }
+
+    #[test]
+    fn graph_status_survives_saturated_custom_queues_and_coalesces_per_peer() {
+        let plane = ControlPlane::new(1).unwrap();
+        let (source, _) = attach(&plane, "source");
+        let (first, mut first_queue) = attach(&plane, "first");
+        let (second, mut second_queue) = attach(&plane, "second");
+        connect(&plane, &[("source", "first"), ("source", "second")]);
+        source
+            .notify_downstream(ControlNotification::Custom {
+                kind: "occupied".into(),
+                payload: Value::Null,
+            })
+            .unwrap();
+        for sequence in 0..128 {
+            source
+                .publish_status(
+                    ControlDirection::Downstream,
+                    ControlNotification::Unavailable {
+                        reason: format!("failure {sequence}"),
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(plane.state.lock().unwrap().pending_status.len(), 2);
+        for peer in [&first, &second] {
+            let message = plane
+                .take_status(peer.id(), peer.generation())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                message.notification,
+                ControlNotification::Unavailable {
+                    reason: "failure 127".into()
+                }
+            );
+            plane.validate_delivery(&message).unwrap();
+        }
+        assert!(matches!(
+            first_queue.try_recv().unwrap().notification,
+            ControlNotification::Custom { .. }
+        ));
+        assert!(matches!(
+            second_queue.try_recv().unwrap().notification,
+            ControlNotification::Custom { .. }
+        ));
+        assert!(plane.state.lock().unwrap().pending_status.is_empty());
+    }
+
+    #[test]
+    fn graph_readiness_revocation_does_not_wait_for_a_full_peer_queue_and_rebind_discards_stale_status(
+    ) {
+        let plane = ControlPlane::new(1).unwrap();
+        let (source, _queued) = attach(&plane, "source");
+        let (sink, _) = attach(&plane, "sink");
+        connect(&plane, &[("source", "sink")]);
+        sink.ready().unwrap();
+        assert!(plane.downstream_ready(source.id()));
+        sink.publish_not_ready().unwrap();
+        assert!(!plane.downstream_ready(source.id()));
+        assert_eq!(plane.state.lock().unwrap().pending_status.len(), 1);
+        plane
+            .sync_connections([(id("source"), id("sink"))], [(id("source"), id("sink"))])
+            .unwrap();
+        assert!(plane
+            .take_status(source.id(), source.generation())
+            .unwrap()
+            .is_none());
+        sink.publish_not_ready().unwrap();
+        plane.remove(source.id(), source.generation()).unwrap();
+        assert!(plane.state.lock().unwrap().pending_status.is_empty());
     }
 
     #[test]

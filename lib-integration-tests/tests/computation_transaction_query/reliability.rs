@@ -42,6 +42,7 @@ fn source_input(
     source: &str,
     key: u64,
     sequence: u64,
+    source_time: u64,
     properties: serde_json::Value,
     insert: bool,
 ) -> Result<InputEnvelope> {
@@ -53,8 +54,7 @@ fn source_input(
             } else {
                 "Customer"
             })]),
-            // Deliberately disagree with arrival order across and within producers.
-            effective_from: 10_000 - sequence,
+            effective_from: source_time,
         },
         properties: ElementPropertyMap::from(properties),
     };
@@ -115,13 +115,19 @@ async fn mixed_source_recovery() -> Result<()> {
     let mut orders = BTreeMap::new();
     let mut customers = BTreeMap::new();
     let mut last = BTreeMap::<&str, InputEnvelope>::new();
+    let mut frontiers = BTreeMap::<(&str, u64), u64>::new();
+    let mut admitted = 0;
+    let mut skipped = 0;
     for cycle in 0..64_u64 {
         let sequence = cycle + 1;
         let key = cycle % 4;
+        // Reverse each sixteen-change block, then advance beyond every previous frontier.
+        let source_time = 10_000 + (cycle / 16) * 16 + (15 - cycle % 16);
         let order = source_input(
             "orders",
             key,
             sequence,
+            source_time,
             serde_json::json!({
                 "customerId":key, "amount":sequence
             }),
@@ -132,6 +138,7 @@ async fn mixed_source_recovery() -> Result<()> {
             "customers",
             key,
             sequence,
+            source_time,
             serde_json::json!({
                 "id":key, "region":region
             }),
@@ -143,14 +150,30 @@ async fn mixed_source_recovery() -> Result<()> {
             [("customers", customer), ("orders", order)]
         };
         for (source, input) in arrivals {
-            if source == "orders" {
-                orders.insert(key, sequence as i64);
+            if frontiers
+                .get(&(source, key))
+                .is_none_or(|latest| source_time >= *latest)
+            {
+                frontiers.insert((source, key), source_time);
+                admitted += 1;
+                if source == "orders" {
+                    orders.insert(key, sequence as i64);
+                } else {
+                    customers.insert(key, region.clone());
+                }
             } else {
-                customers.insert(key, region.clone());
+                skipped += 1;
             }
             let output = query.transform(input.clone()).await?;
             query.delivery_completed(&output).await?;
             assert_joined(&query, &orders, &customers)?;
+            assert_eq!(
+                progress.snapshot().checkpoints
+                    [&SourceProgressKey::Stream(StreamId::try_new(format!("{source}/out"))?)]
+                    .sequence,
+                sequence,
+                "skipping stale state still commits the source input frontier"
+            );
             last.insert(source, input);
         }
         if cycle % 8 == 7 {
@@ -173,6 +196,7 @@ async fn mixed_source_recovery() -> Result<()> {
             assert_joined(&query, &orders, &customers)?;
         }
     }
+    assert_eq!((admitted, skipped), (32, 96));
     query.stop().await?;
     Ok(())
 }

@@ -445,14 +445,18 @@ async fn stop_ready_continuation() {
         while progressed.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-        let report = control
-            .stop_components(GraphRevision(1), GraphSelection::All)
-            .await
-            .unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(2),
+            control.stop_components(GraphRevision(1), GraphSelection::All),
+        )
+        .await
+        .expect("stop must remain bounded")
+        .unwrap();
         assert_eq!(report.summary, OperationSummary::Completed);
-        assert!(
-            progressed.load(Ordering::SeqCst) < 4096,
-            "continuations starved control"
+        assert_eq!(
+            progressed.load(Ordering::SeqCst),
+            4096,
+            "graceful stop completes the admitted input's continuations"
         );
         control.cancel();
     });

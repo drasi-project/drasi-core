@@ -8,8 +8,9 @@ solution *with* Drasi, use the [application developer guide](developer-guide/REA
 For exact signatures and configuration fields, use the
 [implementation reference](computation-graph-reference.md).
 
-For current priorities and completion criteria, see the
-[remaining-work inventory](computation-graph-remaining-work.md).
+For the single current list of outstanding work, including design/code-review
+findings, scope, priorities and completion criteria, see the
+[consolidated inventory](computation-graph-remaining-work.md).
 
 ComputationGraph makes the processing topology an executable, owned structure.
 It decides which component instances exist, which connections they use, when
@@ -277,6 +278,42 @@ The controller's `begin_start`, `advance_start` and `complete` paths connect
 them. Use [addition/control tests](../tests/computation_addition_control.rs)
 when changing acceptance, readiness or reported failures.
 
+### Returned failures belong to nodes, not the controller
+
+`GraphError::failure_disposition` is the common classification policy.
+`ComponentOperationError` carries an explicit disposition and the original
+typed cause through `anyhow` context. Recognized transient I/O is retryable;
+unclassified errors, invalid output/protocol, corruption, failed rollback,
+uncertain acceptance/acknowledgement and partial fan-out are terminal.
+Retryable is eligibility for recovery, not proof of rollback or permission to
+reuse an owner whose transaction or cleanup is fenced.
+
+A returned component error leaves its generation failed and inspectable.
+Independent branches and management continue. Both `run()` and an automatically
+started scope retain failed nodes; `start()` completes naturally only when the
+finite work ends without remaining failures. Observe the failure or await a
+lifecycle report rather than expecting `GraphRun` to terminate on a node error.
+Explicit stop/start or reconstruction remains subject to cleanup and recovery
+checks. No implicit retry restarts an unchanged terminal failure.
+
+Managed reconciliation attempts a retryable member at most once per explicit
+reconciliation request. There is no background reconstruction retry scheduler.
+`DeliveryRunner` separately applies its configured attempt limit and delay
+(one attempt by default); an exhausted handling budget becomes terminal instead
+of implicitly resetting the budget through graph reconciliation.
+
+Control-handler errors are recorded with `FailurePhase::Control` and degraded
+health; the inbox is rearmed so a rejected custom message cannot disable later
+requests. Graph-generated readiness/availability notices use a separate
+latest-state slot per connected peer, direction and category, so a full custom
+queue cannot suppress them. They are not an event history. Public command
+fan-out still reserves every recipient atomically or accepts none. Rebind and
+replacement invalidate both kinds of stale messages.
+
+This policy handles returned errors, not a new panic-isolation boundary.
+Unwinding containment and protection against native aborts/memory faults remain
+separate unfinished work.
+
 ### Stale work cannot act on a replacement
 
 Several identities solve different races. A graph revision identifies the
@@ -469,6 +506,44 @@ same input against already-updated state.
 Use [query fault tests](../tests/computation_query_faults.rs) and
 [query recovery tests](../tests/computation_query_recovery.rs) when changing
 these boundaries, not only happy-path result tests.
+
+### Mutation integrity uses source time
+
+The shared evaluator admits mutations by source-scoped element identity and
+`ElementMetadata.effective_from` (epoch milliseconds). This is not receipt time,
+transport sequence, a property, or the source-time merger's arrival policy.
+Strictly older inserts, updates and deletes are skipped with a structured warning
+containing the identity and incoming/stored timestamps. Processing continues and
+the native query commits input progress even when no result changes.
+
+Equal-time distinct changes follow admitted order; an identical full element is
+a no-op. Insert against an existing identity is a full-row upsert: retract the old
+contribution before adding the new one, removing omitted properties. Update
+preserves sparse-property merge semantics. A live identity cannot change between
+node and relationship; a typed error rejects the mutation. A deletion, including
+deletion of an absent element, writes a source-time tombstone. Newer recreation
+clears it in the same index transaction. Equal-time recreation follows the same
+admitted-order rule.
+
+Deletion frontiers use the appended `ResultOwner::ElementTombstone` namespace,
+not a separate volatile map. They survive reconstruction, participate in actual
+rollback and bypass caches that have no rollback hooks. There is no automatic
+frontier garbage collection: one record per deleted identity remains until
+recreation or explicit state reset. Safe pruning needs a source watermark/
+retention contract; elapsed wall time is not sufficient.
+
+Native query configuration identities are version 5 (ordinary change inputs)
+and 6 (complete source transactions), including the shared mutation-semantics
+version. Stored identities from the earlier semantics are intentionally rejected
+as `ConfigurationChanged`, not silently reused or migrated. Plan an explicit
+reset/rebootstrap or a separate migration while preserving pending delivery
+obligations. Older stores cannot reconstruct missing deletion history from live
+rows alone. Changing source clocks or correcting a value with an older timestamp
+also requires an explicit upstream policy, not bypassing the guard.
+
+[Mutation integrity tests](../tests/computation_mutation_integrity.rs) exercise
+real RocksDB rollback/reopen, input checkpoints, independent result models and
+rejection of incompatible stored identities.
 
 ### A source transaction is more than a vector of changes
 
@@ -773,6 +848,29 @@ resources. `GraphRun` drop can mark cleanup required; only awaited async
 cleanup can finish it. DrasiLib stop permits supported restart, whereas
 shutdown is terminal.
 
+Graceful graph/component stop first quiesces selected producers upstream to
+downstream and drains selected edges. Once an input is admitted to a transformer
+or sink, its call, continuations, forwarding and required acknowledgement finish
+before stop hooks run. Graph-owned source admission similarly finishes a
+submitted journal/registration transaction; quiescence cancels only the wait
+for another request, then rejects queued requests without claiming acceptance.
+Pending activations remain represented in their original start report until
+the stop explicitly supersedes them.
+
+A graceful boundary timeout is an explicit failure, not a forced abort or
+successful stop. The in-flight operation remains owned; eligible paused members
+are resumed, every resume failure retains its component identity, and a later
+stop can retry after work completes. `GraphControl::cancel()` and dropping a run
+are the explicit force-cancellation paths; they can interrupt writes, fence
+owners and require reconstruction. Idle `next`/receive/service waits still have
+their cancellation contract, and unfinished construction/start may be cancelled.
+No graceful deadline can preempt a plugin blocking the executor thread.
+
+Use [graceful-stop tests](../tests/computation_graceful_stop.rs) for blocked
+handlers, real durable continuations and deadline/retry behavior. Native
+admission tests also compare graceful drain with forced cancellation on both
+sides of the actual journal commit.
+
 Use [runtime lifecycle tests](../tests/computation_runtime_lifecycle.rs),
 [resource dependency tests](../tests/computation_resource_dependencies.rs)
 and [`core/src/computation/io_scope.rs`](../../core/src/computation/io_scope.rs)
@@ -799,12 +897,21 @@ calculation and reconciliation rules;
 the lifecycle work. [Reconciliation tests](../tests/computation_reconciliation.rs)
 exercise stale previews, partial outcomes and unaffected components.
 
-Committing the desired topology is the dividing line for errors. Before
-commit, an error rejects the request. After commit, `execute` always returns
+Committing the desired topology is the dividing line for errors. Counter,
+slot-ownership, prepared ordering and peer-attachment checks finish before the
+first live mutation. The commit holds every required slot lease and the actual
+peer-topology lock, then mutates without a fallible return. Plugin-backed
+transports, handlers and retired objects are released only after that lock is
+released. One inspection publication contains the new desired/observed revision.
+Precommit rejection preserves the old topology; this does not roll back earlier
+draining, stop hooks or external cleanup.
+
+After commit, `execute` always returns
 the `ReconciliationReport` with `committed` set; only cancellation returns an
 error. Realization, recovery-validation, settle and startup failures are
-recorded in `report.failures`, and producers paused for the change are always
-resumed. If the graph has not settled, or another lifecycle operation owns the
+recorded in `report.failures`. Resumption attempts every eligible paused producer,
+aggregates failures and leaves unsuccessful members visibly quiesced/unavailable.
+If the graph has not settled, or another lifecycle operation owns the
 controller, components marked for automatic start are queued in
 `pending_auto_start` and the controller starts them once it is free. A caller
 must therefore read the report, not just the `Result`, to learn whether the

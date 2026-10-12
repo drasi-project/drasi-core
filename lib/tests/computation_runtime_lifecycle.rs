@@ -880,10 +880,16 @@ async fn provider_failure_before_start_is_visible_and_terminal() {
     .build()
     .unwrap();
     assert_eq!(creates.load(Ordering::SeqCst), 0);
-    assert!(matches!(
-        graph.start().unwrap().await,
-        Err(GraphError::StartupIncomplete)
-    ));
+    let run = graph.start().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        let report = control.startup_report().await.unwrap();
+        assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+        assert_eq!(control.state(), GraphState::Running);
+        assert_eq!(control.desired_snapshot().nodes.len(), 2);
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
     assert!(matches!(
         graph
             .observed()
@@ -899,7 +905,7 @@ async fn provider_failure_before_start_is_visible_and_terminal() {
         GraphError::Pipe { .. }
     ));
     assert!(signals.starts.lock().unwrap().is_empty());
-    assert_eq!(graph.state(), GraphState::Failed);
+    assert_eq!(graph.state(), GraphState::Cancelled);
 }
 
 #[test]
@@ -1350,8 +1356,28 @@ async fn fanout_send_failure_reports_prior_branch_acceptance_without_retry() {
     )
     .build()
     .unwrap();
-    let error = graph.start().unwrap().await.unwrap_err();
-    match error.underlying() {
+    let run = graph.start().unwrap();
+    let control = run.control();
+    let (result, failure) = tokio::join!(run, async {
+        let mut observed = control.subscribe_observed();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            observed.wait_for(|state| state.components[&component("source")].failure.is_some()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let failure = control.observed().components[&component("source")]
+            .failure
+            .clone()
+            .unwrap();
+        assert_eq!(failure.disposition, FailureDisposition::Terminal);
+        assert_eq!(control.state(), GraphState::Running);
+        control.cancel();
+        failure
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    match failure.cause.underlying() {
         GraphError::Forward {
             accepted_branches,
             source,
@@ -1365,7 +1391,7 @@ async fn fanout_send_failure_reports_prior_branch_acceptance_without_retry() {
         other => panic!("expected partial fanout failure, got {other}"),
     }
     assert_eq!(signals.produced.load(Ordering::SeqCst), 1);
-    assert_eq!(graph.state(), GraphState::Failed);
+    assert_eq!(graph.state(), GraphState::Cancelled);
 }
 
 #[tokio::test]
@@ -1411,15 +1437,34 @@ async fn clean_restart_retains_sequence_state_and_rejects_regression() {
         .build()
         .unwrap();
         graph.start().unwrap().await.unwrap();
-        let result = graph.start().unwrap().await;
         if matches!(behavior, Behavior::EmitOnStart) {
-            result.unwrap();
+            graph.start().unwrap().await.unwrap();
             assert_eq!(signals.handled.load(Ordering::SeqCst), 2);
         } else {
-            assert!(matches!(
-                result.as_ref().err().map(GraphError::underlying),
-                Some(GraphError::Emission { .. })
-            ));
+            let run = graph.start().unwrap();
+            let control = run.control();
+            let (result, ()) = tokio::join!(run, async {
+                let mut observed = control.subscribe_observed();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    observed
+                        .wait_for(|state| state.components[&component("source")].failure.is_some()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let failed = control.observed().components[&component("source")]
+                    .failure
+                    .clone()
+                    .unwrap();
+                assert!(matches!(
+                    failed.cause.underlying(),
+                    GraphError::Emission { .. }
+                ));
+                assert_eq!(control.state(), GraphState::Running);
+                control.cancel();
+            });
+            assert!(matches!(result, Err(GraphError::Cancelled)));
             assert_eq!(signals.handled.load(Ordering::SeqCst), 1);
         }
         assert_eq!(signals.starts.lock().unwrap().len(), 4);

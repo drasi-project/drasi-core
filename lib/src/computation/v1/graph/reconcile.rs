@@ -26,6 +26,10 @@ use crate::computation::v1::{
 };
 use std::{future::Future, num::NonZeroUsize};
 
+#[cfg(test)]
+#[path = "reconcile_commit_tests.rs"]
+mod commit_tests;
+
 /// Desired mutations are descriptions, not constructed instances or resolved secrets.
 /// Supply new external instances/providers separately when executing the preview.
 #[derive(Debug, Clone)]
@@ -1624,7 +1628,14 @@ pub(super) async fn quiesce(
     cancel: &mut watch::Receiver<bool>,
     selected: BTreeSet<usize>,
 ) -> GraphResult<Vec<ComponentId>> {
-    if operations.starting.is_some() || operations.stopping.is_some() {
+    if operations.stopping.is_some()
+        || selected.iter().any(|index| {
+            operations
+                .active
+                .get(index)
+                .is_some_and(|active| active.operation != Operation::Process)
+        })
+    {
         return Err(GraphError::OperationInProgress);
     }
     let ids: BTreeSet<_> = selected
@@ -1669,7 +1680,12 @@ pub(super) async fn quiesce(
     .await;
     if let Err(error) = result {
         if !matches!(error, GraphError::Cancelled) {
-            resume(graph, operations, &ids)?;
+            if let Err(resume_error) = resume(graph, operations, &ids) {
+                return Err(GraphError::Cleanup {
+                    primary: Some(Box::new(error)),
+                    errors: vec![resume_error],
+                });
+            }
         }
         return Err(error);
     }
@@ -1725,6 +1741,7 @@ fn resume(
     operations: &mut Operations,
     ids: &BTreeSet<ComponentId>,
 ) -> GraphResult<()> {
+    let mut errors = Vec::new();
     for id in ids {
         let Some(&index) = graph.ids.get(id) else {
             continue;
@@ -1747,10 +1764,36 @@ fn resume(
                 state.components.get_mut(id).expect("component").lifecycle =
                     ComponentLifecycle::Running
             });
-            operations.launch(graph, index, Operation::Process)?;
+            if let Err(error) = operations.launch(graph, index, Operation::Process) {
+                operations.paused.insert(index);
+                let failed = failure(
+                    GraphError::Component {
+                        component: id.clone(),
+                        operation: "resume processing",
+                        source: error.into(),
+                    },
+                    FailurePhase::Activation,
+                );
+                update(graph, |state| {
+                    let node = state.components.get_mut(id).expect("component");
+                    node.lifecycle = ComponentLifecycle::Quiesced;
+                    node.health = ComponentHealth::Unavailable;
+                    node.failure = Some(failed.clone());
+                });
+                errors.push(GraphError::Reported {
+                    cause: failed.cause,
+                });
+            }
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(GraphError::Cleanup {
+            primary: None,
+            errors,
+        })
+    }
 }
 
 async fn stop_instance(
@@ -2086,7 +2129,17 @@ pub(super) async fn execute(
         )?;
         return Ok(report);
     }
-    commit_desired(graph, operations, controls, &plan, &mut prepared)?;
+    if let Err(error) = commit_desired(graph, operations, controls, &plan, &mut prepared) {
+        report.failures.push(failure(error, FailurePhase::Binding));
+        report.summary = OperationSummary::CompletedWithFailures;
+        let resumed = resume(
+            graph,
+            operations,
+            &plan.pause.difference(&stop).cloned().collect(),
+        );
+        record_committed(&mut report, FailurePhase::Activation, resumed)?;
+        return Ok(report);
+    }
     if defer_activation {
         graph.deferred_activation.extend(
             plan.create
@@ -2099,6 +2152,24 @@ pub(super) async fn execute(
     report.revision = graph.snapshot.revision;
     report.committed = true;
     report.removed = plan.remove.clone();
+    for index in graph.order.clone() {
+        if !operations.active.contains_key(&index) {
+            if let Err(error) = operations.attach_control(graph, index) {
+                let failed = failure(error, FailurePhase::Binding);
+                update(graph, |state| {
+                    let node = state
+                        .components
+                        .get_mut(graph.nodes[index].descriptor.id())
+                        .expect("committed node");
+                    node.failure = Some(failed.clone());
+                    node.health = ComponentHealth::Unavailable;
+                });
+                report.failures.push(failed);
+            }
+        }
+    }
+    let connections = operations.refresh_connections(graph);
+    record_committed(&mut report, FailurePhase::Binding, connections)?;
     // The desired topology is now published and observable, so the caller must
     // receive this report: from here on only controller cancellation aborts, and
     // every other failure is recorded against the committed revision.
@@ -2375,6 +2446,31 @@ fn commit_desired(
     plan: &ReconciliationPreview,
     prepared: &mut Prepared,
 ) -> GraphResult<()> {
+    let next_generation = graph
+        .next_generation
+        .checked_add(
+            u64::try_from(prepared.components.len())
+                .map_err(|_| topology("too many component generations"))?,
+        )
+        .ok_or_else(|| topology("construction generation exhausted"))?;
+    let next_edge = graph
+        .next_edge
+        .checked_add(prepared.pipes.len())
+        .ok_or_else(|| topology("relationship generation exhausted"))?;
+    let next_binding = graph
+        .next_binding_generation
+        .checked_add(
+            u64::try_from(plan.rebind.len())
+                .map_err(|_| topology("too many binding generations"))?,
+        )
+        .ok_or_else(|| topology("binding generation exhausted"))?;
+    let next_resource = graph
+        .next_resource_generation
+        .checked_add(
+            u64::try_from(plan.resources.len())
+                .map_err(|_| topology("too many resource generations"))?,
+        )
+        .ok_or_else(|| topology("resource generation exhausted"))?;
     let old_edges: Vec<_> = graph
         .edges
         .iter()
@@ -2383,48 +2479,155 @@ fn commit_desired(
         })
         .map(|(index, _)| *index)
         .collect();
+    let mut required = BTreeSet::new();
+    for index in &old_edges {
+        let edge = &graph.edges[index];
+        for endpoint in [&edge.definition.from, &edge.definition.to] {
+            required.insert(
+                *graph
+                    .ids
+                    .get(&endpoint.component)
+                    .ok_or_else(|| topology("edge endpoint is missing"))?,
+            );
+        }
+    }
+    let mut retired_controls = Vec::new();
+    for id in plan.remove.iter().chain(prepared.components.keys()) {
+        if let Some(&index) = graph.ids.get(id) {
+            required.insert(index);
+            retired_controls.push((id.clone(), graph.components[index].generation));
+        } else if plan.remove.contains(id) {
+            return Err(GraphError::StaleGeneration);
+        }
+    }
+    let mut leases = BTreeMap::new();
+    for index in required {
+        leases.insert(index, graph.components[index].take()?);
+    }
+    let mut future_ids = graph.ids.clone();
+    for id in &plan.remove {
+        future_ids.remove(id);
+    }
+    let mut next_index = graph.components.len();
+    for node in &prepared.nodes {
+        let id = node.descriptor.id();
+        if !future_ids.contains_key(id) {
+            if !prepared.components.contains_key(id) {
+                return Err(topology("new component has no prepared instance"));
+            }
+            future_ids.insert(id.clone(), next_index);
+            next_index = next_index
+                .checked_add(1)
+                .ok_or_else(|| topology("component index exhausted"))?;
+        }
+    }
+    let order = prepared
+        .order
+        .iter()
+        .map(|index| {
+            prepared
+                .nodes
+                .get(*index)
+                .and_then(|node| future_ids.get(node.descriptor.id()))
+                .copied()
+                .ok_or_else(|| topology("prepared ordering references a missing component"))
+        })
+        .collect::<GraphResult<Vec<_>>>()?;
+    let pairs = prepared
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.definition.from.component.clone(),
+                edge.definition.to.component.clone(),
+            )
+        })
+        .chain(plan.desired.control_connections.iter().cloned())
+        .chain(plan.desired.subscriptions.iter().cloned())
+        .collect();
+    let rebound = plan
+        .rebind
+        .iter()
+        .map(|edge| (edge.from.component.clone(), edge.to.component.clone()))
+        .collect();
+    let mut replacements = BTreeMap::new();
+    for ((id, component), generation) in std::mem::take(&mut prepared.components)
+        .into_iter()
+        .zip(graph.next_generation..next_generation)
+    {
+        let slot = InstanceSlot::new(component, ComponentGeneration(generation));
+        let lease = slot.take()?;
+        replacements.insert(id, (slot, lease));
+    }
+    let peers = graph.peers.clone();
+    let peer_commit = peers.prepare_topology_commit(&retired_controls, pairs, &rebound)?;
+    let binding_generations: BTreeMap<_, _> = plan
+        .rebind
+        .iter()
+        .cloned()
+        .zip(graph.next_binding_generation..next_binding)
+        .collect();
+    let resource_generations: BTreeMap<_, _> = plan
+        .resources
+        .iter()
+        .cloned()
+        .zip(graph.next_resource_generation..next_resource)
+        .collect();
+    // Every fallible ownership/counter check precedes the first mutation.
+    let mut cancelled_controls = Vec::new();
+    let mut retired_instances = Vec::new();
+    let mut retired_providers = Vec::new();
+    let mut retired_outputs = Vec::new();
+    let mut retired_inputs = Vec::new();
+    let mut retired_handlers = Vec::new();
     for index in old_edges {
         operations.invalidated_bindings.remove(&index);
         let edge = graph.edges.remove(&index).expect("edge");
         if let Some(control) = controls.0.remove(&index) {
-            control.cancel();
+            cancelled_controls.push(control);
         }
-        graph.providers.remove(&index);
+        if let Some(provider) = graph.providers.remove(&index) {
+            retired_providers.push(provider);
+        }
         let from = graph.ids[&edge.definition.from.component];
         let to = graph.ids[&edge.definition.to.component];
-        graph.components[from]
-            .take()?
-            .outputs
-            .retain(|output| output.edge != index);
-        graph.components[to]
-            .take()?
-            .inputs
-            .retain(|input| input.edge != index);
+        let outputs = &mut leases
+            .get_mut(&from)
+            .expect("prepared source lease")
+            .outputs;
+        for output in std::mem::take(outputs) {
+            if output.edge == index {
+                retired_outputs.push(output);
+            } else {
+                outputs.push(output);
+            }
+        }
+        let inputs = &mut leases.get_mut(&to).expect("prepared receiver lease").inputs;
+        for input in std::mem::take(inputs) {
+            if input.edge == index {
+                retired_inputs.push(input);
+            } else {
+                inputs.push(input);
+            }
+        }
     }
     for id in &plan.remove {
         let index = graph.ids.remove(id).expect("removed component");
         graph.deferred_activation.remove(id);
         graph.reported_resources.remove(id);
-        operations.retire_control(graph, index)?;
-        let mut lease = graph.components[index].take()?;
-        lease.value.take();
+        retired_handlers.push(index);
+        let lease = leases.get_mut(&index).expect("prepared removal lease");
+        retired_instances.extend(lease.value.take());
         operations.paused.remove(&index);
         operations.exhausted.remove(&index);
     }
     for node in &prepared.nodes {
         let id = node.descriptor.id().clone();
-        if let Some(component) = prepared.components.remove(&id) {
-            let generation = ComponentGeneration(graph.next_generation);
-            graph.next_generation = graph
-                .next_generation
-                .checked_add(1)
-                .ok_or_else(|| topology("construction generation exhausted"))?;
-            let slot = InstanceSlot::new(component, generation);
+        if let Some((slot, mut new)) = replacements.remove(&id) {
             if let Some(&index) = graph.ids.get(&id) {
                 graph.reported_resources.remove(&id);
-                operations.retire_control(graph, index)?;
-                let mut old = graph.components[index].take()?;
-                let mut new = slot.take()?;
+                retired_handlers.push(index);
+                let old = leases.get_mut(&index).expect("prepared replacement lease");
                 new.inputs = std::mem::take(&mut old.inputs);
                 new.outputs = std::mem::take(&mut old.outputs);
                 new.sequences = std::mem::take(&mut old.sequences)
@@ -2435,13 +2638,14 @@ fn commit_desired(
                                 == node.output_streams.get(port)
                     })
                     .collect();
-                old.value.take();
+                retired_instances.extend(old.value.take());
                 drop(new);
                 graph.components[index] = slot;
                 operations.exhausted.remove(&index);
                 operations.paused.remove(&index);
                 graph.nodes[index] = node.clone();
             } else {
+                drop(new);
                 let index = graph.components.len();
                 graph.ids.insert(id.clone(), index);
                 graph.components.push(slot);
@@ -2455,10 +2659,7 @@ fn commit_desired(
         if let Some(provider) = prepared.pipes.remove(&edge.definition) {
             graph.edges.insert(graph.next_edge, edge.clone());
             graph.providers.insert(graph.next_edge, provider);
-            graph.next_edge = graph
-                .next_edge
-                .checked_add(1)
-                .ok_or_else(|| topology("relationship generation exhausted"))?;
+            graph.next_edge += 1;
         } else if let Some((_, existing)) = graph
             .edges
             .iter_mut()
@@ -2467,14 +2668,20 @@ fn commit_desired(
             *existing = edge.clone();
         }
     }
-    graph.order = prepared
-        .order
-        .iter()
-        .map(|index| graph.ids[prepared.nodes[*index].descriptor.id()])
-        .collect();
-    graph.resource_handles = std::mem::take(&mut prepared.resources);
+    graph.order = order;
+    graph.next_generation = next_generation;
+    graph.next_edge = next_edge;
+    graph.next_binding_generation = next_binding;
+    graph.next_resource_generation = next_resource;
+    let retired_resources = std::mem::replace(
+        &mut graph.resource_handles,
+        std::mem::take(&mut prepared.resources),
+    );
     graph.snapshot.resource_dependencies = plan.desired.resource_dependencies.clone();
-    graph.factories = std::mem::take(&mut prepared.factories);
+    let retired_factories = std::mem::replace(
+        &mut graph.factories,
+        std::mem::take(&mut prepared.factories),
+    );
     graph.snapshot.revision = plan.desired.revision;
     graph.snapshot.requirements = plan.desired.requirements.clone();
     graph.snapshot.recovery_requirements = plan.desired.recovery_requirements.clone();
@@ -2563,24 +2770,23 @@ fn commit_desired(
             }
         }
     }
-    let binding_generations: BTreeMap<_, _> = plan
-        .rebind
-        .iter()
-        .map(|edge| {
-            let generation = graph.next_binding_generation;
-            graph.next_binding_generation += 1;
-            (edge.clone(), generation)
-        })
-        .collect();
-    let resource_generations: BTreeMap<_, _> = plan
-        .resources
-        .iter()
-        .map(|id| {
-            let generation = graph.next_resource_generation;
-            graph.next_resource_generation += 1;
-            (id.clone(), generation)
-        })
-        .collect();
+    peer_commit.commit();
+    for index in retired_handlers {
+        operations.forget_control(index);
+    }
+    for control in cancelled_controls {
+        control.cancel();
+    }
+    drop(leases);
+    drop((
+        retired_instances,
+        retired_providers,
+        retired_resources,
+        retired_factories,
+        retired_outputs,
+        retired_inputs,
+    ));
+    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
     update(graph, |state| {
         state.revision = plan.desired.revision;
         for id in &plan.remove {
@@ -2673,13 +2879,6 @@ fn commit_desired(
             }
         }
     }
-    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
-    for &index in &graph.order {
-        if !operations.active.contains_key(&index) {
-            operations.attach_control(graph, index)?;
-        }
-    }
-    operations.refresh_connections(graph)?;
     Ok(())
 }
 
@@ -2764,7 +2963,7 @@ async fn create_component(
                     accept_addition(graph, operations, addition, management_access, reply);
                 }
                 Some(Command::HandleStop { component, generation, reply }) => {
-                    submit_handle_request(graph, operations, HandleRequest::Stop { component, generation, defer_restart: true, reply })?;
+                    submit_handle_request(graph, operations, controls, cancel, HandleRequest::Stop { component, generation, defer_restart: true, reply }).await?;
                 }
                 Some(_) => unreachable!("construction channel only accepts additions and handle stops"),
                 None => return Err(GraphError::ControllerClosed),

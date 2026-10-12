@@ -61,7 +61,7 @@ async fn wait_output(output: &Mutex<Vec<ChangeEnvelope>>, count: usize) -> TestR
     Ok(())
 }
 
-async fn interrupted_replacement() -> TestResult<()> {
+async fn draining_replacement() -> TestResult<()> {
     for committed in [false, true] {
         let directory = tempfile::tempdir()?;
         let probe = Arc::new(Probe::default());
@@ -184,7 +184,17 @@ async fn interrupted_replacement() -> TestResult<()> {
                     else { counts.committing.notified().await; }
                 }).await.context("transaction did not reach the commit barrier")?;
                 assert!(output.lock().unwrap().is_empty());
-                control.stop_components(GraphRevision(1), GraphSelection::Exact(vec![id("sequence")])).await?;
+                let stop = control.stop_components(GraphRevision(1), GraphSelection::Exact(vec![id("sequence")]));
+                tokio::pin!(stop);
+                let mut observed = control.subscribe_observed();
+                tokio::select! {
+                    result = &mut stop => panic!("stop interrupted an active commit: {result:?}"),
+                    state = observed.wait_for(|state| state.components[&id("sequence")].lifecycle == ComponentLifecycle::Quiescing) => { state?; }
+                }
+                assert!(output.lock().unwrap().is_empty());
+                counts.release_commit.notify_one();
+                assert_eq!(stop.await?.summary, OperationSummary::Completed);
+                wait_output(&output, 1).await?;
                 let desired = control.desired_snapshot().select(GraphSelection::Exact(vec![id("sequence")]))?
                     .components.into_iter().find(|node| node.descriptor.id() == &id("sequence")).unwrap();
                 let preview = control.preview(
@@ -201,7 +211,6 @@ async fn interrupted_replacement() -> TestResult<()> {
                 for name in ["source", "collector"] {
                     assert_eq!(before.components[&id(name)].generation, after.components[&id(name)].generation);
                 }
-                if !committed { send.send(input(1, 3).envelope).await?; }
                 wait_output(&output, 1).await.with_context(|| format!(
                     "first output after replacement (committed={committed}), observed={:?}, calls={:?}",
                     control.observed(), probe.trace.lock().unwrap()
@@ -215,7 +224,7 @@ async fn interrupted_replacement() -> TestResult<()> {
                     assert_eq!(values(envelope, "second_count"), [offset as i64 + 1]);
                     assert_eq!(values(envelope, "value"), [20]);
                 }
-                assert_eq!(probe.trace.lock().unwrap().len(), if committed { 4 } else { 6 });
+                assert_eq!(probe.trace.lock().unwrap().len(), 4, "the drained input is not recomputed after replacement");
                 assert_eq!(probe.standalone_calls.load(Ordering::Acquire), 0);
                 Ok::<_, anyhow::Error>(())
             }.await;
@@ -234,13 +243,13 @@ async fn interrupted_replacement() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn live_replacement_after_interrupted_commit_preserves_transaction_state_current_thread(
+async fn live_replacement_waits_for_commit_and_preserves_transaction_state_current_thread(
 ) -> TestResult<()> {
-    tokio::time::timeout(Duration::from_secs(30), interrupted_replacement()).await?
+    tokio::time::timeout(Duration::from_secs(30), draining_replacement()).await?
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_replacement_after_interrupted_commit_preserves_transaction_state_multi_thread(
+async fn live_replacement_waits_for_commit_and_preserves_transaction_state_multi_thread(
 ) -> TestResult<()> {
-    tokio::time::timeout(Duration::from_secs(30), interrupted_replacement()).await?
+    tokio::time::timeout(Duration::from_secs(30), draining_replacement()).await?
 }

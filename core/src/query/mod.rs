@@ -23,5 +23,8 @@ pub use continuous_query::{ContinuousQuery, DueFutureResult};
 pub use evaluator::QueryEvaluator;
 pub use query_builder::QueryBuilder;
 
+/// Persisted query identities must change when source mutation semantics change.
+pub const SOURCE_CHANGE_SEMANTICS_VERSION: u32 = 1;
+
 #[cfg(test)]
 mod tests;

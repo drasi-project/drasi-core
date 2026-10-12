@@ -60,15 +60,15 @@ Start with the guide for your task:
 | [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
-| [Opt-in resilience and recovery plan](docs/computation-graph-reliability-plan.md) | Proposed phased work for shared recovery services, pipe/provider activation, and a fast path without added recovery machinery |
+| [Opt-in resilience and recovery plan](docs/computation-graph-reliability-plan.md) | Recovery design and dated framework-completion evidence; current actions are in the consolidated inventory |
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
-| [Remaining-work inventory](docs/computation-graph-remaining-work.md) | Current correctness work, qualification gaps, performance improvements and separately scoped integrations, with plain-language completion criteria |
-| [Issues, gaps and next-phase work](docs/computation-graph-backlog.md) | Plain-English explanations of unfinished work, suggested priorities, complexity and disruption risk |
+| [Consolidated outstanding-work inventory](docs/computation-graph-remaining-work.md) | Single current list: pre-review work, all review findings, post-merge status, priorities, completion criteria and tracking crosswalks |
+| [Historical CG backlog](docs/computation-graph-backlog.md) | Original CG-01 through CG-28 detail, design rationale and dated measurement evidence |
 | [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and remaining replacement blockers |
 
 From the drasi-core repository root, run a complete in-process example:

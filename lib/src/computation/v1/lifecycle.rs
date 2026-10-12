@@ -93,6 +93,186 @@ pub enum FailureDisposition {
     Terminal,
 }
 
+/// A classified native operation failure. Retryability never proves rollback or cleanup.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct ComponentOperationError {
+    pub disposition: FailureDisposition,
+    #[source]
+    pub source: anyhow::Error,
+}
+
+impl ComponentOperationError {
+    pub fn new(disposition: FailureDisposition, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            disposition,
+            source: source.into(),
+        }
+    }
+}
+
+pub(crate) fn operation_failure_disposition(error: &anyhow::Error) -> FailureDisposition {
+    for cause in error.chain().take(32) {
+        if let Some(error) = cause.downcast_ref::<ComponentOperationError>() {
+            return error.disposition;
+        }
+        if let Some(error) = cause.downcast_ref::<super::ComponentCreationError>() {
+            return error.disposition;
+        }
+        if let Some(error) = cause.downcast_ref::<GraphError>() {
+            return error.failure_disposition();
+        }
+        if let Some(error) = cause.downcast_ref::<super::PipeError>() {
+            return pipe_failure_disposition(error);
+        }
+        if let Some(error) = cause.downcast_ref::<drasi_core::computation::ComputationQueryError>()
+        {
+            use drasi_core::computation::ComputationQueryError;
+            match error {
+                ComputationQueryError::Rollback { .. }
+                | ComputationQueryError::RecoveryRequired
+                | ComputationQueryError::TransactionMismatch
+                | ComputationQueryError::AtomicOutputUnsupported => {
+                    return FailureDisposition::Terminal
+                }
+                ComputationQueryError::OperationInProgress => return FailureDisposition::Retryable,
+                ComputationQueryError::Index(error) => {
+                    if let Some(disposition) = index_failure_disposition(error) {
+                        return disposition;
+                    }
+                }
+                ComputationQueryError::Build(_) | ComputationQueryError::Evaluation(_) => {}
+            }
+        }
+        if cause.is::<super::DeliveryError>() {
+            // The delivery runner already applied its handling retry budget.
+            return FailureDisposition::Terminal;
+        }
+        if let Some(error) = cause.downcast_ref::<drasi_core::interface::IndexError>() {
+            if let Some(disposition) = index_failure_disposition(error) {
+                return disposition;
+            }
+        }
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            return match error.kind() {
+                std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::AddrInUse => FailureDisposition::Retryable,
+                _ => FailureDisposition::Terminal,
+            };
+        }
+    }
+    FailureDisposition::Terminal
+}
+
+fn index_failure_disposition(
+    error: &drasi_core::interface::IndexError,
+) -> Option<FailureDisposition> {
+    use drasi_core::interface::IndexError;
+    match error {
+        IndexError::IOError | IndexError::ConnectionFailed(_) => {
+            Some(FailureDisposition::Retryable)
+        }
+        IndexError::Other(_) => None,
+        IndexError::NotSupported
+        | IndexError::ArchiveNotEnabled
+        | IndexError::CorruptedData
+        | IndexError::UnknownStore(_) => Some(FailureDisposition::Terminal),
+    }
+}
+
+impl GraphError {
+    /// Classifies reported work. A component-returned error never authorizes killing the driver.
+    pub(crate) fn failure_disposition(&self) -> FailureDisposition {
+        use FailureDisposition::{Retryable, Terminal};
+        match self {
+            Self::Creation { disposition, .. } => *disposition,
+            Self::Component { source, .. }
+            | Self::ResourceCreation { source, .. }
+            | Self::ResourceCleanup { source, .. } => operation_failure_disposition(source),
+            Self::Reported { cause } => cause.failure_disposition(),
+            Self::AdditionRejected { cause, .. } => cause.failure_disposition(),
+            Self::Pipe { source, .. } => pipe_failure_disposition(source),
+            Self::Forward {
+                accepted_branches,
+                source,
+                ..
+            } => {
+                if *accepted_branches == 0 {
+                    pipe_failure_disposition(&source.error)
+                } else {
+                    Terminal
+                }
+            }
+            Self::Cleanup { primary, errors } => {
+                let mut causes = primary
+                    .iter()
+                    .map(|cause| cause.as_ref())
+                    .chain(errors.iter());
+                if primary.is_none() && errors.is_empty()
+                    || causes.any(|cause| cause.failure_disposition() == Terminal)
+                {
+                    Terminal
+                } else {
+                    Retryable
+                }
+            }
+            Self::Control(error) => match error {
+                super::ControlError::QueueFull { .. } => Retryable,
+                super::ControlError::InvalidCapacity { .. }
+                | super::ControlError::PlaneClosed
+                | super::ControlError::Closed { .. }
+                | super::ControlError::NotNeighbor { .. }
+                | super::ControlError::StaleComponent { .. }
+                | super::ControlError::StaleConnection { .. }
+                | super::ControlError::SelfConnection { .. }
+                | super::ControlError::PayloadTooLarge { .. }
+                | super::ControlError::PayloadTooDeep { .. }
+                | super::ControlError::Poisoned => Terminal,
+            },
+            Self::StaleRevision { .. }
+            | Self::OperationInProgress
+            | Self::ObservationQueueFull
+            | Self::ReconciliationTimeout
+            | Self::StartupIncomplete
+            | Self::DependencyUnavailable { .. }
+            | Self::CreationStopped { .. }
+            | Self::StartSuperseded { .. }
+            | Self::StopTimeout { .. }
+            | Self::Cancelled => Retryable,
+            Self::Contract(_)
+            | Self::Recovery(_)
+            | Self::Validation { .. }
+            | Self::Topology { .. }
+            | Self::InvalidState { .. }
+            | Self::StaleGeneration
+            | Self::ControllerClosed
+            | Self::Emission { .. } => Terminal,
+        }
+    }
+}
+
+fn pipe_failure_disposition(error: &super::PipeError) -> FailureDisposition {
+    match error {
+        super::PipeError::Backend(source) => operation_failure_disposition(source),
+        super::PipeError::CapacityExhausted => FailureDisposition::Retryable,
+        super::PipeError::InvalidCapacity
+        | super::PipeError::Contract(_)
+        | super::PipeError::Closed
+        | super::PipeError::ReceiverTaken
+        | super::PipeError::Lagged { .. }
+        | super::PipeError::PositionUnavailable { .. }
+        | super::PipeError::AcceptanceUnknown { .. }
+        | super::PipeError::AcknowledgementUnknown { .. } => FailureDisposition::Terminal,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ComponentFailure {
     pub phase: FailurePhase,
@@ -391,6 +571,141 @@ pub enum GraphSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_policy_preserves_classification_through_context_and_reporting() {
+        for disposition in [FailureDisposition::Retryable, FailureDisposition::Terminal] {
+            let source = anyhow::Error::new(ComponentOperationError::new(
+                disposition,
+                drasi_core::interface::IndexError::IOError,
+            ))
+            .context("native operation");
+            let error = GraphError::Component {
+                component: ComponentId::try_new("query").unwrap(),
+                operation: "process",
+                source,
+            };
+            assert_eq!(error.failure_disposition(), disposition);
+            let reported = GraphError::Reported {
+                cause: Arc::new(error),
+            };
+            assert_eq!(reported.failure_disposition(), disposition);
+            assert_eq!(failure_from_report(reported).disposition, disposition);
+        }
+    }
+
+    fn failure_from_report(error: GraphError) -> ComponentFailure {
+        ComponentFailure {
+            disposition: error.failure_disposition(),
+            phase: FailurePhase::Processing,
+            cause: Arc::new(error),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn io_failures_and_corruption_do_not_share_a_retry_policy() {
+        use drasi_core::{
+            computation::ComputationQueryError, evaluation::EvaluationError, interface::IndexError,
+        };
+        for evaluation in [false, true] {
+            for (cause, expected) in [
+                (IndexError::IOError, FailureDisposition::Retryable),
+                (IndexError::CorruptedData, FailureDisposition::Terminal),
+                (IndexError::NotSupported, FailureDisposition::Terminal),
+            ] {
+                let cause = if evaluation {
+                    ComputationQueryError::Evaluation(EvaluationError::IndexError(cause))
+                } else {
+                    ComputationQueryError::Index(cause)
+                };
+                let cause = anyhow::Error::new(cause)
+                    .context("evaluating input")
+                    .context("native query");
+                assert_eq!(operation_failure_disposition(&cause), expected);
+            }
+        }
+        assert_eq!(
+            operation_failure_disposition(&anyhow::anyhow!("retryable transient error")),
+            FailureDisposition::Terminal,
+            "messages are not a retry protocol"
+        );
+    }
+
+    #[test]
+    fn structural_failure_policy_precedes_nested_transient_causes() {
+        use drasi_core::{computation::ComputationQueryError, interface::IndexError};
+        let errors = [
+            anyhow::Error::new(ComputationQueryError::Rollback {
+                failure: Box::new(ComputationQueryError::Index(IndexError::IOError)),
+                rollback: IndexError::IOError,
+            }),
+            anyhow::Error::new(super::super::PipeError::AcceptanceUnknown {
+                source: IndexError::IOError.into(),
+            }),
+            anyhow::Error::new(GraphError::Cleanup {
+                primary: Some(Box::new(GraphError::Component {
+                    component: ComponentId::try_new("query").unwrap(),
+                    operation: "process",
+                    source: IndexError::IOError.into(),
+                })),
+                errors: vec![GraphError::Topology {
+                    reason: "corrupt ownership".into(),
+                }],
+            }),
+        ];
+        for error in errors {
+            let error = error
+                .context("native operation")
+                .context("reported failure");
+            assert_eq!(
+                operation_failure_disposition(&error),
+                FailureDisposition::Terminal
+            );
+        }
+    }
+
+    #[test]
+    fn uncertain_pipe_effects_and_mixed_cleanup_failures_are_terminal() {
+        for pipe in [
+            super::super::PipeError::AcceptanceUnknown {
+                source: drasi_core::interface::IndexError::IOError.into(),
+            },
+            super::super::PipeError::AcknowledgementUnknown {
+                source: drasi_core::interface::IndexError::IOError.into(),
+            },
+            super::super::PipeError::PositionUnavailable {
+                requested: 4,
+                oldest: 8,
+            },
+        ] {
+            assert_eq!(
+                pipe_failure_disposition(&pipe),
+                FailureDisposition::Terminal
+            );
+        }
+        let transient = || GraphError::StopTimeout {
+            component: ComponentId::try_new("query").unwrap(),
+        };
+        assert_eq!(
+            GraphError::Cleanup {
+                primary: Some(Box::new(transient())),
+                errors: vec![transient()],
+            }
+            .failure_disposition(),
+            FailureDisposition::Retryable
+        );
+        assert_eq!(
+            GraphError::Cleanup {
+                primary: Some(Box::new(transient())),
+                errors: vec![GraphError::Topology {
+                    reason: "invalid binding".into()
+                }],
+            }
+            .failure_disposition(),
+            FailureDisposition::Terminal
+        );
+    }
 
     fn failure(phase: FailurePhase, disposition: FailureDisposition) -> ComponentFailure {
         ComponentFailure {

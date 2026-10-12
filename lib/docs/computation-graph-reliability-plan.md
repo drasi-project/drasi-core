@@ -2,6 +2,14 @@
 
 **Date: 2026-10-04. Status: native-only stages A-D complete; the broader nine-package plan is not complete.**
 
+This is a design and dated completion record, not a separate active work queue.
+All remaining actions, including later review findings and the current scope,
+are consolidated in the [outstanding-work inventory](computation-graph-remaining-work.md).
+For current returned-failure, graceful-stop, source-mutation and atomic
+topology-commit semantics, use the
+[maintainer's guide](computation-graph-maintainers-guide.md); the interruption
+scenarios below retain their dated implementation evidence.
+
 ### Active native-only completion scope (user decision, 2026-10-07)
 
 Complete the native framework, SDK, Host and Server work. Plugin migrations are

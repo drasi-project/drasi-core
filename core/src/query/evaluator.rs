@@ -28,12 +28,15 @@ use crate::{
         context::{
             query_variables_unchanged, ChangeContext, QueryPartEvaluationContext, QueryVariables,
         },
+        functions::aggregation::ValueAccumulator,
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
-    interface::{ElementIndex, FutureQueue, MiddlewareError, QueryClock},
+    interface::{
+        ElementIndex, FutureQueue, IndexError, MiddlewareError, QueryClock, ResultKey, ResultOwner,
+    },
     middleware::SourceMiddlewarePipelineCollection,
-    models::{Element, ElementReference, SourceChange},
+    models::{validate_effective_from, Element, ElementReference, SourceChange},
     path_solver::{
         match_path::{MatchPath, SlotElementSpec},
         solution::{MatchPathSolution, SolutionSignature},
@@ -54,6 +57,19 @@ pub struct QueryEvaluator {
     query: Arc<Query>,
     future_queue: Arc<dyn FutureQueue>,
     source_pipelines: SourceMiddlewarePipelineCollection,
+}
+
+enum MutationAdmission {
+    Skip,
+    Apply {
+        current: Option<Arc<Element>>,
+        tombstone: Option<TombstoneUpdate>,
+    },
+}
+
+enum TombstoneUpdate {
+    Delete(ElementReference, u64),
+    Recreate(ElementReference),
 }
 
 impl QueryEvaluator {
@@ -104,6 +120,116 @@ impl QueryEvaluator {
         self.query.clone()
     }
 
+    async fn admit_mutation(
+        &self,
+        change: &SourceChange,
+    ) -> Result<MutationAdmission, EvaluationError> {
+        let (metadata, incoming) = match change {
+            SourceChange::Insert { element } | SourceChange::Update { element } => {
+                (element.get_metadata(), Some(element))
+            }
+            SourceChange::Delete { metadata } => (metadata, None),
+            SourceChange::Future { .. } => {
+                return Ok(MutationAdmission::Apply {
+                    current: None,
+                    tombstone: None,
+                })
+            }
+        };
+        if validate_effective_from(metadata.effective_from).is_err() {
+            return Err(EvaluationError::InvalidSourceTime {
+                reference: metadata.reference.clone(),
+                timestamp: metadata.effective_from,
+            });
+        }
+        let current = self.element_index.get_element(&metadata.reference).await?;
+        let tombstone = match self
+            .part_evaluator
+            .result_index()
+            .get(
+                &ResultKey::Element(metadata.reference.clone()),
+                &ResultOwner::ElementTombstone,
+            )
+            .await?
+        {
+            Some(ValueAccumulator::TimeMarker { timestamp })
+                if validate_effective_from(timestamp).is_ok() =>
+            {
+                Some(timestamp)
+            }
+            None => None,
+            _ => return Err(IndexError::CorruptedData.into()),
+        };
+        if current.is_some() && tombstone.is_some() {
+            return Err(IndexError::CorruptedData.into());
+        }
+        let latest = current
+            .as_ref()
+            .map(|element| element.get_effective_from())
+            .or(tombstone);
+        if latest.is_some_and(|timestamp| validate_effective_from(timestamp).is_err()) {
+            return Err(IndexError::CorruptedData.into());
+        }
+        if let Some(latest) = latest.filter(|latest| metadata.effective_from < *latest) {
+            tracing::warn!(
+                source_id = %metadata.reference.source_id,
+                element_id = %metadata.reference.element_id,
+                incoming_source_time = metadata.effective_from,
+                stored_source_time = latest,
+                "Skipped stale source change"
+            );
+            return Ok(MutationAdmission::Skip);
+        }
+        if let (Some(current), Some(incoming)) = (&current, incoming) {
+            let kind = |element: &Element| match element {
+                Element::Node { .. } => "node",
+                Element::Relation { .. } => "relationship",
+            };
+            if kind(current) != kind(incoming) {
+                return Err(EvaluationError::ElementKindConflict {
+                    reference: metadata.reference.clone(),
+                    existing: kind(current),
+                    incoming: kind(incoming),
+                });
+            }
+            if current.as_ref() == incoming {
+                return Ok(MutationAdmission::Skip);
+            }
+        }
+        let update = if incoming.is_none() {
+            Some(TombstoneUpdate::Delete(
+                metadata.reference.clone(),
+                metadata.effective_from,
+            ))
+        } else if tombstone.is_some() {
+            Some(TombstoneUpdate::Recreate(metadata.reference.clone()))
+        } else {
+            None
+        };
+        Ok(MutationAdmission::Apply {
+            current,
+            tombstone: update,
+        })
+    }
+
+    async fn update_tombstone(&self, update: TombstoneUpdate) -> Result<(), EvaluationError> {
+        let (reference, value) = match update {
+            TombstoneUpdate::Delete(reference, timestamp) => {
+                (reference, Some(ValueAccumulator::TimeMarker { timestamp }))
+            }
+            TombstoneUpdate::Recreate(reference) => (reference, None),
+        };
+        self.part_evaluator
+            .result_index()
+            .set(
+                ResultKey::Element(reference),
+                ResultOwner::ElementTombstone,
+                value,
+            )
+            .await?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, err, level = "debug")]
     async fn process_changes_inner(
         &self,
@@ -112,11 +238,16 @@ impl QueryEvaluator {
         let mut result = Vec::new();
 
         for change in changes {
+            let MutationAdmission::Apply { current, tombstone } =
+                self.admit_mutation(&change).await?
+            else {
+                continue;
+            };
             let base_variables = QueryVariables::new(); //todo: get query parameters
             let after_clock = Arc::new(InstantQueryClock::from_source_change(&change));
 
             let solution_changes = self
-                .build_solution_changes(&base_variables, change, after_clock.clone())
+                .build_solution_changes(&base_variables, change, current, after_clock.clone())
                 .await?;
             let before_clock = match solution_changes.before_clock {
                 Some(before_clock) => before_clock,
@@ -179,6 +310,9 @@ impl QueryEvaluator {
                 }
                 result.push(ctx);
             }
+            if let Some(tombstone) = tombstone {
+                self.update_tombstone(tombstone).await?;
+            }
         }
 
         Ok(result)
@@ -189,6 +323,7 @@ impl QueryEvaluator {
         &self,
         base_variables: &QueryVariables,
         change: SourceChange,
+        current: Option<Arc<Element>>,
         clock: Arc<dyn QueryClock>,
     ) -> Result<SolutionChangesResult, EvaluationError> {
         let mut result = SolutionChangesResult::new();
@@ -205,42 +340,10 @@ impl QueryEvaluator {
             .flatten();
         let mut before_anchors = HashSet::new();
 
+        let merge_properties = matches!(change, SourceChange::Update { .. });
         match change {
-            SourceChange::Insert { element } => {
-                let element = Arc::new(element);
-                let affinity_slots = self
-                    .get_slots_with_affinity(base_variables, element.clone(), clock.clone())
-                    .await?;
-                let solutions = self
-                    .resolve_solutions(element.clone(), affinity_slots, true)
-                    .await?;
-
-                if let Some(slot) = optional_anchor {
-                    let anchors = Self::required_anchors(&solutions, slot);
-                    before_change_solutions = self
-                        .resolve_required_anchors(&anchors, slot, Some(element.get_reference()))
-                        .await?;
-                    after_change_solutions =
-                        self.resolve_required_anchors(&anchors, slot, None).await?;
-                } else {
-                    for (signature, solution) in solutions {
-                        if let Some(blank_optional_solution) =
-                            solution.get_empty_optional_solution(&self.match_path)
-                        {
-                            before_change_solutions.insert(signature, blank_optional_solution);
-                        }
-                        after_change_solutions.insert(signature, solution);
-                    }
-                }
-
-                result.anchor_element = Some(element);
-            }
-            SourceChange::Update { mut element } => {
-                let previous = if let Some(prev_version) = self
-                    .element_index
-                    .get_element(element.get_reference())
-                    .await?
-                {
+            SourceChange::Insert { mut element } | SourceChange::Update { mut element } => {
+                let previous = if let Some(prev_version) = current {
                     let prev_timestamp = prev_version.get_effective_from();
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
@@ -251,7 +354,9 @@ impl QueryEvaluator {
                             before_clock.clone(),
                         )
                         .await?;
-                    element.merge_missing_properties(prev_version.as_ref());
+                    if merge_properties {
+                        element.merge_missing_properties(prev_version.as_ref());
+                    }
                     Some((prev_version, before_clock, affinity_slots))
                 } else {
                     None
@@ -313,7 +418,7 @@ impl QueryEvaluator {
                 result.anchor_element = Some(element);
             }
             SourceChange::Delete { metadata } => {
-                if let Some(element) = self.element_index.get_element(&metadata.reference).await? {
+                if let Some(element) = current {
                     let prev_timestamp = element.get_effective_from();
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));

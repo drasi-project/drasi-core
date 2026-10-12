@@ -487,7 +487,10 @@ impl ComponentFactory for NativeFactory {
             .map_err(|error| {
                 if error
                     .downcast_ref::<super::NativeFailure>()
-                    .is_some_and(|failure| failure.retryable)
+                    .is_some_and(|failure| {
+                        super::proxy::native_failure_disposition(failure)
+                            == FailureDisposition::Retryable
+                    })
                 {
                     ComponentCreationError::retryable(error)
                 } else {

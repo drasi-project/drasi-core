@@ -16,6 +16,56 @@ use super::{
     loader::PluginOwner,
 };
 
+pub(super) fn native_failure_disposition(error: &Failure) -> FailureDisposition {
+    if error.code == abi::status::FAILED && error.retryable {
+        FailureDisposition::Retryable
+    } else {
+        FailureDisposition::Terminal
+    }
+}
+
+fn operation_failure(error: Failure) -> anyhow::Error {
+    ComponentOperationError::new(native_failure_disposition(&error), error).into()
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn native_terminal_status_cannot_be_made_retryable_by_its_flag() {
+        for (code, retryable, expected) in [
+            (abi::status::FAILED, true, FailureDisposition::Retryable),
+            (abi::status::FAILED, false, FailureDisposition::Terminal),
+            (abi::status::PANICKED, true, FailureDisposition::Terminal),
+            (abi::status::PROTOCOL, true, FailureDisposition::Terminal),
+            (abi::status::CANCELLED, true, FailureDisposition::Terminal),
+            (abi::status::CLOSED, true, FailureDisposition::Terminal),
+            (u32::MAX, true, FailureDisposition::Terminal),
+        ] {
+            let error = operation_failure(Failure {
+                code,
+                message: "retained native cause".into(),
+                retryable,
+            })
+            .context("host operation");
+            assert_eq!(
+                error
+                    .downcast_ref::<ComponentOperationError>()
+                    .unwrap()
+                    .disposition,
+                expected
+            );
+            let source = error
+                .chain()
+                .find_map(|source| source.downcast_ref::<Failure>())
+                .unwrap();
+            assert_eq!(source.code, code);
+            assert_eq!(source.message, "retained native cause");
+        }
+    }
+}
+
 pub(super) struct RemoteComponent {
     raw: abi::ComponentHandle,
     _plugin: Arc<PluginOwner>,
@@ -48,15 +98,18 @@ impl RemoteComponent {
         unsafe { &*self.raw.vtable }
     }
     fn inspect(&self) -> anyhow::Result<InstanceMetadata> {
-        let bytes =
-            unsafe { take_reply(self.table().inspect.expect("validated")(self.raw.state))? };
+        let bytes = unsafe {
+            take_reply(self.table().inspect.expect("validated")(self.raw.state))
+                .map_err(operation_failure)?
+        };
         Ok(serde_json::from_slice(&bytes)?)
     }
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         let bytes = unsafe {
             take_reply(self.table().configuration.expect("validated")(
                 self.raw.state,
-            ))?
+            ))
+            .map_err(operation_failure)?
         };
         Ok(serde_json::from_slice(&bytes)?)
     }
@@ -86,12 +139,15 @@ impl RemoteComponent {
                 abi::BorrowedBytes::new(input),
                 transaction.map_or(std::ptr::null(), |value| value),
                 &mut operation,
-            ))?;
-            Ok(OperationFuture::new(operation)?)
+            ))
+            .map_err(operation_failure)?;
+            OperationFuture::new(operation).map_err(operation_failure)
         }
     }
     pub(super) async fn call(&self, code: u32, input: &[u8]) -> anyhow::Result<ReceivedBytes> {
-        Ok(self.begin(code, input, None)?.await?)
+        self.begin(code, input, None)?
+            .await
+            .map_err(operation_failure)
     }
     pub(super) async fn unit(&self, code: u32, input: &[u8]) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -297,7 +353,7 @@ impl ComputationComponent for NativeComponentProxy {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("native control binding poisoned"))?;
             if let Some(error) = &binding.error {
-                return Err(error.clone().into());
+                return Err(operation_failure(error.clone()));
             }
         }
         self.inner.unit(abi::operation::START, &[]).await

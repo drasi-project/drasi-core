@@ -1565,6 +1565,9 @@ impl ComputationGraph {
 
     /// Exclusive borrowing prevents duplicate concurrent starts at compile time.
     /// Terminal states also reject starts at runtime without altering resources.
+    /// Finite, successful work completes naturally. Component failures remain in
+    /// observations with live inspection/control, even if no runnable work remains;
+    /// use the control handle to repair, stop, or explicitly cancel the scope.
     ///
     /// ```compile_fail
     /// # use drasi_lib::computation::v1::ComputationGraph;
@@ -2225,14 +2228,22 @@ async fn run_admitted_source(
         }
         check_descriptor(component, node)?;
         let mut pending = sequences.clone();
-        let accepted = tokio::select! {
-            biased;
-            _ = cancelled(quiesce) => return Ok(()),
-            result = lease.process(|envelope| {
-                validate_emissions(node, &mut pending, &[OutputEnvelope {
-                    port: admission.port().clone(), envelope: envelope.clone(),
-                }]).map_err(Into::into)
-            }) => result.map_err(|error| component_error(node, "admit", error.into()))?,
+        let accepted = lease
+            .process(quiesce, |envelope| {
+                validate_emissions(
+                    node,
+                    &mut pending,
+                    &[OutputEnvelope {
+                        port: admission.port().clone(),
+                        envelope: envelope.clone(),
+                    }],
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .map_err(|error| component_error(node, "admit", error.into()))?;
+        let Some(accepted) = accepted else {
+            return Ok(());
         };
         if accepted {
             *sequences = pending;
@@ -2510,22 +2521,20 @@ async fn run_node(
                 }
                 _ => {}
             }
-            let continuation = match component {
-                Component::Transformer(transformer) | Component::Query(transformer)
-                    if transformer.has_pending_emissions() =>
-                {
-                    if let Some(yield_node) = budget.checkpoint() {
-                        yield_node.await;
+            let continuation =
+                match component {
+                    Component::Transformer(transformer) | Component::Query(transformer)
+                        if transformer.has_pending_emissions() =>
+                    {
+                        if let Some(yield_node) = budget.checkpoint() {
+                            yield_node.await;
+                        }
+                        Some(transformer.continue_transform().await.map_err(|source| {
+                            component_error(node, "continue transform", source)
+                        })?)
                     }
-                    Some(tokio::select! {
-                        biased;
-                        _ = cancelled(quiesce) => return Ok(()),
-                        result = transformer.continue_transform() =>
-                            result.map_err(|source| component_error(node, "continue transform", source))?,
-                    })
-                }
-                _ => None,
-            };
+                    _ => None,
+                };
             match continuation {
                 Some(next) => emissions = next,
                 None => break,

@@ -448,11 +448,7 @@ async fn connected_qos_reconstructs_state_before_acknowledging_the_whole_batch(
         stateful_sink(path.path(), handler.clone()).await?,
     )
     .await?;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(5), running.start()?)
-            .await?
-            .is_err()
-    );
+    stop_after_consumer_failure(&mut running).await?;
     assert_eq!(channel.progress().await?.processed["target"], 0);
     running.shutdown().await?;
     channel.shutdown().await?;

@@ -198,7 +198,8 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         .expect_err("old callbacks must be revoked");
     assert_eq!(
         error
-            .downcast_ref::<sdk::transport::Failure>()
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<sdk::transport::Failure>())
             .unwrap()
             .code,
         abi::status::CLOSED
@@ -694,17 +695,39 @@ async fn native_recovery_graph_factory_resolves_typed_resources_and_revokes_afte
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()?;
-        let result = tokio::time::timeout(TIMEOUT, graph.start()?).await?;
-        let captured = captured().lock().unwrap().take();
         if graph_id == GRAPH {
-            result?;
-            let captured = captured.context("factory did not receive the progress service")?;
+            tokio::time::timeout(TIMEOUT, graph.start()?).await??;
+            let captured = captured()
+                .lock()
+                .unwrap()
+                .take()
+                .context("factory did not receive the progress service")?;
             drop(graph);
             assert!(captured.reader().snapshot().is_err());
         } else {
-            assert!(result.is_err());
+            let run = graph.start()?;
+            let control = run.control();
+            let (result, ()) = tokio::time::timeout(TIMEOUT, async {
+                tokio::join!(run, async {
+                    let report = control.startup_report().await.unwrap();
+                    assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+                    let observed = control.observed();
+                    let failure = observed.components[&id("source")].failure.as_ref().unwrap();
+                    assert_eq!(failure.disposition, FailureDisposition::Terminal);
+                    assert_eq!(failure.phase, FailurePhase::Creation);
+                    assert_eq!(control.state(), GraphState::Running);
+                    assert!(control
+                        .desired_snapshot()
+                        .nodes
+                        .iter()
+                        .any(|node| node.descriptor.id() == &id("source")));
+                    control.cancel();
+                })
+            })
+            .await?;
+            assert!(matches!(result, Err(GraphError::Cancelled)));
             assert!(
-                captured.is_none(),
+                captured().lock().unwrap().take().is_none(),
                 "foreign constructor must not receive wrong-scope progress"
             );
         }

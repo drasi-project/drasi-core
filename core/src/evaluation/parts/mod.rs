@@ -60,6 +60,10 @@ pub struct QueryPartEvaluator {
 }
 
 impl QueryPartEvaluator {
+    pub(crate) fn result_index(&self) -> &Arc<dyn ResultIndex> {
+        &self.result_index
+    }
+
     pub fn new(
         expression_evaluator: Arc<ExpressionEvaluator>,
         result_index: Arc<dyn ResultIndex>,

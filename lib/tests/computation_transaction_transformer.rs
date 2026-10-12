@@ -382,6 +382,7 @@ struct Counts {
     wait_before_commit: AtomicBool,
     committing: Notify,
     committed: Notify,
+    release_commit: Notify,
 }
 struct CountSession {
     inner: Arc<dyn SessionControl>,
@@ -397,7 +398,7 @@ impl SessionControl for CountSession {
         self.counts.commits.fetch_add(1, Ordering::SeqCst);
         if self.counts.wait_before_commit.swap(false, Ordering::AcqRel) {
             self.counts.committing.notify_one();
-            std::future::pending::<()>().await;
+            self.counts.release_commit.notified().await;
         }
         if self.counts.fail_commit.swap(false, Ordering::AcqRel) {
             return Err(IndexError::IOError);
@@ -405,7 +406,7 @@ impl SessionControl for CountSession {
         self.inner.commit().await?;
         if self.counts.wait_after_commit.swap(false, Ordering::AcqRel) {
             self.counts.committed.notify_one();
-            std::future::pending::<()>().await;
+            self.counts.release_commit.notified().await;
         }
         Ok(())
     }

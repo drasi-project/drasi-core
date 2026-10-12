@@ -1,6 +1,6 @@
 # ComputationGraph: current functionality
 
-**Snapshot: 9 October 2026**
+**Snapshot: 12 October 2026**
 
 This document describes the implementation on
 `agentofreality-parallel-computation-graph` in the local drasi-core workspace,
@@ -43,7 +43,7 @@ ComputationGraph is available with default features disabled. The empty
 | Validation | Strict graph construction checks identities, cycles, schemas, ports, required connections and declared capabilities before activation. Incremental additions can retain incomplete declarations. |
 | Readiness | Acceptance, successful construction and readiness are distinct. Handles can wait for creation or startup and expose failures. |
 | Observation | Creation state, execution state and health are independent; a running instance does not imply that every component is ready. |
-| Control | Bounded readiness and neighbour-control mailboxes are separate from data queues. Generation checks invalidate stale handles and bindings. |
+| Control | Bounded command queues and separate coalescing readiness/availability notices do not wait behind data queues. Generation checks invalidate stale handles and bindings. |
 | Ownership | Components and graph-owned resources have explicit asynchronous cleanup; borrowed resources retain their external owner. |
 
 Accepted additions remain inspectable when initialization or activation fails.
@@ -51,6 +51,14 @@ An addition can still be rejected for invalid ownership, duplicate IDs or a clos
 instance. Standard `add_source` and `add_reaction` receive preconstructed objects,
 so a caller-side constructor failure cannot appear as a graph node. Factory-backed
 declarations support construction within the managed lifecycle.
+
+Returned terminal errors, including invalid emissions, leave the failed node and
+its diagnostics inspectable while the controller and independent branches
+continue. A failed control notification does not close the inbox. Unknown errors
+default to terminal; typed causes preserve explicit retry eligibility without
+bypassing cleanup or storage fencing. Managed reconstruction has one attempt per
+explicit reconciliation request; delivery has a separate bounded attempt/delay
+policy. This is returned-error containment, not native crash isolation.
 
 Ordinary DrasiLib queries own nested QueryGraphs with independent, owned Tokio
 tasks. They can execute on different workers in a multithreaded runtime; a
@@ -86,6 +94,19 @@ separate-route or discard alternatives. Persistent mode retains its buffer,
 frontier and unconfirmed output atomically and requires durable output pipes.
 It does not claim completeness beyond the configured lateness window or repair
 already-published query state.
+
+The shared evaluator independently protects current state by source-scoped
+identity and `effective_from`. Strictly older mutations are reported and skipped;
+native input checkpoints still advance. Equal-time differences follow admitted
+order. Duplicate inserts upsert rather than double-count, inserts replace full
+properties, updates merge sparse properties, and live node/relationship identity
+collisions fail explicitly. Transactional deletion frontiers prevent stale
+resurrection after reconstruction. They do not expire automatically without a
+source-watermark/retention contract.
+
+Native query configuration identity formats 5/6 include these mutation semantics.
+Incompatible saved configurations require explicit reset/rebootstrap or a
+separately designed migration, with pending-output obligations preserved.
 
 The source's dispatch mode controls admission to the query inbox: Channel
 backpressures; Broadcast can drop arrivals when full. The query's dispatch mode
@@ -318,6 +339,18 @@ old handles from controlling replacements. Removal policies can reject dependent
 breakage, cascade, retain permitted unresolved relationships or drain a supported
 completed-handling boundary.
 
+Desired-topology commit acquires required leases and validates counters and peer
+attachments before mutation, then publishes a coherent desired/observed revision.
+Rejection cannot leave a partially committed topology; earlier draining and
+external cleanup are not rolled back. Postcommit realization failures retain a
+committed report. Resumption attempts every eligible paused producer.
+
+Graceful stop finishes admitted input, continuations, forwarding, required
+acknowledgement and active graph-owned admission writes before stop hooks.
+A drain timeout reports failure without abandoning active work. Explicit graph
+cancellation or dropping a run remains force cancellation and can require
+storage reconstruction.
+
 Resource dependencies order creation before use and cleanup after dependents.
 Failed or cancelled cleanup retains the owner and its prerequisites for retry.
 Await shutdown before releasing storage or reconstructing owners. DrasiLib
@@ -472,7 +505,7 @@ Additional core resilience evidence is bound into the executable
 | QoS | 128 seeded schedules execute 131,072 ledger-checked actions. Sixteen-member persistent fan-out verifies 2,048 exact deliveries and 2,048 cancelled admissions per runtime through eight disconnection/rebinding cycles. Membership process crashes and rejected capacity shrink preserve the exact pending obligations. Successful skip diagnostics follow confirmed cursor advancement, not cancelled attempts. |
 | Query transactions | Failures after actual scheduling push/remove/pop mutations roll back across native/legacy RocksDB and direct/transaction-body query entrypoints. Interrupted transaction replacement retries rolled-back input or replays committed output without repeating completed step evaluation. |
 | Mixed sources and timers | Grouped synthetic joins match an independent oracle with reversed timestamps, alternating source arrival and eight reconstructions per runtime. Scheduling-source tests control forward/backward wall-clock jumps without changing due timestamps or popping work. |
-| Responsiveness | With eight permanently ready producers and a 4,096-entry timer burst, both query branches progress in eight trials per runtime. Every live producer appears in actual results. Local debug stop measurements are about 2.1-22.0 ms; the executable regression guard is two seconds, not a production latency promise. |
+| Responsiveness | With eight permanently ready producers and a 4,096-entry timer burst, both query branches progress in eight trials per runtime. Every live producer appears in actual results. The executable graceful-stop regression guard is two seconds, not a production latency promise. |
 
 These are scoped contracts, not proof for every plugin, backend, failure
 combination or sustained production workload.
@@ -503,6 +536,9 @@ The main boundaries when adopting the functionality are:
   storage migration and arbitrary provider replacement are not inferred.
 - **Plugin adoption and operational qualification remain selective.** Framework
   capability does not establish connector feature parity or deployment capacity.
+- **Panic/crash containment is unfinished.** Returned-error handling does not
+  guarantee survival of an in-process panic, abort or unsafe native memory fault.
+  The broader containment/isolation work is explicitly deferred.
 
 ## Implementation and further reading
 

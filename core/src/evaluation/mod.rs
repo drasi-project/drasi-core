@@ -36,20 +36,37 @@ use crate::interface::{IndexError, MiddlewareError};
 #[derive(Debug)]
 pub enum EvaluationError {
     DivideByZero,
-    InvalidType { expected: String },
+    InvalidType {
+        expected: String,
+    },
     UnknownIdentifier(String),
     UnknownFunction(String), // Unknown Cypher function
     IndexError(IndexError),
     MiddlewareError(MiddlewareError),
     ParseError,
     InvalidContext,
-    OutOfRange { kind: OutOfRangeType },
+    OutOfRange {
+        kind: OutOfRangeType,
+    },
     OverflowError,
     FunctionError(FunctionError),
     CorruptData,
     InvalidArgument,
-    UnknownProperty { property_name: String },
-    FormatError { expected: String },
+    UnknownProperty {
+        property_name: String,
+    },
+    FormatError {
+        expected: String,
+    },
+    InvalidSourceTime {
+        reference: crate::models::ElementReference,
+        timestamp: u64,
+    },
+    ElementKindConflict {
+        reference: crate::models::ElementReference,
+        existing: &'static str,
+        incoming: &'static str,
+    },
 }
 
 #[derive(Debug)]
@@ -169,6 +186,27 @@ impl Display for EvaluationError {
 
 impl Error for EvaluationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
+        match self {
+            Self::IndexError(error) => Some(error),
+            Self::MiddlewareError(error) => Some(error),
+            Self::FunctionError(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl Error for FunctionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl Error for FunctionEvaluationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::IndexError(error) => Some(error),
+            Self::EvaluationError(error) => Some(error.as_ref()),
+            _ => None,
+        }
     }
 }

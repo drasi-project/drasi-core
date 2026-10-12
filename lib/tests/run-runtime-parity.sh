@@ -297,7 +297,7 @@ for profile in default no-default-features extra-capabilities integration plugin
             binary="${source##*/}"
             binary="${binary%.rs}"
             case "$binary" in
-                computation_query_faults|computation_transaction_transformer|computation_source_transactions|computation_pipeline_parity|computation_middleware_recovery)
+                computation_query_faults|computation_transaction_transformer|computation_source_transactions|computation_pipeline_parity|computation_middleware_recovery|computation_mutation_integrity)
                     [[ "$profile" == extra-capabilities ]] || continue
                     ;;
             esac

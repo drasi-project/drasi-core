@@ -249,7 +249,7 @@ async fn source_transaction_transient_relations_never_escape_the_group() {
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS name",
     )
     .await;
-    let relation = SourceChange::Insert {
+    let mut relation = SourceChange::Insert {
         element: Element::Relation {
             metadata: ElementMetadata {
                 reference: ElementReference::new("source", "knows"),
@@ -279,12 +279,27 @@ async fn source_transaction_transient_relations_never_escape_the_group() {
         .await
         .expect("live state")
         .is_empty());
-    let final_row = commit(
+    let stale = commit(
         &fixture,
         2,
-        vec![relation, update("alice", json!({"name": "final"}), 1300)],
+        vec![
+            relation.clone(),
+            update("alice", json!({"name": "final"}), 1300),
+        ],
     )
     .await;
+    assert!(
+        stale.is_empty(),
+        "an older insert cannot resurrect the deleted relationship"
+    );
+    let SourceChange::Insert {
+        element: Element::Relation { metadata, .. },
+    } = &mut relation
+    else {
+        unreachable!("relationship fixture")
+    };
+    metadata.effective_from = 1400;
+    let final_row = commit(&fixture, 3, vec![relation]).await;
     added_name(&final_row, "final");
     fixture.query.shutdown().await.expect("cleanup");
 }

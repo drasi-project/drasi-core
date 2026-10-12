@@ -559,7 +559,7 @@ fn invalid_emission(producer: &str, fault: Fault, input: &Envelope) -> OutputEnv
     }
 }
 
-fn assert_fault(error: GraphError, producer: &str, fault: Fault) {
+fn assert_fault(error: &GraphError, producer: &str, fault: Fault) {
     match (error.underlying(), fault) {
         (
             GraphError::Contract(ContractError::SchemaMismatch { expected, actual }),
@@ -625,10 +625,22 @@ async fn invalid_source_scenario() {
             .expect("valid descriptors");
         let run = graph.start().expect("graph starts");
         let control = run.control();
-        let error = run.await.expect_err("invalid source output fails the run");
-        assert_fault(error, "source", fault);
-        assert_eq!(control.state(), GraphState::Failed);
-        assert_eq!(graph.state(), GraphState::Failed);
+        let (result, ()) = tokio::join!(run, async {
+            let mut observed = control.subscribe_observed();
+            observed
+                .wait_for(|state| state.components[&component("source")].failure.is_some())
+                .await
+                .unwrap();
+            let failed = control.observed().components[&component("source")]
+                .failure
+                .clone()
+                .unwrap();
+            assert_fault(&failed.cause, "source", fault);
+            assert_eq!(failed.disposition, FailureDisposition::Terminal);
+            assert_eq!(control.state(), GraphState::Running);
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)));
         assert_eq!(
             sends.load(Ordering::SeqCst),
             usize::from(needs_prefix),
@@ -695,12 +707,22 @@ async fn invalid_transform_scenario() {
             .expect("valid descriptors");
         let run = graph.start().expect("graph starts");
         let control = run.control();
-        let error = run
-            .await
-            .expect_err("invalid transform output fails the run");
-        assert_fault(error, "transform", fault);
-        assert_eq!(control.state(), GraphState::Failed);
-        assert_eq!(graph.state(), GraphState::Failed);
+        let (result, ()) = tokio::join!(run, async {
+            let mut observed = control.subscribe_observed();
+            observed
+                .wait_for(|state| state.components[&component("transform")].failure.is_some())
+                .await
+                .unwrap();
+            let failed = control.observed().components[&component("transform")]
+                .failure
+                .clone()
+                .unwrap();
+            assert_fault(&failed.cause, "transform", fault);
+            assert_eq!(failed.disposition, FailureDisposition::Terminal);
+            assert_eq!(control.state(), GraphState::Running);
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)));
         assert_eq!(
             sends.load(Ordering::SeqCst),
             0,

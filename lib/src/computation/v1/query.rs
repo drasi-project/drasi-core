@@ -118,20 +118,22 @@ impl ContinuousQueryDefinition {
             let mut semantics = execution.clone();
             semantics.source_transactions = None;
             return Ok(Bytes::from(serde_json::to_vec(&(
-                4u32,
+                6u32,
                 &self.query,
                 self.language,
                 self.output_stream.as_str(),
                 &semantics,
                 "complete-source-transactions-v1",
+                drasi_core::query::SOURCE_CHANGE_SEMANTICS_VERSION,
             ))?));
         }
         Ok(Bytes::from(serde_json::to_vec(&(
-            3u32,
+            5u32,
             &self.query,
             self.language,
             self.output_stream.as_str(),
             execution,
+            drasi_core::query::SOURCE_CHANGE_SEMANTICS_VERSION,
         ))?))
     }
 

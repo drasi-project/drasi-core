@@ -70,6 +70,10 @@ impl AccumulatorIndex for CachedResultIndex {
         key: &ResultKey,
         owner: &ResultOwner,
     ) -> Result<Option<ValueAccumulator>, IndexError> {
+        // This cache has no commit/rollback hook; deletion frontiers must not outlive rollback.
+        if matches!(owner, ResultOwner::ElementTombstone) {
+            return self.inner.get(key, owner).await;
+        }
         let cache_key = get_hash_key(owner, key);
 
         {
@@ -93,6 +97,9 @@ impl AccumulatorIndex for CachedResultIndex {
         owner: ResultOwner,
         value: Option<ValueAccumulator>,
     ) -> Result<(), IndexError> {
+        if matches!(owner, ResultOwner::ElementTombstone) {
+            return self.inner.set(key, owner, value).await;
+        }
         let cache_key = get_hash_key(&owner, &key);
 
         self.inner.set(key, owner, value.clone()).await?;

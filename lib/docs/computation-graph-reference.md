@@ -324,10 +324,25 @@ messages per component, a 16 KiB payload budget and JSON depth 64. Sending does
 not wait for capacity; fanout reserves capacity for all recipients or fails.
 These are not durable messages.
 
+Graph-generated readiness/availability notices have separate coalescing slots:
+the latest state per connected peer, direction and category survives a full
+command queue. Rebind invalidates old slots. Public custom commands and explicit
+`ComponentControl` fan-out retain all-recipient reservation semantics.
+
 Register a `ControlHandler` on a component or through its handle. Handlers can
 progress separately from mutable data calls, but blocking an executor thread
 still delays other work. Availability messages do not imply a universal automatic
 restart policy.
+
+A returned handler error records degraded health without closing its inbox.
+Returned data/start errors, including invalid plugin output, retain the failed
+node and leave the controller and unrelated branches available. Inspect observed
+failures or operation reports; a failed node is not completion of `GraphRun`.
+Unknown errors default to terminal; an explicit `ComponentOperationError`
+preserves a classified cause. Retryability does not bypass cleanup or fenced
+storage. Management performs at most one reconstruction attempt per explicit
+reconciliation request, not a background retry loop. Delivery retries keep their
+separate configured limit and delay. Panic containment is not implied.
 
 `require_downstream_ready` optionally gates producer startup. Configure it before
 startup. It is separate from a connection policy requiring an already-running
@@ -367,6 +382,18 @@ bindings. Construction/start failure after a new declaration is committed leaves
 the new declaration and its error visible. Cancellation does not roll back those
 effects.
 
+Desired-topology commit preflights counters, slot leases and peer attachments
+before mutation and publishes one coherent desired/observed revision. Failure
+before this boundary cannot partially replace the topology; it does not undo
+stop/cleanup work already performed. Postcommit errors are carried in a
+`ReconciliationReport` whose `committed` flag remains true.
+
+Graceful stop drains admitted input, continuations and required acknowledgement
+before stop hooks. It also finishes in-flight graph-owned source admission
+writes. A drain timeout reports failure and retains active work, rather than
+aborting it. Explicit `GraphControl::cancel()` or dropping the run forces
+cancellation and can require storage reconstruction.
+
 Rejected additions retain supplied objects through `GraphError::AdditionRejected`.
 The error's owner can return them through `take().await`, or graph disposal can
 clean up newly transferred owned resources. Do not discard the ownership-bearing
@@ -380,6 +407,19 @@ Failed or cancelled cleanup retains ownership for retry. Dropping a run or graph
 cannot await asynchronous hooks or repair a plugin's unmanaged worker tasks.
 
 ## Storage and recovery implementation
+
+Shared query input admission compares source-scoped element identities using
+`effective_from`, not receipt time. Strictly older mutations warn and are skipped;
+native input progress still advances. Equal-time differences follow admitted
+order. Duplicate inserts upsert rather than double-count, updates merge sparse
+properties, and live node/relationship collisions fail explicitly. Transactional
+deletion frontiers prevent stale resurrection after restart; they have no
+automatic time-based expiry.
+
+Native query configuration identities include these semantics (versions 5/6).
+An older persisted identity is rejected as `ConfigurationChanged`; explicit
+reset/rebootstrap or a separately designed migration is required, subject to
+pending-output protection. This is not a backward-compatible stored-state change.
 
 An atomic query transaction covers indexes, source checkpoints, result sequence,
 retained output and its eviction, and current result rows. Standard index

@@ -21,7 +21,7 @@ use std::{
 
 use chrono::Utc;
 use futures::{
-    future::{AbortHandle, Abortable, Aborted, BoxFuture},
+    future::{AbortHandle, AbortRegistration, Abortable, Aborted, BoxFuture},
     stream::FuturesUnordered,
     FutureExt, StreamExt,
 };
@@ -910,20 +910,7 @@ pub(super) fn mark_cleanup_required(observed: &watch::Sender<Arc<ObservedGraph>>
 fn failure(error: GraphError, phase: FailurePhase) -> ComponentFailure {
     ComponentFailure {
         phase,
-        disposition: if let GraphError::Creation { disposition, .. } = error.underlying() {
-            *disposition
-        } else if matches!(
-            error.underlying(),
-            GraphError::Contract(_)
-                | GraphError::Emission { .. }
-                | GraphError::Topology { .. }
-                | GraphError::Validation { .. }
-                | GraphError::Recovery(_)
-        ) {
-            FailureDisposition::Terminal
-        } else {
-            FailureDisposition::Retryable
-        },
+        disposition: error.failure_disposition(),
         cause: Arc::new(error),
         timestamp: Utc::now(),
     }
@@ -1490,7 +1477,13 @@ impl HandleRequest {
         }
     }
 
-    fn begin(self, graph: &mut ComputationGraph, operations: &mut Operations) -> GraphResult<()> {
+    async fn begin(
+        self,
+        graph: &mut ComputationGraph,
+        operations: &mut Operations,
+        controls: &PipeGuard,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> GraphResult<()> {
         let index = match self.validate(graph) {
             Ok(index) => index,
             Err(error) => {
@@ -1512,6 +1505,23 @@ impl HandleRequest {
                 reply,
                 ..
             } => {
+                if let Err(error) = quiesce_before_stop(
+                    graph,
+                    operations,
+                    controls,
+                    cancel,
+                    &BTreeSet::from([index]),
+                )
+                .await
+                {
+                    let cancelled = matches!(error, GraphError::Cancelled);
+                    let _ = reply.send(Err(error));
+                    return if cancelled {
+                        Err(GraphError::Cancelled)
+                    } else {
+                        Ok(())
+                    };
+                }
                 if defer_restart {
                     graph.deferred_activation.insert(component);
                 }
@@ -1525,6 +1535,86 @@ struct ControlCompletion {
     component: ComponentId,
     generation: ComponentGeneration,
     result: Result<anyhow::Result<()>, Aborted>,
+    next: Option<PeerDriver>,
+}
+
+struct PeerDriver {
+    plane: Arc<crate::computation::v1::control::ControlPlane>,
+    control: crate::computation::v1::ComponentControl,
+    inbox: mpsc::Receiver<crate::computation::v1::PeerMessage>,
+    handler: watch::Receiver<Option<Arc<dyn crate::computation::v1::ControlHandler>>>,
+}
+
+impl PeerDriver {
+    async fn handle_next(&mut self) -> anyhow::Result<bool> {
+        loop {
+            let mut status_changes = self.plane.subscribe();
+            let message = loop {
+                if let Some(message) = self
+                    .plane
+                    .take_status(self.control.id(), self.control.generation())?
+                {
+                    break message;
+                }
+                tokio::select! {
+                    message = self.inbox.recv() => match message {
+                        Some(message) => break message,
+                        None => return Ok(false),
+                    },
+                    changed = status_changes.changed() => { changed?; }
+                }
+            };
+            let mut changes = self.plane.subscribe();
+            if let Err(error) = self.plane.validate_delivery(&message) {
+                log::debug!(
+                    "Discarding obsolete peer notification for {}: {error}",
+                    self.control.id()
+                );
+                continue;
+            }
+            let callback = self.handler.borrow().clone();
+            if let Some(callback) = callback {
+                let pending = callback.on_message(message.clone(), self.control.clone());
+                tokio::pin!(pending);
+                loop {
+                    tokio::select! {
+                        biased;
+                        changed = changes.changed() => {
+                            if changed.is_err() || self.plane.validate_delivery(&message).is_err() {
+                                return Ok(true);
+                            }
+                        }
+                        result = &mut pending => {
+                            result?;
+                            return Ok(true);
+                        }
+                    }
+                }
+            } else if matches!(
+                message.notification,
+                crate::computation::v1::ControlNotification::Custom { .. }
+            ) {
+                anyhow::bail!(
+                    "component {} has no handler for a custom control message",
+                    self.control.id()
+                );
+            }
+            return Ok(true);
+        }
+    }
+
+    async fn advance(mut self, registration: AbortRegistration) -> ControlCompletion {
+        let component = self.control.id().clone();
+        let generation = self.control.generation();
+        let result = Abortable::new(self.handle_next(), registration).await;
+        let next = !matches!(result, Err(_) | Ok(Ok(false)));
+        ControlCompletion {
+            component,
+            generation,
+            result: result.map(|result| result.map(|_| ())),
+            next: next.then_some(self),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1532,13 +1622,13 @@ struct Operations {
     futures: FuturesUnordered<BoxFuture<'static, Completion>>,
     active: BTreeMap<usize, Active>,
     starting: Option<Starting>,
+    suspended_starts: BTreeSet<usize>,
     stopping: Option<Stopping>,
     /// Handle starts and stops waiting for a conflicting operation, in arrival order.
     handle_requests: VecDeque<HandleRequest>,
     stop_after_abort: BTreeSet<usize>,
     propagated_stop: BTreeSet<usize>,
     exhausted: BTreeSet<usize>,
-    last_failure: Option<Arc<GraphError>>,
     quiescing: BTreeSet<usize>,
     paused: BTreeSet<usize>,
     invalidated_bindings: BTreeSet<usize>,
@@ -1576,7 +1666,7 @@ impl Operations {
                 return Ok(());
             }
         }
-        let (control, mut inbox) = graph.peers.attach(slot.id.clone(), slot.generation)?;
+        let (control, inbox) = graph.peers.attach(slot.id.clone(), slot.generation)?;
         if let Some(previous) = self.control_aborts.remove(&index) {
             previous.abort();
         }
@@ -1590,59 +1680,16 @@ impl Operations {
         );
         self.control_handlers.insert(index, handlers);
         self.peer_controls.insert(index, control.clone());
-        let plane = graph.peers.clone();
-        let id = slot.id.clone();
-        let generation = slot.generation;
         let (abort, registration) = AbortHandle::new_pair();
         self.control_aborts.insert(index, abort);
         self.control_futures.push(
-            async move {
-                let result = Abortable::new(
-                    async {
-                        while let Some(message) = inbox.recv().await {
-                            let mut changes = plane.subscribe();
-                            if let Err(error) = plane.validate_delivery(&message) {
-                                log::debug!(
-                                    "Discarding obsolete peer notification for {id}: {error}"
-                                );
-                                continue;
-                            }
-                            let callback = handler.borrow().clone();
-                            if let Some(callback) = callback {
-                                let pending = callback.on_message(message.clone(), control.clone());
-                                tokio::pin!(pending);
-                                loop {
-                                    tokio::select! {
-                                        biased;
-                                        changed = changes.changed() => {
-                                            if changed.is_err() || plane.validate_delivery(&message).is_err() {
-                                                log::debug!("Cancelling a retired peer callback for {id}");
-                                                break;
-                                            }
-                                        }
-                                        result = &mut pending => { result?; break; }
-                                    }
-                                }
-                            } else if matches!(
-                                message.notification,
-                                crate::computation::v1::ControlNotification::Custom { .. }
-                            ) {
-                                anyhow::bail!(
-                                    "component {id} has no handler for a custom control message"
-                                );
-                            }
-                        }
-                        Ok(())
-                    },
-                    registration,
-                )
-                .await;
-                ControlCompletion {
-                    component: id,
-                    generation,
-                    result,
-                }
+            PeerDriver {
+                plane: graph.peers.clone(),
+                control,
+                inbox,
+                handler,
             }
+            .advance(registration)
             .boxed(),
         );
         Ok(())
@@ -1654,6 +1701,12 @@ impl Operations {
         };
         if graph.components[index].generation != completed.generation {
             return;
+        }
+        if let Some(next) = completed.next {
+            let (abort, registration) = AbortHandle::new_pair();
+            self.control_aborts.insert(index, abort);
+            self.control_futures
+                .push(next.advance(registration).boxed());
         }
         if let Ok(Err(source)) = completed.result {
             let failure = failure(
@@ -1678,14 +1731,18 @@ impl Operations {
 
     fn retire_control(&mut self, graph: &ComputationGraph, index: usize) -> GraphResult<()> {
         let slot = &graph.components[index];
+        graph.peers.remove(&slot.id, slot.generation)?;
+        self.forget_control(index);
+        Ok(())
+    }
+
+    fn forget_control(&mut self, index: usize) {
         if let Some(abort) = self.control_aborts.remove(&index) {
             abort.abort();
         }
-        graph.peers.remove(&slot.id, slot.generation)?;
         self.peer_controls.remove(&index);
         self.control_handlers.remove(&index);
         self.pending_auto_start.remove(&index);
-        Ok(())
     }
 
     fn refresh_connections(&mut self, graph: &ComputationGraph) -> GraphResult<()> {
@@ -1821,13 +1878,19 @@ impl Operations {
         notification: crate::computation::v1::ControlNotification,
     ) {
         if let Some(control) = self.peer_controls.get(&index) {
-            if let Err(error) = control.notify_upstream(notification.clone()) {
+            if let Err(error) = control.publish_status(
+                crate::computation::v1::ControlDirection::Upstream,
+                notification.clone(),
+            ) {
                 log::warn!(
                     "Upstream availability notification failed for {}: {error}",
                     control.id()
                 );
             }
-            if let Err(error) = control.notify_downstream(notification) {
+            if let Err(error) = control.publish_status(
+                crate::computation::v1::ControlDirection::Downstream,
+                notification,
+            ) {
                 log::warn!(
                     "Peer availability notification failed for {}: {error}",
                     control.id()
@@ -2206,7 +2269,7 @@ impl Operations {
             return Ok(());
         };
         for index in graph.order.iter().rev().copied() {
-            if !group.pending.contains(&index) {
+            if !group.pending.contains(&index) || self.suspended_starts.contains(&index) {
                 continue;
             }
             let node = &graph.nodes[index];
@@ -2386,7 +2449,7 @@ impl Operations {
                     .lifecycle_requested = true;
             });
             if let Some(control) = self.peer_controls.get(&index) {
-                if let Err(error) = control.not_ready() {
+                if let Err(error) = control.publish_not_ready() {
                     log::warn!("Cannot revoke readiness for {}: {error}", control.id());
                 }
             }
@@ -2737,7 +2800,7 @@ impl Operations {
             }
             (Operation::Stop, Ok(())) => {
                 if let Some(control) = self.peer_controls.get(&completion.index) {
-                    if let Err(error) = control.not_ready() {
+                    if let Err(error) = control.publish_not_ready() {
                         log::warn!("Readiness notification failed for {id}: {error}");
                     }
                 }
@@ -2770,13 +2833,6 @@ impl Operations {
             }
             (operation, Err(error)) => {
                 self.quiescing.remove(&completion.index);
-                let fatal = matches!(
-                    error,
-                    GraphError::Contract(_)
-                        | GraphError::Emission { .. }
-                        | GraphError::Forward { .. }
-                        | GraphError::Topology { .. }
-                );
                 let phase = match operation {
                     Operation::Create => FailurePhase::Creation,
                     Operation::Start => FailurePhase::Activation,
@@ -2791,11 +2847,10 @@ impl Operations {
                     },
                 );
                 if let Some(control) = self.peer_controls.get(&completion.index) {
-                    if let Err(error) = control.not_ready() {
+                    if let Err(error) = control.publish_not_ready() {
                         log::warn!("Readiness notification failed for {id}: {error}");
                     }
                 }
-                self.last_failure = Some(failure.cause.clone());
                 update(graph, |state| {
                     let node = state.components.get_mut(id).expect("component");
                     node.lifecycle = ComponentLifecycle::Failed;
@@ -2823,11 +2878,6 @@ impl Operations {
                             .outcomes
                             .insert(id.clone(), StopOutcome::StopFailed(failure.clone()));
                     }
-                }
-                if fatal {
-                    return Err(GraphError::Reported {
-                        cause: failure.cause,
-                    });
                 }
                 if operation != Operation::Stop {
                     self.propagate(graph, completion.index)?;
@@ -2914,9 +2964,11 @@ fn accept_addition(
 /// with the operation in flight, or follows a queued request for the same
 /// component, is queued for the controller loop instead of failing. A stop
 /// supersedes the same component's queued starts.
-fn submit_handle_request(
+async fn submit_handle_request(
     graph: &mut ComputationGraph,
     operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
     request: HandleRequest,
 ) -> GraphResult<()> {
     if let Err(error) = request.validate(graph) {
@@ -2934,7 +2986,7 @@ fn submit_handle_request(
         operations.handle_requests.push_back(request);
         Ok(())
     } else {
-        request.begin(graph, operations)
+        request.begin(graph, operations, controls, cancel).await
     }
 }
 
@@ -2942,9 +2994,11 @@ fn submit_handle_request(
 /// component's requests in arrival order. Requests are revalidated when they
 /// begin, and those whose caller has gone are dropped. Returns whether any
 /// request began.
-fn begin_handle_requests(
+async fn begin_handle_requests(
     graph: &mut ComputationGraph,
     operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
 ) -> GraphResult<bool> {
     let mut began = false;
     let mut blocked = BTreeSet::new();
@@ -2956,11 +3010,37 @@ fn begin_handle_requests(
             blocked.insert(request.component().clone());
             position += 1;
         } else if let Some(request) = operations.handle_requests.remove(position) {
-            request.begin(graph, operations)?;
+            request.begin(graph, operations, controls, cancel).await?;
             began = true;
         }
     }
     Ok(began)
+}
+
+async fn quiesce_before_stop(
+    graph: &ComputationGraph,
+    operations: &mut Operations,
+    controls: &PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    selected: &BTreeSet<usize>,
+) -> GraphResult<()> {
+    // An incomplete start/constructor has no processing boundary to drain.
+    // Already-running members still quiesce even while other members start.
+    let processing: BTreeSet<_> = selected
+        .iter()
+        .copied()
+        .filter(|index| {
+            operations
+                .active
+                .get(index)
+                .map_or(true, |active| active.operation == Operation::Process)
+        })
+        .collect();
+    // Keep the group's pending members so a drain cannot finish its start report early.
+    let previous = std::mem::replace(&mut operations.suspended_starts, selected.clone());
+    let result = reconcile::quiesce(graph, operations, controls, cancel, processing).await;
+    operations.suspended_starts = previous;
+    result.map(|_| ())
 }
 
 async fn settle_pending_stop(
@@ -3040,7 +3120,7 @@ pub(super) async fn run(
         loop {
             operations.advance_start(graph)?;
             operations.advance_stop(graph)?;
-            if !begin_handle_requests(graph, &mut operations)? {
+            if !begin_handle_requests(graph, &mut operations, &controls, cancel).await? {
                 break;
             }
         }
@@ -3050,18 +3130,25 @@ pub(super) async fn run(
             && operations.stopping.is_none()
             && operations.propagated_stop.is_empty()
         {
-            if let Some(cause) = operations.last_failure {
-                return Err(GraphError::Reported { cause });
+            let observed = graph.observed();
+            let failed = observed
+                .components
+                .values()
+                .any(|node| node.failure.is_some())
+                || observed
+                    .relationships
+                    .values()
+                    .any(|edge| edge.failure.is_some())
+                || observed
+                    .resources
+                    .values()
+                    .any(|resource| resource.failure.is_some())
+                || observed.startup.as_ref().is_some_and(|report| {
+                    report.summary == OperationSummary::CompletedWithFailures
+                });
+            if !failed {
+                return Ok(());
             }
-            if graph
-                .observed()
-                .startup
-                .as_ref()
-                .is_some_and(|report| report.summary == OperationSummary::CompletedWithFailures)
-            {
-                return Err(GraphError::StartupIncomplete);
-            }
-            return Ok(());
         }
         tokio::select! {
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
@@ -3365,7 +3452,7 @@ pub(super) async fn run(
                     let _ = reply.send(result);
                 }
                 Some(Command::HandleStart { component, generation, reply }) => {
-                    submit_handle_request(graph, &mut operations, HandleRequest::Start { component, generation, reply })?;
+                    submit_handle_request(graph, &mut operations, &controls, cancel, HandleRequest::Start { component, generation, reply }).await?;
                 }
                 Some(Command::StartMembers { members, reply }) => {
                     let selected = member_indices(graph, &members).and_then(|selected| {
@@ -3384,18 +3471,12 @@ pub(super) async fn run(
                     let result = async {
                         settle_pending_stop(graph, &mut operations, &controls, cancel).await?;
                         let selected = member_indices(graph, &members)?;
-                        let quiesced = if operations.starting.is_none() {
-                            reconcile::quiesce(graph, &mut operations, &controls, cancel, selected.clone()).await
-                        } else {
-                            // Stopping must cancel unfinished starts; quiescence requires completed startup.
-                            Ok(Vec::new())
-                        };
+                        quiesce_before_stop(graph, &mut operations, &controls, cancel, &selected).await?;
                         let (stopped, receive) = oneshot::channel();
                         operations.begin_stop(graph, selected, stopped)?;
                         let report = reconcile::drive(graph, &mut operations, &controls, cancel, async {
                             receive.await.map_err(|_| GraphError::ControllerClosed)?
                         }).await?;
-                        quiesced?;
                         Ok(report)
                     }.await;
                     let cancelled = matches!(&result, Err(GraphError::Cancelled));
@@ -3403,7 +3484,7 @@ pub(super) async fn run(
                     if cancelled { return Err(GraphError::Cancelled); }
                 }
                 Some(Command::HandleStop { component, generation, reply }) => {
-                    submit_handle_request(graph, &mut operations, HandleRequest::Stop { component, generation, defer_restart: false, reply })?;
+                    submit_handle_request(graph, &mut operations, &controls, cancel, HandleRequest::Stop { component, generation, defer_restart: false, reply }).await?;
                 }
                 Some(Command::MutateMembers { members, changes, bindings, deprovision, management_access, reply }) => {
                     let result = async {
@@ -3467,7 +3548,16 @@ pub(super) async fn run(
                         else { select(graph, &selection) }
                     });
                     match valid {
-                        Ok(selected) => operations.begin_stop(graph, selected, reply)?,
+                        Ok(selected) => {
+                            match quiesce_before_stop(graph, &mut operations, &controls, cancel, &selected).await {
+                                Ok(()) => operations.begin_stop(graph, selected, reply)?,
+                                Err(error) => {
+                                    let cancelled = matches!(error, GraphError::Cancelled);
+                                    let _ = reply.send(Err(error));
+                                    if cancelled { return Err(GraphError::Cancelled); }
+                                }
+                            }
+                        }
                         Err(error) => { let _ = reply.send(Err(error)); }
                     }
                 }

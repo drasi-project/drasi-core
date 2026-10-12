@@ -1,14 +1,14 @@
 # ComputationGraph: issues, gaps, and next-phase work
 
-**Current assessment: 2026-10-09.** The stable CG-01 through CG-28 identifiers
-remain useful for tracking, but implemented framework capabilities are not open
-feature work. The active phase is core-only: no plugin additions, removals,
-porting, SDK expansion or observability work.
+**Historical catalogue, assessed 2026-10-09.** This document retains the
+CG-01 through CG-28 descriptions, design rationale and dated measurement evidence.
+It is not maintained as a second active backlog.
 
-For the consolidated current priorities, including shared-engine correctness
-findings and the source-time merger's remaining qualification, read the
-[remaining-work inventory](computation-graph-remaining-work.md). This backlog
-retains the detailed CG identifiers and historical evidence.
+The [consolidated outstanding-work inventory](computation-graph-remaining-work.md)
+is the single current list. It includes the pre-review work, every runtime-review
+finding, Phase 0 and post-merge dispositions, and a crosswalk for all CG IDs.
+The scope, priorities and completion statements below describe their dated
+assessment; use the consolidated inventory for current planning.
 
 ## Active core-only work
 

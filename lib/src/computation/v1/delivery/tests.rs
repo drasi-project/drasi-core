@@ -4,11 +4,11 @@
 use super::*;
 use crate::computation::v1::{
     ChangeSet, ComponentDescriptor, ComputationComponent, ComputationGraph, EdgeDefinition,
-    Endpoint, EnvelopeSink, EnvelopeSource, GraphChangeCodec, GraphProducerIdentity,
-    GraphProducerProgress, LegacyIndexProviderAdapter, OutputEnvelope, PipeRequirements,
-    PortDescriptor, PortDirection, QosChannel, QosChannelDefinition, QueryChangeCodec,
-    ResourceCleanup, ResourceId, ResourceOwnership, ResourceRole, ResourceSpecification,
-    RetentionPolicy, SinkCompletion, SubscriptionStart,
+    Endpoint, EnvelopeSink, EnvelopeSource, FailurePhase, GraphChangeCodec, GraphError,
+    GraphProducerIdentity, GraphProducerProgress, GraphState, LegacyIndexProviderAdapter,
+    OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, QosChannel,
+    QosChannelDefinition, QueryChangeCodec, ResourceCleanup, ResourceId, ResourceOwnership,
+    ResourceRole, ResourceSpecification, RetentionPolicy, SinkCompletion, SubscriptionStart,
 };
 use drasi_core::{
     computation::{ComputationIndexProvider, ComputationResource, TransactionDomain},
@@ -27,6 +27,20 @@ use std::{
 use tokio::sync::Notify;
 
 mod transactional;
+
+#[test]
+fn exhausted_delivery_budget_cannot_be_reset_by_graph_failure_classification() {
+    let error = anyhow::Error::new(DeliveryError::Handling {
+        id: DeliveryId("bounded-retry".into()),
+        attempts: 3,
+        source: drasi_core::interface::IndexError::IOError.into(),
+    })
+    .context("native consumer");
+    assert_eq!(
+        crate::computation::v1::lifecycle::operation_failure_disposition(&error),
+        crate::computation::v1::FailureDisposition::Terminal
+    );
+}
 
 fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("nonzero")
@@ -696,6 +710,42 @@ async fn graph(
     Ok((graph, channel))
 }
 
+async fn stop_after_consumer_failure(graph: &mut ComputationGraph) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let run = graph.start()?;
+        let control = run.control();
+        let sink = ComponentId::try_new("sink")?;
+        let (result, ()) = tokio::join!(run, async {
+            let mut observed = control.subscribe_observed();
+            observed
+                .wait_for(|state| {
+                    state.components[&sink]
+                        .failure
+                        .as_ref()
+                        .is_some_and(|failure| failure.phase == FailurePhase::Processing)
+                })
+                .await
+                .expect("controller retains the failed consumer");
+            let failure = control.observed().components[&sink]
+                .failure
+                .clone()
+                .unwrap();
+            let GraphError::Component { source, .. } = failure.cause.underlying() else {
+                panic!("expected a component failure: {failure:?}");
+            };
+            assert!(matches!(
+                source.downcast_ref::<DeliveryError>(),
+                Some(DeliveryError::Handling { .. })
+            ));
+            assert_eq!(control.state(), GraphState::Running);
+            control.cancel();
+        });
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        Ok(())
+    })
+    .await?
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn connected_qos_waits_for_every_operation_and_replays_only_unfinished_delivery(
 ) -> anyhow::Result<()> {
@@ -712,11 +762,7 @@ async fn connected_qos_waits_for_every_operation_and_replays_only_unfinished_del
         external_sink(directory.path(), handler.clone()).await?,
     )
     .await?;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(5), running.start()?)
-            .await?
-            .is_err()
-    );
+    stop_after_consumer_failure(&mut running).await?;
     assert_eq!(channel.progress().await?.processed["target"], 0);
     assert_eq!(handler.lock().await.effects.len(), 1);
     running.shutdown().await?;

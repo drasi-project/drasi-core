@@ -85,6 +85,21 @@ Cancellation drops the future immediately; it does **not** promise rollback of
 already performed state changes or external effects. Failed, panicked, cancelled
 and invalid operations return structured failures, not empty successful output.
 
+The Host retains the original native `Failure` as the cause of a classified
+`ComponentOperationError`. Only `FAILED` with its retryable flag is retryable;
+`PANICKED`, `PROTOCOL`, `CANCELLED`, `CLOSED` and unknown status codes remain
+terminal even if that flag is set. The consumer extension has its own explicit
+retry status and bounded `DeliveryRunner` attempt/delay policy; exhausting it
+does not authorize an implicit graph restart.
+
+Returned terminal errors retain the graph node and its diagnostics. Unrelated
+branches and host management continue. Rejected custom control messages do not
+close the inbox. Graceful graph stop waits for an admitted data operation,
+continuations and delivery confirmation before stop; a boundary timeout reports
+failure without abandoning that work. Explicit graph cancellation remains force
+cancellation with the rollback limitations above. These policies do not add a
+process-isolation or comprehensive host panic-containment guarantee.
+
 The SDK has one explicitly owned, process-lifetime Tokio I/O runtime per binary.
 It enters that runtime while the host polls plugin futures so timer/socket drivers
 work without borrowing the host's Tokio internals. It never spawns graph execution
