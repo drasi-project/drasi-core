@@ -103,8 +103,29 @@ impl Source for KubernetesSource {
             .task_handle
             .try_write()
             .map_err(|_| anyhow!("Kubernetes source '{}' is already starting", self.base.id))?;
-        if self.base.get_status().await == ComponentStatus::Running {
+        let status = self.base.get_status().await;
+        if status == ComponentStatus::Running {
             return Ok(());
+        }
+        if status == ComponentStatus::Error {
+            // Error may be visible before the old worker finishes publishing it.
+            // Join before Starting so its status/resources cannot overlap a retry.
+            drop(task_handle);
+            self.base.shutdown_tx.write().await.take();
+            if let Err(error) = self.base.abort_and_join_task().await {
+                error!(
+                    "Failed to clean up Kubernetes source '{}' before restarting: {error:#}",
+                    self.base.id
+                );
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some("Kubernetes source recovery failed; see logs for details".into()),
+                    )
+                    .await;
+                return Err(error);
+            }
+            task_handle = self.base.task_handle.write().await;
         }
         anyhow::ensure!(
             task_handle.is_none(),

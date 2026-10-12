@@ -747,6 +747,244 @@ async fn fatal_watch_event_after_start_reports_error() {
 }
 
 #[tokio::test]
+async fn direct_recovery_after_fatal_watch_preserves_subscription() {
+    use drasi_core::models::SourceChange;
+    use drasi_lib::channels::SourceEvent;
+
+    for in_stream_error in [false, true] {
+        let api = MockApi::new().await;
+        let source = api.source();
+        let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+        source.start().await.unwrap();
+        api.wait_for_watches(2).await;
+        let old_task = source
+            .base
+            .task_handle
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        api.state.watch_status.store(403, Ordering::SeqCst);
+        if in_stream_error {
+            api.send_watch_error(403);
+        } else {
+            api.close_watches();
+        }
+        wait_for_error(&source).await;
+
+        let error = source.start().await.expect_err("access is still denied");
+        assert!(format!("{error:#}").contains("403"));
+        assert!(old_task.is_finished(), "retry must join the failed worker");
+        assert!(source.base.task_handle.read().await.is_none());
+        assert!(source.base.shutdown_tx.read().await.is_none());
+        assert_eq!(source.status().await, ComponentStatus::Error);
+
+        api.state.watch_status.store(200, Ordering::SeqCst);
+        let expected_watches = *api.state.watch_count.borrow() + 2;
+        source.start().await.unwrap();
+        api.wait_for_watches(expected_watches).await;
+        assert_eq!(source.status().await, ComponentStatus::Running);
+        api.send_watch_event(json!({
+            "type": "ADDED",
+            "object": {
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "recovered", "namespace": "test", "uid": "recovered", "resourceVersion": "2"}
+            }
+        }));
+        let event = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &event.event,
+            SourceEvent::Change(SourceChange::Insert { element })
+                if element.get_reference().element_id.as_ref() == "pod:recovered"
+        ));
+        source.stop().await.unwrap();
+        api.assert_watches_closed().await;
+    }
+}
+
+#[tokio::test]
+async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
+    use drasi_core::models::SourceChange;
+    use drasi_lib::channels::SourceEvent;
+    use drasi_lib::component_graph::wait_for_status;
+    use drasi_lib::DrasiLib;
+
+    for stop_first in [false, true] {
+        let api = MockApi::new().await;
+        let core = DrasiLib::builder()
+            .with_source(api.source_builder().with_auto_start(false).build().unwrap())
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        core.start_source("test-source").await.unwrap();
+        let graph = core.component_graph();
+        let runtime = graph
+            .read()
+            .await
+            .get_runtime::<Arc<dyn Source>>("test-source")
+            .cloned()
+            .unwrap();
+        let source = runtime.as_any().downcast_ref::<KubernetesSource>().unwrap();
+        let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+        api.wait_for_watches(2).await;
+        let old_task = source
+            .base
+            .task_handle
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        api.send_watch_error(403);
+        wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Error],
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+        if stop_first {
+            core.stop_source(source.id()).await.unwrap();
+            wait_for_status(
+                &graph,
+                source.id(),
+                &[ComponentStatus::Stopped],
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+            assert!(source.base.task_handle.read().await.is_none());
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            receiver = source.base.create_streaming_receiver().await.unwrap();
+        }
+        let expected_watches = *api.state.watch_count.borrow() + 2;
+        core.start_source(source.id()).await.unwrap();
+        wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Running],
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        api.wait_for_watches(expected_watches).await;
+        assert!(old_task.is_finished());
+        assert_eq!(source.status().await, ComponentStatus::Running);
+        api.send_watch_event(json!({
+            "type": "ADDED",
+            "object": {
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "managed", "namespace": "test", "uid": "managed", "resourceVersion": "2"}
+            }
+        }));
+        let event = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &event.event,
+            SourceEvent::Change(SourceChange::Insert { element })
+                if element.get_reference().element_id.as_ref() == "pod:managed"
+        ));
+        core.stop_source(source.id()).await.unwrap();
+        wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Stopped],
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        api.assert_watches_closed().await;
+        core.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn recovery_joins_failed_worker_before_restarting() {
+    struct TaskResource {
+        base: drasi_lib::sources::SourceBase,
+        released: Arc<AtomicBool>,
+    }
+    impl Drop for TaskResource {
+        fn drop(&mut self) {
+            assert!(self.base.task_handle.try_write().is_ok());
+            self.released.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let api = MockApi::new().await;
+    let source = api.source();
+    let released = Arc::new(AtomicBool::new(false));
+    let resource = TaskResource {
+        base: source.base.clone_shared(),
+        released: released.clone(),
+    };
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _resource = resource;
+        let _shutdown_rx = shutdown_rx;
+        ready_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let old_task = task.abort_handle();
+    source.base.set_task_handle(task).await;
+    source.base.set_shutdown_tx(shutdown_tx).await;
+    ready_rx.await.unwrap();
+    source.base.set_status(ComponentStatus::Error, None).await;
+
+    source.start().await.unwrap();
+    assert!(old_task.is_finished());
+    assert!(released.load(Ordering::SeqCst));
+    assert_eq!(source.status().await, ComponentStatus::Running);
+    source.stop().await.unwrap();
+    api.assert_watches_closed().await;
+}
+
+#[tokio::test]
+async fn recovery_reports_worker_panic_before_retrying() {
+    let api = MockApi::new().await;
+    let source = api.source();
+    let task = tokio::spawn(async { panic!("failed worker") });
+    while !task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    source.base.set_task_handle(task).await;
+    source.base.set_status(ComponentStatus::Error, None).await;
+
+    let error = source
+        .start()
+        .await
+        .expect_err("unexpected task failure must be reported");
+    assert!(error
+        .downcast_ref::<tokio::task::JoinError>()
+        .unwrap()
+        .is_panic());
+    assert_eq!(*api.state.watch_count.borrow(), 0);
+    assert_eq!(source.status().await, ComponentStatus::Error);
+    assert!(source.base.task_handle.read().await.is_none());
+    assert!(source.base.shutdown_tx.read().await.is_none());
+
+    source.start().await.unwrap();
+    assert_eq!(source.status().await, ComponentStatus::Running);
+    source.stop().await.unwrap();
+    api.assert_watches_closed().await;
+}
+
+#[tokio::test]
 async fn transient_watch_failure_retries_and_stop_joins() {
     let api = MockApi::new().await;
     let source = api.source();

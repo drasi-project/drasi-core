@@ -50,6 +50,14 @@ within that deadline. The running watcher also reports fatal API errors as
 `Error`, while continuing to retry transient failures and expired resource
 versions.
 
+After a fatal watch error, calling `start()` (or managed `start_source()`) retries
+without requiring a prior stop. Recovery cancels and joins the previous worker,
+clears its shutdown handle, and repeats initialization before reporting `Running`.
+Existing subscriptions are retained so consumers can receive changes after
+recovery. Unexpected task panics are reported by that recovery attempt; once the
+failed worker has been joined, a subsequent start can retry. Managed
+`stop_source()` also supports cleanup from `Error`.
+
 Label and field selectors are trusted operator configuration. They are forwarded
 to Kubernetes on both list and watch requests; Kubernetes validates their syntax.
 Component error status messages contain a summary only; detailed failures are
