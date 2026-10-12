@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::Context;
 use async_trait::async_trait;
 use axum::http::Method;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -23,7 +24,8 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch, Mutex};
+use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -36,6 +38,28 @@ pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
+const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct SseLifecycle {
+    shutdown: Option<watch::Sender<bool>>,
+    tasks: JoinSet<anyhow::Result<()>>,
+}
+
+impl SseLifecycle {
+    async fn join_tasks(&mut self, reaction_id: &str, task_error: &mut Option<anyhow::Error>) {
+        while let Some(result) = self.tasks.join_next().await {
+            let error = match result {
+                Ok(Ok(())) => continue,
+                Ok(Err(error)) => error,
+                Err(error) if error.is_cancelled() => continue,
+                Err(error) => error.into(),
+            };
+            error!("[{reaction_id}] SSE background task failed: {error:#}");
+            task_error.get_or_insert(error);
+        }
+    }
+}
 
 /// Helper function to pre-create broadcasters for static paths in a template spec
 fn pre_create_broadcaster_for_template_spec(
@@ -81,7 +105,7 @@ pub struct SseReaction {
     pub(crate) base: ReactionBase,
     config: SseReactionConfig,
     broadcasters: Arc<tokio::sync::RwLock<HashMap<String, broadcast::Sender<String>>>>,
-    task_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    lifecycle: Mutex<SseLifecycle>,
 }
 
 impl std::fmt::Debug for SseReaction {
@@ -90,7 +114,7 @@ impl std::fmt::Debug for SseReaction {
             .field("id", &self.base.id)
             .field("config", &self.config)
             .field("broadcasters", &"<broadcasters>")
-            .field("task_handles", &"<task_handles>")
+            .field("lifecycle", &"<lifecycle>")
             .finish()
     }
 }
@@ -181,7 +205,7 @@ impl SseReaction {
             base: ReactionBase::new(params),
             config,
             broadcasters: Arc::new(tokio::sync::RwLock::new(broadcasters)),
-            task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lifecycle: Mutex::new(SseLifecycle::default()),
         }
     }
 
@@ -247,6 +271,16 @@ impl Reaction for SseReaction {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
+        // Serialize lifecycle transitions, including partially completed starts and stops.
+        let mut lifecycle = self.lifecycle.lock().await;
+        anyhow::ensure!(
+            lifecycle.shutdown.is_none()
+                && lifecycle.tasks.is_empty()
+                && self.base.processing_task.read().await.is_none(),
+            "SSE reaction '{}' is already started; stop it before starting again",
+            self.base.id
+        );
+
         log_component_start("SSE Reaction", &self.base.id);
 
         // Transition to Starting
@@ -257,13 +291,30 @@ impl Reaction for SseReaction {
             )
             .await;
 
-        // Transition to Running
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("SSE reaction started".to_string()),
-            )
-            .await;
+        let host = self.config.host.clone();
+        let port = self.config.port;
+        let listener = match tokio::time::timeout(
+            LIFECYCLE_TIMEOUT,
+            tokio::net::TcpListener::bind((host.as_str(), port)),
+        )
+        .await
+        .context("SSE listener bind timed out")
+        .and_then(|result| result.map_err(anyhow::Error::from))
+        .with_context(|| format!("Failed to bind SSE server on {host}:{port}"))
+        {
+            Ok(listener) => listener,
+            Err(error) => {
+                error!("[{}] {error:#}", self.base.id);
+                self.base
+                    .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                    .await;
+                return Err(error);
+            }
+        };
+
+        let (shutdown_tx, mut server_shutdown_rx) = watch::channel(false);
+        let mut heartbeat_shutdown_rx = shutdown_tx.subscribe();
+        lifecycle.shutdown = Some(shutdown_tx);
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -285,7 +336,10 @@ impl Reaction for SseReaction {
             super::register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
+                if !matches!(
+                    status_handle.get_status().await,
+                    ComponentStatus::Starting | ComponentStatus::Running
+                ) {
                     info!("[{reaction_id}] SSE reaction not running, breaking loop");
                     break;
                 }
@@ -498,10 +552,14 @@ impl Reaction for SseReaction {
         // Heartbeat task - sends to all paths
         let broadcasters_hb = self.broadcasters.clone();
         let interval = self.config.heartbeat_interval_ms;
-        let hb_handle = tokio::spawn(async move {
+        lifecycle.tasks.spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(interval));
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    biased;
+                    _ = heartbeat_shutdown_rx.wait_for(|shutdown| *shutdown) => break,
+                    _ = ticker.tick() => {}
+                }
                 let beat = json!({"type":"heartbeat","ts": chrono::Utc::now().timestamp_millis()})
                     .to_string();
                 // Send heartbeat to all broadcasters
@@ -510,12 +568,10 @@ impl Reaction for SseReaction {
                     let _ = broadcaster.send(beat.clone());
                 }
             }
+            Ok(())
         });
-        self.task_handles.lock().await.push(hb_handle);
 
         // HTTP server task - dynamically creates routes for all paths
-        let host = self.config.host.clone();
-        let port = self.config.port;
         let broadcasters_server = self.broadcasters.clone();
 
         // Get snapshot_fetcher from the runtime context for the /snapshot/:query_id endpoint
@@ -525,7 +581,7 @@ impl Reaction for SseReaction {
             .await
             .and_then(|ctx| ctx.snapshot_fetcher.clone());
 
-        let server_handle = tokio::spawn(async move {
+        lifecycle.tasks.spawn(async move {
             // Configure CORS to allow all origins
             let cors = CorsLayer::new()
                 .allow_origin(Any)
@@ -534,8 +590,10 @@ impl Reaction for SseReaction {
 
             // Create a handler that checks for matching paths dynamically
             let broadcasters_clone = broadcasters_server.clone();
+            let stream_shutdown_rx = server_shutdown_rx.clone();
             let handler = get(move |req: axum::http::Request<axum::body::Body>| {
                 let broadcasters = broadcasters_clone.clone();
+                let mut shutdown_rx = stream_shutdown_rx.clone();
                 async move {
                     let path = req.uri().path().to_string();
 
@@ -552,6 +610,9 @@ impl Reaction for SseReaction {
                             .map(|msg| {
                                 Ok::<Event, std::convert::Infallible>(Event::default().data(msg))
                             });
+                        let stream = futures::StreamExt::take_until(stream, async move {
+                            let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
+                        });
                         Sse::new(stream)
                             .keep_alive(
                                 KeepAlive::new()
@@ -635,30 +696,71 @@ impl Reaction for SseReaction {
                 .layer(cors);
 
             info!("Starting SSE server on {host}:{port} with CORS enabled");
-            let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
-                Ok(l) => l,
-                Err(e) => {
-                    error!("Failed to bind SSE server: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = axum::serve(listener, app).await {
-                error!("SSE server error: {e}");
-            }
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = server_shutdown_rx.wait_for(|shutdown| *shutdown).await;
+                })
+                .await
+                .context("SSE HTTP server failed")
         });
-        self.task_handles.lock().await.push(server_handle);
+
+        // The listener is bound and background tasks are spawned, but may not yet be scheduled.
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("SSE reaction started".to_string()),
+            )
+            .await;
 
         Ok(())
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        // Use ReactionBase common stop functionality
-        self.base.stop_common().await?;
+        let mut lifecycle = self.lifecycle.lock().await;
+        if let Some(shutdown) = &lifecycle.shutdown {
+            shutdown.send_replace(true);
+        }
 
-        // Cancel all other tasks (heartbeat, HTTP server)
-        let mut handles = self.task_handles.lock().await;
-        for handle in handles.drain(..) {
-            handle.abort();
+        let mut task_error = None;
+        if let Err(error) = tokio::time::timeout(
+            LIFECYCLE_TIMEOUT,
+            lifecycle.join_tasks(&self.base.id, &mut task_error),
+        )
+        .await
+        {
+            error!(
+                "[{}] SSE graceful shutdown timed out: {error}",
+                self.base.id
+            );
+            task_error.get_or_insert(
+                anyhow::Error::new(error).context("SSE graceful shutdown timed out"),
+            );
+            lifecycle.tasks.abort_all();
+            if let Err(error) = tokio::time::timeout(
+                LIFECYCLE_TIMEOUT,
+                lifecycle.join_tasks(&self.base.id, &mut task_error),
+            )
+            .await
+            {
+                error!(
+                    "[{}] Aborted SSE tasks did not terminate: {error}",
+                    self.base.id
+                );
+            }
+        }
+
+        self.base.stop_common().await?;
+        // Retain unfinished tasks and the start guard after a timeout so stop() can be retried.
+        if lifecycle.tasks.is_empty() {
+            lifecycle.shutdown = None;
+        }
+
+        if let Some(error) = task_error {
+            let error = error.context(format!("Failed to stop SSE reaction '{}'", self.base.id));
+            self.base
+                .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                .await;
+            return Err(error);
         }
 
         // Transition to Stopped
@@ -693,5 +795,186 @@ impl Reaction for SseReaction {
 
     fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
         drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::tests::sse_reaction_with_reserved_port;
+    use drasi_lib::channels::QueryResult;
+    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::context::ReactionRuntimeContext;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_sse_lifecycle_stop_reports_task_failure_after_releasing_listener() {
+        let (mut reaction, reserved_listener) =
+            sse_reaction_with_reserved_port("failed-task").await;
+        let addr = reserved_listener.local_addr().unwrap();
+        // Tokio's interval panics on zero: exercise the actual heartbeat task.
+        reaction.config.heartbeat_interval_ms = 0;
+        let (update_tx, mut updates) = tokio::sync::mpsc::channel(16);
+        reaction
+            .initialize(ReactionRuntimeContext::new(
+                "test-instance",
+                reaction.id(),
+                None,
+                update_tx,
+                None,
+            ))
+            .await;
+        drop(reserved_listener);
+        reaction.start().await.unwrap();
+
+        let error = reaction
+            .stop()
+            .await
+            .expect_err("unexpected task failures must be reported");
+        assert!(error
+            .downcast_ref::<tokio::task::JoinError>()
+            .unwrap()
+            .is_panic());
+        assert_eq!(reaction.status().await, ComponentStatus::Error);
+        let mut last_update = None;
+        while let Ok(update) = updates.try_recv() {
+            last_update = Some(update);
+        }
+        assert!(matches!(
+            last_update,
+            Some(ComponentUpdate::Status {
+                status: ComponentStatus::Error,
+                message: Some(message),
+                ..
+            }) if message.contains("panicked")
+        ));
+        assert!(reaction.lifecycle.lock().await.tasks.is_empty());
+        assert!(reaction.base.processing_task.read().await.is_none());
+        let _probe = TcpListener::bind(addr)
+            .await
+            .expect("all listeners must be released even when a task failed");
+        reaction.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sse_lifecycle_stop_preserves_returned_task_errors() {
+        let (reaction, reserved_listener) = sse_reaction_with_reserved_port("server-error").await;
+        let addr = reserved_listener.local_addr().unwrap();
+        drop(reserved_listener);
+        reaction.start().await.unwrap();
+        reaction.lifecycle.lock().await.tasks.spawn(async {
+            Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "serve failed").into())
+        });
+
+        let error = reaction.stop().await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(reaction.status().await, ComponentStatus::Error);
+        assert!(reaction.lifecycle.lock().await.tasks.is_empty());
+        assert!(reaction.base.processing_task.read().await.is_none());
+        let _probe = TcpListener::bind(addr).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sse_lifecycle_processing_survives_starting_status() {
+        let (reaction, reserved_listener) =
+            sse_reaction_with_reserved_port("starting-result").await;
+        drop(reserved_listener);
+        let mut results = reaction.broadcasters.read().await["/events"].subscribe();
+        let shutdown_gate = reaction.base.shutdown_tx.write().await;
+        let start = reaction.start();
+        tokio::pin!(start);
+        assert!(futures::poll!(&mut start).is_pending());
+        let processing_gate = reaction.base.processing_task.write().await;
+        drop(shutdown_gate);
+        assert!(futures::poll!(&mut start).is_pending());
+        assert_eq!(reaction.status().await, ComponentStatus::Starting);
+
+        reaction
+            .enqueue_query_result(QueryResult::new(
+                "starting-query".to_string(),
+                1,
+                chrono::Utc::now(),
+                vec![ResultDiff::Add {
+                    data: json!({"value": 42}),
+                    row_signature: 0,
+                }],
+                Default::default(),
+            ))
+            .await
+            .unwrap();
+        let payload = tokio::time::timeout(Duration::from_secs(5), results.recv())
+            .await
+            .expect("the processor must not exit while status is Starting")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload).unwrap()["queryId"],
+            "starting-query"
+        );
+        drop(processing_gate);
+        start.await.unwrap();
+        reaction.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sse_lifecycle_partial_start_requires_cleanup() {
+        let (reaction, reserved_listener) = sse_reaction_with_reserved_port("partial-start").await;
+        drop(reserved_listener);
+        let shutdown_gate = reaction.base.shutdown_tx.write().await;
+        let mut start = Box::pin(reaction.start());
+        assert!(futures::poll!(&mut start).is_pending());
+        drop(start);
+        drop(shutdown_gate);
+
+        assert!(reaction.lifecycle.lock().await.tasks.is_empty());
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already started"));
+        reaction.stop().await.unwrap();
+        reaction.start().await.unwrap();
+        reaction.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sse_lifecycle_shutdown_timeout_retains_unfinished_tasks() {
+        let (reaction, reserved_listener) = sse_reaction_with_reserved_port("stuck-task").await;
+        let addr = reserved_listener.local_addr().unwrap();
+        drop(reserved_listener);
+        reaction.start().await.unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        reaction
+            .lifecycle
+            .lock()
+            .await
+            .tasks
+            .spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            });
+        started_rx.await.unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(15), reaction.stop())
+            .await
+            .expect("shutdown must remain bounded even if a task cannot be aborted")
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("shutdown timed out"));
+        assert_eq!(reaction.status().await, ComponentStatus::Error);
+        assert_eq!(reaction.lifecycle.lock().await.tasks.len(), 1);
+        assert!(reaction.start().await.is_err());
+        let probe = TcpListener::bind(addr).await.unwrap();
+        drop(probe);
+
+        release_tx.send(()).unwrap();
+        reaction.stop().await.unwrap();
+        assert!(reaction.lifecycle.lock().await.tasks.is_empty());
+        reaction.start().await.unwrap();
+        reaction.stop().await.unwrap();
     }
 }

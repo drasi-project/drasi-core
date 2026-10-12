@@ -26,6 +26,12 @@ let source = MySqlReplicationSource::builder("mysql-source")
     .build()?;
 ```
 
+The builder defaults to auto-start enabled. Use `.with_auto_start(false)` to
+require an explicit start through the runtime. When constructing a source through
+`MySqlSourceDescriptor`, the descriptor preserves its `auto_start` argument.
+Construction itself never starts replication: the source remains `Stopped` for
+either value until it is started.
+
 ## Configuration Options
 
 | Property | Type | Default | Description |
@@ -69,6 +75,18 @@ protect against passive eavesdropping but not an active man-in-the-middle. Use
 ## Limitations
 
 - Packets > 16 MB are not supported.
+
+## Lifecycle
+
+`stop()` cleans up running, starting, and failed sources. It aborts and joins the
+replication task, closes stale streaming subscriptions, and clears their resume
+positions before reporting `Stopped`. Repeated direct stops are safe; new
+subscriptions are required after a restart to supply fresh resume positions.
+Both database sources use `SourceBase::abort_and_join_task()`: expected task
+cancellation succeeds, while an unexpected task failure is logged and returned
+after cleanup, leaving status `Error`. A subsequent stop can then reach `Stopped`.
+Task joining is not timed out, so an old task cannot outlive cleanup or overlap a
+restart; replication tasks must remain cooperative async tasks.
 
 ## Testing
 

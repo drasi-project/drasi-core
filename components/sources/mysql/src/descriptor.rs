@@ -226,7 +226,7 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
         &self,
         id: &str,
         config_json: &serde_json::Value,
-        _auto_start: bool,
+        auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
         let dto: MySqlSourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
@@ -259,6 +259,7 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
             .into();
 
         let mut builder = MySqlSourceBuilder::new(id)
+            .with_auto_start(auto_start)
             .with_host(host)
             .with_port(port)
             .with_database(database)
