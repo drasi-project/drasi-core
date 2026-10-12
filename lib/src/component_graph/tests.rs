@@ -918,57 +918,66 @@ fn test_validate_and_transition_nonexistent_component() {
 }
 
 #[test]
-fn test_validate_and_transition_cannot_stop_error_non_query() {
-    for node in [source_node("s1"), reaction_node("r1")] {
-        let mut graph = create_test_graph();
-        let id = node.id.clone();
-        graph.add_component(node).unwrap();
-        graph
-            .validate_and_transition(&id, ComponentStatus::Starting, None)
-            .unwrap();
-        graph
-            .validate_and_transition(&id, ComponentStatus::Error, None)
-            .unwrap();
+fn test_validate_and_transition_cannot_stop_error_reaction() {
+    let mut graph = create_test_graph();
+    graph.add_component(reaction_node("r1")).unwrap();
+    graph
+        .validate_and_transition("r1", ComponentStatus::Starting, None)
+        .unwrap();
+    graph
+        .validate_and_transition("r1", ComponentStatus::Error, None)
+        .unwrap();
 
-        let error = graph
-            .validate_and_transition(&id, ComponentStatus::Stopping, None)
-            .unwrap_err();
-        assert!(error.to_string().contains("error state"));
-        assert!(graph
-            .update_status(&id, ComponentStatus::Stopping)
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            graph.get_component(&id).unwrap().status,
-            ComponentStatus::Error
-        );
-    }
+    let error = graph
+        .validate_and_transition("r1", ComponentStatus::Stopping, None)
+        .unwrap_err();
+    assert!(error.to_string().contains("error state"));
+    assert!(graph
+        .update_status("r1", ComponentStatus::Stopping)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        graph.get_component("r1").unwrap().status,
+        ComponentStatus::Error
+    );
 }
 
 #[test]
-fn test_validate_and_transition_can_stop_error_query() {
-    let mut graph = create_test_graph();
-    graph.register_query("q1", HashMap::new(), &[]).unwrap();
-    graph
-        .validate_and_transition("q1", ComponentStatus::Starting, None)
-        .unwrap();
-    graph
-        .validate_and_transition("q1", ComponentStatus::Error, None)
-        .unwrap();
-    graph
-        .validate_and_transition("q1", ComponentStatus::Stopping, None)
-        .unwrap();
-    assert_eq!(
-        graph.get_component("q1").unwrap().status,
-        ComponentStatus::Stopping
-    );
-    graph
-        .validate_and_transition("q1", ComponentStatus::Stopped, None)
-        .unwrap();
-    assert_eq!(
-        graph.get_component("q1").unwrap().status,
-        ComponentStatus::Stopped
-    );
+fn test_validate_and_transition_can_stop_error_query_and_source() {
+    for node in [query_node("q1"), source_node("s1")] {
+        for via_update in [false, true] {
+            let mut graph = create_test_graph();
+            let id = node.id.clone();
+            graph.add_component(node.clone()).unwrap();
+            graph
+                .validate_and_transition(&id, ComponentStatus::Starting, None)
+                .unwrap();
+            graph
+                .validate_and_transition(&id, ComponentStatus::Error, None)
+                .unwrap();
+            if via_update {
+                assert!(graph
+                    .update_status(&id, ComponentStatus::Stopping)
+                    .unwrap()
+                    .is_some());
+            } else {
+                graph
+                    .validate_and_transition(&id, ComponentStatus::Stopping, None)
+                    .unwrap();
+            }
+            assert_eq!(
+                graph.get_component(&id).unwrap().status,
+                ComponentStatus::Stopping
+            );
+            graph
+                .validate_and_transition(&id, ComponentStatus::Stopped, None)
+                .unwrap();
+            assert_eq!(
+                graph.get_component(&id).unwrap().status,
+                ComponentStatus::Stopped
+            );
+        }
+    }
 }
 
 // ========================================================================

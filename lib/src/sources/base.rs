@@ -1573,6 +1573,30 @@ impl SourceBase {
             .expect("Failed to create test subscription receiver")
     }
 
+    /// Abort and join the source task, releasing the handle lock before waiting.
+    ///
+    /// Expected cancellation is successful; unexpected task failures are returned
+    /// with their `JoinError` preserved. Callers must finish resource cleanup before
+    /// propagating an error. This does not change status or clear subscriptions.
+    ///
+    /// Joining is intentionally not timed out: dropping an unfinished handle would
+    /// let the task outlive cleanup and overlap a restart. Source tasks must use
+    /// cooperative async I/O rather than blocking the executor.
+    pub async fn abort_and_join_task(&self) -> Result<()> {
+        let task = self.task_handle.write().await.take();
+        if let Some(task) = task {
+            task.abort();
+            if let Err(error) = task.await {
+                // abort() normally produces cancellation; a panic is not cancellation.
+                if !error.is_cancelled() {
+                    return Err(anyhow::Error::new(error)
+                        .context(format!("Source '{}' task failed during shutdown", self.id)));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Handle common stop functionality
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping source '{}'", self.id);
@@ -1702,6 +1726,62 @@ impl SourceBase {
 mod tests {
     use super::*;
     use crate::sources::ByteLexPositionComparator;
+
+    #[tokio::test]
+    async fn abort_and_join_task_releases_lock_before_joining() {
+        struct DropProbe {
+            base: SourceBase,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                assert!(
+                    self.base.task_handle.try_write().is_ok(),
+                    "joining must not hold the task-handle lock"
+                );
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let base = SourceBase::new(SourceBaseParams::new("join-test")).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let probe = DropProbe {
+            base: base.clone_shared(),
+            dropped: dropped.clone(),
+        };
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _probe = probe;
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let abort_handle = task.abort_handle();
+        base.set_task_handle(task).await;
+        ready_rx.await.unwrap();
+
+        base.abort_and_join_task().await.unwrap();
+        assert!(abort_handle.is_finished());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(base.task_handle.read().await.is_none());
+        base.abort_and_join_task().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_and_join_task_preserves_panic() {
+        let base = SourceBase::new(SourceBaseParams::new("panic-test")).unwrap();
+        let task = tokio::spawn(async { panic!("task panic") });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        base.set_task_handle(task).await;
+        let error = base.abort_and_join_task().await.unwrap_err();
+        assert!(error
+            .downcast_ref::<tokio::task::JoinError>()
+            .unwrap()
+            .is_panic());
+        assert!(base.task_handle.read().await.is_none());
+    }
 
     // =========================================================================
     // SourceBaseParams tests
