@@ -70,14 +70,14 @@ async fn native_query_stop_preserves_an_unrelated_inflight_stop() -> anyhow::Res
         let mut query_stop = Box::pin(core.stop_query("query"));
         tokio::select! {
             result = &mut other_stop => panic!("unrelated stop completed while blocked: {result:?}"),
-            result = &mut query_stop => panic!("query stop completed while another stop was blocked: {result:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            result = &mut query_stop => result?,
+            _ = tokio::time::sleep(DEADLINE) => panic!("independent query stop stalled behind an unrelated stop"),
         }
-        assert_eq!(core.get_query_status("query").await?, ComponentStatus::Running);
+        assert_eq!(core.get_query_status("query").await?, ComponentStatus::Stopped);
+        assert_eq!(other.observed()?.lifecycle, ComponentLifecycle::Stopping);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut other_stop).await.is_err());
         release.notify_one();
-        let (other_result, query_result) = tokio::join!(other_stop, query_stop);
-        other_result?;
-        query_result?;
+        other_stop.await?;
         assert_eq!(other.observed()?.lifecycle, ComponentLifecycle::Stopped);
         assert_eq!(core.get_query_status("query").await?, ComponentStatus::Stopped);
         core.shutdown().await?;

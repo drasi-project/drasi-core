@@ -30,10 +30,13 @@ use tokio::sync::{mpsc, watch};
 mod addition;
 mod configuration;
 mod controller;
+mod execution;
+pub(crate) use addition::RejectedResources;
 pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
 pub use configuration::{CapturedComponentConfiguration, GraphConfigurationSnapshot};
 mod recovery;
 mod registry;
+mod resource_tasks;
 mod resources;
 mod retirement;
 pub(crate) use registry::GraphRegistrySnapshot;
@@ -91,6 +94,13 @@ pub enum GraphError {
     StaleGeneration,
     #[error("the graph controller is closed")]
     ControllerClosed,
+    #[error("graph {graph} run {run_epoch} driver failed: {source}")]
+    Driver {
+        graph: Arc<str>,
+        run_epoch: u64,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("the graph observation queue is full")]
     ObservationQueueFull,
     #[error("a conflicting component lifecycle operation is still in progress")]
@@ -1165,7 +1175,7 @@ impl ComputationGraphBuilder {
             providers: self
                 .edges
                 .into_iter()
-                .map(|(_, provider)| provider)
+                .map(|(_, provider)| Arc::from(provider))
                 .enumerate()
                 .collect(),
             order,
@@ -1178,12 +1188,15 @@ impl ComputationGraphBuilder {
             registry,
             peers: super::ControlPlane::new(64)?,
             rejected_additions: Arc::new(std::sync::Mutex::new(Vec::new())),
+            rejected_resources: Vec::new(),
+            pending_metadata: BTreeMap::new(),
             protected_components: BTreeSet::new(),
             protected_resources: BTreeSet::new(),
             deferred_activation: BTreeSet::new(),
             reported_resources: BTreeMap::new(),
             management_protected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             retirement: None,
+            tasks: Arc::default(),
         };
         if !graph.snapshot.allow_incomplete {
             graph.validate_recovery(true)?;
@@ -1332,17 +1345,18 @@ impl GraphControl {
 /// Only natural drain followed by successful stop permits a new run. Boxes and
 /// stream high-watermarks are retained; a fresh generation creates fresh pipes.
 /// Failed component activation can be explicitly stopped and retried through the
-/// controller; no automatic retry or rollback is implied. Dropping a run
-/// cancels its scoped futures/pipes immediately but cannot call async hooks;
-/// `shutdown().await` must then be used to finish cleanup before dropping the
-/// graph. Components owning their own external workers must stop them in hooks.
+/// controller; no automatic retry or rollback is implied. Dropping a run closes
+/// its pipes and requests cancellation. The graph retains actual tasks, instance
+/// leases and join handles until `shutdown().await` completes cleanup. A panic
+/// quarantines the construction generation even after a successful stop.
+/// Components owning external workers must retain and join them in their hooks.
 pub struct ComputationGraph {
     snapshot: GraphSnapshot,
     // Stable runtime indices survive compact desired snapshots and removals.
     nodes: Vec<NodeSnapshot>,
     edges: BTreeMap<usize, EdgeSnapshot>,
     components: Vec<Arc<controller::InstanceSlot>>,
-    providers: BTreeMap<usize, Box<dyn PipeProvider>>,
+    providers: BTreeMap<usize, Arc<dyn PipeProvider>>,
     factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
     next_generation: u64,
     next_edge: usize,
@@ -1362,12 +1376,15 @@ pub struct ComputationGraph {
     execution_scope: Arc<str>,
     peers: Arc<super::ControlPlane>,
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
+    rejected_resources: Vec<Arc<addition::RejectedResources>>,
+    pending_metadata: BTreeMap<(ComponentId, bool), controller::Command>,
     deferred_activation: BTreeSet<ComponentId>,
     protected_components: BTreeSet<ComponentId>,
     protected_resources: BTreeSet<ResourceId>,
     reported_resources: BTreeMap<ComponentId, BTreeSet<ResourceId>>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
     retirement: Option<Arc<retirement::RetirementState>>,
+    tasks: Arc<controller::ExecutionTasks>,
 }
 
 impl ComputationGraph {
@@ -1396,7 +1413,7 @@ impl ComputationGraph {
         }
         for (index, provider) in self.providers {
             if let DesiredPipe::External { binding, .. } = &self.edges[&index].pipe {
-                bindings.pipes.insert(binding.clone(), provider);
+                bindings.pipes.insert(binding.clone(), Box::new(provider));
             }
         }
         Ok(super::ComponentBatch {
@@ -1624,14 +1641,16 @@ impl ComputationGraph {
         let observed = self.observed.clone();
         let inspector = self.inspector.clone();
         let registry = self.registry.clone();
+        let tasks = self.tasks.clone();
         Ok(GraphRun {
-            future: self.execute(cancellation, receiver, auto_start).boxed(),
+            future: Some(self.execute(cancellation, receiver, auto_start).boxed()),
             control,
             state,
             finished: false,
             observed,
             inspector,
             registry,
+            tasks,
         })
     }
 
@@ -1679,6 +1698,16 @@ impl ComputationGraph {
                 errors.push(error);
             }
         }
+        for resources in &self.rejected_resources {
+            if let Err(error) = resources
+                .dispose(&self.resource_handles, self.cleanup_timeout)
+                .await
+            {
+                errors.push(error);
+            }
+        }
+        self.rejected_resources
+            .retain(|resources| !resources.complete());
         self.rejected_additions
             .lock()
             .map_err(|_| topology("rejected addition cleanup registry is poisoned"))?
@@ -1722,17 +1751,19 @@ impl ComputationGraph {
     }
 }
 
-/// Future owning every scoped operation for one generation. Drop cancels, but
-/// never claims asynchronous stop hooks have run. See `ComputationGraph::shutdown`.
+/// Caller-polled controller for graph-owned component tasks. Drop requests
+/// cancellation, but does not join tasks or claim that async stop hooks ran.
+/// See `ComputationGraph::shutdown`.
 #[must_use = "a computation run must be polled; await it to drive and clean up the graph"]
 pub struct GraphRun<'a> {
-    future: BoxFuture<'a, GraphResult<()>>,
+    future: Option<BoxFuture<'a, GraphResult<()>>>,
     control: GraphControl,
     state: watch::Sender<GraphState>,
     finished: bool,
     observed: watch::Sender<Arc<ObservedGraph>>,
     inspector: super::ComputationInspector,
     registry: watch::Sender<Arc<GraphRegistrySnapshot>>,
+    tasks: Arc<controller::ExecutionTasks>,
 }
 
 impl GraphRun<'_> {
@@ -1745,7 +1776,54 @@ impl Future for GraphRun<'_> {
     type Output = GraphResult<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let result = self.future.as_mut().poll(cx);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.future
+                .as_mut()
+                .expect("active graph run")
+                .as_mut()
+                .poll(cx)
+        }));
+        let result = match result {
+            Ok(result) => result,
+            Err(payload) => {
+                self.control.cancel();
+                self.tasks.cancel();
+                let abandoned = self.future.take();
+                let dropped =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(abandoned)));
+                self.state.send_replace(GraphState::CleanupRequired);
+                controller::mark_cleanup_required(&self.observed);
+                self.inspector.publish(
+                    &self.control.desired_snapshot(),
+                    self.observed.borrow().clone(),
+                );
+                registry::publish_observed(&self.registry, self.observed.borrow().clone());
+                let error = GraphError::Driver {
+                    graph: self.control.desired_snapshot().id.clone(),
+                    run_epoch: self.observed.borrow().run_epoch,
+                    source: super::ComponentPanic::new(anyhow::anyhow!(
+                        "{}",
+                        execution::panic_message(payload)
+                    ))
+                    .into(),
+                };
+                Poll::Ready(Err(match dropped {
+                    Ok(()) => error,
+                    Err(payload) => GraphError::Cleanup {
+                        primary: Some(Box::new(error)),
+                        errors: vec![GraphError::Driver {
+                            graph: self.control.desired_snapshot().id.clone(),
+                            run_epoch: self.observed.borrow().run_epoch,
+                            source: super::ComponentPanic::new(anyhow::anyhow!(
+                                "driver future destruction: {}",
+                                execution::panic_message(payload)
+                            ))
+                            .into(),
+                        }],
+                    },
+                }))
+            }
+        };
         if result.is_ready() {
             self.finished = true;
         }
@@ -1757,6 +1835,34 @@ impl Drop for GraphRun<'_> {
     fn drop(&mut self) {
         if !self.finished {
             self.control.cancel();
+            self.tasks.cancel();
+            let abandoned = self.future.take();
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(abandoned)))
+            {
+                let cause = Arc::new(GraphError::Driver {
+                    graph: self.control.desired_snapshot().id.clone(),
+                    run_epoch: self.observed.borrow().run_epoch,
+                    source: super::ComponentPanic::new(anyhow::anyhow!(
+                        "driver future destruction: {}",
+                        execution::panic_message(payload)
+                    ))
+                    .into(),
+                });
+                self.observed.send_modify(|observed| {
+                    let observed = Arc::make_mut(observed);
+                    for node in observed.components.values_mut() {
+                        if node.failure.is_none() {
+                            node.failure = Some(super::ComponentFailure {
+                                phase: super::FailurePhase::Control,
+                                disposition: super::FailureDisposition::Terminal,
+                                cause: cause.clone(),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
+                    }
+                });
+            }
             self.state.send_replace(GraphState::CleanupRequired);
             controller::mark_cleanup_required(&self.observed);
             self.inspector.publish(

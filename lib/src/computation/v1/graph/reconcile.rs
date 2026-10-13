@@ -1240,7 +1240,7 @@ pub(crate) fn validate_definition(desired: &DesiredTopology) -> GraphResult<()> 
     Ok(())
 }
 
-struct Prepared {
+pub(super) struct Prepared {
     nodes: Vec<NodeSnapshot>,
     edges: Vec<EdgeSnapshot>,
     order: Vec<usize>,
@@ -1249,6 +1249,125 @@ struct Prepared {
     resources: BTreeMap<ResourceId, ResourceHandle>,
     resource_constructors: BTreeMap<ResourceId, Arc<dyn ResourceConstructor>>,
     factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
+}
+
+struct PreparationSnapshot {
+    snapshot: GraphSnapshot,
+    observed: Arc<ObservedGraph>,
+    components: Vec<Arc<InstanceSlot>>,
+    ids: BTreeMap<ComponentId, usize>,
+    edges: BTreeMap<usize, EdgeSnapshot>,
+    providers: BTreeMap<usize, Arc<dyn PipeProvider>>,
+    factories: BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
+    resource_handles: BTreeMap<ResourceId, ResourceHandle>,
+    execution_scope: Arc<str>,
+    next_generation: u64,
+    next_edge: usize,
+    next_binding_generation: u64,
+    next_resource_generation: u64,
+}
+
+impl PreparationSnapshot {
+    fn capture(graph: &ComputationGraph) -> Self {
+        Self {
+            snapshot: graph.snapshot.clone(),
+            observed: graph.observed(),
+            components: graph.components.clone(),
+            ids: graph.ids.clone(),
+            edges: graph.edges.clone(),
+            providers: graph.providers.clone(),
+            factories: graph.factories.clone(),
+            resource_handles: graph.resource_handles.clone(),
+            execution_scope: graph.execution_scope.clone(),
+            next_generation: graph.next_generation,
+            next_edge: graph.next_edge,
+            next_binding_generation: graph.next_binding_generation,
+            next_resource_generation: graph.next_resource_generation,
+        }
+    }
+    fn observed(&self) -> &ObservedGraph {
+        &self.observed
+    }
+}
+
+async fn prepare_owned(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    commands: &mut CommandReceiver,
+    plan: &ReconciliationPreview,
+    bindings: TopologyBindings,
+) -> GraphResult<(
+    Prepared,
+    Option<Arc<super::super::addition::RejectedResources>>,
+)> {
+    if !graph.tasks.preparations.is_empty() || !graph.tasks.pipes.is_empty() {
+        return Err(GraphError::OperationInProgress);
+    }
+    let mut failures: Vec<_> = settle_retirements(graph, operations, controls, cancel, commands)
+        .await
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
+    match failures.len() {
+        0 => {}
+        1 => return Err(failures.pop().expect("one retirement failure")),
+        _ => {
+            return Err(GraphError::Cleanup {
+                primary: None,
+                errors: failures,
+            })
+        }
+    }
+    let resources = super::super::addition::RejectedResources::new(
+        plan.desired.resources.iter().cloned(),
+        &bindings.resources,
+    );
+    if let Some(resources) = &resources {
+        graph.rejected_resources.push(resources.clone());
+    }
+    let snapshot = PreparationSnapshot::capture(graph);
+    let plan = plan.clone();
+    let revision = graph.snapshot.revision;
+    let identity = super::super::execution::GraphIdentity {
+        graph: graph.snapshot.id.clone(),
+        run_epoch: graph.observed().run_epoch,
+        phase: FailurePhase::Validation,
+    };
+    let (abort, registration) = AbortHandle::new_pair();
+    let joined = graph
+        .tasks
+        .preparations
+        .spawn(identity.clone(), abort, async move {
+            identity
+                .run(async move {
+                    Abortable::new(
+                        async move { prepare(&snapshot, &plan, bindings) },
+                        registration,
+                    )
+                    .await
+                    .unwrap_or(Err(GraphError::Cancelled))
+                })
+                .await
+        })?;
+    let prepared = drive_reconciliation(
+        graph,
+        operations,
+        controls,
+        cancel,
+        commands,
+        graph.cleanup_timeout,
+        async { joined.await? },
+    )
+    .await?;
+    if graph.snapshot.revision != revision {
+        return Err(GraphError::StaleRevision {
+            expected: revision,
+            actual: graph.snapshot.revision,
+        });
+    }
+    Ok((prepared, resources))
 }
 
 fn validate_output_bindings(graph: &ComputationGraph, prepared: &Prepared) -> GraphResult<()> {
@@ -1274,7 +1393,7 @@ fn validate_output_bindings(graph: &ComputationGraph, prepared: &Prepared) -> Gr
 }
 
 fn prepare(
-    graph: &ComputationGraph,
+    graph: &PreparationSnapshot,
     plan: &ReconciliationPreview,
     mut bindings: TopologyBindings,
 ) -> GraphResult<Prepared> {
@@ -1605,11 +1724,17 @@ async fn drive_with_deadline<T>(
     let operation = tokio::time::timeout(deadline, operation);
     tokio::pin!(operation);
     loop {
+        operations.advance_drains(graph, controls)?;
         operations.advance_start(graph)?;
         operations.advance_stop(graph)?;
+        let drain_timeout = operations.next_drain_deadline();
         tokio::select! {
             biased;
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            _ = drain_deadline(drain_timeout) => {},
+            completion = operations.drain_futures.next(), if !operations.drain_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_drain(graph, completion); }
+            }
             completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete_control(graph, completion); }
             }
@@ -1621,6 +1746,137 @@ async fn drive_with_deadline<T>(
     }
 }
 
+async fn drive_reconciliation<T>(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    commands: &mut CommandReceiver,
+    deadline: std::time::Duration,
+    operation: impl Future<Output = GraphResult<T>>,
+) -> GraphResult<T> {
+    let operation = tokio::time::timeout(deadline, operation);
+    tokio::pin!(operation);
+    loop {
+        tokio::task::consume_budget().await;
+        operations.advance_additions(graph)?;
+        operations.advance_drains(graph, controls)?;
+        operations.advance_start(graph)?;
+        operations.advance_stop(graph)?;
+        begin_handle_requests(graph, operations, controls, cancel).await?;
+        let drain_timeout = operations.next_drain_deadline();
+        tokio::select! {
+            _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            _ = drain_deadline(drain_timeout) => {},
+            completion = operations.drain_futures.next(), if !operations.drain_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_drain(graph, completion); }
+            }
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_control(graph, completion); }
+            }
+            result = &mut operation => return result.map_err(|_| GraphError::ReconciliationTimeout)?,
+            completion = operations.futures.next(), if !operations.futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+            }
+            result = operations.retirements.next(), if !operations.retirements.is_empty() => {
+                if let Some(result) = result {
+                    operations.complete_retirement(graph, result)?;
+                }
+            }
+            command = commands.recv() => {
+                handle_command(graph, operations, controls, cancel,
+                    command.ok_or(GraphError::ControllerClosed)?, commands).await?;
+            }
+        }
+    }
+}
+
+async fn settle_retirements(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    commands: &mut CommandReceiver,
+) -> Vec<GraphResult<()>> {
+    let deadline = tokio::time::Instant::now() + graph.cleanup_timeout;
+    let mut pending = std::mem::take(&mut operations.retirements);
+    let mut outcomes = Vec::new();
+    while !pending.is_empty() {
+        let result = drive_reconciliation(
+            graph,
+            operations,
+            controls,
+            cancel,
+            commands,
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            async { pending.next().await.ok_or(GraphError::ControllerClosed) },
+        )
+        .await;
+        let interrupted = result.is_err();
+        outcomes.push(match result {
+            Ok(completion) => operations.complete_retirement(graph, completion),
+            Err(error) => Err(error),
+        });
+        pending.extend(std::mem::take(&mut operations.retirements));
+        if interrupted {
+            break;
+        }
+    }
+    operations.retirements.extend(pending);
+    if operations.retirements.is_empty() {
+        if graph.tasks.retirements.is_empty() {
+            operations.retiring.clear();
+        } else {
+            outcomes.push(Err(GraphError::OperationInProgress));
+        }
+    }
+    outcomes
+}
+
+async fn pause_reconciliation(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    commands: &mut CommandReceiver,
+    index: usize,
+) -> GraphResult<()> {
+    let Some(active) = operations.active.get(&index) else {
+        return Ok(());
+    };
+    if active.operation != Operation::Process {
+        return Err(GraphError::OperationInProgress);
+    }
+    operations.pause_for_drain(graph, index);
+    let id = graph.nodes[index].descriptor.id().clone();
+    let mut observed = graph.observed.subscribe();
+    let result = drive_reconciliation(
+        graph,
+        operations,
+        controls,
+        cancel,
+        commands,
+        graph.cleanup_timeout,
+        async move {
+            let state = observed
+                .wait_for(|state| state.components[&id].lifecycle != ComponentLifecycle::Quiescing)
+                .await
+                .map_err(|_| GraphError::ControllerClosed)?;
+            match &state.components[&id].failure {
+                Some(failure) => Err(GraphError::Reported {
+                    cause: failure.cause.clone(),
+                }),
+                None => Ok(()),
+            }
+        },
+    )
+    .await;
+    if result.is_err() {
+        operations.resume_quiescing(graph, &BTreeSet::from([index]));
+    }
+    result
+}
+
 pub(super) async fn quiesce(
     graph: &ComputationGraph,
     operations: &mut Operations,
@@ -1628,7 +1884,7 @@ pub(super) async fn quiesce(
     cancel: &mut watch::Receiver<bool>,
     selected: BTreeSet<usize>,
 ) -> GraphResult<Vec<ComponentId>> {
-    if operations.stopping.is_some()
+    if operations.conflicts(&selected, false)
         || selected.iter().any(|index| {
             operations
                 .active
@@ -1722,9 +1978,7 @@ async fn pause(
                     if let Some(completion) = completion { operations.complete_control(graph, completion); }
                 }
                 _ = &mut deadline => {
-                    if let Some(active) = operations.active.get(&index) { active.quiesce.send_replace(false); }
-                    operations.quiescing.remove(&index);
-                    update(graph, |state| state.components.get_mut(graph.nodes[index].descriptor.id()).expect("component").lifecycle = ComponentLifecycle::Running);
+                    operations.resume_quiescing(graph, &BTreeSet::from([index]));
                     return Err(GraphError::ReconciliationTimeout);
                 }
                 completion = operations.futures.next() => {
@@ -1736,7 +1990,7 @@ async fn pause(
     Ok(())
 }
 
-fn resume(
+pub(super) fn resume(
     graph: &ComputationGraph,
     operations: &mut Operations,
     ids: &BTreeSet<ComponentId>,
@@ -1797,63 +2051,85 @@ fn resume(
 }
 
 async fn stop_instance(
-    graph: &ComputationGraph,
+    graph: &mut ComputationGraph,
     operations: &mut Operations,
-    controls: &PipeGuard,
+    controls: &mut PipeGuard,
     cancel: &mut watch::Receiver<bool>,
     index: usize,
     deprovision: bool,
+    commands: &mut CommandReceiver,
 ) -> GraphResult<()> {
     let slot = graph.components[index].clone();
-    graph.peers.reset_ready(&slot.id, slot.generation)?;
-    let node = graph.nodes[index].clone();
-    let mut lease = slot.take()?;
-    if !lease.attempted && !deprovision {
+    if operations
+        .peer_controls
+        .get(&index)
+        .is_some_and(|control| control.generation() == slot.generation)
+    {
+        graph.peers.reset_ready(&slot.id, slot.generation)?;
+    }
+    if !slot.take()?.attempted && !deprovision {
         return Ok(());
     }
-    update(graph, |state| {
-        let observed = state.components.get_mut(&slot.id).expect("component");
-        observed.lifecycle = ComponentLifecycle::Stopping;
-        observed.operation = OperationEpoch(observed.operation.0 + 1);
-        observed.transition_time = Utc::now();
-    });
-    let result = drive(graph, operations, controls, cancel, async {
-        if lease.attempted {
-            lease
-                .component
-                .stop()
-                .await
-                .map_err(|source| component_error(&node, "stop", source))?;
-            lease.attempted = false;
+    if deprovision {
+        if let Some(cause) = slot.damage() {
+            return Err(GraphError::Reported { cause });
         }
-        if deprovision
-            && !matches!(
-                lease.component,
-                Component::Deferred { .. } | Component::Unresolved(_)
-            )
-        {
-            lease
-                .component
-                .deprovision()
-                .await
-                .map_err(|source| component_error(&node, "deprovision", source))?;
-        }
-        Ok(())
-    })
-    .await;
-    if result.is_ok() {
-        lease.attempted = false;
     }
-    update(graph, |state| {
-        let observed = state.components.get_mut(&slot.id).expect("component");
-        if result.is_ok() {
-            observed.record_stopped(ComponentLifecycle::Stopped);
-        } else {
-            observed.lifecycle = ComponentLifecycle::Failed;
-            observed.transition_time = Utc::now();
+    operations.launch_cleanup(graph, index, Operation::Stop, deprovision)?;
+    let (reply, response) = oneshot::channel();
+    operations
+        .active
+        .get_mut(&index)
+        .expect("owned stop task")
+        .reply = Some(reply);
+    drive_reconciliation(
+        graph,
+        operations,
+        controls,
+        cancel,
+        commands,
+        graph.cleanup_timeout,
+        async { response.await.map_err(|_| GraphError::ControllerClosed)? },
+    )
+    .await
+}
+
+async fn pause_control(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    index: usize,
+    commands: &mut CommandReceiver,
+) -> GraphResult<()> {
+    operations.control_quiescing.insert(index);
+    if let Some(abort) = operations.control_aborts.get(&index) {
+        abort.abort();
+    }
+    let deadline = tokio::time::sleep(graph.cleanup_timeout);
+    tokio::pin!(deadline);
+    while operations.control_aborts.contains_key(&index) {
+        operations.advance_drains(graph, controls)?;
+        operations.advance_start(graph)?;
+        operations.advance_stop(graph)?;
+        begin_handle_requests(graph, operations, controls, cancel).await?;
+        tokio::select! {
+            biased;
+            _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            _ = &mut deadline => return Err(GraphError::ReconciliationTimeout),
+            completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_control(graph, completion); }
+            }
+            completion = operations.futures.next(), if !operations.futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+            }
+            command = commands.recv() => {
+                handle_command(graph, operations, controls, cancel,
+                    command.ok_or(GraphError::ControllerClosed)?, commands).await?;
+            }
         }
-    });
-    result
+    }
+    Ok(())
 }
 
 /// Applies a previewed topology change.
@@ -1871,14 +2147,64 @@ pub(super) async fn execute(
     bindings: TopologyBindings,
     commands: &mut CommandReceiver,
 ) -> GraphResult<ReconciliationReport> {
+    if operations.reconciliation.is_some() {
+        return Err(GraphError::OperationInProgress);
+    }
+    operations.reconciliation = Some(ReconciliationReservation {
+        components: supplied
+            .pause
+            .iter()
+            .chain(&supplied.create)
+            .chain(&supplied.replace)
+            .chain(&supplied.update)
+            .chain(&supplied.remove)
+            .chain(&supplied.restart)
+            .cloned()
+            .collect(),
+        resources: supplied
+            .resources
+            .union(&supplied.remove_resources)
+            .cloned()
+            .collect(),
+        resource_instances: graph
+            .resource_handles
+            .iter()
+            .chain(graph.pending_resource_cleanup.iter())
+            .filter(|(id, _)| {
+                supplied.resources.contains(*id) || supplied.remove_resources.contains(*id)
+            })
+            .map(|(_, handle)| handle.scope_identity())
+            .collect(),
+        committed: false,
+    });
+    let result = execute_reserved(
+        graph, operations, controls, cancel, supplied, bindings, commands,
+    )
+    .await;
+    operations.reconciliation = None;
+    flush_metadata(graph, operations, controls, cancel, commands).await?;
+    result
+}
+
+async fn execute_reserved(
+    graph: &mut ComputationGraph,
+    operations: &mut Operations,
+    controls: &mut PipeGuard,
+    cancel: &mut watch::Receiver<bool>,
+    supplied: ReconciliationPreview,
+    bindings: TopologyBindings,
+    commands: &mut CommandReceiver,
+) -> GraphResult<ReconciliationReport> {
     check_revision(graph, supplied.revision)?;
     if supplied.desired.graph_id != graph.snapshot.id.as_ref() {
         return Err(topology("preview belongs to another graph"));
     }
-    if operations.starting.is_some()
-        || operations.stopping.is_some()
-        || !operations.propagated_stop.is_empty()
-    {
+    let affected: BTreeSet<_> = supplied
+        .pause
+        .iter()
+        .filter_map(|id| graph.ids.get(id).copied())
+        .collect();
+    if operations.conflicts(&affected, true) || !operations.propagated_stop.is_disjoint(&affected) {
         return Err(GraphError::OperationInProgress);
     }
     for (id, (generation, epoch)) in &supplied.epochs {
@@ -1898,8 +2224,19 @@ pub(super) async fn execute(
         ));
     }
     plan.deprovision = supplied.deprovision;
+    if plan
+        .resources
+        .iter()
+        .chain(&plan.remove_resources)
+        .any(|id| graph.tasks.resources.contains(id))
+    {
+        return Err(GraphError::OperationInProgress);
+    }
     let defer_activation = bindings.defer_activation;
-    let mut prepared = prepare(graph, &plan, bindings)?;
+    let (mut prepared, supplied_resources) = prepare_owned(
+        graph, operations, controls, cancel, commands, &plan, bindings,
+    )
+    .await?;
     validate_output_bindings(graph, &prepared)?;
     for id in plan.remove.iter().chain(&plan.replace) {
         let Some(&index) = graph.ids.get(id) else {
@@ -1915,6 +2252,10 @@ pub(super) async fn execute(
             let deadline = tokio::time::sleep(graph.cleanup_timeout);
             tokio::pin!(deadline);
             while operations.active.contains_key(&index) {
+                operations.advance_drains(graph, controls)?;
+                operations.advance_start(graph)?;
+                operations.advance_stop(graph)?;
+                begin_handle_requests(graph, operations, controls, cancel).await?;
                 tokio::select! {
                     biased;
                     _ = cancelled(cancel) => return Err(GraphError::Cancelled),
@@ -1924,6 +2265,10 @@ pub(super) async fn execute(
                     }
                     completion = operations.futures.next() => {
                         if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+                    }
+                    command = commands.recv() => {
+                        handle_command(graph, operations, controls, cancel,
+                            command.ok_or(GraphError::ControllerClosed)?, commands).await?;
                     }
                 }
             }
@@ -1947,11 +2292,12 @@ pub(super) async fn execute(
     let changing_edges: BTreeSet<_> = plan.rebind.union(&plan.unbind).cloned().collect();
     let boundary = async {
         for index in graph.order.clone() {
+            let consumer = graph.nodes[index].descriptor.id().clone();
             // Drain incoming work while this consumer is still active, then
             // park it before advancing to its downstream consumers.
             for edge in changing_edges
                 .iter()
-                .filter(|edge| &edge.to.component == graph.nodes[index].descriptor.id())
+                .filter(|edge| edge.to.component == consumer)
             {
                 // Retirement already proved drain and fenced these exact owners.
                 // Asking their now-closed journal to drain would block cleanup.
@@ -1981,14 +2327,20 @@ pub(super) async fn execute(
                         .get(&edge_index)
                         .cloned()
                         .ok_or_else(|| topology("bound edge has no drain control"))?;
-                    drive(graph, operations, controls, cancel, async {
-                        progress.drained(control.as_ref()).await
-                    })
+                    drive_reconciliation(
+                        graph,
+                        operations,
+                        controls,
+                        cancel,
+                        commands,
+                        graph.cleanup_timeout,
+                        async { progress.drained(control.as_ref()).await },
+                    )
                     .await?;
                 }
             }
             if plan.pause.contains(graph.nodes[index].descriptor.id()) {
-                pause(graph, operations, controls, cancel, index).await?;
+                pause_reconciliation(graph, operations, controls, cancel, commands, index).await?;
             }
         }
         // A producer can commit between preflight and quiescence. Recheck before
@@ -2014,6 +2366,21 @@ pub(super) async fn execute(
         .chain(&activate_blocked)
         .cloned()
         .collect();
+    for id in plan.remove.iter().chain(&plan.replace) {
+        if let Some(&index) = graph.ids.get(id) {
+            if let Err(error) =
+                pause_control(graph, operations, controls, cancel, index, commands).await
+            {
+                if matches!(error, GraphError::Cancelled) {
+                    return Err(error);
+                }
+                report.failures.push(failure(error, FailurePhase::Control));
+                report.summary = OperationSummary::CompletedWithFailures;
+                resume(graph, operations, &plan.pause)?;
+                return Ok(report);
+            }
+        }
+    }
     for index in graph.order.clone() {
         let id = graph.nodes[index].descriptor.id().clone();
         if stop.contains(&id) {
@@ -2024,6 +2391,7 @@ pub(super) async fn execute(
                 cancel,
                 index,
                 plan.deprovision.contains(&id),
+                commands,
             )
             .await
             {
@@ -2052,14 +2420,12 @@ pub(super) async fn execute(
             let Some(spec) = graph.snapshot.resources.get(id) else {
                 continue;
             };
-            let Some(handle) = graph
-                .resource_handles
-                .get(id)
-                .or_else(|| graph.pending_resource_cleanup.get(id))
-                .cloned()
-            else {
+            if !graph.resource_handles.contains_key(id)
+                && !graph.pending_resource_cleanup.contains_key(id)
+                && !graph.tasks.resources.contains(id)
+            {
                 continue;
-            };
+            }
             if spec.ownership == ResourceOwnership::Graph {
                 cleanup_touched.insert(id.clone());
                 update(graph, |state| {
@@ -2069,16 +2435,22 @@ pub(super) async fn execute(
                 let result = match super::super::resources::ensure_released_dependents(graph, id) {
                     Err(error) => Err(error),
                     Ok(()) => {
-                        drive(graph, operations, controls, cancel, async {
-                            handle
-                                .shutdown()
-                                .await
-                                .map_err(|source| GraphError::ResourceCleanup {
-                                    resource: id.clone(),
-                                    source,
-                                })
-                        })
-                        .await
+                        let job = super::super::resource_tasks::shutdown(graph, id)?;
+                        let result = drive_reconciliation(
+                            graph,
+                            operations,
+                            controls,
+                            cancel,
+                            commands,
+                            graph.cleanup_timeout,
+                            job.wait(),
+                        )
+                        .await;
+                        if job.joined() {
+                            super::super::resource_tasks::complete(graph, &job)
+                        } else {
+                            result
+                        }
                     }
                 };
                 if let Err(error) = result {
@@ -2092,12 +2464,7 @@ pub(super) async fn execute(
                     });
                     report.failures.push(failure);
                 } else {
-                    graph.resource_handles.remove(id);
-                    graph.pending_resource_cleanup.remove(id);
-                    update(graph, |state| {
-                        state.resources.get_mut(id).expect("resource").realization =
-                            ResourceRealization::Released
-                    });
+                    debug_assert!(!graph.tasks.resources.contains(id));
                 }
             }
         }
@@ -2129,17 +2496,21 @@ pub(super) async fn execute(
         )?;
         return Ok(report);
     }
-    if let Err(error) = commit_desired(graph, operations, controls, &plan, &mut prepared) {
-        report.failures.push(failure(error, FailurePhase::Binding));
-        report.summary = OperationSummary::CompletedWithFailures;
-        let resumed = resume(
-            graph,
-            operations,
-            &plan.pause.difference(&stop).cloned().collect(),
-        );
-        record_committed(&mut report, FailurePhase::Activation, resumed)?;
-        return Ok(report);
-    }
+    let retirement_failures =
+        match commit_desired(graph, operations, controls, &plan, &mut prepared) {
+            Ok(failures) => failures,
+            Err(error) => {
+                report.failures.push(failure(error, FailurePhase::Binding));
+                report.summary = OperationSummary::CompletedWithFailures;
+                let resumed = resume(
+                    graph,
+                    operations,
+                    &plan.pause.difference(&stop).cloned().collect(),
+                );
+                record_committed(&mut report, FailurePhase::Activation, resumed)?;
+                return Ok(report);
+            }
+        };
     if defer_activation {
         graph.deferred_activation.extend(
             plan.create
@@ -2151,7 +2522,28 @@ pub(super) async fn execute(
     }
     report.revision = graph.snapshot.revision;
     report.committed = true;
+    if let Some(resources) = supplied_resources {
+        resources.adopted(&graph.resource_handles).await;
+        graph
+            .rejected_resources
+            .retain(|resources| !resources.complete());
+    }
+    operations
+        .reconciliation
+        .as_mut()
+        .expect("reserved reconciliation")
+        .committed = true;
+    let mut retirement_failed = !retirement_failures.is_empty();
+    report.failures.extend(retirement_failures);
     report.removed = plan.remove.clone();
+    for result in settle_retirements(graph, operations, controls, cancel, commands).await {
+        retirement_failed |= result.is_err();
+        record_committed(&mut report, FailurePhase::Removal, result)?;
+    }
+    if retirement_failed {
+        report.summary = OperationSummary::CompletedWithFailures;
+        return Ok(report);
+    }
     for index in graph.order.clone() {
         if !operations.active.contains_key(&index) {
             if let Err(error) = operations.attach_control(graph, index) {
@@ -2180,6 +2572,7 @@ pub(super) async fn execute(
         cancel,
         &mut prepared,
         &mut report,
+        commands,
     )
     .await;
     let mut realized = record_committed(&mut report, FailurePhase::Creation, resources)?.is_some();
@@ -2197,7 +2590,16 @@ pub(super) async fn execute(
         realized = record_committed(&mut report, FailurePhase::Creation, components)?.is_some();
     }
     verify_recovery(graph, &plan, &mut report);
-    let settled = settle(graph, operations, controls, cancel).await;
+    let affected: BTreeSet<_> = plan
+        .pause
+        .iter()
+        .chain(&plan.create)
+        .chain(&plan.replace)
+        .chain(&plan.restart)
+        .chain(&activate_blocked)
+        .filter_map(|id| graph.ids.get(id).copied())
+        .collect();
+    let settled = settle(graph, operations, controls, cancel, &affected, commands).await;
     let settled = record_committed(&mut report, FailurePhase::Activation, settled)?.is_some();
     // Producers paused for the commit are resumed even when the graph did not
     // settle; leaving them paused would silently stall every downstream reader.
@@ -2215,18 +2617,23 @@ pub(super) async fn execute(
         if settled {
             let (reply, receiver) = oneshot::channel();
             operations.begin_start(graph, start, Some(reply), false);
-            let startup = drive(graph, operations, controls, cancel, async {
-                receiver.await.map_err(|_| GraphError::ControllerClosed)?
-            })
+            let startup = drive_reconciliation(
+                graph,
+                operations,
+                controls,
+                cancel,
+                commands,
+                graph.cleanup_timeout,
+                async { receiver.await.map_err(|_| GraphError::ControllerClosed)? },
+            )
             .await;
             if let Some(startup) = record_committed(&mut report, FailurePhase::Activation, startup)?
             {
                 report.startup = Some(startup);
             }
         } else {
-            // Another lifecycle group still owns `starting`/`stopping`; starting
-            // now would displace it. Defer to the controller's auto-start queue,
-            // which begins these components once that group completes.
+            // A conflicting lifecycle group is still active. Preserve its
+            // report and start these members when their own domain is free.
             defer_startup(graph, operations, start);
         }
     }
@@ -2295,28 +2702,39 @@ fn verify_recovery(
 /// Waits, within the cleanup deadline, for lifecycle groups that began while
 /// this reconciliation was realizing components.
 async fn settle(
-    graph: &ComputationGraph,
+    graph: &mut ComputationGraph,
     operations: &mut Operations,
-    controls: &PipeGuard,
+    controls: &mut PipeGuard,
     cancel: &mut watch::Receiver<bool>,
+    selected: &BTreeSet<usize>,
+    commands: &mut CommandReceiver,
 ) -> GraphResult<()> {
     let deadline = tokio::time::sleep(graph.cleanup_timeout);
     tokio::pin!(deadline);
-    while operations.starting.is_some() || operations.stopping.is_some() {
+    while operations.conflicts(selected, true) {
+        operations.advance_drains(graph, controls)?;
         operations.advance_start(graph)?;
         operations.advance_stop(graph)?;
-        if operations.starting.is_none() && operations.stopping.is_none() {
+        begin_handle_requests(graph, operations, controls, cancel).await?;
+        if !operations.conflicts(selected, true) {
             break;
         }
         tokio::select! {
             biased;
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
             _ = &mut deadline => return Err(GraphError::ReconciliationTimeout),
+            completion = operations.drain_futures.next(), if !operations.drain_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_drain(graph, completion); }
+            }
             completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete_control(graph, completion); }
             }
             completion = operations.futures.next(), if !operations.futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
+            }
+            command = commands.recv() => {
+                handle_command(graph, operations, controls, cancel,
+                    command.ok_or(GraphError::ControllerClosed)?, commands).await?;
             }
         }
     }
@@ -2342,10 +2760,11 @@ fn defer_startup(graph: &ComputationGraph, operations: &mut Operations, start: B
 async fn realize_resources(
     graph: &mut ComputationGraph,
     operations: &mut Operations,
-    controls: &PipeGuard,
+    controls: &mut PipeGuard,
     cancel: &mut watch::Receiver<bool>,
     prepared: &mut Prepared,
     report: &mut ReconciliationReport,
+    commands: &mut CommandReceiver,
 ) -> GraphResult<()> {
     let mut constructors = std::mem::take(&mut prepared.resource_constructors);
     let order = super::super::resources::construction_order(
@@ -2379,40 +2798,29 @@ async fn realize_resources(
         let result = match dependencies {
             Err(error) => Err(error),
             Ok(dependencies) => {
-                drive_with_deadline(
+                let job = super::super::resource_tasks::construct(
+                    graph,
+                    &id,
+                    constructor,
+                    dependencies,
+                    specification.role,
+                )?;
+                let result = drive_reconciliation(
                     graph,
                     operations,
                     controls,
                     cancel,
+                    commands,
                     std::time::Duration::from_secs(30),
-                    async {
-                        constructor
-                            .construct_with_dependencies(&dependencies)
-                            .await
-                            .map_err(|source| GraphError::ResourceCreation {
-                                resource: id.clone(),
-                                source,
-                            })
-                    },
+                    job.wait(),
                 )
-                .await
-            }
-        };
-        let result = match result {
-            Ok(handle) if handle.role() == specification.role => {
-                graph.resource_handles.insert(id.clone(), handle);
-                Ok(())
-            }
-            Ok(handle) => {
-                if specification.ownership == ResourceOwnership::Graph {
-                    graph.pending_resource_cleanup.insert(id.clone(), handle);
+                .await;
+                if job.joined() {
+                    super::super::resource_tasks::complete(graph, &job)
+                } else {
+                    result
                 }
-                Err(GraphError::ResourceCreation {
-                    resource: id.clone(),
-                    source: anyhow::anyhow!("provider role differs from declaration"),
-                })
             }
-            result => result.map(|_| ()),
         };
         let failed = match result {
             Ok(()) => None,
@@ -2445,7 +2853,7 @@ fn commit_desired(
     controls: &mut PipeGuard,
     plan: &ReconciliationPreview,
     prepared: &mut Prepared,
-) -> GraphResult<()> {
+) -> GraphResult<Vec<ComponentFailure>> {
     let next_generation = graph
         .next_generation
         .checked_add(
@@ -2495,13 +2903,15 @@ fn commit_desired(
     for id in plan.remove.iter().chain(prepared.components.keys()) {
         if let Some(&index) = graph.ids.get(id) {
             required.insert(index);
-            retired_controls.push((id.clone(), graph.components[index].generation));
+            if operations.peer_controls.contains_key(&index) {
+                retired_controls.push((id.clone(), graph.components[index].generation));
+            }
         } else if plan.remove.contains(id) {
             return Err(GraphError::StaleGeneration);
         }
     }
     let mut leases = BTreeMap::new();
-    for index in required {
+    for index in required.iter().copied() {
         leases.insert(index, graph.components[index].take()?);
     }
     let mut future_ids = graph.ids.clone();
@@ -2555,7 +2965,7 @@ fn commit_desired(
         .into_iter()
         .zip(graph.next_generation..next_generation)
     {
-        let slot = InstanceSlot::new(component, ComponentGeneration(generation));
+        let slot = InstanceSlot::declared(id.clone(), component, ComponentGeneration(generation));
         let lease = slot.take()?;
         replacements.insert(id, (slot, lease));
     }
@@ -2617,7 +3027,13 @@ fn commit_desired(
         graph.reported_resources.remove(id);
         retired_handlers.push(index);
         let lease = leases.get_mut(&index).expect("prepared removal lease");
-        retired_instances.extend(lease.value.take());
+        if let Some(instance) = lease.value.take() {
+            retired_instances.push((
+                lease.slot.clone(),
+                graph.observed().components[id].operation,
+                instance,
+            ));
+        }
         operations.paused.remove(&index);
         operations.exhausted.remove(&index);
     }
@@ -2638,7 +3054,13 @@ fn commit_desired(
                                 == node.output_streams.get(port)
                     })
                     .collect();
-                retired_instances.extend(old.value.take());
+                if let Some(instance) = old.value.take() {
+                    retired_instances.push((
+                        old.slot.clone(),
+                        graph.observed().components[&id].operation,
+                        instance,
+                    ));
+                }
                 drop(new);
                 graph.components[index] = slot;
                 operations.exhausted.remove(&index);
@@ -2658,7 +3080,7 @@ fn commit_desired(
     for edge in &prepared.edges {
         if let Some(provider) = prepared.pipes.remove(&edge.definition) {
             graph.edges.insert(graph.next_edge, edge.clone());
-            graph.providers.insert(graph.next_edge, provider);
+            graph.providers.insert(graph.next_edge, Arc::from(provider));
             graph.next_edge += 1;
         } else if let Some((_, existing)) = graph
             .edges
@@ -2774,18 +3196,7 @@ fn commit_desired(
     for index in retired_handlers {
         operations.forget_control(index);
     }
-    for control in cancelled_controls {
-        control.cancel();
-    }
     drop(leases);
-    drop((
-        retired_instances,
-        retired_providers,
-        retired_resources,
-        retired_factories,
-        retired_outputs,
-        retired_inputs,
-    ));
     graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
     update(graph, |state| {
         state.revision = plan.desired.revision;
@@ -2879,15 +3290,128 @@ fn commit_desired(
             }
         }
     }
-    Ok(())
+    let mut failures = Vec::new();
+    let identity = super::super::execution::GraphIdentity {
+        graph: graph.snapshot.id.clone(),
+        run_epoch: graph.observed().run_epoch,
+        phase: FailurePhase::Removal,
+    };
+    operations.retiring.extend(required);
+    let retirement_targets: BTreeMap<_, _> = operations
+        .retiring
+        .iter()
+        .filter_map(|index| {
+            let slot = &graph.components[*index];
+            graph
+                .ids
+                .get(&slot.id)
+                .filter(|current| *current == index)?;
+            Some((slot.id.clone(), slot.clone()))
+        })
+        .collect();
+    let (abort, _registration) = AbortHandle::new_pair();
+    let joined = graph
+        .tasks
+        .retirements
+        .spawn(identity.clone(), abort, async move {
+            identity
+                .run(async {
+                    let mut errors = Vec::new();
+                    for (slot, epoch, instance) in retired_instances {
+                        let target = retirement_targets.get(&slot.id);
+                        let component = super::super::execution::Identity {
+                            slot,
+                            epoch,
+                            phase: FailurePhase::Removal,
+                            action: "destroy retired component",
+                        };
+                        if let Err(error) = component.call(|| {
+                            drop(instance);
+                            Ok(())
+                        }) {
+                            let cause = Arc::new(error);
+                            if let Some(target) = target {
+                                target.quarantine(GraphError::Reported {
+                                    cause: cause.clone(),
+                                });
+                            }
+                            errors.push(GraphError::Reported { cause });
+                        }
+                    }
+                    for control in cancelled_controls {
+                        if let Err(error) = identity.call(|| {
+                            control.cancel();
+                            drop(control);
+                            Ok(())
+                        }) {
+                            let cause = Arc::new(error);
+                            for target in retirement_targets.values() {
+                                target.quarantine(GraphError::Reported {
+                                    cause: cause.clone(),
+                                });
+                            }
+                            errors.push(GraphError::Reported { cause });
+                        }
+                    }
+                    macro_rules! retire {
+                        ($values:expr) => {
+                            for value in $values {
+                                if let Err(error) = identity.call(|| {
+                                    drop(value);
+                                    Ok(())
+                                }) {
+                                    let cause = Arc::new(error);
+                                    for target in retirement_targets.values() {
+                                        target.quarantine(GraphError::Reported {
+                                            cause: cause.clone(),
+                                        });
+                                    }
+                                    errors.push(GraphError::Reported { cause });
+                                }
+                            }
+                        };
+                    }
+                    retire!(retired_providers);
+                    retire!(retired_resources);
+                    retire!(retired_factories);
+                    retire!(retired_outputs);
+                    retire!(retired_inputs);
+                    if errors.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(GraphError::Cleanup {
+                            primary: None,
+                            errors,
+                        })
+                    }
+                })
+                .await
+        });
+    match joined {
+        Ok(joined) => operations.retirements.push(
+            async move {
+                RetirementCompletion {
+                    slot: None,
+                    result: joined.await.and_then(|result| result),
+                }
+            }
+            .boxed(),
+        ),
+        Err(error) => {
+            operations.retiring.clear();
+            failures.push(failure(error, FailurePhase::Removal));
+        }
+    }
+    Ok(failures)
 }
 
-async fn create_component(
+async fn realize_component(
     graph: &mut ComputationGraph,
     operations: &mut Operations,
-    controls: &PipeGuard,
+    controls: &mut PipeGuard,
     cancel: &mut watch::Receiver<bool>,
     index: usize,
+    operation: Operation,
     commands: &mut CommandReceiver,
 ) -> GraphResult<CreationOutcome> {
     let id = graph.nodes[index].descriptor.id().clone();
@@ -2935,22 +3459,31 @@ async fn create_component(
         }
     }
     operations.attach_control(graph, index)?;
-    operations.launch(graph, index, Operation::Create)?;
+    operations.launch(graph, index, operation)?;
     let mut peers = graph.peers.subscribe();
     while operations.active.contains_key(&index)
         || operations.stop_after_abort.contains(&index)
         || operations
             .stopping
-            .as_ref()
-            .is_some_and(|group| group.pending.contains(&index))
+            .iter()
+            .any(|group| group.pending.contains(&index))
+        || operations
+            .draining
+            .iter()
+            .any(|group| group.selected.contains(&index))
     {
         tokio::task::consume_budget().await;
+        operations.advance_drains(graph, controls)?;
         operations.advance_additions(graph)?;
         operations.advance_start(graph)?;
         operations.advance_stop(graph)?;
+        begin_handle_requests(graph, operations, controls, cancel).await?;
         tokio::select! {
             biased;
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
+            completion = operations.drain_futures.next(), if !operations.drain_futures.is_empty() => {
+                if let Some(completion) = completion { operations.complete_drain(graph, completion); }
+            }
             completion = operations.control_futures.next(), if !operations.control_futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete_control(graph, completion); }
             }
@@ -2958,15 +3491,9 @@ async fn create_component(
             completion = operations.futures.next(), if !operations.futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
             }
-            command = commands.recv_during_construction() => match command {
-                Some(Command::Add { addition, management_access, reply }) => {
-                    accept_addition(graph, operations, addition, management_access, reply);
-                }
-                Some(Command::HandleStop { component, generation, reply }) => {
-                    submit_handle_request(graph, operations, controls, cancel, HandleRequest::Stop { component, generation, defer_restart: true, reply }).await?;
-                }
-                Some(_) => unreachable!("construction channel only accepts additions and handle stops"),
-                None => return Err(GraphError::ControllerClosed),
+            command = commands.recv() => {
+                handle_command(graph, operations, controls, cancel,
+                    command.ok_or(GraphError::ControllerClosed)?, commands).await?;
             }
         }
     }
@@ -3008,169 +3535,19 @@ async fn realize(
         if !plan.create.contains(id) && !plan.replace.contains(id) && !plan.update.contains(id) {
             continue;
         }
-        if !plan.update.contains(id) {
-            let id = id.clone();
-            let outcome =
-                create_component(graph, operations, controls, cancel, index, commands).await?;
-            report.creation.insert(id, outcome);
-            continue;
-        }
-        let slot = graph.components[index].clone();
-        let node = graph.nodes[index].clone();
-        let mut lease = slot.take()?;
-        let update_in_place = plan.update.contains(id);
-        let definition = if update_in_place {
-            let spec = Arc::new(graph.snapshot.specifications[id].clone());
-            let factory = graph.factories[&spec.implementation].clone();
-            Some((spec, factory))
-        } else if let Component::Deferred {
-            specification,
-            factory,
-        } = &lease.component
-        {
-            Some((specification.clone(), factory.clone()))
+        let operation = if plan.update.contains(id) {
+            Operation::Reconfigure
         } else {
-            None
+            Operation::Create
         };
-        let mut created = if matches!(lease.component, Component::Unresolved(_)) {
-            Err(GraphError::Creation {
-                component: id.clone(),
-                disposition: FailureDisposition::Retryable,
-                source: anyhow::anyhow!("component factory is not registered"),
-            })
-        } else {
-            Ok(())
-        };
-        if let Some((spec, factory)) = definition {
-            let missing: Vec<_> = spec
-                .dependencies
-                .values()
-                .flatten()
-                .chain(spec.configuration.values().filter_map(|value| {
-                    if let ConfigurationValue::Reference { resource, .. } = value {
-                        Some(resource)
-                    } else {
-                        None
-                    }
-                }))
-                .filter(|id| !graph.resource_handles.contains_key(*id))
-                .cloned()
-                .collect();
-            let dependencies: Vec<_> = graph
-                .snapshot
-                .edges
-                .iter()
-                .filter(|edge| {
-                    edge.policy.required_for_creation
-                        && &edge.definition.to.component == id
-                        && graph.observed().components[&edge.definition.from.component].realization
-                            != RealizationState::Created
-                })
-                .map(|edge| edge.definition.from.component.clone())
-                .collect();
-            if !missing.is_empty() || !dependencies.is_empty() {
-                update(graph, |state| {
-                    state.components.get_mut(id).expect("component").realization =
-                        RealizationState::Blocked
-                });
-                report.creation.insert(
-                    id.clone(),
-                    CreationOutcome::Blocked {
-                        dependencies,
-                        resources: missing,
-                    },
-                );
-                continue;
-            }
-            update(graph, |state| {
-                state.components.get_mut(id).expect("component").realization =
-                    RealizationState::Creating
-            });
-            let resources = graph.resource_handles.clone();
-            let graph_id = graph.snapshot.id.clone();
-            created = drive(graph, operations, controls, cancel, async {
-                super::super::specification::validate_specification(
-                    &graph_id,
-                    &spec,
-                    factory.as_ref(),
-                    &graph.snapshot.resources,
-                    &resources,
-                )
-                .map_err(|error| super::super::addition::validation_failure(id, error))?;
-                let context = ConstructionContext::resolve(
-                    graph.execution_scope.clone(),
-                    graph_id,
-                    slot.generation,
-                    spec,
-                    resources,
-                    &factory.descriptor().configuration,
-                )
-                .await
-                .map_err(|error| GraphError::Creation {
-                    component: id.clone(),
-                    disposition: error.disposition,
-                    source: error.source,
-                })?;
-                if update_in_place {
-                    lease
-                        .component
-                        .reconfigure(context)
-                        .await
-                        .map_err(|source| component_error(&node, "reconfigure", source))?;
-                } else {
-                    let ConstructedComponent(component) =
-                        factory
-                            .create(context)
-                            .await
-                            .map_err(|error| GraphError::Creation {
-                                component: id.clone(),
-                                disposition: error.disposition,
-                                source: error.source,
-                            })?;
-                    lease.component = component;
-                }
-                if lease.component.role() != node.role {
-                    lease.attempted = true;
-                    return Err(topology("constructed role differs from desired role"));
-                }
-                check_descriptor(&lease.component, &node)
-            })
-            .await;
-        }
-        lease.refresh_configuration();
-        match created {
-            Ok(()) => {
-                update(graph, |state| {
-                    let observed = state.components.get_mut(id).expect("component");
-                    observed.realization = RealizationState::Created;
-                    observed.failure = None;
-                    observed.transition_time = Utc::now();
-                });
-                report.creation.insert(id.clone(), CreationOutcome::Created);
-            }
-            Err(error) => {
-                if matches!(error, GraphError::Cancelled) {
-                    return Err(error);
-                }
-                let failure = failure(error, FailurePhase::Creation);
-                update(graph, |state| {
-                    let observed = state.components.get_mut(id).expect("component");
-                    observed.realization = RealizationState::CreationFailed;
-                    observed.failure = Some(failure.clone());
-                    if update_in_place {
-                        observed.lifecycle = ComponentLifecycle::Failed;
-                    }
-                    observed.transition_time = Utc::now();
-                });
-                report
-                    .creation
-                    .insert(id.clone(), CreationOutcome::CreationFailed(failure));
-            }
-        }
-        drop(lease);
-        operations.attach_control(graph, index)?;
+        let id = id.clone();
+        let outcome = realize_component(
+            graph, operations, controls, cancel, index, operation, commands,
+        )
+        .await?;
+        report.creation.insert(id, outcome);
     }
-    for (&index, edge) in &graph.edges {
+    for (index, edge) in graph.edges.clone() {
         if !plan.rebind.contains(&edge.definition) {
             continue;
         }
@@ -3200,61 +3577,18 @@ async fn realize(
                 .expect("relationship")
                 .binding = BindingState::Binding
         });
-        let result = (|| {
-            let mut pipe = graph.providers[&index]
-                .create_with_resources(&graph.resource_handles)
-                .map_err(|source| GraphError::Pipe {
-                    edge: index,
-                    source,
-                })?;
-            controls.0.insert(index, pipe.control.clone());
-            if pipe.pipe.capabilities() != &edge.capabilities {
-                return Err(topology("created pipe differs from preflight capabilities"));
-            }
-            let receiver = pipe
-                .pipe
-                .take_receiver()
-                .map_err(|source| GraphError::Pipe {
-                    edge: index,
-                    source,
-                })?;
-            let progress = Arc::new(FlowProgress::default());
-            graph.components[from].take()?.outputs.push(Outgoing {
-                edge: index,
-                port: edge.definition.from.port.clone(),
-                sender: pipe.pipe.sender(),
-                progress: progress.clone(),
-                multicast: graph.providers[&index]
-                    .multicast_subscription()
-                    .map(|(group, _)| group),
-                admission_channel: super::super::admission_channel(
-                    graph.providers[&index].as_ref(),
-                    &graph.resource_handles,
-                )?,
-                destination: super::super::output_destination(
-                    &edge.definition,
-                    &edge.pipe,
-                    &graph.resource_handles,
-                )
-                .map_err(|error| GraphError::Pipe {
-                    edge: index,
-                    source: crate::computation::v1::PipeError::Backend(error),
-                })?,
-            });
-            graph.components[to].take()?.inputs.push(Incoming {
-                edge: index,
-                port: edge.definition.to.port.clone(),
-                receiver,
-                acknowledgement_required: edge
-                    .capabilities
-                    .supported()
-                    .contains(&PipeCapability::ExplicitAcknowledgement),
-                pending: None,
-                exhausted: false,
-                progress,
-            });
-            Ok::<_, GraphError>(())
-        })();
+        let constructed = construct_pipe(graph, index, &edge)?;
+        let result = drive_reconciliation(
+            graph,
+            operations,
+            controls,
+            cancel,
+            commands,
+            graph.cleanup_timeout,
+            constructed,
+        )
+        .await
+        .and_then(|provided| install_pipe(graph, controls, index, &edge, provided));
         match result {
             Ok(()) => update(graph, |state| {
                 let observed = state

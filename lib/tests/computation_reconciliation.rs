@@ -41,6 +41,12 @@ struct Calls {
     fail_stop: AtomicBool,
     fail_create: AtomicBool,
     terminal: AtomicBool,
+    update_gate: Mutex<Option<Arc<Gate>>>,
+    panic_update: AtomicBool,
+    panic_update_metadata: AtomicBool,
+    panic_preflight: AtomicBool,
+    panic_drop: AtomicBool,
+    validator_tasks: Mutex<Vec<Option<tokio::task::Id>>>,
 }
 
 #[derive(Default)]
@@ -88,11 +94,20 @@ struct Sink {
 impl Drop for Sink {
     fn drop(&mut self) {
         self.calls.drops.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.calls.panic_drop.swap(false, Ordering::SeqCst),
+            "retired sink destruction fault"
+        );
     }
 }
 #[async_trait]
 impl ComputationComponent for Sink {
     fn descriptor(&self) -> &ComponentDescriptor {
+        if self.calls.panic_update_metadata.load(Ordering::SeqCst)
+            && self.calls.updates.load(Ordering::SeqCst) > 0
+        {
+            panic!("reconfigured metadata fault");
+        }
         &self.descriptor
     }
     async fn start(&mut self) -> anyhow::Result<()> {
@@ -111,6 +126,15 @@ impl ComputationComponent for Sink {
         Ok(())
     }
     async fn reconfigure(&mut self, context: ConstructionContext) -> anyhow::Result<()> {
+        let gate = self.calls.update_gate.lock().expect("update gate").take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+        assert!(
+            !self.calls.panic_update.load(Ordering::SeqCst),
+            "reconfiguration fault"
+        );
         self.label = context.configuration()["label"]
             .as_str()
             .expect("validated")
@@ -926,6 +950,15 @@ impl ComponentFactory for Factory {
         true
     }
     fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
+        self.calls
+            .validator_tasks
+            .lock()
+            .expect("validator tasks")
+            .push(tokio::task::try_id());
+        assert!(
+            !self.calls.panic_preflight.load(Ordering::SeqCst),
+            "preflight callback fault"
+        );
         Ok(())
     }
     async fn create(
@@ -1072,6 +1105,744 @@ async fn supported_in_place_update_changes_behavior_without_reconstruction_or_up
     });
     cancelled(result);
 }
+
+async fn pending_reconfiguration_keeps_disjoint_lifecycle_and_caller_cancellation_safe() {
+    let calls = Arc::new(Calls::default());
+    let healthy = Arc::new(Calls::default());
+    let gate = Arc::new(Gate::default());
+    *calls.update_gate.lock().expect("update gate") = Some(gate.clone());
+    let (received, mut output_rx) = mpsc::channel(8);
+    let factory = Arc::new(Factory::new(calls.clone(), received.clone()));
+    let (source, input) = source(Arc::new(Calls::default()));
+    let mut graph = ComputationGraph::builder("owned-reconfiguration")
+        .source(source)
+        .component(factory.specification("before"), factory.clone())
+        .sink(Box::new(sink(
+            "healthy",
+            "healthy",
+            healthy.clone(),
+            received,
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("source", "healthy"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .expect("graph");
+    let run = graph.run().expect("scope");
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        let generation = control.observed().components[&component("sink")].generation;
+        let mut desired = definition("sink");
+        desired.construction = ComponentConstruction::Factory(factory.specification("after"));
+        let preview = control
+            .preview(
+                GraphRevision(1),
+                vec![DesiredMutation::UpdateComponent(desired)],
+            )
+            .await
+            .expect("preview");
+        {
+            let update = control.reconcile(preview, TopologyBindings::default());
+            tokio::pin!(update);
+            tokio::select! {
+                result = &mut update => panic!("update completed without release: {result:?}"),
+                _ = gate.entered.notified() => {}
+            }
+            let revision = control.desired_snapshot().revision;
+            let healthy_generation =
+                control.observed().components[&component("healthy")].generation;
+            for notification in 0..3 {
+                control
+                    .observe_resources(
+                        &component("healthy"),
+                        healthy_generation,
+                        vec![(
+                            ResourceSpecification {
+                                id: ResourceId::try_new("provider").unwrap(),
+                                role: ResourceRole::StateStore,
+                                ownership: ResourceOwnership::Borrowed,
+                                binding: format!("notification-{notification}").into(),
+                            },
+                            ResourceHandle::new(ResourceRole::StateStore, Arc::new(notification)),
+                        )],
+                    )
+                    .unwrap();
+            }
+            for _ in 0..2 {
+                let report = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    control.stop_components(
+                        revision,
+                        GraphSelection::Exact(vec![component("healthy")]),
+                    ),
+                )
+                .await
+                .expect("independent stop is serviceable")
+                .expect("stop");
+                assert_eq!(report.summary, OperationSummary::Completed);
+                let report = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    control.start_requested(
+                        revision,
+                        GraphSelection::Exact(vec![component("healthy")]),
+                    ),
+                )
+                .await
+                .expect("independent start is serviceable")
+                .expect("start");
+                assert_eq!(report.summary, OperationSummary::Completed);
+            }
+            assert_eq!(
+                control.desired_snapshot().revision,
+                revision,
+                "metadata cannot invalidate the active reconciliation"
+            );
+            assert!(matches!(
+                control
+                    .start_requested(revision, GraphSelection::Exact(vec![component("sink")]))
+                    .await,
+                Err(GraphError::OperationInProgress)
+            ));
+        }
+        assert_eq!(calls.updates.load(Ordering::SeqCst), 0);
+        assert_eq!(healthy.stops.load(Ordering::SeqCst), 2);
+        gate.release.notify_one();
+        let mut observed = control.subscribe_observed();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            observed.wait_for(|state| {
+                state.components[&component("sink")].lifecycle == ComponentLifecycle::Running
+                    && state.revision.0 > 2
+            }),
+        )
+        .await
+        .expect("accepted update survives caller cancellation")
+        .expect("observation");
+        assert_eq!(calls.updates.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 1);
+        let metadata: Vec<_> = control
+            .desired_snapshot()
+            .resources
+            .values()
+            .map(|resource| resource.binding.clone())
+            .collect();
+        assert_eq!(metadata, [Arc::<str>::from("notification-2")]);
+        assert_eq!(
+            control.observed().components[&component("sink")].generation,
+            generation
+        );
+        input
+            .send(output(root("source", 1, &[1])))
+            .await
+            .expect("input");
+        let mut actual =
+            vec![output_rx.recv().await.expect("first"), output_rx.recv().await.expect("second")];
+        actual.sort();
+        assert_eq!(actual, [("after".into(), 1), ("healthy".into(), 1)]);
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    owned_reconfiguration_and_disjoint_commands,
+    pending_reconfiguration_keeps_disjoint_lifecycle_and_caller_cancellation_safe
+);
+
+async fn force_cancellation_joins_owned_reconfiguration_and_defers_reactivation() {
+    let calls = Arc::new(Calls::default());
+    let gate = Arc::new(Gate::default());
+    *calls.update_gate.lock().unwrap() = Some(gate.clone());
+    let (received, _output) = mpsc::channel(8);
+    let factory = Arc::new(Factory::new(calls.clone(), received));
+    let (source, _input) = source(Arc::default());
+    let mut graph = ComputationGraph::builder("forced-reconfiguration")
+        .source(source)
+        .component(factory.specification("before"), factory.clone())
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        let generation = control.observed().components[&component("sink")].generation;
+        let mut desired = definition("sink");
+        desired.construction = ComponentConstruction::Factory(factory.specification("after"));
+        let preview = control
+            .preview(
+                control.desired_snapshot().revision,
+                vec![DesiredMutation::UpdateComponent(desired.clone())],
+            )
+            .await
+            .unwrap();
+        let update = control.reconcile(preview, TopologyBindings::default());
+        tokio::pin!(update);
+        tokio::select! {
+            result = &mut update => panic!("update completed before cancellation: {result:?}"),
+            _ = gate.entered.notified() => {}
+        }
+        let forced = control
+            .force_cancel_components(
+                control.desired_snapshot().revision,
+                GraphSelection::Exact(vec![component("sink")]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forced.cleanup.summary, OperationSummary::Completed);
+        assert_eq!(
+            forced.interrupted[&component("sink")].phase,
+            FailurePhase::Creation
+        );
+        let report = update.await.unwrap();
+        assert!(report.committed);
+        assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+        assert_eq!(calls.updates.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            control.observed().components[&component("sink")].generation,
+            generation
+        );
+        let restart = control
+            .start_requested(
+                control.desired_snapshot().revision,
+                GraphSelection::Exact(vec![component("sink")]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restart.summary, OperationSummary::CompletedWithFailures);
+        desired.construction = ComponentConstruction::Factory(factory.specification("repaired"));
+        let repair = control
+            .preview(
+                control.desired_snapshot().revision,
+                vec![DesiredMutation::ReplaceComponent(desired)],
+            )
+            .await
+            .unwrap();
+        let repaired = control
+            .reconcile(repair, TopologyBindings::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            repaired.summary,
+            OperationSummary::Completed,
+            "{repaired:?}"
+        );
+        assert_ne!(
+            control.observed().components[&component("sink")].generation,
+            generation
+        );
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.starts.load(Ordering::SeqCst), 2);
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    force_owned_reconfiguration,
+    force_cancellation_joins_owned_reconfiguration_and_defers_reactivation
+);
+
+async fn retired_component_faults_fence_only_the_affected_replacement() {
+    let calls = Arc::new(Calls::default());
+    let (received, mut output_rx) = mpsc::channel(8);
+    let factory = Arc::new(Factory::new(calls.clone(), received.clone()));
+    let (source, input) = source(Arc::new(Calls::default()));
+    let mut graph = ComputationGraph::builder("owned-retirement")
+        .source(source)
+        .component(factory.specification("before"), factory.clone())
+        .sink(Box::new(sink(
+            "healthy",
+            "healthy",
+            Arc::default(),
+            received,
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("source", "healthy"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        calls.panic_drop.store(true, Ordering::SeqCst);
+        let mut desired = definition("sink");
+        desired.construction = ComponentConstruction::Factory(factory.specification("after"));
+        let preview = control
+            .preview(
+                control.desired_snapshot().revision,
+                vec![DesiredMutation::ReplaceComponent(desired.clone())],
+            )
+            .await
+            .unwrap();
+        let report = control
+            .reconcile(preview, TopologyBindings::default())
+            .await
+            .unwrap();
+        assert!(report.committed);
+        assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+        assert_eq!(
+            calls.creates.load(Ordering::SeqCst),
+            1,
+            "failed retirement prevents construction"
+        );
+        assert!(control.observed().components[&component("sink")]
+            .failure
+            .is_some());
+        let restart = control
+            .start_requested(
+                report.revision,
+                GraphSelection::Exact(vec![component("sink")]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restart.summary, OperationSummary::CompletedWithFailures);
+        input.send(output(root("source", 1, &[1]))).await.unwrap();
+        assert_eq!(output_rx.recv().await, Some(("healthy".into(), 1)));
+        let preview = control
+            .preview(
+                control.desired_snapshot().revision,
+                vec![DesiredMutation::ReplaceComponent(desired)],
+            )
+            .await
+            .unwrap();
+        let report = control
+            .reconcile(preview, TopologyBindings::default())
+            .await
+            .unwrap();
+        assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 2);
+        input.send(output(root("source", 2, &[2]))).await.unwrap();
+        let mut actual = vec![
+            output_rx.recv().await.unwrap(),
+            output_rx.recv().await.unwrap(),
+            output_rx.recv().await.unwrap(),
+        ];
+        actual.sort();
+        assert_eq!(
+            actual,
+            [("after".into(), 1), ("after".into(), 2), ("healthy".into(), 2)]
+        );
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    owned_retirement_faults,
+    retired_component_faults_fence_only_the_affected_replacement
+);
+
+struct FaultingMetadata {
+    tasks: Arc<Mutex<Vec<Option<tokio::task::Id>>>>,
+}
+impl Drop for FaultingMetadata {
+    fn drop(&mut self) {
+        self.tasks.lock().unwrap().push(tokio::task::try_id());
+        panic!("retired metadata provider fault");
+    }
+}
+
+async fn resource_metadata_destruction_is_owned_and_quarantines_its_generation() {
+    let calls = Arc::new(Calls::default());
+    let (received, mut output_rx) = mpsc::channel(8);
+    let factory = Arc::new(Factory::new(calls, received.clone()));
+    let (source, input) = source(Arc::default());
+    let tasks = Arc::new(Mutex::new(Vec::new()));
+    let mut graph = ComputationGraph::builder("owned-metadata-retirement")
+        .source(source)
+        .component(factory.specification("bad"), factory)
+        .sink(Box::new(sink(
+            "healthy",
+            "healthy",
+            Arc::default(),
+            received,
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("source", "healthy"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        let generation = control.observed().components[&component("sink")].generation;
+        control
+            .observe_resources(
+                &component("sink"),
+                generation,
+                vec![(
+                    ResourceSpecification {
+                        id: ResourceId::try_new("metadata").unwrap(),
+                        role: ResourceRole::StateStore,
+                        ownership: ResourceOwnership::Borrowed,
+                        binding: "metadata".into(),
+                    },
+                    ResourceHandle::new(
+                        ResourceRole::StateStore,
+                        Arc::new(FaultingMetadata {
+                            tasks: tasks.clone(),
+                        }),
+                    ),
+                )],
+            )
+            .unwrap();
+        let mut observed = control.subscribe_observed();
+        observed
+            .wait_for(|state| state.resources.len() == 1)
+            .await
+            .unwrap();
+        assert!(tasks.lock().unwrap().is_empty());
+        control
+            .observe_resources(&component("sink"), generation, Vec::new())
+            .unwrap();
+        observed
+            .wait_for(|state| {
+                state.components[&component("sink")]
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| {
+                        failure.phase == FailurePhase::Removal
+                            && failure.disposition == FailureDisposition::Terminal
+                    })
+            })
+            .await
+            .unwrap();
+        {
+            let tasks = tasks.lock().unwrap();
+            assert_eq!(tasks.len(), 1);
+            assert!(
+                tasks[0].is_some(),
+                "metadata destruction must run in an owned task"
+            );
+        }
+        assert_eq!(
+            control.observed().components[&component("sink")].generation,
+            generation
+        );
+        assert_eq!(
+            control.observed().components[&component("sink")].health,
+            ComponentHealth::Unavailable
+        );
+        let restart = control
+            .start_requested(
+                control.desired_snapshot().revision,
+                GraphSelection::Exact(vec![component("sink")]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restart.summary, OperationSummary::CompletedWithFailures);
+        input.send(output(root("source", 1, &[1]))).await.unwrap();
+        assert_eq!(output_rx.recv().await, Some(("healthy".into(), 1)));
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    owned_metadata_retirement,
+    resource_metadata_destruction_is_owned_and_quarantines_its_generation
+);
+
+async fn reconfiguration_and_metadata_panics_quarantine_only_the_changed_generation() {
+    for fault in 0..3 {
+        let calls = Arc::new(Calls::default());
+        let (received, mut output_rx) = mpsc::channel(8);
+        let factory = Arc::new(Factory::new(calls.clone(), received.clone()));
+        let (source, input) = source(Arc::new(Calls::default()));
+        let mut graph = ComputationGraph::builder("reconfiguration-fault")
+            .source(source)
+            .component(factory.specification("before"), factory.clone())
+            .sink(Box::new(sink(
+                "healthy",
+                "healthy",
+                Arc::new(Calls::default()),
+                received,
+            )))
+            .bind_stream(endpoint("source", "out"), stream("source"))
+            .connect(
+                edge("source", "sink"),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .connect(
+                edge("source", "healthy"),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .cleanup_timeout(Duration::from_millis(100))
+            .build()
+            .expect("graph");
+        let run = graph.run().expect("scope");
+        let control = run.control();
+        let (result, ()) = tokio::join!(run, async {
+            activate(&control).await;
+            calls.panic_update.store(fault == 0, Ordering::SeqCst);
+            calls
+                .panic_update_metadata
+                .store(fault == 1, Ordering::SeqCst);
+            if fault == 2 {
+                *calls.update_gate.lock().expect("update gate") = Some(Arc::default());
+            }
+            let mut desired = definition("sink");
+            desired.construction = ComponentConstruction::Factory(factory.specification("after"));
+            let preview = control
+                .preview(
+                    GraphRevision(1),
+                    vec![DesiredMutation::UpdateComponent(desired)],
+                )
+                .await
+                .expect("preview");
+            let report = control
+                .reconcile(preview, TopologyBindings::default())
+                .await
+                .expect("committed report");
+            assert!(report.committed);
+            assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+            let state = control.observed();
+            let failed = state.components[&component("sink")]
+                .failure
+                .as_ref()
+                .expect("retained failure");
+            assert_eq!(failed.disposition, FailureDisposition::Terminal);
+            assert!(failed.cause.to_string().contains(if fault == 2 {
+                "interrupted"
+            } else {
+                "panicked"
+            }));
+            input
+                .send(output(root("source", 1, &[1])))
+                .await
+                .expect("input");
+            assert_eq!(output_rx.recv().await, Some(("healthy".into(), 1)));
+            assert_eq!(
+                control.observed().components[&component("healthy")].lifecycle,
+                ComponentLifecycle::Running
+            );
+            let stop = control
+                .stop_components(
+                    report.revision,
+                    GraphSelection::Exact(vec![component("sink")]),
+                )
+                .await
+                .expect("guarded cleanup");
+            assert_eq!(stop.summary, OperationSummary::Completed);
+            let restart = control
+                .start_requested(
+                    report.revision,
+                    GraphSelection::Exact(vec![component("sink")]),
+                )
+                .await
+                .expect("restart report");
+            assert_eq!(restart.summary, OperationSummary::CompletedWithFailures);
+            control.cancel();
+        });
+        cancelled(result);
+    }
+}
+both_tokio_flavors!(
+    owned_reconfiguration_panic_boundaries,
+    reconfiguration_and_metadata_panics_quarantine_only_the_changed_generation
+);
+
+async fn owned_preflight_panics_leave_the_previous_topology_and_traffic_usable() {
+    let calls = Arc::new(Calls::default());
+    let (received, mut output_rx) = mpsc::channel(8);
+    let factory = Arc::new(Factory::new(calls.clone(), received));
+    let (source, input) = source(Arc::new(Calls::default()));
+    let mut graph = ComputationGraph::builder("owned-preflight")
+        .source(source)
+        .component(factory.specification("before"), factory.clone())
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        calls
+            .validator_tasks
+            .lock()
+            .expect("validator tasks")
+            .clear();
+        let driver_task = tokio::task::try_id();
+        let mut desired = definition("sink");
+        desired.construction = ComponentConstruction::Factory(factory.specification("after"));
+        let preview = control
+            .preview(
+                GraphRevision(1),
+                vec![DesiredMutation::UpdateComponent(desired)],
+            )
+            .await
+            .unwrap();
+        calls.panic_preflight.store(true, Ordering::SeqCst);
+        let error = control
+            .reconcile(preview.clone(), TopologyBindings::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("panicked during Validation"),
+            "{error}"
+        );
+        assert_eq!(control.desired_snapshot().revision, GraphRevision(1));
+        assert_eq!(calls.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.updates.load(Ordering::SeqCst), 0);
+        input.send(output(root("source", 1, &[1]))).await.unwrap();
+        assert_eq!(output_rx.recv().await, Some(("before".into(), 1)));
+        calls.panic_preflight.store(false, Ordering::SeqCst);
+        let report = control
+            .reconcile(preview, TopologyBindings::default())
+            .await
+            .unwrap();
+        assert_eq!(report.summary, OperationSummary::Completed);
+        {
+            let tasks = calls.validator_tasks.lock().expect("validator tasks");
+            assert!(!tasks.is_empty());
+            assert!(
+                tasks
+                    .iter()
+                    .all(|task| task.is_some() && *task != driver_task),
+                "extension validation must run in owned tasks, not the controller"
+            );
+        }
+        input.send(output(root("source", 2, &[2]))).await.unwrap();
+        assert_eq!(output_rx.recv().await, Some(("after".into(), 2)));
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    owned_preflight_faults,
+    owned_preflight_panics_leave_the_previous_topology_and_traffic_usable
+);
+
+struct FaultingProvider {
+    fault: Arc<AtomicBool>,
+}
+impl PipeProvider for FaultingProvider {
+    fn capabilities(&self) -> Result<PipeCapabilities, PipeError> {
+        BoundedPipeConfig { capacity: 2 }.capabilities()
+    }
+    fn create(&self) -> Result<ProvidedPipe, PipeError> {
+        assert!(
+            !self.fault.load(Ordering::SeqCst),
+            "pipe construction fault"
+        );
+        BoundedPipeConfig { capacity: 2 }.create()
+    }
+}
+
+async fn owned_pipe_faults_do_not_terminate_disjoint_lifecycle_work() {
+    let (source, _input) = source(Arc::new(Calls::default()));
+    let (received, _output) = mpsc::channel(8);
+    let healthy = Arc::new(Calls::default());
+    let mut graph = ComputationGraph::builder("owned-pipe")
+        .source(source)
+        .sink(Box::new(sink(
+            "sink",
+            "sink",
+            Arc::new(Calls::default()),
+            received.clone(),
+        )))
+        .sink(Box::new(sink(
+            "healthy",
+            "healthy",
+            healthy.clone(),
+            received,
+        )))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .connect(
+            edge("source", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("source", "healthy"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        activate(&control).await;
+        let capabilities = BoundedPipeConfig { capacity: 2 }.capabilities().unwrap();
+        let mut replacement = relationship("sink");
+        replacement.pipe = DesiredPipe::External {
+            binding: "fault".into(),
+            capabilities: capabilities.supported().iter().copied().collect(),
+            capacity: Some(2),
+            resources: BTreeMap::new(),
+            exclusive_resources: Vec::new(),
+        };
+        let preview = control
+            .preview(GraphRevision(1), vec![DesiredMutation::Bind(replacement)])
+            .await
+            .unwrap();
+        let mut bindings = TopologyBindings::default();
+        bindings.pipes.insert(
+            "fault".into(),
+            Box::new(FaultingProvider {
+                fault: Arc::new(AtomicBool::new(true)),
+            }),
+        );
+        let report = control.reconcile(preview, bindings).await.unwrap();
+        assert!(report.committed);
+        assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
+        let state = control.observed();
+        let failure = state.relationships[&edge("source", "sink")]
+            .failure
+            .as_ref()
+            .unwrap();
+        assert!(failure
+            .cause
+            .to_string()
+            .contains("pipe construction fault"));
+        assert_eq!(failure.phase, FailurePhase::Binding);
+        let revision = control.desired_snapshot().revision;
+        for _ in 0..2 {
+            control
+                .stop_components(revision, GraphSelection::Exact(vec![component("healthy")]))
+                .await
+                .unwrap();
+            control
+                .start_requested(revision, GraphSelection::Exact(vec![component("healthy")]))
+                .await
+                .unwrap();
+        }
+        assert_eq!(healthy.stops.load(Ordering::SeqCst), 2);
+        assert_eq!(healthy.starts.load(Ordering::SeqCst), 3);
+        control.cancel();
+    });
+    cancelled(result);
+}
+both_tokio_flavors!(
+    owned_pipe_faults,
+    owned_pipe_faults_do_not_terminate_disjoint_lifecycle_work
+);
 
 fn retained_config(id: &str) -> RetainedPipeConfig {
     RetainedPipeConfig {
@@ -1825,7 +2596,7 @@ impl ComputationService for StallingService {
     }
 }
 
-async fn settle_timeout_after_commit_resumes_paused_producers() {
+async fn committed_reconciliation_ignores_disjoint_pending_start() {
     let late = Arc::new(Calls::default());
     let (source, input) = source(Arc::new(Calls::default()));
     let (received, mut output_rx) = mpsc::channel(16);
@@ -1878,7 +2649,7 @@ async fn settle_timeout_after_commit_resumes_paused_producers() {
         assert!(preview.paused().contains(&component("source")));
 
         // While `late` is being constructed, a concurrently added service
-        // begins a start that outlives the reconciliation's settle deadline.
+        // begins a start which remains pending throughout this reconciliation.
         let mut bindings = TopologyBindings::default();
         bindings
             .factories
@@ -1901,7 +2672,10 @@ async fn settle_timeout_after_commit_resumes_paused_producers() {
             stalled
         });
         let report = report.expect("a committed reconciliation returns its report");
-        assert_timed_out_after_commit(&report);
+        assert!(report.committed);
+        assert_eq!(report.summary, OperationSummary::Completed);
+        assert!(report.failures.is_empty());
+        assert!(report.startup.is_some());
         assert_eq!(
             control.observed().components[&component("source")].lifecycle,
             ComponentLifecycle::Running,
@@ -1911,27 +2685,32 @@ async fn settle_timeout_after_commit_resumes_paused_producers() {
             .send(output(root("source", 1, &[1])))
             .await
             .expect("input");
-        assert_eq!(output_rx.recv().await, Some(("sink".into(), 1)));
+        let mut actual = vec![output_rx.recv().await.unwrap(), output_rx.recv().await.unwrap()];
+        actual.sort();
+        assert_eq!(actual, [("late".into(), 1), ("sink".into(), 1)]);
 
-        // Startup was deferred because the graph had not settled. Once the
-        // in-flight start completes, the committed component starts on its own
-        // and receives the data queued for it.
+        // Only the unrelated service is still starting. Both committed
+        // consumers have already received their exact input once.
         assert_eq!(
             control.observed().components[&component("late")].lifecycle,
-            ComponentLifecycle::Stopped
+            ComponentLifecycle::Running
+        );
+        assert_eq!(
+            control.observed().components[&component("stalled")].lifecycle,
+            ComponentLifecycle::Starting
         );
         start.release.notify_one();
         stalled
             .wait_started()
             .await
             .expect("stalled service starts");
-        assert_eq!(output_rx.recv().await, Some(("late".into(), 1)));
+        assert!(output_rx.try_recv().is_err());
         assert_eq!(late.starts.load(Ordering::SeqCst), 1);
         control.cancel();
     });
     cancelled(result);
 }
 both_tokio_flavors!(
-    committed_settle_timeout,
-    settle_timeout_after_commit_resumes_paused_producers
+    disjoint_start_during_committed_reconciliation,
+    committed_reconciliation_ignores_disjoint_pending_start
 );

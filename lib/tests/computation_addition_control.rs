@@ -962,6 +962,81 @@ async fn rejected_addition_retains_cleanup_and_never_shuts_down_existing_or_borr
     assert_eq!(incoming_cleanup.load(Ordering::SeqCst), 1);
 }
 
+#[derive(Default)]
+struct GatedRejectedCleanup {
+    entered: Notify,
+    release: Notify,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ResourceCleanup for GatedRejectedCleanup {
+    async fn shutdown(&self) -> anyhow::Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+async fn cancelled_rejected_disposal_retains_the_original_cleanup() {
+    let cleanup = Arc::new(GatedRejectedCleanup::default());
+    let mut graph = ComputationGraph::builder("retained-rejection-cleanup")
+        .service(Box::new(Service::new("existing", Arc::default())))
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (result, rejected) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let addition = service("existing").with_resource(
+            resource_spec("rejected-store", ResourceOwnership::Graph),
+            ResourceHandle::new(ResourceRole::StateStore, Arc::new(1usize))
+                .with_cleanup(cleanup.clone()),
+        );
+        let rejected = match control.add_component(addition).await {
+            Err(GraphError::AdditionRejected { addition, .. }) => addition,
+            result => panic!("expected ownership-retaining rejection: {result:?}"),
+        };
+        control.cancel();
+        rejected
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)));
+    tokio::select! {
+        result = graph.dispose() => panic!("cleanup finished without release: {result:?}"),
+        _ = cleanup.entered.notified() => {}
+    }
+    assert_eq!(cleanup.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        rejected.take().await.is_none(),
+        "cannot return ownership while cleanup is active"
+    );
+    cleanup.release.notify_one();
+    graph.dispose().await.unwrap();
+    graph.dispose().await.unwrap();
+    assert_eq!(cleanup.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_disposal_cancellation_current_thread() {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        cancelled_rejected_disposal_retains_the_original_cleanup(),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_disposal_cancellation_multi_thread() {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        cancelled_rejected_disposal_retains_the_original_cleanup(),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn connecting_deferred_components_does_not_start_them_before_explicit_activation() {
     let (_input, receiver) = mpsc::channel(1);

@@ -397,6 +397,9 @@ unsafe extern "C" fn begin_consumer(
     transport::status_boundary(|| {
         require_output(out)?;
         let instance = unsafe { state_ref::<Arc<Instance>>(raw)? }.clone();
+        if instance.damaged.is_damaged() {
+            return Err(Failure::panicked());
+        }
         let state = instance
             .consumer
             .as_ref()
@@ -436,7 +439,8 @@ unsafe extern "C" fn begin_consumer(
             })?;
         let guard = BusyGuard(instance.clone());
         let runtime = io_runtime()?;
-        let operation = transport::export_operation(
+        let damaged = instance.damaged.clone();
+        let operation = transport::export_component_operation(
             async move {
                 let _guard = guard;
                 let state = instance.consumer.as_ref().expect("validated");
@@ -464,6 +468,8 @@ unsafe extern "C" fn begin_consumer(
                     .await
             },
             Some(runtime),
+            damaged,
+            false,
         );
         unsafe { transport::write_out(out, operation) }
     })
@@ -683,6 +689,7 @@ struct Instance {
     wakeup: Option<Arc<dyn WakeupSource>>,
     busy: AtomicBool,
     running: AtomicBool,
+    damaged: Arc<transport::PanicState>,
     admission: bool,
     progress: Option<SourceProgressReader>,
     recovery: Option<crate::progress::InstanceRecovery>,
@@ -964,6 +971,7 @@ unsafe fn create_component_with_services(
                 wakeup,
                 busy: AtomicBool::new(false),
                 running: AtomicBool::new(false),
+                damaged: Arc::new(transport::PanicState::default()),
                 admission: !admission.is_null(),
                 progress,
                 recovery,
@@ -1014,13 +1022,32 @@ unsafe extern "C" fn inspect_recovery(state: *mut c_void) -> Reply {
 unsafe extern "C" fn configuration(state: *mut c_void) -> Reply {
     transport::reply_boundary(|| {
         let instance = unsafe { state_ref::<Arc<Instance>>(state)? };
+        if instance.damaged.is_damaged() {
+            return Err(Failure::panicked());
+        }
         let component = instance.component.try_lock().map_err(|_| {
             Failure::new(
                 abi::status::BUSY,
                 "configuration requires a data-operation boundary",
             )
         })?;
-        let configuration = component.base().configuration().map_err(Failure::from)?;
+        let configuration = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            component.base().configuration().map_err(Failure::from)
+        })) {
+            Ok(result) => {
+                if result
+                    .as_ref()
+                    .is_err_and(|failure| failure.code == abi::status::PANICKED)
+                {
+                    instance.damaged.quarantine();
+                }
+                result?
+            }
+            Err(_) => {
+                instance.damaged.quarantine();
+                return Err(Failure::panicked());
+            }
+        };
         instance
             .factory
             .configuration
@@ -1064,6 +1091,9 @@ pub(crate) fn io_runtime() -> Result<Arc<tokio::runtime::Runtime>, Failure> {
 struct BusyGuard(Arc<Instance>);
 impl Drop for BusyGuard {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.damaged.quarantine();
+        }
         self.0.busy.store(false, Ordering::Release);
     }
 }
@@ -1091,6 +1121,9 @@ unsafe extern "C" fn begin(
         };
         let c = instance.factory.capabilities;
         use abi::operation::*;
+        if code != STOP && instance.damaged.is_damaged() {
+            return Err(Failure::panicked());
+        }
         let allowed = match code {
             START | STOP => true,
             NEXT => {
@@ -1132,9 +1165,10 @@ unsafe extern "C" fn begin(
             Some(BusyGuard(instance.clone()))
         };
         let runtime = io_runtime()?;
+        let damaged = instance.damaged.clone();
         // Select before boxing so ordinary operations retain no consumer future.
         let operation = if instance.consumer.is_some() {
-            transport::export_operation(
+            transport::export_component_operation(
                 async move {
                     let _guard = guard;
                     let consumer = instance.consumer.as_ref().expect("checked consumer");
@@ -1147,9 +1181,11 @@ unsafe extern "C" fn begin(
                         .await
                 },
                 Some(runtime),
+                damaged,
+                code == STOP,
             )
         } else {
-            transport::export_operation(
+            transport::export_component_operation(
                 async move {
                     let _guard = guard;
                     execute(instance, code, input, transaction)
@@ -1157,6 +1193,8 @@ unsafe extern "C" fn begin(
                         .map_err(Failure::from)
                 },
                 Some(runtime),
+                damaged,
+                code == STOP,
             )
         };
         unsafe { transport::write_out(out, operation) }

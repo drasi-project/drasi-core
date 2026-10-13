@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures::FutureExt;
 use std::{
     collections::BTreeMap,
     ops::{Deref, DerefMut},
@@ -24,8 +25,8 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use super::v1::{
     ComponentBatch, ComputationGraph, DeploymentReport, DesiredMutation, GraphControl, GraphError,
-    GraphRevision, GraphSelection, GraphState, ObservedGraph, OperationSummary, ResourceHandle,
-    ResourceId, ResourceOwnership, StartReport, TopologyBindings,
+    GraphRevision, GraphSelection, GraphState, ObservedGraph, OperationSummary, RejectedResources,
+    ResourceHandle, ResourceId, ResourceOwnership, StartReport, TopologyBindings,
 };
 use crate::error::{DrasiError, Result};
 
@@ -214,15 +215,30 @@ impl Drop for GraphLease {
     }
 }
 
-struct TaskLease<'a> {
-    slot: &'a Mutex<Option<JoinHandle<()>>>,
-    task: Option<JoinHandle<()>>,
+struct DriverPublication {
+    state: watch::Sender<DriverState>,
+    graph: String,
+    finished: bool,
 }
-impl Drop for TaskLease<'_> {
+impl DriverPublication {
+    fn finish(&mut self, outcome: anyhow::Result<()>) {
+        self.state.send_replace(DriverState::Finished(
+            outcome.err().map(|error| DriverFailure(Arc::new(error))),
+        ));
+        self.finished = true;
+    }
+}
+impl Drop for DriverPublication {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            let mut slot = self.slot.lock().unwrap_or_else(|error| error.into_inner());
-            *slot = Some(task);
+        if !self.finished {
+            self.finish(Err(GraphError::Driver {
+                graph: Arc::from(self.graph.as_str()),
+                run_epoch: 0,
+                source: anyhow::anyhow!(
+                    "driver exited without a completion report; cleanup remains owned"
+                ),
+            }
+            .into()));
         }
     }
 }
@@ -233,7 +249,7 @@ struct Entry {
     control: Arc<OnceLock<GraphControl>>,
     cancel: watch::Sender<bool>,
     driver: watch::Sender<DriverState>,
-    task: Mutex<Option<JoinHandle<()>>>,
+    task: tokio::sync::RwLock<Option<JoinHandle<()>>>,
     cleanup: tokio::sync::Mutex<()>,
     disposed: AtomicBool,
 }
@@ -248,16 +264,31 @@ impl Entry {
         let (driver, _) = watch::channel(DriverState::Initializing);
         let slot = graph.clone();
         let publish_control = control.clone();
-        let publish_state = driver.clone();
-        let task = tokio::spawn(async move {
-            let outcome = async {
+        let mut publication = DriverPublication {
+            state: driver.clone(),
+            graph: id.clone(),
+            finished: false,
+        };
+        let entry = Arc::new(Self {
+            id,
+            graph,
+            control,
+            cancel,
+            driver,
+            task: tokio::sync::RwLock::new(None),
+            cleanup: tokio::sync::Mutex::new(()),
+            disposed: AtomicBool::new(false),
+        });
+        let work =
+            async move {
+                let outcome = std::panic::AssertUnwindSafe(async {
                 let mut graph = slot.take()?;
                 let run = graph.run()?;
                 let control = run.control();
                 publish_control
                     .set(control.clone())
                     .map_err(|_| anyhow::anyhow!("driver control already published"))?;
-                publish_state.send_replace(DriverState::Running);
+                publication.state.send_replace(DriverState::Running);
                 tokio::pin!(run);
                 let result = tokio::select! {
                     biased;
@@ -271,22 +302,21 @@ impl Entry {
                     Ok(()) | Err(GraphError::Cancelled) => Ok::<_, anyhow::Error>(()),
                     Err(error) => Err(error.into()),
                 }
-            }
-            .await;
-            publish_state.send_replace(DriverState::Finished(
-                outcome.err().map(|error| DriverFailure(Arc::new(error))),
-            ));
-        });
-        Arc::new(Self {
-            id,
-            graph,
-            control,
-            cancel,
-            driver,
-            task: Mutex::new(Some(task)),
-            cleanup: tokio::sync::Mutex::new(()),
-            disposed: AtomicBool::new(false),
-        })
+            }).catch_unwind().await.unwrap_or_else(|payload| {
+                Err(GraphError::Driver {
+                    graph: Arc::from(publication.graph.as_str()),
+                    run_epoch: 0,
+                    source: super::v1::ComponentPanic::new(anyhow::anyhow!(
+                        "{}",
+                        super::v1::bounded_panic_message(payload)
+                    )).into(),
+                }.into())
+            });
+                publication.finish(outcome);
+            };
+        crate::context::workers::try_spawn_owned_worker(&entry.task, work)
+            .expect("new instance owns a vacant driver slot");
+        entry
     }
 
     async fn ready(self: &Arc<Self>) -> Result<ComputationHandle> {
@@ -296,6 +326,9 @@ impl Entry {
             .await
             .map_err(|error| operation_cause(&self.id, "deploy", error))?;
         if self.control.get().is_none() {
+            if let DriverState::Finished(Some(error)) = &*self.driver.borrow() {
+                return Err(operation_cause(&self.id, "deploy", error.clone()));
+            }
             return Err(operation(
                 &self.id,
                 "deploy",
@@ -323,22 +356,15 @@ impl Entry {
             }
             return Ok(());
         }
-        let task = self
-            .task
-            .lock()
-            .map_err(|_| operation(&self.id, "shutdown", "driver task ownership poisoned"))?
-            .take();
-        let mut task = TaskLease {
-            slot: &self.task,
-            task,
-        };
-        let joined = if let Some(handle) = task.task.as_mut() {
+        let mut task = self.task.write().await;
+        let joined = if let Some(handle) = task.as_mut() {
             let result = handle.await;
-            task.task.take();
+            *task = None;
             result.map_err(|error| operation_cause(&self.id, "join", error))
         } else {
             Ok(())
         };
+        drop(task);
         for batch in pending {
             batch.cleanup().await?;
         }
@@ -363,12 +389,7 @@ impl Entry {
 impl Drop for Entry {
     fn drop(&mut self) {
         self.request_shutdown();
-        if let Some(task) = self
-            .task
-            .get_mut()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
+        if let Some(task) = self.task.get_mut().take() {
             task.abort();
             if !self.disposed.load(Ordering::Acquire) {
                 log::warn!("Computation {} dropped without awaited shutdown; asynchronous plugin cleanup is not guaranteed", self.id);
@@ -684,38 +705,35 @@ impl Drop for InstanceGraph {
 
 pub(crate) struct PendingComponents {
     value: tokio::sync::Mutex<Option<ComponentBatch>>,
-    resources: tokio::sync::Mutex<BTreeMap<ResourceId, ResourceHandle>>,
+    resources: Option<Arc<RejectedResources>>,
     control: Option<GraphControl>,
     done: AtomicBool,
+    cleanup_started: AtomicBool,
 }
 
 impl PendingComponents {
     fn new(batch: ComponentBatch, control: Option<GraphControl>) -> Arc<Self> {
-        let resources = batch
-            .definition
-            .resources
-            .iter()
-            .filter(|resource| resource.ownership == ResourceOwnership::Graph)
-            .filter_map(|resource| {
-                batch
-                    .bindings
-                    .resources
-                    .get(&resource.id)
-                    .map(|handle| (resource.id.clone(), handle.clone()))
-            })
-            .collect();
+        let resources = RejectedResources::new(
+            batch.definition.resources.iter().cloned(),
+            &batch.bindings.resources,
+        );
         Arc::new(Self {
             value: tokio::sync::Mutex::new(Some(batch)),
-            resources: tokio::sync::Mutex::new(resources),
+            resources,
             control,
             done: AtomicBool::new(false),
+            cleanup_started: AtomicBool::new(false),
         })
     }
 
     pub(crate) async fn take(&self) -> Result<ComponentBatch> {
-        self.value
-            .lock()
-            .await
+        let mut value = self.value.lock().await;
+        if self.cleanup_started.load(Ordering::Acquire) {
+            return Err(DrasiError::invalid_state(
+                "component batch cleanup has begun",
+            ));
+        }
+        value
             .take()
             .ok_or_else(|| DrasiError::invalid_state("component batch was already submitted"))
     }
@@ -725,56 +743,66 @@ impl PendingComponents {
     }
 
     pub(crate) async fn cleanup(&self) -> Result<()> {
-        let mut resources = self.resources.lock().await;
+        {
+            let mut value = self.value.lock().await;
+            self.cleanup_started.store(true, Ordering::Release);
+            if let Some(batch) = value.as_mut() {
+                for resource in &batch.definition.resources {
+                    if resource.ownership == ResourceOwnership::Graph {
+                        batch.bindings.resources.remove(&resource.id);
+                    }
+                }
+            }
+        }
         let existing = self
             .control
             .as_ref()
             .map(|control| control.registry_snapshot());
-        let ids: Vec<_> = resources.keys().cloned().collect();
-        let mut failures = Vec::new();
-        for id in ids {
-            let resource = resources[&id].clone();
-            let adopted = existing.as_ref().is_some_and(|snapshot| {
+        let handles = existing
+            .as_ref()
+            .map(|snapshot| {
                 snapshot
                     .desired
                     .resources
                     .keys()
-                    .filter_map(|id| snapshot.resource(id).ok())
-                    .any(|current| current.same_shared_instance(&resource))
-            });
-            if !adopted {
-                match tokio::time::timeout(std::time::Duration::from_secs(30), resource.shutdown())
-                    .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        failures.push(error.context(id.to_string()));
-                        continue;
-                    }
-                    Err(error) => {
-                        failures.push(anyhow::Error::new(error).context(id.to_string()));
-                        continue;
-                    }
-                }
-            }
-            resources.remove(&id);
+                    .filter_map(|id| {
+                        snapshot
+                            .resource(id)
+                            .ok()
+                            .map(|handle| (id.clone(), handle))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(resources) = &self.resources {
+            resources
+                .dispose(&handles, std::time::Duration::from_secs(30))
+                .await
+                .map_err(|error| operation_cause("components", "cleanup", error))?;
         }
-        if !failures.is_empty() {
-            return Err(operation_cause(
+        let value = self.value.lock().await.take();
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value)));
+        self.done.store(true, Ordering::Release);
+        dropped.map_err(|payload| {
+            operation_cause(
                 "components",
                 "cleanup",
-                crate::error::OperationFailures::new("component cleanup failed", failures),
-            ));
-        }
-        self.value.lock().await.take();
-        self.done.store(true, Ordering::Release);
-        Ok(())
+                super::v1::ComponentPanic::new(anyhow::anyhow!(
+                    "rejected component batch destruction: {}",
+                    super::v1::bounded_panic_message(payload)
+                )),
+            )
+        })
     }
 }
 
 impl Drop for PendingComponents {
     fn drop(&mut self) {
-        if !self.resources.get_mut().is_empty() {
+        if self
+            .resources
+            .as_ref()
+            .is_some_and(|resources| !resources.complete())
+        {
             log::warn!("Component batch dropped before awaited resource cleanup completed");
         }
     }

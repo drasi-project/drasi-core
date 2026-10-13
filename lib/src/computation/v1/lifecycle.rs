@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 
@@ -93,6 +96,80 @@ pub enum FailureDisposition {
     Terminal,
 }
 
+/// Marks an unwinding extension failure as damage to its construction generation.
+///
+/// Adapters which catch a panic outside Rust (including a native plugin ABI)
+/// should return this cause. Successful cleanup does not authorize reuse of the
+/// object; replacement requires a new, independently constructed generation.
+#[derive(Debug, thiserror::Error)]
+#[error("component panicked; its generation is quarantined: {source}")]
+pub struct ComponentPanic {
+    #[source]
+    pub source: anyhow::Error,
+}
+
+impl ComponentPanic {
+    pub fn new(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            source: source.into(),
+        }
+    }
+}
+
+/// Bounded diagnostics for an unwind caught by the graph-owned task boundary.
+#[derive(Debug, thiserror::Error)]
+#[error("component {component} generation {generation:?} operation {operation:?} panicked during {phase:?}: {message}")]
+pub struct ComponentUnwind {
+    pub component: ComponentId,
+    pub generation: ComponentGeneration,
+    pub operation: OperationEpoch,
+    pub phase: FailurePhase,
+    pub message: String,
+}
+
+/// Interrupted mutable work has no rollback proof. Cleanup may release its
+/// resources, but only replacement can authorize another construction generation.
+#[derive(Debug, thiserror::Error)]
+#[error("component {component} generation {generation:?} operation {operation:?} was interrupted during {phase:?} ({reason}); its generation is quarantined")]
+pub struct ComponentInterrupted {
+    pub component: ComponentId,
+    pub generation: ComponentGeneration,
+    pub operation: OperationEpoch,
+    pub phase: FailurePhase,
+    pub reason: &'static str,
+}
+
+/// Bounded diagnostics for a graph-owned resource callback's unwind.
+#[derive(Debug, thiserror::Error)]
+#[error("resource {resource} generation {generation} operation {operation:?} panicked during {phase:?}: {message}")]
+pub struct ResourceUnwind {
+    pub resource: ResourceId,
+    pub generation: u64,
+    pub operation: OperationEpoch,
+    pub phase: FailurePhase,
+    pub message: String,
+}
+
+pub(crate) fn bounded_panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    let message = if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else {
+        "non-string panic payload"
+    };
+    let mut end = message.len().min(2048);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let message = message[..end].to_owned();
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload))) {
+        // Do not recursively destroy an adversarial payload from a second panic.
+        std::mem::forget(payload);
+    }
+    message
+}
+
 /// A classified native operation failure. Retryability never proves rollback or cleanup.
 #[derive(Debug, thiserror::Error)]
 #[error("{source}")]
@@ -112,6 +189,13 @@ impl ComponentOperationError {
 }
 
 pub(crate) fn operation_failure_disposition(error: &anyhow::Error) -> FailureDisposition {
+    if error
+        .chain()
+        .take(64)
+        .any(|cause| cause.is::<ComponentPanic>() || cause.is::<ComponentInterrupted>())
+    {
+        return FailureDisposition::Terminal;
+    }
     for cause in error.chain().take(32) {
         if let Some(error) = cause.downcast_ref::<ComponentOperationError>() {
             return error.disposition;
@@ -188,12 +272,34 @@ fn index_failure_disposition(
 }
 
 impl GraphError {
+    pub(crate) fn damages_generation(&self) -> bool {
+        use std::error::Error;
+        let mut cause: Option<&(dyn Error + 'static)> = Some(self);
+        for _ in 0..64 {
+            let Some(error) = cause else {
+                break;
+            };
+            if error.is::<ComponentPanic>() || error.is::<ComponentInterrupted>() {
+                return true;
+            }
+            if let Some(GraphError::Cleanup { primary, errors }) = error.downcast_ref() {
+                return primary
+                    .as_ref()
+                    .is_some_and(|error| error.damages_generation())
+                    || errors.iter().any(GraphError::damages_generation);
+            }
+            cause = error.source();
+        }
+        false
+    }
+
     /// Classifies reported work. A component-returned error never authorizes killing the driver.
     pub(crate) fn failure_disposition(&self) -> FailureDisposition {
         use FailureDisposition::{Retryable, Terminal};
         match self {
             Self::Creation { disposition, .. } => *disposition,
             Self::Component { source, .. }
+            | Self::Driver { source, .. }
             | Self::ResourceCreation { source, .. }
             | Self::ResourceCleanup { source, .. } => operation_failure_disposition(source),
             Self::Reported { cause } => cause.failure_disposition(),
@@ -290,6 +396,9 @@ impl ComponentFailure {
     /// removal, and control failures need a specification or topology change,
     /// so stopping cannot resolve them.
     pub(crate) fn cleared_by_stop(&self) -> bool {
+        if self.cause.damages_generation() {
+            return false;
+        }
         match self.phase {
             FailurePhase::Activation | FailurePhase::Processing | FailurePhase::Stop => true,
             FailurePhase::Creation => self.disposition == FailureDisposition::Retryable,
@@ -324,10 +433,19 @@ impl ObservedComponent {
     /// and supersedes only an earlier stop failure. Other failures stay
     /// visible until the component next starts.
     pub(crate) fn record_stopped(&mut self, lifecycle: ComponentLifecycle) {
-        self.lifecycle = lifecycle;
+        let damaged = self
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.cause.damages_generation());
+        self.lifecycle = if damaged {
+            ComponentLifecycle::Failed
+        } else {
+            lifecycle
+        };
         if self.failure.as_ref().is_some_and(|failure| {
-            failure.phase == FailurePhase::Stop
-                || (lifecycle == ComponentLifecycle::Stopped && failure.cleared_by_stop())
+            !damaged
+                && (failure.phase == FailurePhase::Stop
+                    || (lifecycle == ComponentLifecycle::Stopped && failure.cleared_by_stop()))
         }) {
             self.failure = None;
         }
@@ -420,6 +538,29 @@ pub struct StopReport {
     pub revision: GraphRevision,
     pub summary: OperationSummary,
     pub components: BTreeMap<ComponentId, StopOutcome>,
+}
+
+/// A forced interruption is separate from its subsequent cleanup. Completed
+/// cleanup is not proof that the interrupted work rolled back.
+#[derive(Debug, Clone)]
+pub struct ForceCancellationReport {
+    pub revision: GraphRevision,
+    pub summary: OperationSummary,
+    pub interrupted: BTreeMap<ComponentId, ComponentFailure>,
+    pub cleanup: StopReport,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("force cancellation requires the complete actual resource domain; requested {requested:?}, required {required:?}")]
+pub struct ForceCancellationScopeError {
+    pub requested: BTreeSet<ComponentId>,
+    pub required: BTreeSet<ComponentId>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("force cancellation cannot prove resource {resource} is safe while construction or cleanup is incomplete")]
+pub struct ForceCancellationResourceUnavailable {
+    pub resource: ResourceId,
 }
 
 /// A lifecycle request completed with unsuccessful members. The complete report

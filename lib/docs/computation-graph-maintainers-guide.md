@@ -1,6 +1,6 @@
 # Maintaining ComputationGraph
 
-**Implementation baseline: 10 October 2026, `agentofreality-parallel-computation-graph`.**
+**Implementation baseline: 13 October 2026 development checkout, `agentofreality-parallel-computation-graph`.**
 
 This guide is for engineers changing Drasi itself: its runtime, query execution,
 storage integration, component lifecycle or plugin hosting. For building a
@@ -213,17 +213,51 @@ subscribers of the same QoS channel, not arbitrary graph-wide atomic delivery.
 
 ## Scheduling, readiness and lifecycle
 
-### Cooperative nodes, independently driven ordinary queries
+### Owned native tasks and independently driven query scopes
 
-The controller polls owned operation futures; it does not spawn one Tokio task
-per native node. Mutable operations on an instance are serialized. An async
-wait releases the controller to poll other work, but a long synchronous
-calculation inside a component still occupies its executor thread.
+Native processing, lifecycle/control and supported resource operations run in
+graph-owned Tokio tasks. The controller observes completions rather than polling
+their business futures inline. Graph-owned task/result registries outlive
+cancelled waiters and the controller future until cleanup joins the actual work.
+Mutable operations on an instance remain serialized.
 
 Ordinary QueryGraphs have separate owned driver tasks. On a multithreaded Tokio
-runtime, independent queries can therefore run on different workers. They
-also run on a current-thread runtime. Adding more native nodes to one graph
-does not, by itself, create CPU parallelism.
+runtime, independent native nodes and query scopes can use different workers.
+Current-thread operation remains supported but is not CPU parallelism. A
+transaction container's inner steps remain within its one transaction/runner.
+Measured capacity still depends on contention, work size and transport.
+
+See [`execution.rs`](../src/computation/v1/graph/execution.rs) and
+[`resource_tasks.rs`](../src/computation/v1/graph/resource_tasks.rs) for retained
+task/result ownership. Initial factory deployment is dependency-aware. Factory
+and provider preflight, pipe construction, in-place reconfiguration, superseded
+resource metadata and retired object destruction use retained task boundaries
+too. A retirement failure fences the affected replacement before construction
+or activation; cleanup success cannot clear generation damage.
+
+Scoped force validates the complete actual resource domain before interruption
+and joins the processing/control work it reports as interrupted. A selected
+never-started or already-quiesced member can still have an idle graph-owned
+peer-control observer. Force does not falsely report that observer as interrupted
+or wait for its unrequested termination; it remains owned for later lifecycle
+use and is joined when the graph is disposed. Both runtime flavors protect this
+case in `computation_task_execution`.
+
+Successful force cleanup does not repair a damaged generation. Recovery
+retirement must still reject it. Reconstruct a fresh normal owner from the
+accepted configuration and actually recover the producer before changing its
+output bindings; construction alone is not recovery. The Server held-Handled
+sink tests preserve pending output through that sequence instead of aborting
+handling under a successful graceful-stop claim.
+
+Awaited reconciliation phases service the same bounded command dispatcher.
+Reservations reject conflicting structural changes while disjoint lifecycle
+operations continue. Resource reservations include exact provider aliases and
+use weak identities so they cannot keep retired storage alive. Resource/plugin
+notifications are generation-fenced and deferred until reconciliation finishes,
+keeping only the latest notification of each kind per registered component.
+This prevents an inventory update from invalidating or being overwritten by
+an owned preflight.
 
 [`graph/controller.rs`](../src/computation/v1/graph/controller.rs) manages
 active operations and their completions. `NodeWorkBudget` in
@@ -310,9 +344,18 @@ queue cannot suppress them. They are not an event history. Public command
 fan-out still reserves every recipient atomically or accepts none. Rebind and
 replacement invalidate both kinds of stale messages.
 
-This policy handles returned errors, not a new panic-isolation boundary.
-Unwinding containment and protection against native aborts/memory faults remain
-separate unfinished work.
+`ComponentPanic` marks damaged generations; protected operation and destruction
+boundaries retain the instance for diagnosis/cleanup and refuse same-generation
+restart. SDK `PANICKED` results preserve that marker through normal,
+transactional, consumer and bootstrap Host calls. Start completion racing a
+control panic must take the local quarantine path, never unwind the controller.
+Native abort/memory-fault isolation and complete coverage of every synchronous
+callback are not implied.
+
+The separate [instance host](../../components/instance-host/README.md) runs a
+normal DrasiLib per process; [bridge sources/sinks](../../components/computation-plugins/bridge/README.md)
+carry data. This is composition, not a special remote-component execution mode.
+Local child/group termination and inter-instance message recovery remain distinct.
 
 ### Stale work cannot act on a replacement
 
@@ -860,9 +903,17 @@ the stop explicitly supersedes them.
 A graceful boundary timeout is an explicit failure, not a forced abort or
 successful stop. The in-flight operation remains owned; eligible paused members
 are resumed, every resume failure retains its component identity, and a later
-stop can retry after work completes. `GraphControl::cancel()` and dropping a run
-are the explicit force-cancellation paths; they can interrupt writes, fence
-owners and require reconstruction. Idle `next`/receive/service waits still have
+stop can retry after work completes. `GraphControl::force_cancel_components`
+offers explicit selected-domain escalation. It requires every registered user
+of the actual shared resource domain and required propagation boundaries;
+unfinished resource construction/cleanup or deferred resource metadata rejects
+the request before cancellation. `ForceCancellationReport` separates interrupted
+work from its subsequently joined cleanup. Completed cleanup is not rollback,
+and an interrupted generation requires explicit reconstruction with a changed
+specification rather than stop/start reuse.
+
+`GraphControl::cancel()` and dropping a run force the whole graph; they can
+interrupt writes, fence owners and require reconstruction. Idle `next`/receive/service waits still have
 their cancellation contract, and unfinished construction/start may be cancelled.
 No graceful deadline can preempt a plugin blocking the executor thread.
 
@@ -917,14 +968,14 @@ controller, components marked for automatic start are queued in
 must therefore read the report, not just the `Result`, to learn whether the
 change was applied in full.
 
-The controller runs one start group and one stop group at a time; a stop
-may interrupt a start. Single-component starts and stops from
+Disjoint start, stop and drain groups can progress concurrently; a conflicting
+stop may supersede a start. Single-component starts and stops from
 `ComponentHandle` that conflict with an in-flight group are queued in
 `handle_requests` rather than failed. Each component's requests begin in
 arrival order, are revalidated against its current generation, and are
 dropped if their caller has gone. Any stop that reaches the controller rejects
 the same component's queued starts with `StartSuperseded`, so a completed stop
-is never undone by an older start. Graph-wide start, stop, policy and
+is never undone by an older start. Conflicting group, structural and
 recovery-freeze commands still return `OperationInProgress`.
 
 ### Durable acceptance precedes realization
@@ -1158,9 +1209,11 @@ cargo test --locked -p drasi-lib \
   --test computation_graph_dataflow --test computation_runtime_lifecycle \
   --test computation_controller
 
-# The source-time merger, including real RocksDB reconstruction.
+# Real RocksDB query reset/deprovision and merger child-crash reconstruction.
 cargo test --locked -p drasi-lib --no-default-features \
-  --features computation-rocksdb-tests --test computation_time_merge
+  --features computation-rocksdb-tests \
+  --test computation_query_recovery --test computation_time_merge \
+  -- --test-threads=1
 ```
 
 These commands are examples of targeted selection, not the complete CI gate.
@@ -1177,6 +1230,21 @@ plugins and backend profiles. An ignored process-crash worker does not count
 as coverage without its passing parent crash driver. Keep assertions about
 ordering, exact output and retained obligations; "the graph did not panic" is
 not a sufficient oracle.
+
+The query and merger parent drivers run the same normal DrasiLib in a separate
+process, check that its live RocksDB cannot be opened by another owner, externally
+SIGKILL it at selected persistence boundaries, and verify actual reopen. Query
+cases cover reset/deprovision intent and partial wipes, strict refusal of
+incomplete state, and explicit retry with exact rows/high-water/generation.
+Merger cases cover admission, emission, journal handoff and confirmation with
+exact buffered/output/receipt recovery. These selected cases passed on macOS
+and an init-enabled Linux container; they are not every provider's wipe or
+production fault matrix.
+
+For the actual mutual-TLS macOS/Linux-VM profile, use the
+[prepared-peer instructions](../../components/instance-host/README.md#qualified-unix-platforms-and-prepared-network-peer).
+Do not count an unprepared ignored network case as acceptance or substitute an
+injected loopback error for the required real receipt fault.
 
 Use [the qualification ledger](../tests/runtime_parity/requirements.tsv) and
 [current limitations](componentgraph-vs-computationgraph.md#performance-and-qualification-boundaries)

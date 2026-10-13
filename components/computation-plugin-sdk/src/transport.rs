@@ -290,10 +290,64 @@ impl Drop for ForeignWake {
 }
 
 type Work = Pin<Box<dyn Future<Output = Result<Vec<u8>, Failure>> + Send>>;
+
+pub(crate) struct PanicState {
+    damaged: AtomicBool,
+    changed: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for PanicState {
+    fn default() -> Self {
+        Self {
+            damaged: AtomicBool::new(false),
+            changed: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+impl PanicState {
+    pub(crate) fn is_damaged(&self) -> bool {
+        self.damaged.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn quarantine(&self) {
+        self.damaged.store(true, Ordering::Release);
+        self.changed.send_replace(true);
+    }
+}
+
 struct Operation {
     future: Option<Work>,
     terminal: u32,
     runtime: Option<Arc<tokio::runtime::Runtime>>,
+    damaged: Option<Arc<PanicState>>,
+    cleanup: bool,
+}
+
+impl Operation {
+    fn quarantined(&self) -> bool {
+        !self.cleanup
+            && self
+                .damaged
+                .as_ref()
+                .is_some_and(|damaged| damaged.is_damaged())
+    }
+
+    fn record_panic(&mut self) {
+        self.terminal = status::PANICKED;
+        if let Some(damaged) = &self.damaged {
+            damaged.quarantine();
+        }
+    }
+
+    fn drop_work(&mut self) -> bool {
+        if catch_unwind(AssertUnwindSafe(|| drop(self.future.take()))).is_err() {
+            self.record_panic();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Create a producer-owned, caller-polled operation. The optional runtime is
@@ -302,11 +356,43 @@ pub fn export_operation(
     future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
     runtime: Option<Arc<tokio::runtime::Runtime>>,
 ) -> OperationHandle {
+    export_owned_operation(future, runtime, None, false)
+}
+
+pub(crate) fn export_component_operation(
+    future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
+    runtime: Option<Arc<tokio::runtime::Runtime>>,
+    damaged: Arc<PanicState>,
+    cleanup: bool,
+) -> OperationHandle {
+    export_owned_operation(future, runtime, Some(damaged), cleanup)
+}
+
+fn export_owned_operation(
+    future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
+    runtime: Option<Arc<tokio::runtime::Runtime>>,
+    damaged: Option<Arc<PanicState>>,
+    cleanup: bool,
+) -> OperationHandle {
+    let future: Work = if let Some(state) = damaged.as_ref().filter(|_| !cleanup) {
+        let mut changed = state.changed.subscribe();
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = changed.wait_for(|quarantined| *quarantined) => Err(Failure::panicked()),
+                result = future => result,
+            }
+        })
+    } else {
+        Box::pin(future)
+    };
     OperationHandle {
         state: Box::into_raw(Box::new(Operation {
-            future: Some(Box::pin(future)),
+            future: Some(future),
             terminal: 0,
             runtime,
+            damaged,
+            cleanup,
         }))
         .cast(),
         vtable: &OPERATION_VTABLE,
@@ -329,11 +415,19 @@ unsafe extern "C" fn poll_operation(state: *mut c_void, wake: *const abi::Wake) 
             };
         }
         let operation = unsafe { &mut *state.cast::<Operation>() };
+        if operation.quarantined() {
+            operation.record_panic();
+            operation.drop_work();
+            return abi::PollResult {
+                state: abi::POLL_READY,
+                reply: reply_result(Err(Failure::panicked())),
+            };
+        }
         let Some(future) = operation.future.as_mut() else {
-            let error = if operation.terminal == status::CANCELLED {
-                Failure::cancelled()
-            } else {
-                Failure::protocol("native operation already completed")
+            let error = match operation.terminal {
+                status::CANCELLED => Failure::cancelled(),
+                status::PANICKED => Failure::panicked(),
+                _ => Failure::protocol("native operation already completed"),
             };
             return abi::PollResult {
                 state: abi::POLL_READY,
@@ -354,25 +448,40 @@ unsafe extern "C" fn poll_operation(state: *mut c_void, wake: *const abi::Wake) 
             }
             Ok(Ok(Poll::Ready(result))) => result,
             Ok(Err(error)) => Err(error),
-            Err(_) => Err(Failure::panicked()),
+            Err(_) => {
+                operation.record_panic();
+                Err(Failure::panicked())
+            }
         };
+        if result
+            .as_ref()
+            .is_err_and(|failure| failure.code == status::PANICKED)
+        {
+            operation.record_panic();
+        }
         operation.terminal = result
             .as_ref()
             .err()
             .map_or(status::PROTOCOL, |error| error.code);
-        let dropped = catch_unwind(AssertUnwindSafe(|| drop(operation.future.take())));
+        let dropped_panicked = operation.drop_work();
         abi::PollResult {
             state: abi::POLL_READY,
-            reply: reply_result(if dropped.is_err() {
+            reply: reply_result(if dropped_panicked || operation.quarantined() {
                 Err(Failure::panicked())
             } else {
                 result
             }),
         }
     }));
-    result.unwrap_or_else(|_| abi::PollResult {
-        state: abi::POLL_READY,
-        reply: reply_result(Err(Failure::panicked())),
+    result.unwrap_or_else(|_| {
+        if !state.is_null() {
+            // The uniquely polled allocation remains owned until release_operation.
+            unsafe { &mut *state.cast::<Operation>() }.record_panic();
+        }
+        abi::PollResult {
+            state: abi::POLL_READY,
+            reply: reply_result(Err(Failure::panicked())),
+        }
     })
 }
 
@@ -384,7 +493,9 @@ unsafe extern "C" fn cancel_operation(state: *mut c_void) -> Status {
         let operation = unsafe { &mut *state.cast::<Operation>() };
         if operation.future.is_some() {
             operation.terminal = status::CANCELLED;
-            drop(operation.future.take());
+            if operation.drop_work() {
+                return Err(Failure::panicked());
+            }
         }
         Ok(())
     })
@@ -392,7 +503,8 @@ unsafe extern "C" fn cancel_operation(state: *mut c_void) -> Status {
 unsafe extern "C" fn release_operation(state: *mut c_void) {
     drop_boundary(|| {
         if !state.is_null() {
-            unsafe { drop(Box::from_raw(state.cast::<Operation>())) };
+            let mut operation = unsafe { Box::from_raw(state.cast::<Operation>()) };
+            operation.drop_work();
         }
     });
 }
@@ -581,6 +693,161 @@ mod tests {
                 .code,
             status::PANICKED
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn component_panic_wakes_existing_calls_and_cleanup_cannot_revive_the_instance() {
+        let state = Arc::new(PanicState::default());
+        let waiting =
+            export_component_operation(std::future::pending(), None, state.clone(), false);
+        let mut waiting = Box::pin(unsafe { OperationFuture::new(waiting) }.unwrap());
+        std::future::poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let panicking = export_component_operation(
+            async { panic!("component body panicked") },
+            None,
+            state.clone(),
+            false,
+        );
+        assert_eq!(
+            unsafe { OperationFuture::new(panicking) }
+                .unwrap()
+                .await
+                .unwrap_err()
+                .code,
+            status::PANICKED
+        );
+        assert!(state.is_damaged());
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            status::PANICKED,
+            "a control panic must wake a separately pending data operation"
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        for cleanup in [true, false] {
+            let called = calls.clone();
+            let operation = export_component_operation(
+                async move {
+                    called.fetch_add(1, Ordering::SeqCst);
+                    Ok(Vec::new())
+                },
+                None,
+                state.clone(),
+                cleanup,
+            );
+            let result = unsafe { OperationFuture::new(operation) }.unwrap().await;
+            if cleanup {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().code, status::PANICKED);
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state.is_damaged());
+        let fresh = export_component_operation(
+            async { Ok(vec![1]) },
+            None,
+            Arc::new(PanicState::default()),
+            false,
+        );
+        assert_eq!(
+            unsafe { OperationFuture::new(fresh) }
+                .unwrap()
+                .await
+                .unwrap()
+                .as_ref(),
+            &[1]
+        );
+    }
+
+    struct PanicOnDrop {
+        ready: bool,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Future for PanicOnDrop {
+        type Output = Result<Vec<u8>, Failure>;
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.ready {
+                Poll::Ready(Ok(Vec::new()))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            panic!("native operation destructor panicked");
+        }
+    }
+
+    #[tokio::test]
+    async fn component_future_destruction_quarantines_poll_cancel_and_release_paths() {
+        for mode in 0..4 {
+            let state = Arc::new(PanicState::default());
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let raw = export_component_operation(
+                PanicOnDrop {
+                    ready: mode == 3,
+                    dropped: dropped.clone(),
+                },
+                None,
+                state.clone(),
+                false,
+            );
+            if mode == 2 {
+                unsafe { release_operation(raw.state) };
+            } else {
+                let mut operation = unsafe { OperationFuture::new(raw) }.unwrap();
+                if mode == 0 {
+                    assert_eq!(operation.cancel().unwrap_err().code, status::PANICKED);
+                    assert_eq!(operation.await.unwrap_err().code, status::PANICKED);
+                } else if mode == 1 {
+                    drop(operation);
+                } else {
+                    assert_eq!(operation.await.unwrap_err().code, status::PANICKED);
+                }
+            }
+            assert!(state.is_damaged(), "path {mode} failed to retain the panic");
+            assert_eq!(dropped.load(Ordering::SeqCst), 1, "path {mode} drops once");
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_cancellation_and_returned_failure_do_not_quarantine_a_component() {
+        let state = Arc::new(PanicState::default());
+        let raw = export_component_operation(std::future::pending(), None, state.clone(), false);
+        let mut operation = unsafe { OperationFuture::new(raw) }.unwrap();
+        operation.cancel().unwrap();
+        assert_eq!(operation.await.unwrap_err().code, status::CANCELLED);
+        assert!(!state.is_damaged());
+        let raw = export_component_operation(
+            async { Err(Failure::failed("ordinary operation error")) },
+            None,
+            state.clone(),
+            false,
+        );
+        assert_eq!(
+            unsafe { OperationFuture::new(raw) }
+                .unwrap()
+                .await
+                .unwrap_err()
+                .code,
+            status::FAILED
+        );
+        assert!(!state.is_damaged());
     }
 
     #[tokio::test]

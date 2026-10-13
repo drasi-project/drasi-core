@@ -508,7 +508,11 @@ async fn dropping_a_pending_construction_retains_desired_state_and_cancels_scope
     );
     assert_eq!(active.load(Ordering::SeqCst), 1);
     drop(run);
-    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        active.load(Ordering::SeqCst),
+        1,
+        "dropping the controller requests cancellation; the graph still owns the constructor task"
+    );
     assert!(matches!(
         control.deployment_report().await,
         Err(GraphError::ControllerClosed)
@@ -521,6 +525,7 @@ async fn dropping_a_pending_construction_retains_desired_state_and_cancels_scope
         .shutdown()
         .await
         .expect("cleanup cancelled construction");
+    assert_eq!(active.load(Ordering::SeqCst), 0);
     assert_eq!(graph.snapshot().specifications.len(), 1);
 }
 

@@ -37,7 +37,7 @@ fi
 
 python3 lib/tests/runtime_parity/check_requirements.py || exit 1
 
-for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
     package=drasi-lib
     inventory=lib/tests/runtime_parity/original-cases.tsv
     mappings=lib/tests/runtime_parity/case-mappings.tsv
@@ -75,6 +75,24 @@ for profile in default no-default-features extra-capabilities integration plugin
             sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
             targets=(--lib --test integration_test --test native_computation_pipeline --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
             test_arguments+=(--test-threads=1)
+            ;;
+        native-bridge)
+            package=drasi-computation-bridge
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib)
+            targets=(--lib)
+            ;;
+        native-instance-host)
+            package=drasi-instance-host
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib components/instance-host/tests/processes.rs)
+            targets=(--lib --test processes)
+            test_arguments+=(--test-threads=1)
+            if [[ -n "${DRASI_NETWORK_CONTAINER:-}" ]]; then
+                test_arguments+=(--include-ignored)
+            fi
             ;;
         configuration-store)
             package=drasi-state-store-redb

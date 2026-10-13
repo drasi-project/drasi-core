@@ -3,7 +3,7 @@
 
 //! In-process query/fan-out measurement with an independent per-query result oracle.
 //! Arguments: events window queries payload-bytes ordinary|native
-//! current-thread|multi-thread projection|aggregate|join|persistent-aggregate.
+//! current-thread|multi-thread projection|aggregate|join|persistent-aggregate|cpu-heavy [workers].
 
 #![allow(clippy::print_stdout)]
 
@@ -43,13 +43,14 @@ struct Options {
     execution: String,
     runtime: String,
     workload: String,
+    workers: usize,
 }
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self> {
         ensure!(
-            args.len() == 7,
-            "expected events window queries payload-bytes execution runtime workload"
+            matches!(args.len(), 7 | 8),
+            "expected events window queries payload-bytes execution runtime workload [workers]"
         );
         let options = Self {
             events: args[0].parse()?,
@@ -59,6 +60,11 @@ impl Options {
             execution: args[4].clone(),
             runtime: args[5].clone(),
             workload: args[6].clone(),
+            workers: args
+                .get(7)
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or(if args[5] == "multi-thread" { 2 } else { 1 }),
         };
         ensure!(
             (1..=10_000_000).contains(&options.events),
@@ -78,10 +84,15 @@ impl Options {
             matches!(options.runtime.as_str(), "current-thread" | "multi-thread"),
             "unknown runtime"
         );
+        ensure!((1..=64).contains(&options.workers), "workers must be 1..64");
+        ensure!(
+            options.runtime != "current-thread" || options.workers == 1,
+            "current-thread requires exactly one worker"
+        );
         ensure!(
             matches!(
                 options.workload.as_str(),
-                "projection" | "aggregate" | "join" | "persistent-aggregate"
+                "projection" | "aggregate" | "join" | "persistent-aggregate" | "cpu-heavy"
             ),
             "unknown workload"
         );
@@ -97,6 +108,8 @@ impl Options {
             "MATCH (n:Bench) RETURN sum(n.value) AS value"
         } else if self.workload == "join" {
             "MATCH (n:Bench)-[:FACTOR]->(r:Reference) RETURN n.value * r.factor AS value, n.payload AS payload"
+        } else if self.workload == "cpu-heavy" {
+            "MATCH (n:Bench) WITH n, range(1, 256) AS steps RETURN reduce(total = 0, x IN steps | total + n.value + x) AS value, n.payload AS payload"
         } else {
             "MATCH (n:Bench) RETURN n.value AS value, n.payload AS payload"
         }
@@ -225,6 +238,8 @@ async fn exercise(
                     sum
                 } else if options.workload == "join" {
                     values[key] * 2
+                } else if options.workload == "cpu-heavy" {
+                    values[key] * 256 + 32_896
                 } else {
                     values[key]
                 });
@@ -303,7 +318,7 @@ async fn exercise(
         "payload_bytes": options.payload_bytes,
         "execution": options.execution,
         "runtime": options.runtime,
-        "workers": if options.runtime == "multi-thread" { 2 } else { 1 },
+        "workers": options.workers,
         "workload": options.workload,
         "keys": KEYS,
         "warmup_events": WARMUP,
@@ -534,13 +549,21 @@ async fn native(options: &Options) -> Result<Value> {
         control.cancel();
         (measured, stop)
     });
+    let observed = graph.observed();
     graph.dispose().await?;
     ensure!(
         matches!(running, Ok(()) | Err(GraphError::Cancelled)),
         "native graph failed: {running:?}"
     );
     let (measured, stop) = measured;
-    let mut measured = measured?;
+    let mut measured = measured.with_context(|| {
+        let failures: Vec<_> = observed
+            .components
+            .iter()
+            .filter_map(|(id, node)| node.failure.as_ref().map(|failure| (id, failure)))
+            .collect();
+        format!("native component failures: {failures:?}")
+    })?;
     measured["shutdown_ns"] = json!(stop.elapsed().as_nanos() as u64);
     Ok(measured)
 }
@@ -549,7 +572,7 @@ fn main() -> Result<()> {
     let options = Options::parse(&std::env::args().skip(1).collect::<Vec<_>>())?;
     let mut runtime = if options.runtime == "multi-thread" {
         let mut runtime = tokio::runtime::Builder::new_multi_thread();
-        runtime.worker_threads(2);
+        runtime.worker_threads(options.workers);
         runtime
     } else {
         tokio::runtime::Builder::new_current_thread()

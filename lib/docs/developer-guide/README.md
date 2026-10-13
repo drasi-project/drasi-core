@@ -1,6 +1,6 @@
 # Developing Rust applications with drasi-lib
 
-**Implementation snapshot: 9 October 2026**
+**Implementation snapshot: 13 October 2026 - current development checkout**
 
 For engineers changing Drasi itself, the separate
 [ComputationGraph maintainer's guide](../computation-graph-maintainers-guide.md)
@@ -33,7 +33,7 @@ application does not need. Read the guide in order for the concepts, or use the
 contents to return to a particular decision.
 
 The examples target `agentofreality-parallel-computation-graph`, where
-`drasi-lib` is version `0.9.2`. Use matching checkouts of the component crates;
+`drasi-lib` is version `0.9.3`. Use matching checkouts of the component crates;
 do not assume these development APIs exist in an arbitrary published release.
 The guide assumes familiarity with Rust, async code and Cargo, but not Drasi's
 Rust interfaces.
@@ -75,6 +75,7 @@ components are replaced or work is replayed.
 - [Normalizing incoming data](#normalizing-incoming-data)
 - [Consuming results correctly](#consuming-results-correctly)
 - [Assembling an explicit graph](#assembling-an-explicit-graph)
+- [Independent instances and process isolation](#independent-instances-and-process-isolation)
 - [Choosing queues, ordering and backpressure](#choosing-queues-ordering-and-backpressure)
 - [Making state survive a restart](#making-state-survive-a-restart)
 - [Coordinating bootstrap and replay](#coordinating-bootstrap-and-replay)
@@ -298,10 +299,20 @@ fn product_change(quantity: i64, effective_from: u64) -> SourceChange {
 }
 ```
 
-`effective_from` is the element's effective time in milliseconds, not its
-delivery sequence. Ordinary node updates patch supplied properties; explicitly
-set a property to null to clear it. A native record can instead declare replacement
-semantics, as discussed under explicit graphs.
+`effective_from` is the source's effective time in milliseconds, not receipt time
+or a delivery sequence. The shared evaluator reports and skips strictly older
+mutations while continuing processing. Equal-time differences follow admitted
+order. Identical full elements are no-ops; Insert is a full-row upsert rather
+than another aggregate contribution, while Update merges supplied properties.
+Set a property to null to clear it. A live node/relationship identity collision
+fails explicitly before modification.
+
+Deleting even an absent element records a transactional source-time frontier,
+preventing stale resurrection after reconstruction. These frontiers do not expire
+automatically without a source-watermark/retention contract. Native query
+configuration identities include the mutation semantics (formats 5/6); incompatible
+saved identities require explicit reset/rebootstrap or a designed migration.
+Never discard pending-output obligations to make an upgrade succeed.
 
 An `Element::Relation` has the same metadata/properties plus `in_node` and
 `out_node` references. For example, a `STORED_IN` relationship can connect
@@ -704,17 +715,26 @@ flowchart LR
 ```
 
 The ordinary `Query` path and the direct query both use the same parsers,
-indexes and `ComputationQuery` evaluator. An ordinary query owns an internal
-query graph driven by a `ScopedGraph` Tokio task. A direct node is polled
-cooperatively by its containing graph driver. Adding direct nodes does not
-automatically create one CPU task per node. Independent ordinary queries can
-execute independently; parallel throughput still depends on executor threads,
-the graph shape, storage and consumer behavior.
+indexes and `ComputationQuery` evaluator. Native processing loops now execute as
+graph-owned Tokio tasks, independently of the controller task. An ordinary
+query still owns its internal `ScopedGraph`; it is not required to obtain native
+component-level CPU concurrency. Mutable work on one component remains
+serialized. Transaction containers retain their own ordered inner steps.
+
+Multiple independent native nodes can use different runtime workers. A
+current-thread runtime remains supported but cannot supply multicore execution.
+Throughput still depends on graph shape, shared transaction owners, storage and
+consumer behavior; independent task execution is not a production scaling SLO.
+Graph-invoked preflight, pipe creation, in-place reconfiguration and retirement
+also have owned task boundaries. Reconciliation services unrelated lifecycle
+commands while retaining conflicting ownership. Qualification and separately
+scoped management work remain explicit in the
+[work inventory](../computation-graph-remaining-work.md).
 
 Use direct composition when data should pass through custom transformations,
 queries should participate in a wider graph, or transport/recovery boundaries
-must be explicit. Keep the ordinary API when source-query-reaction composition
-already expresses the application clearly.
+must be explicit. Ordinary examples document currently retained behavior; the
+selected migration target is native components, not new adapter bridges.
 
 ### Records and envelopes
 
@@ -817,6 +837,54 @@ A standalone graph is useful for finite pipelines or an independently owned
 computation. Its `run()` must remain awaited; cancellation and restart rules
 are covered under cleanup. A batch inside `DrasiLib` adds components to the
 existing owner rather than creating a second runtime.
+
+## Independent instances and process isolation
+
+The `drasi-instance-host` package hosts a normal DrasiLib in each process.
+Parent, child and grandchild use the same library implementation and native
+component contracts. Process supervision is a portless native service;
+`drasi-computation-bridge` supplies separate source/sink components for data.
+There is no remote `transform()` method or special child evaluator.
+
+The current owned-child host is Unix-only. It retains process handles, stable
+instance/state identity, bounded control/diagnostics and generation-fenced
+operations. Process liveness alone is not readiness. Required components use
+the graph's declared readiness contract; an independent health value of Unknown
+does not itself imply failed startup. Readiness follows accepted configuration,
+including persisted empty configurations, rather than an obsolete startup seed.
+
+Bridge profiles explicitly distinguish volatile queue acceptance from durable
+receiver admission. Neither proves completion of the child subgraph or external
+effects. Source times, origin identity, configured namespaces, ordering, bounded
+backpressure and actual receipt/replay contracts remain significant across links.
+Standard portable schemas are supported; child-only executable validators are
+not loaded into the parent. Mutual-TLS transport exists, but this does not claim
+all cross-machine failure/platform qualification is complete. The selected
+macOS/Linux checkpoint runs actual parent/child/grandchild processes and a
+prepared mutual-TLS Linux-VM peer with receipt faults and persistent reopen.
+Windows hosting, physical cross-machine production partitions and hard kernel
+resource isolation are not qualified.
+
+Keep transaction containers and actual shared-storage groups inside one instance.
+Each instance owns its graph/resources; matching database paths do not create
+cross-process atomicity. The host's explicit tree-stop cuts coordinate returning
+data and control traffic; a local `DrasiLib::stop` is not proof of composition
+drain. Force termination affects the selected whole child instance.
+
+Within one graph, scoped force must select the complete registered actual
+resource domain. Its report distinguishes interrupted work from cleanup;
+successful cleanup does not repair a damaged generation. Idle observers of
+never-started/quiesced members remain graph-owned, rather than falsely becoming
+interrupted work. After forced generation damage, reconstruct a fresh normal
+owner and recover its producer before retiring pending output or replacing
+bindings; force is not rollback or permission to discard that output.
+
+See the [host configuration/lifecycle guide](../../../components/instance-host/README.md)
+and [bridge profiles, resources and cuts](../../../components/computation-plugins/bridge/README.md)
+for the exact implemented configuration. The
+[execution/isolation plan](../computation-graph-execution-isolation-plan.md) and
+[inventory](../computation-graph-remaining-work.md) identify remaining work;
+they are not stronger runtime guarantees.
 
 ## Choosing queues, ordering and backpressure
 
@@ -1544,13 +1612,14 @@ tokio::time::timeout(Duration::from_secs(10), handle.wait_started()).await??;
 ```
 
 A failed addition remains visible and retryable when its failure permits retry.
-Stopping a component whose construction failed or was still in progress
-acknowledges that outcome: the component reports Stopped, pending waits return
-`CreationStopped`, and the next start retries construction.
-Concurrent starts and stops of individual components are queued and run in
-turn; a stop that reaches a component with a queued start cancels that start
-with `StartSuperseded`. Graph-wide operations issued while another lifecycle
-operation is running return `OperationInProgress`.
+Stopping unfinished or retryable failed construction can acknowledge that
+outcome and allow a later retry. Unchanged terminal creation failures require
+repair rather than repeated construction. Overlapping individual lifecycle
+requests remain ordered; a stop can supersede a queued start with
+`StartSuperseded`. Disjoint starts/stops can progress while another owner waits
+for a lifecycle/drain boundary. Conflicting operations still reject or wait under
+their documented contract; bulk reconciliation command servicing remains a
+separate unfinished boundary.
 Inspect returned lifecycle/deployment reports: a graph handle can exist while
 one component is CreationFailed, another is Running, and an edge is unbound.
 `OperationSummary::CompletedWithFailures` is not a successful start of every
@@ -2570,10 +2639,11 @@ rechecking, and hints preserve the scheduled timestamp. This is not a real-time
 deadline guarantee; deterministic scheduling-source clock tests do not establish
 all whole-query clock changes combined with persistent recovery.
 
-The controller bounds continuously ready work per node, allowing live inputs,
-timers and lifecycle controls to progress. Custom component code must still
-yield and bound its own work; this is not independent task scheduling per native
-node or permission to block a runtime thread.
+The runner bounds continuously ready work per node, allowing live inputs,
+timers and lifecycle controls to progress. Native processing runs in owned
+independent tasks, but custom component code must still yield and bound its
+work. Task cancellation cannot preempt a synchronous callback that never yields;
+process isolation has its own explicit termination boundary.
 
 `WalSourceResource`/`WalReplaySource` similarly adapt a real WAL partition
 and source-progress owner, with `resume_after` selecting the replay boundary.
@@ -3037,6 +3107,26 @@ An unavailable network may be retryable; a rejected schema is not repaired by
 retry. Neither a timeout nor dropping a future proves a storage write or remote
 request did not complete.
 
+Protected native operation unwinds carry `ComponentPanic` and bounded identity
+information. The affected generation remains quarantined; successful cleanup
+does not authorize restarting the same damaged instance. The native SDK also
+retains panic damage across operation/control/getter and future-destruction
+boundaries and wakes pending calls. Reconstruct a fresh generation after the
+required cleanup/recovery checks.
+
+These boundaries do not establish preemption of a synchronous hook that never
+yields, containment of native abort/unsafe memory faults, or protection against
+a double-panic abort. Use a separately hosted normal DrasiLib for those process
+failure boundaries.
+
+`GraphControl::force_cancel_components(revision, selection)` is explicit
+escalation when graceful work cannot finish. It rejects incomplete registered
+resource domains and unproven pending ownership before effects. Its report keeps
+interruption and cleanup separate: cleanup does not prove rollback or completed
+business effects. The interrupted generation cannot restart; explicit
+changed-specification reconstruction remains subject to cleanup/recovery
+requirements. Unreported opaque sharing is not proven safe by this API.
+
 ### Ownership survives unsuccessful operations
 
 A `ComputationCleanupError` can retain a failed construction/registration owner.
@@ -3050,6 +3140,12 @@ the work result, await `shutdown`, report cleanup failure separately, and only
 then return the primary failure. A service that cannot finish cleanup should
 retain the owner and surface that condition rather than immediately reopen the
 same resource.
+
+Graph-owned construction, processing and cleanup tasks retain their joins when
+a caller drops a waiter. A repeated cleanup request joins the existing operation
+rather than starting a competing shutdown. Graceful stop finishes admitted work,
+continuations and required forwarding before stop hooks; a timeout reports the
+unfinished boundary without treating the write/effect as rolled back.
 
 Configuration-store leases follow the same rule. Cancelling a builder
 restoration or storage-call waiter does not release ownership while actual
@@ -3096,7 +3192,10 @@ reported Running.
 The [current capability snapshot](../componentgraph-vs-computationgraph.md) and
 [qualification ledger](../../tests/runtime_parity/requirements.tsv) distinguish
 implemented behavior from its demonstrated operating range. The core evidence
-includes:
+below includes historical baseline measurements; its throughput/allocation and
+stop-latency numbers are not a fresh qualification of owned-task execution.
+The current execution/hosting checkpoint and remaining gates are recorded in the
+[implementation plan](../computation-graph-execution-isolation-plan.md#current-checkpoint---13-october-2026).
 
 | Area | Checked behavior |
 |---|---|

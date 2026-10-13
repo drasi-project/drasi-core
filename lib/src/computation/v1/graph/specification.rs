@@ -288,6 +288,41 @@ pub struct ResourceHandle {
 trait ResourceIdentity: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn same_identity(&self, other: &dyn ResourceIdentity) -> bool;
+    fn downgrade(&self) -> Box<dyn WeakResourceIdentity>;
+}
+
+trait WeakResourceIdentity: Send + Sync {
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool;
+}
+
+struct WeakSharedResourceIdentity<T: ?Sized>(std::sync::Weak<T>);
+impl<T: ?Sized + Send + Sync + 'static> WeakResourceIdentity for WeakSharedResourceIdentity<T> {
+    fn same_identity(&self, other: &dyn ResourceIdentity) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<SharedResourceIdentity<T>>()
+            .is_some_and(|other| std::sync::Weak::ptr_eq(&self.0, &Arc::downgrade(&other.0)))
+    }
+}
+
+pub(super) struct ResourceScopeIdentity {
+    role: ResourceRole,
+    concrete: TypeId,
+    value: std::sync::Weak<dyn Any + Send + Sync>,
+    identity: Option<Box<dyn WeakResourceIdentity>>,
+}
+
+impl ResourceScopeIdentity {
+    pub(super) fn matches(&self, other: &ResourceHandle) -> bool {
+        self.role == other.role
+            && self.concrete == other.value.as_ref().type_id()
+            && (std::sync::Weak::ptr_eq(&self.value, &Arc::downgrade(&other.value))
+                || self
+                    .identity
+                    .as_ref()
+                    .zip(other.identity.as_ref())
+                    .is_some_and(|(left, right)| left.same_identity(right.as_ref())))
+    }
 }
 
 struct SharedResourceIdentity<T: ?Sized>(Arc<T>);
@@ -302,6 +337,10 @@ impl<T: ?Sized + Send + Sync + 'static> ResourceIdentity for SharedResourceIdent
             .as_any()
             .downcast_ref::<Self>()
             .is_some_and(|other| Arc::ptr_eq(&self.0, &other.0))
+    }
+
+    fn downgrade(&self) -> Box<dyn WeakResourceIdentity> {
+        Box::new(WeakSharedResourceIdentity(Arc::downgrade(&self.0)))
     }
 }
 
@@ -331,6 +370,15 @@ impl WeakResourceHandle {
 }
 
 impl ResourceHandle {
+    pub(super) fn scope_identity(&self) -> ResourceScopeIdentity {
+        ResourceScopeIdentity {
+            role: self.role,
+            concrete: self.value.as_ref().type_id(),
+            value: Arc::downgrade(&self.value),
+            identity: self.identity.as_ref().map(|identity| identity.downgrade()),
+        }
+    }
+
     pub(crate) fn downgrade(&self) -> WeakResourceHandle {
         WeakResourceHandle {
             role: self.role,

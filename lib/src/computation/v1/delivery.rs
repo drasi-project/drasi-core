@@ -144,6 +144,37 @@ pub struct DeliveryBatchIdentity {
     digest: [u8; 32],
 }
 
+impl DeliveryBatchIdentity {
+    /// Derive the same identity used by delivery progress without opening a
+    /// progress store or invoking a destination.
+    pub fn for_input(
+        scope: &DeliveryScope,
+        input: &InputEnvelope,
+        codec: &EnvelopeCodec,
+    ) -> anyhow::Result<Self> {
+        scope.validate()?;
+        bounded_identifier(input.port.as_str())?;
+        bounded_identifier(input.envelope.system().stream().as_str())?;
+        batch_identity(scope, input, &Candidate::new(&input.envelope, codec)?)
+    }
+
+    pub fn stream(&self) -> &str {
+        &self.stream
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn operations(&self) -> usize {
+        self.operations
+    }
+
+    pub fn content_digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+}
+
 impl DeliveryItem<'_> {
     pub fn batch_identity(&self) -> anyhow::Result<DeliveryBatchIdentity> {
         self.position.validate()?;
@@ -874,13 +905,7 @@ impl DeliveryRunner {
 
     /// Validate and identify a batch without changing progress or invoking effects.
     pub fn batch_identity(&self, input: &InputEnvelope) -> anyhow::Result<DeliveryBatchIdentity> {
-        bounded_identifier(input.port.as_str())?;
-        bounded_identifier(input.envelope.system().stream().as_str())?;
-        batch_identity(
-            &self.scope,
-            input,
-            &Candidate::new(&input.envelope, &self.codec)?,
-        )
+        DeliveryBatchIdentity::for_input(&self.scope, input, &self.codec)
     }
 
     pub async fn progress(&mut self) -> anyhow::Result<Vec<DeliveryProgress>> {

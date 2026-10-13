@@ -13,6 +13,7 @@ import re
 import resource
 import statistics
 import subprocess
+import time
 
 
 def measure(binary, events, window, plugin=None, *, arguments=(), require_allocations=True):
@@ -32,9 +33,11 @@ def measure(binary, events, window, plugin=None, *, arguments=(), require_alloca
         raise RuntimeError("RSS measurement requires macOS or Linux")
     command.extend(str(argument) for argument in arguments)
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    started = time.monotonic()
     result = subprocess.run(
         command, capture_output=True, text=True, env=environment, timeout=180
     )
+    elapsed = time.monotonic() - started
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     if result.returncode:
         raise RuntimeError(f"{binary} failed:\n{result.stdout}\n{result.stderr}")
@@ -48,6 +51,8 @@ def measure(binary, events, window, plugin=None, *, arguments=(), require_alloca
     value["process_cpu_seconds"] = (
         after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime
     )
+    value["process_elapsed_seconds"] = elapsed
+    value["effective_cpu_cores"] = value["process_cpu_seconds"] / elapsed
     if require_allocations:
         value["allocations_per_event"] = value["allocations"] / events
         value["allocated_bytes_per_event"] = value["allocated_bytes"] / events

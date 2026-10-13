@@ -5,30 +5,18 @@ use super::*;
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::{
-    computation::{
-        ComputationIndexProvider, ComputationIndexes, ComputationResource, ComputationTransaction,
-        InMemoryComputationProvider, TransactionDomain,
-    },
-    interface::{FailureMode, IndexError, IndexSet, SessionControl},
+    computation::{ComputationTransaction, InMemoryComputationProvider},
+    interface::FailureMode,
 };
-use drasi_index_rocksdb::{
-    computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
-};
-use std::{
-    path::Path,
-    sync::atomic::{AtomicU8, Ordering},
-};
+use std::{path::Path, sync::atomic::Ordering};
 
-fn provider(path: &Path) -> Arc<dyn ComputationIndexProvider> {
-    Arc::new(RocksDbComputationProvider::new(
-        path,
-        RocksIndexOptions::new(
-            false,
-            false,
-            RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).expect("RocksDB budget"),
-        ),
-    ))
-}
+#[path = "../computation_support/persistent_faults.rs"]
+mod persistent_faults;
+use persistent_faults::{provider, Fault, FaultProvider};
+
+#[cfg(unix)]
+#[path = "processes.rs"]
+mod processes;
 
 async fn create(path: &Path, config: SourceTimeMergeDefinition) -> SourceTimeMergeTransformer {
     SourceTimeMergeTransformer::new_durable(config, schema(), provider(path))
@@ -252,92 +240,6 @@ async fn durable_output_cannot_connect_to_a_volatile_pipe() {
         )
         .build();
     assert!(graph.is_err());
-}
-
-#[derive(Default)]
-struct Fault {
-    // 1: fail before commit; 2: lose commit acknowledgement; 3: cancel after commit.
-    mode: AtomicU8,
-    committed: tokio::sync::Notify,
-}
-
-struct FaultSession {
-    inner: Arc<dyn SessionControl>,
-    fault: Arc<Fault>,
-}
-
-#[async_trait]
-impl SessionControl for FaultSession {
-    async fn begin(&self) -> std::result::Result<(), IndexError> {
-        self.inner.begin().await
-    }
-    async fn commit(&self) -> std::result::Result<(), IndexError> {
-        let mode = self.fault.mode.swap(0, Ordering::SeqCst);
-        if mode == 1 {
-            return Err(IndexError::IOError);
-        }
-        self.inner.commit().await?;
-        if mode == 2 {
-            return Err(IndexError::IOError);
-        }
-        if mode == 3 {
-            self.fault.committed.notify_one();
-            std::future::pending::<()>().await;
-        }
-        Ok(())
-    }
-    fn rollback(&self) -> std::result::Result<(), IndexError> {
-        self.inner.rollback()
-    }
-}
-
-struct FaultProvider {
-    inner: Arc<dyn ComputationIndexProvider>,
-    fault: Arc<Fault>,
-}
-
-#[async_trait]
-impl ComputationIndexProvider for FaultProvider {
-    async fn create_indexes(
-        &self,
-        graph: &str,
-        id: &str,
-    ) -> std::result::Result<ComputationIndexes, IndexError> {
-        let original = self.inner.create_indexes(graph, id).await?;
-        let set = original.indexes();
-        let session: Arc<dyn SessionControl> = Arc::new(FaultSession {
-            inner: set.session_control.clone(),
-            fault: self.fault.clone(),
-        });
-        let domain = TransactionDomain::new(session.clone());
-        let indexes = ComputationIndexes::try_new(
-            IndexSet {
-                element_index: set.element_index.clone(),
-                archive_index: set.archive_index.clone(),
-                result_index: set.result_index.clone(),
-                future_queue: set.future_queue.clone(),
-                session_control: session,
-            },
-            Some(domain.clone()),
-            Some(ComputationResource::participating(
-                original.checkpoint_store().expect("checkpoint").clone(),
-                &domain,
-            )),
-            Some(ComputationResource::participating(
-                original.outbox_writer().expect("outbox").clone(),
-                &domain,
-            )),
-            Some(ComputationResource::participating(
-                original.live_results_writer().expect("projection").clone(),
-                &domain,
-            )),
-        )
-        .map_err(IndexError::other)?;
-        Ok(indexes.with_cleanup(original.cleanup().expect("cleanup owner").clone()))
-    }
-    fn is_volatile(&self) -> bool {
-        false
-    }
 }
 
 #[tokio::test]

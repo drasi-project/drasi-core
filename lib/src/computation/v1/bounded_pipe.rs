@@ -97,6 +97,41 @@ pub trait PipeProvider: Send + Sync {
     fn create(&self) -> std::result::Result<ProvidedPipe, PipeError>;
 }
 
+impl PipeProvider for Arc<dyn PipeProvider> {
+    fn multicast_subscription(&self) -> Option<(super::ResourceId, String)> {
+        self.as_ref().multicast_subscription()
+    }
+    fn specification(&self) -> Option<super::DesiredPipe> {
+        self.as_ref().specification()
+    }
+    fn resource_dependencies(
+        &self,
+    ) -> std::collections::BTreeMap<super::ResourceId, super::ResourceRole> {
+        self.as_ref().resource_dependencies()
+    }
+    fn exclusive_resources(&self) -> Vec<super::ResourceId> {
+        self.as_ref().exclusive_resources()
+    }
+    fn validate_resources(
+        &self,
+        resources: &std::collections::BTreeMap<super::ResourceId, super::ResourceHandle>,
+    ) -> Result<(), PipeError> {
+        self.as_ref().validate_resources(resources)
+    }
+    fn create_with_resources(
+        &self,
+        resources: &std::collections::BTreeMap<super::ResourceId, super::ResourceHandle>,
+    ) -> Result<ProvidedPipe, PipeError> {
+        self.as_ref().create_with_resources(resources)
+    }
+    fn capabilities(&self) -> Result<PipeCapabilities, PipeError> {
+        self.as_ref().capabilities()
+    }
+    fn create(&self) -> Result<ProvidedPipe, PipeError> {
+        self.as_ref().create()
+    }
+}
+
 /// Configuration/provider for a volatile FIFO queue. Zero is rejected, not repaired.
 #[derive(Debug, Clone, Copy)]
 pub struct BoundedPipeConfig {

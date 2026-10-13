@@ -1752,7 +1752,10 @@ async fn admission_preserves_lineage_without_confusing_client_and_journal_sequen
         .into_parts();
     assert_eq!(output.system().sequence(), 1);
     assert_eq!(output.system().timestamp(), input.system().timestamp());
-    assert_eq!(output.system().source_position(), None);
+    assert_eq!(
+        output.system().source_position(),
+        Some(&Bytes::from_static(b"client-checkpoint"))
+    );
     let lineage = output.lineage().expect("client lineage");
     assert_eq!(lineage.envelope_id(), input.id());
     assert_eq!(

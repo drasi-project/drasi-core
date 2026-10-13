@@ -157,7 +157,8 @@ pub(super) fn ensure_released_dependents(
             .find(|(dependent, required)| {
                 required.contains_key(id)
                     && (graph.resource_handles.contains_key(*dependent)
-                        || graph.pending_resource_cleanup.contains_key(*dependent))
+                        || graph.pending_resource_cleanup.contains_key(*dependent)
+                        || graph.tasks.resources.contains(dependent))
             })
     {
         return Err(GraphError::ResourceCleanup {
@@ -294,6 +295,7 @@ pub(super) fn observe(
     component: ComponentId,
     generation: ComponentGeneration,
     bindings: Vec<(ResourceSpecification, ResourceHandle)>,
+    retired: &mut Vec<ResourceHandle>,
 ) -> GraphResult<()> {
     graph
         .ids
@@ -406,7 +408,9 @@ pub(super) fn observe(
             graph.snapshot.resources.remove(&id);
             graph.snapshot.resource_configurations.remove(&id);
             graph.snapshot.resource_dependencies.remove(&id);
-            graph.resource_handles.remove(&id);
+            if let Some(handle) = graph.resource_handles.remove(&id) {
+                retired.push(handle);
+            }
             released.push(id);
         }
     }

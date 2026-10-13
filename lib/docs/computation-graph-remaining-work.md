@@ -1,8 +1,16 @@
 # ComputationGraph consolidated outstanding-work inventory
 
-**Assessment date: 12 October 2026.**
+**Assessment date: 13 October 2026 (development checkpoint).**
 **Status: the single current inventory, including the pre-review backlog and the
-design/code-review findings.**
+design/code-review findings. Reprioritized for independent execution and
+capability-preserving native migration.**
+
+**Highest priority:** restore independent multicore execution and failure
+isolation, remove unnecessary coupling between unrelated components, and close
+native replacement gaps before retiring functionality. Centralize graph
+authority, not all component execution. See the
+[recommended sequence](#recommended-sequence) and
+[capability-preservation gaps](#capability-preservation-gaps-and-owners).
 
 ComputationGraph is implemented and is the only execution runtime on these
 branches. Remaining work concerns correctness, failure containment, operation
@@ -15,19 +23,27 @@ source-time merger work, and the error-reporting/observability plan. Overlapping
 findings are grouped into **CW** work packages. The original identifiers remain
 in the [tracking crosswalk](#tracking-crosswalk); they are not additional tasks.
 Completed work is recorded separately, not left in the open list.
-The 55 stable entries include investigations, qualification, optional decisions
-and explicitly retired scopes; they are not 55 active tasks or confirmed defects.
+The 56 entries include investigations, qualification, optional decisions and
+explicitly retired scopes; they are not 56 active tasks or confirmed defects.
+CW-01 through CW-55 retain their identifiers; CW-56 explicitly tracks isolated
+DrasiLib instance hosting and native inter-instance links.
 
 The [maintainer's guide](computation-graph-maintainers-guide.md) explains the
 implementation. The [older backlog](computation-graph-backlog.md) and
 [reliability plan](computation-graph-reliability-plan.md) retain design and
 historical evidence, but are not separate active work queues.
 
+The [execution and isolation implementation plan](computation-graph-execution-isolation-plan.md)
+defines the recommended combined scope, contracts, phase dependencies and
+acceptance gates. Implementation is authorized and in progress; the plan is not
+evidence of completed implementation or a second status inventory.
+
 ## Contents
 
 - [Scope and evidence](#scope-and-evidence)
-- [Completed work and qualification snapshot](#already-complete-do-not-reopen-as-missing-features)
+- [Capability-preservation gaps and owners](#capability-preservation-gaps-and-owners)
 - [Recommended sequence](#recommended-sequence)
+- [Completed work and qualification snapshot](#already-complete-do-not-reopen-as-missing-features)
 - [ComputationGraph runtime integrity](#computationgraph-runtime-integrity)
 - [Shared input, evaluator and plugin correctness](#shared-input-evaluator-and-plugin-correctness)
 - [Persistence, wire formats and delivery integrity](#persistence-wire-formats-and-delivery-integrity)
@@ -45,15 +61,20 @@ The assessment uses the existing feature branches after merging `main`:
 
 | Repository | Implementation baseline |
 |---|---|
-| drasi-core | [`493358f7`](https://github.com/drasi-project/drasi-core/commit/493358f7e11b596f255f921ce5aae8223854b34f) |
+| drasi-core | [`4587bd5e`](https://github.com/drasi-project/drasi-core/commit/4587bd5e88bc00e0d8ff8a772e12c535bf1dbf73) |
 | drasi-server | [`f97bb59`](https://github.com/drasi-project/drasi-server/commit/f97bb596f0d2590f63e93659d5da4bb7fdbf3ebf) |
 | learning-drasi-server | [`7277082`](https://github.com/drasi-project/learning-drasi-server/commit/72770826a214f99b65aa85d092e9b919e08254d8) |
 | test-infra | [`55ff7ee`](https://github.com/drasi-project/test-infra/commit/55ff7eeba41a4222c892c75af526a64d9c16b801) |
 
-All four use `agentofreality-parallel-computation-graph`. These commits identify
-the merged baseline; the current drasi-core checkout also includes the native
-reliability changes recorded below. This describes checkout code, not the
-contents or guarantees of a published release.
+All four use `agentofreality-parallel-computation-graph`. Core includes the
+completed returned-error, graceful-stop, mutation-integrity and topology-commit
+work. This describes checkout code, not the contents or guarantees of a
+published release.
+
+The current execution/hosting changes are summarized in the
+[plan checkpoint](computation-graph-execution-isolation-plan.md#current-checkpoint---13-october-2026).
+They are additional to the committed baselines above. Passing a scoped
+checkpoint does not close the entire execution/isolation plan.
 
 ### Which graph does an item concern?
 
@@ -91,8 +112,8 @@ component/adaptation surfaces, not another running ComponentGraph engine.
 | Retire older integration work | CW-15, CW-16 and CW-42 are retained as historical findings, not active work. The ordinary-to-native bridge portion of CW-43 is retired. |
 | Keep only native/shared portions | CW-07, CW-10, CW-14, CW-17, CW-18, CW-23, CW-32 and CW-34 must not become ordinary-adapter repair projects. Their ordinary-only examples remain provenance, not tasks. |
 | Exclude developer-assistance projects | General API-hygiene, convenience wrappers, advisory lint expansion and shared helpers whose purpose is preventing author mistakes are not deliverables. CW-35 is narrowed to actual native runtime invariants. |
-| Qualify the target, not perpetual parity | CW-36 through CW-41 and CW-46 must build evidence for native execution. Do not expand ordinary/native parity matrices or ordinary-only test infrastructure. Existing checks can remain until their code is migrated. |
-| Complete native migration | CW-43 retains native reconstruction recipes. CW-44 through CW-47 cover native plugins, full Server migration, native acceptance and native solution delivery. |
+| Qualify the target without losing capability | CW-36 through CW-41 and CW-46 must prove native execution preserves required behavior. Use the earlier implementation as reference evidence, not an excuse to expand ordinary-only test infrastructure or retain adapter fallbacks. |
+| Complete native migration | CW-43 retains native reconstruction recipes and standard result-access wiring. CW-44 through CW-47 must preserve required connector, Server and solution capabilities before their older implementations are retired. |
 | Preserve core correctness | CW-11/CW-12/CW-13 are shared evaluator work used by native queries, not older-query integration. Native lifecycle, persistence and failure containment remain priorities. |
 
 This scope decision does not itself remove code, start the full migration or
@@ -100,6 +121,40 @@ authorize data deletion. Define explicit configuration/data cutover behavior
 when implementing migration; do not silently discard state or break the current
 checkout while it still contains ordinary paths. Existing connector-compliance
 and release issue queues are not automatically added to this work.
+
+### Capability-preservation gaps and owners
+
+**User-directed priority, 12 October 2026:** independent execution, closing
+regressions and preserving functionality take precedence over optional new
+features. Native migration must not depend on the separately driven ordinary
+QueryGraphs to provide multicore execution or on older plugins to supply missing
+capabilities. Removing an old implementation is not authorization to remove its
+required behavior.
+
+The backward comparison used the ComponentGraph implementation at
+[`261b8d40`](https://github.com/drasi-project/drasi-core/commit/261b8d40d35ce203a7f4aaae0028956d76a8def4)
+and current Core at `4587bd5e`. These are code-confirmed mechanisms and explicit
+native feature gaps, not fresh performance measurements. Existing ordinary APIs
+can still supply some capabilities; that does not establish the native target.
+
+| Gap | Current boundary and required outcome | Owning work |
+|---|---|---|
+| Multicore execution | Native nodes have independently scheduled, owned tasks. The selected exact one/two/four-worker reference met the approved scaling targets over three repetitions; broader resource/production qualification remains separate. More workers alone are not scaling evidence. | CW-50; ownership CW-17, evidence CW-40 |
+| Panic and worker-failure isolation | Contain unwinding failures within each instance. Isolate native process faults through separate complete DrasiLib instances connected by native sources/sinks; retain truthful parent/child diagnostics. | CW-03, CW-10, CW-22, CW-41, CW-56 |
+| Independent lifecycle/control progress | Disjoint groups and awaited reconciliation now service unrelated commands under component/resource reservations. Broader accepted-management and combined fault qualification remain open; serialize actual conflicts, not every component's lifecycle. | CW-07, CW-06, CW-50 |
+| Selective recovery of stuck work | Explicit scoped force now requires the complete registered actual resource domain, retains joins, separates interruption from cleanup and quarantines damaged generations. Wider opaque/provider/process qualification remains open; no rollback or unreported-sharing guarantee is inferred. | Remaining CW-05, CW-03, CW-08 |
+| Cleanup fairness and deadlines | Independent component cleanup has its own opportunity and retained outcomes. Wider phase/platform deadline qualification remains required; no deadline preempts non-yielding native code. | CW-06, CW-08 |
+| Graph-size publication cost | A local lifecycle update rebuilds whole-registry/configuration mappings. Keep coherent snapshots with incremental/shared publication; quantify and remove unacceptable graph-size amplification. This is not a claim that every data event rebuilds the graph. | CW-31, CW-40 |
+| Native connector feature completeness | Native HTTP/gRPC/SSE replacements do not yet preserve all applicable templates, batching and snapshot/recovery behavior. Required existing deployment features must work natively, not merely be rejected as unsupported. | CW-44, CW-45, CW-46, CW-47 |
+| Standard query-result access | A native query needs an actual catalogue and connected outlet to expose live subscriptions. Standard native assembly/reconstruction must provide snapshot/outbox/live access where required, without a second evaluator or shadow registry. | CW-10, CW-43, CW-45, CW-46 |
+
+These rows refine the existing CW packages; they are not eight additional
+untracked projects. The current safe graceful default, retained-node errors,
+atomic processing and coherent graph authority must survive their resolution.
+Per-component mutation, actual shared transactions and a short topology commit
+still require serialization. That does not justify graph-wide execution or
+management bottlenecks. Tokio abort cannot forcibly preempt non-yielding code or
+undo external effects; isolation guarantees must state that boundary explicitly.
 
 ### Required plugin-failure contract
 
@@ -121,14 +176,20 @@ cleanup alone is not repair and only explicit removal deletes the node.
 Invalid requests rejected before acceptance are distinct from accepted plugin
 declarations whose construction or execution fails.
 
-CW-03/CW-04/CW-10 and the native migration in CW-44/CW-45 must implement this
+CW-03/CW-04/CW-10, CW-56 and the native migration in CW-44/CW-45 must implement this
 contract; CW-41 qualifies the native plugin boundary. Do not implement an older
 factory API or ordinary SDK bridge to achieve it.
 Reporting graph shutdown accurately is not enough.
 In-process catch boundaries can contain unwinding panics, not native aborts or
-memory faults. Meeting the full native-crash guarantee requires an isolation
-architecture that keeps the node and graph owner outside the failed worker;
-that mechanism is not selected or implemented here.
+memory faults. The selected isolation direction is a separate complete DrasiLib
+instance, not a remote component wrapper. Its process and local graph can
+terminate on a native crash; the parent graph and healthy sibling instances must
+survive. Preserve the child definition and bounded last-known observations outside
+that process, marking them failed/unavailable rather than pretending its runtime
+objects are still accessible. CW-56's selected Unix host/bridge boundary is
+implemented and qualified with real process faults and macOS/Linux-VM receipt
+faults. Its platform/resource limits and broader production qualification remain
+explicit.
 
 ### Status and priority
 
@@ -145,8 +206,9 @@ that mechanism is not selected or implemented here.
 - **Retired:** excluded by the native-only scope. This means not pursued, not
   fixed; IDs and evidence are retained for traceability.
 
-**P1** means address before relying on the affected correctness or recovery
-guarantee. **P2** is an important follow-on improvement. **P3** is use-case-driven.
+**P1** means address before relying on the affected correctness, recovery,
+vertical-scaling or capability-preserving native-migration guarantee.
+**P2** is an important follow-on improvement. **P3** is use-case-driven.
 These are priorities, not delivery estimates. A work package can contain a
 confirmed gap and a separately identified investigation; they must not be closed
 by the same assumption.
@@ -155,6 +217,41 @@ Current status was reconciled against implementation changes after the review
 and the post-merge evidence. Speculative review findings remain investigations.
 Historical line-coverage percentages and issue reproductions are not presented
 as newly measured results.
+
+<a id="recommended-order-and-completion-rules"></a>
+
+## Recommended sequence
+
+**This is the execution order; CW numbers remain stable identifiers, not ranks.**
+CW-50 is now required P1 work, not an optional measurement-led feature. The
+earlier CW-03 deferral applied to the completed hardening tranche; in-process
+panic containment is now among the first planning priorities alongside execution
+isolation. This reprioritization starts no implementation. CW-56 records the
+chosen composition direction: identical DrasiLib instances with native data
+links and external hosting/supervision. Its detailed contracts still require
+approval under the implementation plan. Tokio tasks alone do not provide native
+crash isolation or a security sandbox.
+
+| Order | Work | Required outcome |
+|---|---|---|
+| 1 - Execution and supervision | **CW-50, CW-03, CW-17**, with essential CW-10/CW-22 diagnostics | One graph authority with independently scheduled native components, owned/joined workers, contained unwinding panics and truthful failed-node/driver state. |
+| 2 - Independent operation and selective repair | **CW-07, remaining CW-05, CW-06, CW-08**, with CW-31 publication scaling | Unrelated lifecycle/control progresses; stuck work can be escalated at the smallest safe domain; cleanup has fair budgets; local changes do not cause unacceptable graph-wide overhead. |
+| 3 - Isolated instances and reliable links | **CW-56**, with selected CW-18/CW-19/CW-20/CW-21/CW-23/CW-25/CW-29/CW-43 | The same DrasiLib runs locally, in child/grandchild hosts and across network links; bounded native source/sink contracts preserve identity, admission/recovery and truthful lifecycle. |
+| 4 - Preserve functionality before cutover | **CW-43, CW-44, CW-45, CW-46**, and existing-solution acceptance in CW-47 | Required result access, connector features, saved definitions and Server/solution workflows work natively. No silent feature loss or ordinary-adapter fallback. |
+| With every required slice | **CW-36, CW-39, CW-40, CW-41**, and relevant CW-37/CW-46 cases | Prove CPU scaling, control responsiveness, fault containment, durable recovery and exact feature outcomes; compatibility with a multithreaded runtime is not proof of parallel execution. |
+| Alongside these blockers | Existing P1 shared correctness/recovery work, including CW-12/CW-13/CW-14/CW-18 through CW-21 and native CW-23 | Preserve evaluation, ordering, storage, replay and observation guarantees; the execution change does not excuse existing correctness gaps. |
+| After required gaps are closed | Remaining P2/P3 optimization/observability work, optional CW-48/CW-49/CW-51 through CW-55 and additional packaging | Add separately selected capabilities, rather than using new features to compensate for lost baseline behavior. |
+
+This is not a strict dependency chain or a request to launch parallel sessions.
+Execution, supervision, cancellation and lifecycle ownership need one coordinated
+design; their evidence must accompany implementation rather than wait until all
+features are finished. Native feature mapping can proceed independently, but
+cutover must wait for the applicable execution and capability gates. Version/
+identity decisions precede rollout of changes to stored state.
+
+**Completed foundations to retain:** CW-01/CW-02/CW-04/CW-11 and CW-05's graceful
+drain. Their completed evidence does not close multicore execution, panic
+containment, selective forced cancellation or full native feature preservation.
 
 ## Already complete: do not reopen as missing features
 
@@ -168,7 +265,7 @@ as newly measured results.
 | GM-01: committed reconciliation reported as rejected | Fixed. Post-commit failures remain in the committed report. CW-01/CW-02 additionally cover precommit integrity and complete resumption attempts. External effects are not an all-or-nothing deployment transaction. |
 | CW-01/CW-02: topology commit and producer resumption | Completed. Fallible commit prerequisites precede mutation; resumption attempts every eligible member and preserves all scoped errors. |
 | CW-04: returned native failures and control transport | Completed. Terminal errors retain nodes and the controller; structured classification, bounded retry behavior and coalesced graph status are consistent. This is not CW-03 panic containment. |
-| CW-05: graceful processing boundaries | Completed for native execution. Admitted input, continuations and graph-owned admission writes drain before stop; deadline failure retains ownership and force cancellation remains explicit. |
+| CW-05: graceful processing boundaries | The graceful-drain slice is completed. Deadline failure retains ownership; remaining P1 work adds component/recovery-domain force escalation instead of requiring whole-graph cancellation. |
 | CW-11: source mutation integrity | Completed. Source-time stale changes are reported/skipped, duplicate inserts upsert, live cross-kind collisions fail, and transactional deletion frontiers survive reconstruction. Persisted native query semantics have an explicit incompatible-version boundary. |
 | PX-01: undecodable live plugin change is skipped | Fixed. The live change stream fails with a typed error. Initial-snapshot decode loss and missing metrics remain CW-15/CW-26. |
 | Failed-component stop and concurrent handle requests | Merge adaptations support explicit stop after recoverable lifecycle failures. Single-component starts/stops queue; a later stop supersedes a queued start. This is only part of CW-07's operation-integrity requirement. |
@@ -218,33 +315,66 @@ These counts describe the existing mixed-surface ledger. Native migration must
 bind the required contracts to native paths before claiming native-only
 qualification; historical ordinary coverage is not a substitute.
 
-<a id="recommended-order-and-completion-rules"></a>
-
-## Recommended sequence
-
-| Order | Work | Why first |
-|---|---|---|
-| Deferred P1 | CW-03 | Panic containment/isolation is explicitly deferred by the user. Returned-error hardening does not establish the native-crash guarantee. |
-| Completed selected slice | CW-01/CW-04/CW-05/CW-11, with coupled CW-02 | Atomic topology commit, retained returned failures, safe graceful boundaries and source mutation integrity are implemented with fault/recovery evidence. |
-| Next native runtime work | Native portions of CW-06/CW-07/CW-08/CW-10/CW-17 | Independent deadlines, owned multi-step updates, cleanup, truthful lifecycle surfaces and worker ownership remain. |
-| Alongside fixes | CW-12/CW-13/CW-18 through CW-21; native CW-36 through CW-41 | Correct shared semantics and qualify native failure/recovery guarantees, not older integration. |
-| Migration | Native CW-43 through CW-47 | Complete native recipes, required plugins and full Drasi Server/solution migration. Do not implement the retired ordinary bridge or factory API. |
-| After measurement / separate feature selection | Native/shared CW-22 through CW-35, CW-40 and CW-48 through CW-55 | Add required operability and measured improvements without old-ABI expansion or developer-assistance projects. Core fault diagnostics need not wait for a full exporter project. |
-
-This is not a strict dependency chain or a request to launch parallel sessions.
-In particular, version/identity decisions precede rollout of changes to stored
-query or aggregate state.
-
-The selected five were **CW-03, CW-04, CW-05, CW-11 and CW-01**.
-The user deferred CW-03; the other four are implemented. CW-02 was addressed
-alongside safe stop/reconciliation because resumption must attempt every paused
-owner. Native reconstruction recipes remain separate migration work, not an
-ordinary-to-native bridge.
-
 <a id="correctness-address-first"></a>
 <a id="close-the-remaining-runtime-hardening-gaps"></a>
 
 ## ComputationGraph runtime integrity
+
+### CW-50: Independent native-node CPU execution
+
+**CG | P1 | Selected execution/reference-scale acceptance qualified; broader migration/resource work remains open.** Native processing
+loops now execute in graph-owned Tokio tasks rather than inside the controller
+task. Supported lifecycle/control and resource operations retain actual task
+ownership through cancelled waiters. A synchronous CPU probe demonstrates
+independent native execution; it is not a throughput-scaling benchmark.
+Ordinary QueryGraphs are no longer the only independently scheduled query path.
+Owned preflight, pipe creation, reconfiguration, metadata retirement and
+reconciliation command servicing are implemented. The final-source approved
+exact-result reference achieved 1.926x two-worker and 3.478x four-worker median
+throughput over three repetitions, with measured CPU overlap and current-thread
+correctness. The
+[execution plan](computation-graph-execution-isolation-plan.md#current-checkpoint---13-october-2026)
+records the final-source qualification and its limits. Broader resource,
+graph-size and production qualification is not closed by these local measurements.
+
+**Required direction:** separate execution from graph authority. The controller
+continues to own topology, lifecycle, inspection and recovery policy; independently
+scheduled, supervised component tasks or an equivalent owned execution mechanism
+run unrelated work. Preserve sequential mutable operations per component and
+serialization required by actual transaction domains. Do not create another
+graph registry, detach workers, or require a separate DrasiLib per heavy component.
+Grouping tiny operations may be a measured optimization, not the only available
+execution model.
+
+Optional CW-56 child instances are for isolation/composition, not a workaround
+for missing multicore execution inside one instance. Each child runs this same
+task-based DrasiLib with its own authoritative graph; the core has no special
+child or remote-component execution mode.
+
+**Done when:**
+
+- Independent heavy native queries/transformers in one instance demonstrate
+  concurrent CPU execution and throughput scaling across one, two and four
+  workers/available cores, using the same workload and exact output oracle.
+  Record saturation and shared-storage bottlenecks; thread count or runtime
+  flavor alone does not satisfy this requirement.
+- Preserve current-thread operation, per-stream order, bounded backpressure,
+  admitted-work drain, transaction ownership, replay identity, generation fencing
+  and coherent topology changes. Do not imply internal parallelism for a single
+  stateful evaluator merely by giving it a task.
+- Heavy work cannot unnecessarily block unrelated management. Use cooperative
+  budgets or bounded CPU execution as appropriate; never promise preemption of
+  arbitrary non-yielding plugin code. Set measurable throughput/control-latency
+  acceptance budgets before qualification, without claiming universal linear
+  speedup.
+- Qualify panic, cancellation, restart/replacement and shutdown under load with
+  CW-03/CW-05/CW-06/CW-07/CW-08/CW-17. Join actual work before releasing or
+  reusing its resources; separately spawned tasks alone do not prove supervision.
+
+**Start here:** [controller][controller], [processing][graph],
+[instance driver][instance], [owned workers][workers].
+Tracking: CG-13; CW-40 provides scaling evidence. This package is intentionally
+listed first rather than left among optional extensions.
 
 ### CW-01: Make desired-topology commit atomic
 
@@ -282,18 +412,45 @@ Tracking: GM-10 (Phase 0 resumption follow-up); remaining edge of GM-01.
 
 ### CW-03: Contain component panics and publish driver failure
 
-**CG | P1 | Deferred by the user.** Component operations are polled within the controller.
-A panic can end the driver without executing its normal failure publication.
-Invariant-dependent indexing and `expect` calls also require classification,
-rather than assuming every failure deserves a process- or graph-wide response.
+**CG | P1 | Partial; protected task boundaries implemented.** Native operation
+and supported resource tasks retain typed unwind diagnostics and quarantine
+damaged generations. The SDK now retains per-instance panic state across normal
+operations, control, getters and operation destruction, waking pending calls.
+Start completion racing a control panic remains local. The earlier whole-driver
+panic probe describes the prior implementation, not the current task boundary.
+Factory/provider preflight, pipe construction, in-place reconfiguration and
+retired instance/resource metadata destruction now have owned task coverage on
+both runtime flavors. Failed retirement fences the affected replacement;
+stale metadata completions cannot quarantine a newer generation.
 
-**Done when:** plugin/component panics become typed failures on retained logical
-nodes. The graph controller, inspection and repair remain usable; unrelated
-branches continue. Verify repair under the same logical node ID and rejection
-of stale-generation completions. Fence affected shared recovery domains without
-removing nodes or terminating the controller. A graph shutdown with a better
-error message does not satisfy this contract. Separately protect and report
-actual host/controller defects on every driver exit path.
+Native SDK `PANICKED` results now carry the generic `ComponentPanic` marker into
+graph supervision, including transactional/consumer/bootstrap paths. General
+component operation/getter quarantine prevents same-instance restart after
+cleanup. This does not establish complete coverage of every factory/provider/
+schema callback, custom destruction path or aborting native fault.
+
+**Done when:** unwinding extension failures become typed failures on retained
+logical nodes, with component/generation/operation identity and available panic
+details. Quarantine damaged generations: successful stop must not automatically
+make a panicked object reusable. Permit safe reconstruction under the same
+logical ID only after cleanup, retaining durable progress/output and rejecting
+stale completions. Fence affected shared recovery domains without unnecessarily
+stopping unrelated branches or the management command loop.
+
+Protect failure publication, cancellation and cleanup paths too, and separately
+publish actual host/controller defects on every driver exit. A whole-graph catch
+that merely reports shutdown more accurately is not component containment.
+Exercise startup, processing, control, pre/postcommit and cleanup panics through
+direct native components and actual SDK binaries; verify continuing sibling
+traffic, inspectability, guarded repair and exact storage/effect outcomes.
+
+**Process-isolation boundary:** `panic=abort`, unsafe native memory faults and
+hard termination of noncooperative code require process or suitable sandbox
+isolation to preserve the host. CW-56 selects complete child DrasiLib instances
+and native source/sink links as the implementation direction, not per-component
+method RPC or remote transaction/resource proxies. It is unimplemented.
+Qualify the chosen process fault boundary and platform resource/containment
+policies separately; do not claim Tokio tasks/catch boundaries satisfy them.
 
 **Start here:** [instance driver][instance], [controller][controller],
 [query execution][query]. Tracking: GC-03, GC-06, GC-15, GM-11, QX-11,
@@ -332,9 +489,9 @@ the retry/classification portion of DP-08.
 
 ### CW-05: Pause and stop at safe processing boundaries
 
-**Native CG | P1 | Completed for graceful processing boundaries.** Component,
-selection and instance stops quiesce/drain before aborting startup or invoking
-stop hooks. Admitted transformer/sink work, continuations, forwarding and
+**Native CG | P1 | Partial: graceful boundaries and registered-domain escalation
+implemented; broader qualification open.** Component, selection and instance stops quiesce/drain before aborting
+startup or invoking stop hooks. Admitted transformer/sink work, continuations, forwarding and
 acknowledgement finish together. Graph-owned source admission cancels only its
 idle request wait, not an active journal/producer-metadata transaction.
 
@@ -344,6 +501,29 @@ cannot disappear from their start report during drain. `GraphControl::cancel()`
 and dropping a run remain explicit force cancellation, which can fence storage
 and require reconstruction. No timeout can preempt noncooperative synchronous
 plugin code.
+
+`force_cancel_components` now rejects incomplete actual registered domains and
+unfinished resource/metadata ownership before cancellation. It joins interrupted
+processing/control and subsequent cleanup, reports them separately, preserves
+quarantine and permits changed-specification reconstruction. Held data handling
+and in-place update cases prove that forced interruption is not a successful
+graceful drain. Opaque/unreported sharing and the wider provider/reset matrix
+remain qualification limits, not inferred guarantees.
+
+**Done when:** explicit operator escalation cancels the selected component or
+smallest affected recovery domain, not unrelated components. Preserve a failed/
+cleanup-required node, close admission, retain and join actual work, report
+rejected/committed/uncertain effects and require reconstruction where necessary.
+Do not clear checkpoints, acknowledge unhandled input or reuse a damaged owner.
+Prove a permanently pending handler can be isolated while an independent branch
+and management keep working, then safely repaired. Retain the successful graceful
+drain and timeout/retry cases; do not restore silent abort-on-timeout.
+
+Tokio cancellation is cooperative. Started blocking I/O or non-yielding code may
+remain uninterruptible in process; bounded hard termination belongs to CW-56's
+process-isolation boundary, not a false stop-success guarantee. Terminating a
+child process stops the whole child instance, not only one inner component.
+An unreachable remote instance is not a confirmed terminated process.
 
 **Evidence:** blocked bounded-input handlers on both runtime flavors, stop/restart
 with exact outputs, deterministic timeout/retry, real RocksDB continuation
@@ -359,17 +539,26 @@ PX-04 (setup race requires focused reproduction).
 
 ### CW-06: Give lifecycle phases independent, enforceable deadlines
 
-**CG | P1 | Open; CPU-bound deadline behavior needs qualification.**
-Construction, settling, startup and cleanup do not have consistently separate
-budgets. Slow construction/start can stall control work; one slow cleanup must
-not consume everyone else's opportunity to stop. Tokio timeout alone cannot
-preempt evaluation that never yields.
+**CG | P1 | Partial; broader phase budgets remain open.** Component cleanup now
+uses independently owned tasks and gives independent owners execution
+opportunity. Cancelled resource-cleanup waits retain and later join the original
+operation. Tests cover traversal order, retained ownership and slow independent
+cleanup. Construction, settling, startup and all remaining callbacks still lack
+the complete separately configurable phase/deadline contract.
 
-**Done when:** expose and document appropriate phase/per-component budgets,
-retain cleanup ownership on timeout, and attempt independent cleanup work.
-Characterize CPU-heavy source transactions and either add cooperative deadline
-checks or state the precise supported limit. Test cancellation during creation
-so `Creating` is not left as a misleading final status.
+**Done when:** expose appropriate phase/per-owner budgets with an explicit
+overall shutdown deadline. Clean up independent owners concurrently or otherwise
+give them meaningful execution opportunity, while enforcing dependency order.
+One slow hook must not prevent unrelated owners from starting cleanup; retain
+all outcomes and remaining ownership when the overall deadline is reached.
+Coordinate this with CW-08 rather than creating another cleanup executor.
+
+Keep unrelated management responsive during lifecycle waits through CW-07.
+Qualify slow/failing hooks in different traversal positions, concurrent native
+work and retry after partial cleanup. Characterize CPU-heavy source transactions
+and use cooperative work budgets or bounded CPU execution where appropriate.
+Tokio timeout alone cannot preempt evaluation that never yields. Cancelled
+creation must publish truthful state rather than leave `Creating` indefinitely.
 
 **Start here:** [graph builder/processing][graph], [controller][controller],
 [reconciliation][reconcile], [query execution][query].
@@ -382,17 +571,31 @@ operations through cancellation. Do not repair the ordinary source/query update
 saga as a separate project. RT-01's ordinary-path example below is historical;
 apply its operation-integrity requirement to native paths actually retained.
 
-**CG native operations | P1 | Native qualification / hardening.** Single-component
-handle requests already queue. Native live changes and accepted management
-operations must retain ownership through cancellation, preserve newer user
-intent and report applied versus unfinished work. Do not infer that every native
-path has the ordinary update saga's defect.
+**CG native operations | P1 | Partial; bulk reconciliation remains open.**
+Disjoint start/stop and graceful-drain control now progress while another member
+is pending, with overlapping requests retaining ordering/supersession. Drain
+traversal follows actual dependency order rather than registration indices.
+In-place reconfiguration and awaited reconciliation phases now use retained
+work and the shared bounded dispatcher. Exact resource aliases are reserved,
+and latest-only generation-fenced metadata waits until reconciliation ends.
+Both-runtime held-update/caller-cancellation cases prove disjoint lifecycle
+progress. Wider combined accepted-management qualification remains open; a
+passing single-component test does not close the whole package.
 
-**Done when:** accepted native updates serialize conflicting intent and complete,
-compensate where supported, or report precise degraded state. Resume only what
-the operation still owns. Qualify native cancellation, failed replacement,
-stop/update/remove races and addition during startup; fix counterexamples without
-reworking retiring ordinary APIs.
+**Done when:** track in-flight work and conflicts by affected components,
+bindings and recovery domains. Serialize overlapping intent and the actual
+topology commit, not all lifecycle execution. The controller must continue
+servicing unrelated commands while another owner awaits startup, drain, storage
+or cleanup. Cached inspection and progress of existing data futures alone are
+not proof of a responsive management command loop.
+
+Retain accepted operations through caller cancellation; complete, compensate
+where supported, or report applied versus unfinished work. Resume only what the
+operation still owns. Gate a permanently pending/slow operation on A and prove
+start/stop/preview on independent B completes within its own acceptance budget.
+Also test conflicting stop/update/remove requests, failed replacement and
+addition during startup. A native actor/executor design must preserve these
+properties; merely moving data processing onto Tokio tasks is insufficient.
 
 **Start here:** [runtime update operations][runtime],
 [instance lifecycle][lib-core]. Tracking: RT-01, RT-02; LI-05 is an
@@ -400,17 +603,30 @@ investigation, not an established startup-loss incident.
 
 ### CW-08: Make cleanup, management close and rejected resources reliable
 
-**CG management/runtime | P1 | Open.** Several cleanup paths still stop at an
+**CG management/runtime | P1 | Partial.** Several cleanup paths still stop at an
 early error or lose another failure. Cancelled management close can leave a
 handle that cannot be cleanly retried; failed open/drop cleanup also needs owned,
 observable termination. Raw rejected reconciliation must not silently drop
 graph-owned resources that require asynchronous shutdown.
+
+The selected execution slice owns rejected-resource disposal and retirement,
+retains secondary failures and bounded settlement, and protects scoped force
+with an idle never-started companion on both runtime flavors. Force joins only
+reported interrupted work; untouched peer observers remain graph-owned. This
+does not close the wider management open/close cases below.
 
 **Done when:** cleanup attempts all independent owners, preserves all causes,
 and remains retryable after cancellation. Rejection returns supplied resources
 or awaits their cleanup. Management open failure cannot race store release;
 background cleanup has bounded policy/status instead of an invisible retry loop.
 Root and scoped driver shutdown must retain failures across retries.
+
+Apply CW-06's fair per-owner/overall budgets and dependency-aware parallel
+cleanup, including after CW-05's selective cancellation. A slow or failed owner
+must not withhold cleanup opportunity from unrelated owners. Do not release a
+prerequisite before all of its users have actually stopped, or hide uncertainty
+behind successful task abortion. Verify resource release and retained ownership,
+not only invocation of every stop hook.
 
 **Start here:** [management runtime][management-runtime],
 [instance driver][instance], [runtime][runtime], [reconciliation][reconcile].
@@ -451,6 +667,15 @@ same authoritative state. Closed/replaced owners cannot expose another
 generation's data. Native start/shutdown reports distinguish partial success,
 and not-found/duplicate operations preserve their public category. A retained
 failed node remains inspectable without invoking the failed plugin.
+
+Preserve the application-facing snapshot/outbox/live-subscription capabilities
+of supported query workflows. Native reads already exist, but live access
+requires the actual catalogue and connected query-results outlet. CW-43 must
+wire and reconstruct that native surface in standard assemblies; requiring an
+application to discover missing wiring after successful query creation is not
+equivalent functionality. Raw processing-only graphs may explicitly omit it.
+Test subscriptions after creation, restart and replacement, including consistent
+snapshot/head handoff, gaps and stale-reader rejection, without a second evaluator.
 
 **Start here:** [ordinary query adapter][runtime-query],
 [inspection][runtime-inspection], [runtime][runtime], [public lifecycle][lib-core].
@@ -597,6 +822,12 @@ and concurrent stop. Do not assume arbitrary plugin-spawned work is controllable
 because an optional helper exists; require a proven lifetime boundary or the
 isolation architecture needed by the containment contract.
 
+This is an execution prerequisite for CW-50, not optional plugin-author guidance.
+The graph must own component execution before scheduling it, observe abnormal
+completion, retain joins through cancelled stop waits and fence late completions
+by generation. Explicitly cover independently scheduled data/control work and
+any bounded CPU workers introduced for heavy native components.
+
 **Start here:** [owned workers][workers], [SourceBase][source-base],
 [ReactionBase][reaction-base], [introspection source][graph-source].
 Tracking: LI-06.
@@ -650,6 +881,12 @@ Tracking: PX-05, PX-06.
 generation and writes an in-progress reset marker. The review's assertion that
 no marker exists is obsolete. Some provider clearing operations remain separate
 commits, so the larger interrupted-wipe contract still needs explicit evidence.
+
+The selected normal-DrasiLib RocksDB child fixture now covers six real SIGKILL
+boundaries around reset/deprovision intent and partial wipes on macOS and Linux.
+It checks the live provider lock, actual incomplete markers/rows after reopen,
+strict refusal and explicit retry with exact generation/high-water/output.
+This qualifies those boundaries, not every provider or optional checkpoint API.
 
 **Done when:** fail or kill processing before/after each clear and generation/
 marker write, reopen each supported provider, and prove that partial state is
@@ -927,14 +1164,25 @@ Tracking: PC-03, DP-03, DP-04, DP-07's sequence cost, QX-10.
 
 ### CW-31: Publish changes and wake work proportionally
 
-**CG | P2 | Open improvement.** Per-item whole-graph cloning/publication and
-event translation grow with graph size. Startup repeatedly traverses dependencies.
-Idle WAL/future queries poll; broad change notifications wake unrelated waiters.
+**CG | P1 for graph-size scaling; P2 for remaining idle overhead | Open.**
+A local lifecycle/status publication rebuilds registry configuration/query-API/
+resource mappings across the graph. Earlier ComponentGraph status changes
+updated a local node and emitted its event. Repeated per-component startup
+publications can amplify whole-graph work. This code-level complexity difference
+is confirmed; its measured latency/throughput impact is not yet established.
+It is not a claim that every data event rebuilds the graph.
 
-**Done when:** batch coherent publications, use suitable structural sharing and
-specific notifications, and wait on actual append/due-work changes. Preserve
-observable progress, desired/observed revision coherence, fairness and timely
-shutdown. Benchmark graph-size scaling and idle overhead, not only throughput.
+**Done when:** incremental publication, structural sharing or appropriate
+batching preserves one coherent desired/observed view without unacceptable work
+proportional to the entire graph for each local change. Measure local update and
+whole-startup cost across increasing node counts, configuration sizes and
+observer loads, with latency/allocation budgets agreed before qualification.
+Independent execution must not simply move its bottleneck into the controller's
+publication path. Preserve failure visibility and snapshot/feed consistency.
+
+Startup dependency traversal, idle WAL/future polling and broad wakeups remain
+related improvements: use specific notifications and actual append/due-work
+changes while preserving fairness and timely shutdown.
 
 **Start here:** [controller][controller], [registry][registry],
 [runtime events][runtime-events], [query scheduling][query-scheduling].
@@ -1023,7 +1271,7 @@ PX-14's API surface, RT-10, RT-12, RT-15, LI-13.
 
 ### CW-36: Make tests prove behavior, not just execute named cases
 
-**CG and Shared | P1 | Qualification improvement.** Protected names/outcomes
+**CG and Shared | P1 | Native replacement acceptance gate.** Protected names/outcomes
 are useful but cannot detect weakened assertions. High line coverage also did
 not prevent the reviewed failure scenarios.
 
@@ -1032,6 +1280,16 @@ oracles. Add mutation checks, generative retention/delivery/merger models, codec
 fuzzing and narrowly scoped concurrency models. Match exact error variants;
 replace weak "not yet" assertions with gated boundaries. Evidence markers can
 aid reporting but are not themselves proof that an assertion is meaningful.
+
+Maintain a capability-preservation matrix with the earlier observable contract,
+native implementation/recipe, exact acceptance case, evidence and remaining gap.
+Every row in the priority gap register needs a disposition. Test CPU concurrency
+and scaling rather than just running on a multithreaded Tokio runtime; test an
+unrelated command's completion rather than only cached inspection; verify
+cleanup completion rather than stop-hook invocation. Existing deployment
+features need native result/effect assertions, not a loading/configuration smoke
+test. An intentional behavioral change requires an explicit decision and
+documented cutover, not a weakened expected result.
 
 **Start here:** [qualification tooling][parity-tooling],
 [protected contracts][contracts]. Tracking: TS-01, TS-03, TS-04, TS-10;
@@ -1072,10 +1330,13 @@ Candidate work: [PR #246][p246], [PR #887][p887].
 contracts. Do not add protected obligations solely for retiring ordinary
 reaction-recovery or compatibility binaries.
 
-**CG native | P1 | Partial / qualification.** Merger tests already execute in the
-normal matrix, but their named contracts are not protected in the contract
-inventory. Protect corresponding retained native middleware, graph and consumer
-contracts, not retiring ordinary recovery binaries.
+**CG native | P1 | Selected contracts/process boundaries qualified; broader fault matrix remains open.**
+The contract inventory now protects named native merger, middleware, graph and
+consumer cases. A normal DrasiLib child is externally killed before/after
+merger admission, emission, journal handoff and confirmation. Actual RocksDB
+reopen, live lock ownership, exact buffered/output recovery and retained
+receipts passed on macOS and Linux. This is the selected eight-boundary fixture,
+not all held-late-event, provider or production-duration combinations.
 
 **Done when:** bind meaningful cases into the protected inventory. Kill a
 separate merger process around input admission, output save and confirmation;
@@ -1101,7 +1362,7 @@ foundations. Extend combinations, rather than implement these mechanisms again.
 |---|---|
 | Initial/live query recovery | Independently delayed/failed snapshots, concurrent live changes, missing source progress/history and failed state/output writes through supported entrypoints. T01, T04, S01, S04. |
 | Timers and transactions | Whole-query clock jumps with persistence/restart, repeated large bursts plus traffic, and remaining provider/transaction combinations. T06, T07. |
-| Live topology | Complete invalid-definition matrix, prolonged unavailable dependencies and combined cancellation/replacement/fan-out schedules. G01, G03. |
+| Live topology and independent operation | Complete invalid-definition matrix, unrelated lifecycle progress during blocked work, selective forced cancellation/reconstruction, fair cleanup budgets and combined cancellation/replacement/fan-out schedules. G01, G03; CW-05/CW-06/CW-07/CW-08/CW-50. |
 | Retained/multicast history | More corrupted record/history combinations and prolonged disconnected consumers, preserving exact required obligations. Q01, Q07, Q08. |
 | Consumer effects | Lost replies combined with cancellation and failed progress writes; fresh-trigger and snapshot-maintaining consumers together. R01, R03. |
 | Providers and connectors | Exact PostgreSQL/bootstrap/receiver crash boundaries and additional supported products/offset failures. S01-S05, R04; framework evidence is not general connector certification. |
@@ -1116,10 +1377,12 @@ not evidence that its historical failures remain current.
 ### CW-40: Measure sustained behavior and current performance
 
 **Native-only scope:** measure native execution and the fully migrated Server.
-Do not optimize or requalify ordinary execution or the older HTTP/adaptive
-comparison solely to improve retiring components.
+Historical results and supported old workflows are capability references, not
+an instruction to optimize retiring adapters or rebuild permanent ordinary/
+native parity infrastructure.
 
-**CG and Integration harnesses | P2 | Qualification.** Existing bounded soaks,
+**CG and Integration harnesses | P1 for independent-execution and migration
+acceptance; P2 for broader sustained qualification.** Existing bounded soaks,
 fast-path comparisons and workload matrices are useful foundations. They do not
 prove many-day persistent operation, native allocation/RSS bounds or production
 latency objectives, and their older percentages are not today's measurements.
@@ -1128,9 +1391,19 @@ latency objectives, and their older percentages are not today's measurements.
 throughput, tail latency, CPU, allocations, disk, tasks and file/socket ownership.
 Vary graph/query count, payload, durable buffer/wait size, fan-out and outages.
 Refresh relevant cache/provider measurements after the `main` LRU changes.
-The historical ordinary HTTP/adaptive observation is not a native defect or an
-active measurement task. Use native results to select optimization and
-CPU-isolation work.
+
+For CW-50, exercise multiple independently busy native components in one
+instance across one, two and four available workers/cores. Establish that their
+CPU work overlaps and throughput scales where there is no declared shared
+resource bottleneck; record control tail latency and bounded resource use under
+saturation. A runtime flavor, worker count or several active thread IDs is not
+proof. Include pipelined and independent branches, current-thread correctness
+and shared-domain contention as a deliberately serialized control case.
+
+Measure CW-31's per-update/startup amplification and the cost of preserving
+native batching and result-access contracts. Set workload-specific acceptance
+budgets before claiming a replacement; do not require universal linear speedup
+or make independent execution conditional on discovering a universal bottleneck.
 
 **Start here:** [workload runner][workload-runner],
 [resource soak][resource-soak], [comparison guide][comparison-guide].
@@ -1156,6 +1429,60 @@ Tracking: CG-05, CG-06, CG-07, CG-25; A01-A05.
 
 ## Server, connectors and solution delivery
 
+### CW-56: Isolated DrasiLib instance hosting and native inter-instance links
+
+**Native hosting and components | P1 | Selected Unix implementation/network checkpoint qualified; broader platform/resource work remains open.**
+Run the same DrasiLib implementation in
+parent, child and grandchild hosts. Each instance owns a normal native graph;
+special native sources/sinks carry information between instances. Hosting and
+supervision live outside the engine and may be exposed through a normal native
+service/resource factory. There is no reduced child engine or remote-component
+execution backend.
+
+Current evidence is 7 host unit and 10 local real-process cases on both macOS
+and Linux, including normal
+hierarchy, failure/repair, bounded controls, child-only plugin loading,
+bidirectional cuts and actual process reaping. A strengthened cancellation case
+also verifies release of the parent state namespace. Bridge primitives have
+their own 18-case checkpoint. A prepared mutual-TLS macOS/Linux-VM case additionally
+checks actual receipt loss/delay, version/authentication rejection, exact
+outputs, RocksDB/encrypted-redb reopen and independently owned remote-child
+control. Adjacent real query/merger child faults qualify selected storage
+boundaries. These do not qualify Windows, hard kernel resource isolation,
+physical production cross-machine partitions or the entire provider/reset matrix.
+
+**Done when:**
+
+- Owned local children have reconstructible definitions, stable instance/state
+  identity, readiness/health checks, bounded restart policy and retained process
+  ownership through termination/reaping. Qualify parent-death behavior with
+  grandchildren and publish actual OS/resource-limit support.
+- Native bridge endpoints preserve supported schema, origin/namespace identity,
+  ordering and bounded backpressure. Explicit volatile and durable profiles
+  distinguish transport acceptance, durable ingress admission and downstream
+  completion. Lost replies, conflicts, expiry and gaps do not silently reapply
+  input or erase retained obligations.
+- Control remains serviceable under data pressure. The supervisor retains
+  desired child definitions and bounded last-known observations, marking gaps,
+  stale state, process exits and library-health failures truthfully.
+- Child-only plugin code, including discovery and custom executable validation,
+  is never loaded in the parent to make a link work. Portable boundary schemas
+  are explicit; malformed/deep input cannot defeat parent isolation.
+- A multi-level hierarchy and a real network-separated composition run the same
+  DrasiLib core build. After the generic execution/lifecycle contract is frozen,
+  hierarchy depth and transport substitution require hosting/adapter/configuration
+  changes only. Distinguish owned local children from independently owned remote
+  peers; network loss does not authorize an unfenced duplicate replacement.
+- Transaction containers and actual shared storage domains stay inside one
+  instance. Do not claim cross-instance atomic processing, atomic deployment,
+  automatic state migration or arbitrary remote machine provisioning.
+
+**Delivery plan:** [independent execution and isolated instances](computation-graph-execution-isolation-plan.md).
+Use its selected slices of CW-03/CW-05/CW-06/CW-08/CW-09/CW-10/CW-17/CW-18/
+CW-19/CW-20/CW-21/CW-22/CW-23/CW-25/CW-29/CW-33/CW-43 and qualification
+CW-36 through CW-41/CW-46. Do not close entire packages based only on bridge
+or child-host scenarios. Full connector/Server migration remains CW-44/CW-45.
+
 ### CW-42: Expose ordinary factory-based creation
 
 **Retired by the native-only decision.** Do not add another ordinary
@@ -1169,7 +1496,8 @@ Tracking: CG-08.
 
 ### CW-43: Complete ordinary-to-native wiring and reconstruction recipes
 
-**Native recipes retained; ordinary-to-native bridge retired.** Do not implement
+**Native assembly and recipes | P1 | Required capability preservation;
+ordinary-to-native bridge retired.** Do not implement
 mixed ordinary/native query or plugin wiring. Native components/providers,
 including the source-time merger, still need the recipes and dependency/version
 reporting required to reconstruct complete native Server deployments.
@@ -1179,12 +1507,19 @@ resources, with replacement/restart fencing. Exports distinguish rebuildable
 native definitions from opaque application objects and reject missing recipes.
 No older-component adapter is part of this completion criterion.
 
+Standard native query assembly must include the actual catalogue, result outlet
+and declared bindings needed by supported snapshot/outbox/live-subscription
+workflows. Preserve them in export, managed restoration and replacement; provide
+the public behavior without a hidden second evaluator or mutable shadow graph.
+Explicit processing-only graphs remain possible, but omitting their result
+surface must not silently replace a previously supported workflow.
+
 **Start here:** [pipeline assembly][pipeline], [managed configuration][managed-guide],
 [Server native configuration][server-computation]. Tracking: CG-10, CG-15.
 
 ### CW-44: Select native plugin and connector breadth explicitly
 
-**Native SDK and Integration | P1 for the migration target | Required migration.**
+**Native SDK and Integration | P1 | Required before affected native cutover.**
 Admission, progress, coordinated bootstrap and consumer completion already exist.
 Migrate the required production component/provider set to native plugins.
 Complete native services, packaging and registration needed by supported Server
@@ -1192,17 +1527,29 @@ solutions, including required database/network capabilities. Built-in native
 queries already exist; migration does not require a dynamically loaded query
 engine merely to avoid ordinary queries.
 
-Native HTTP/gRPC parity still needs selected templates, batching, multi-item
-gRPC output, snapshot/recovery behavior, advertised TLS and completion-service
-exposure. General connector adoption is not implied by framework/reference
-implementations.
+**Known feature gaps:** ordinary network consumers support templates and fixed/
+adaptive batching that their native replacements do not yet fully provide.
+Native gRPC currently accepts only `batchSize=1`; native HTTP/gRPC reject
+applicable template/batching options and snapshot/progress-only recovery
+replacement messages. Native SSE has a restricted untemplated surface.
+Requiring one RPC per result or rejecting an established configuration is not
+feature parity. Map supported transport/security, snapshot/recovery and
+completion-service requirements explicitly; framework services or reference
+implementations alone do not supply connector behavior.
 
 **Done when:** publish the supported native combinations and verify required
 solution behavior, failure containment and recovery without an ordinary
-adapter fallback. Reject unsupported configuration. Do not repair every older
-plugin or build permanent compatibility bridges before migration. Existing
-MySQL/MQTT requests are inputs to native capability selection, not separate
-ordinary-plugin improvement projects.
+adapter fallback. Record each existing deployment capability and its native
+equivalent, including payload/header/routing templates, fixed/adaptive batching,
+snapshot replacement, replay and completion semantics where supported. Test
+exact outputs, batch boundaries, partial failure and restart through real native
+components. Do not remove required behavior by silently relabeling it optional.
+Any intentional omission needs an explicit acceptance decision and cutover plan;
+rejecting unsupported configuration is necessary but does not close the gap.
+
+Do not repair every older plugin or build permanent compatibility bridges.
+Existing MySQL/MQTT requests inform the required native capability set; new
+features beyond that set remain separate decisions.
 
 **Start here:** [native SDK limitations][native-sdk], [network components][network],
 [Server native configuration][server-computation].
@@ -1223,6 +1570,12 @@ authority, truthful failed-node inspection, revision-safe changes, reconstructio
 and required result behavior. Include native editing/lifecycle controls and
 accepted/starting/ready/failed presentation. Define configuration/data cutover
 explicitly; the existing React package alone is not a completed migration.
+
+Do not retire a supported endpoint, result subscription, snapshot/recovery
+workflow or connector option until its native equivalent is qualified or its
+removal is explicitly accepted. Include independent-component lifecycle
+operations under load, selective recovery, and existing client payload/error
+contracts in CW-46. One authoritative graph does not require one processing task.
 
 **Start here:** [Server routes][server-routes], [native UI][native-ui],
 [React package][react-package]. Tracking: CG-04, CG-09, CG-14.
@@ -1250,6 +1603,13 @@ recovered runs, recapture compatible goldens and enforce the intended state and
 delivery verdicts. Bind complete Server workflows into the ledger. Never change
 an incomplete capture flag merely to obtain a pass.
 
+Gate native-only migration on the CW-36 capability matrix: multicore execution,
+independent management, selective failure recovery, fair cleanup, required
+network batching/templates/recovery and snapshot/outbox/live result access.
+Run representative established deployments through native recipes and compare
+observable contracts, not implementation class names. A missing capability or
+unapproved loss of behavior blocks the affected cutover.
+
 **Start here:** [Server tests][server-tests], [recovery comparison][recovery-comparison],
 [scheduled recovery boundaries][scheduled-recovery].
 Tracking: CG-26; H01-H05; [#791][i791], [#881][i881], [#929][i929],
@@ -1257,7 +1617,8 @@ Tracking: CG-26; H01-H05; [#791][i791], [#881][i881], [#929][i929],
 
 ### CW-47: Finish templates, stock-Server examples and tutorial acceptance
 
-**Integration | P3 for packaging; P2 for acceptance coverage | Partial.**
+**Integration | P1 for preserving existing supported solutions; P3 for additional
+packaging/tutorial breadth | Partial.**
 Native resources/topology are not a complete solution-template surface.
 The embedded GPU lab works; the stock-Server equivalent remains separate.
 The merged OTel tutorial adds application-telemetry correlation, not shared
@@ -1271,6 +1632,13 @@ Extend tutorial automation to exact expected query results and external effects,
 with bounded completion and useful diagnostics. Preserve the Getting Started
 evaluator's existing result checks; do not reduce acceptance to process startup.
 
+Existing supported examples are native-migration acceptance cases, not optional
+packaging polish. Preserve their required outputs, configuration, result
+subscriptions and recovery behavior. Bring the Rust developer guide and
+maintainer/reference guidance into agreement with the selected native execution
+and lifecycle contracts; documentation of a missing capability is not its
+implementation. Additional examples remain lower priority than preserving these.
+
 **Start here:** [Server solution docs][server-readme], [stock GPU lab][gpu-server],
 [tutorial evaluation][tutorials], [OTel tutorial][otel-tutorial].
 Tracking: CG-16, CG-17, CG-28.
@@ -1281,7 +1649,8 @@ Tracking: CG-16, CG-17, CG-28.
 
 These are not automatic prerequisites for a reliable current runtime. Select the
 contract and cost before implementation; documenting a limit does not implement
-the optional feature.
+the optional feature. CW-50 has been moved to required runtime integrity and is
+not part of this optional group.
 
 ### CW-48: Stronger event-time guarantees
 
@@ -1308,17 +1677,6 @@ Always expose the offending stream/position through CW-22. Keep the safe default
 and test that quarantine never silently acknowledges unrelated work.
 Tracking: QX-05.
 
-### CW-50: Independent native-node CPU execution
-
-**CG | P3 | Measurement-led decision.** Ordinary queries have independently
-driven nested graphs; native nodes in one graph share cooperative scheduling.
-Existing measurements do not establish a universal scheduler bottleneck.
-
-**Done when selected:** demonstrate the representative scaling need, then design
-controlled execution isolation while preserving ordering, fairness, cancellation
-and one authoritative graph owner. CW-06's deadline truthfulness does not depend
-on selecting a scheduler rewrite. Tracking: CG-13.
-
 ### CW-51: Rate/burst limits and larger acknowledgement windows
 
 **CG pipes/protocols | P3 | Decision.** Capacity bounds retained work, not events
@@ -1338,10 +1696,11 @@ Decision.** Complete source transactions are atomic at their declared query
 boundary. Atomic visibility across several queries or external effects requires
 a larger participant/commit protocol.
 
-Graph feedback cycles, distributed execution, all-or-nothing live-deployment
-rollback, unloading libraries during execution and automatic state migration
-are separate designs. Exactly-once arbitrary remote effects requires destination
-cooperation; a local receipt does not provide it.
+Graph feedback cycles, general distributed-graph scheduling, all-or-nothing
+live-deployment rollback, unloading libraries during execution and automatic
+state migration are separate designs. CW-56's source/sink-connected independent
+instances do not require or implement those mechanisms. Exactly-once arbitrary
+remote effects requires destination cooperation; a local receipt does not provide it.
 
 **Done when selected:** specify participants, ownership, visibility, failures,
 buffering and recovery before changing the current guarantee.
@@ -1413,7 +1772,7 @@ Tracking: CG-19's optional policies, LI-12.
 | CG-10 | Ordinary-to-native bridge retired (CW-43). |
 | CG-11 | Completed shared services are not reopened; remaining breadth CW-44. |
 | CG-12 | CW-44. |
-| CG-13 | CW-40/CW-50; no scheduler rewrite selected. |
+| CG-13 | CW-50 is required P1 independent execution; CW-40 qualifies vertical scaling and retained behavior. |
 | CG-14 | CW-45. |
 | CG-15 | Native reconstruction recipes retained (CW-43). |
 | CG-16 | CW-47. |
@@ -1449,7 +1808,7 @@ The unique CW identifiers remove that ambiguity.
 | Review group | Disposition |
 |---|---|
 | Controller | GC-01 -> CW-04; GC-02 -> CW-05; GC-03 -> CW-03; GC-04 -> CW-04; GC-05 -> CW-04; GC-06 -> CW-03; GC-07 -> CW-06; GC-08 -> CW-31; GC-09 -> CW-05/CW-06; GC-10 -> CW-34; GC-11 -> CW-06; GC-12 -> CW-33; GC-13 -> CW-35; GC-14 -> CW-09/CW-31; GC-15 -> CW-03. |
-| Reconciliation | GM-01 -> Phase 0 complete, residual CW-01/CW-02; GM-02 -> CW-08; GM-03 -> CW-09; GM-04 -> CW-33; GM-05 -> CW-34; GM-06 -> CW-34; GM-07 -> CW-01; GM-08 -> CW-06; GM-09 original -> CW-09, Phase 0 -> CW-01; GM-10 original -> CW-22, Phase 0 -> CW-02; GM-11 -> CW-03/CW-35; GM-12 -> CW-31; GM-13 -> CW-23/CW-31; GM-14 -> CW-35; GM-15 -> CW-09; GM-16 -> CW-35. |
+| Reconciliation | GM-01 -> Phase 0 and CW-01/CW-02 complete; GM-02 -> CW-08; GM-03 -> CW-09; GM-04 -> CW-33; GM-05 -> CW-34; GM-06 -> CW-34; GM-07 -> CW-01; GM-08 -> CW-06; GM-09 original -> CW-09, Phase 0 -> CW-01; GM-10 original -> CW-22, Phase 0 -> CW-02; GM-11 -> CW-03/CW-35; GM-12 -> CW-31; GM-13 -> CW-23/CW-31; GM-14 -> CW-35; GM-15 -> CW-09; GM-16 -> CW-35. |
 | Pipes | PC-01 -> Phase 0 complete; PC-02 -> CW-34; PC-03 -> CW-30; PC-04 -> CW-22; PC-05 -> CW-04; PC-06 -> CW-22; PC-07 -> CW-22; PC-08 -> CW-32; PC-09 -> CW-21/CW-35; PC-10 -> CW-35/CW-36. |
 | Delivery/merger | DP-01 -> CW-05; DP-02 -> CW-29; DP-03 -> CW-30; DP-04 -> CW-30/CW-31; DP-05 -> CW-34; DP-06 -> CW-21; DP-07 -> CW-21/CW-30; DP-08 -> CW-04/CW-32; DP-09 -> CW-21; DP-10 -> CW-48; DP-11 -> CW-21/CW-51. |
 | Query execution | QX-01 -> Phase 0 complete; QX-02 -> Phase 0 complete; QX-03 -> CW-18; QX-04 -> partially addressed, CW-20; QX-05 -> CW-22/CW-49; QX-06 -> CW-06; QX-07 -> CW-34; QX-08 -> CW-31; QX-09 -> CW-29; QX-10 -> CW-30; QX-11 -> CW-03; QX-12 -> CW-29 investigation. |
@@ -1464,13 +1823,18 @@ The unique CW identifiers remove that ambiguity.
 |---|---|
 | Stale/duplicate/cross-kind input; aggregate existence/nulls; matching | CW-11/CW-12/CW-13. |
 | Source history, resume filters and receiver readiness | CW-14. |
-| Runtime follow-ups after Phase 0 | CW-01/CW-02/CW-06/CW-15/CW-26. |
+| Runtime follow-ups after Phase 0 | CW-01/CW-02 complete; remaining independent lifecycle/deadlines/cleanup CW-05/CW-06/CW-07/CW-08, counters CW-26. CW-15 is retired. |
 | Merger protection, process exits, durable-window measurements | CW-38/CW-30/CW-40; full compatibility execution is complete. |
 | Group commit, shared byte admission, disk hygiene, archive selection | CW-28/CW-29. |
 | Recovery, timers, replacement, journals, consumers and sustained workloads | CW-37/CW-39/CW-40/CW-41. |
 | Error reporting/consumption, recovery notifications, introspection | CW-22/CW-23. |
 | Ordinary factories/bridges and retained ordinary SDK defects | CW-42 and ordinary CW-43/CW-16 are retired, not fixed. |
-| Native recipes, full Server migration, plugins, templates/tutorials | Native CW-43 through CW-47. |
+| Native recipes, full Server migration, plugins, templates/tutorials | Native CW-43 through CW-47; preserving existing supported capabilities is P1, additional packaging remains separate. |
+| Independent execution and panic/task isolation | Required P1 CW-50/CW-03/CW-17, with CW-10/CW-22 diagnostics and CW-40/CW-41 evidence. |
+| Same-runtime child/grandchild isolation and network links | CW-56, with scoped boundary/hosting/qualification work from the execution and isolation plan; not a special remote-component executor or distributed transaction. |
+| Independent management, selective force cancellation and cleanup fairness | CW-07, remaining CW-05, CW-06/CW-08; completed graceful-drain behavior is retained. |
+| Graph-size publication amplification | CW-31/CW-40; mechanism confirmed, performance impact needs measurement. |
+| Native result-subscription assembly and reconstruction | CW-10/CW-43/CW-45/CW-46; actual catalogue/outlet ownership, not an ordinary bridge. |
 | Observability A: contract and ownership | CW-24; reporting contract prerequisite CW-22/CW-23. |
 | Observability B: context and clocks | CW-25. |
 | Observability C: runtime instrumentation | CW-26. |
@@ -1479,13 +1843,30 @@ The unique CW identifiers remove that ambiguity.
 | Observability F: dual output/local Source | CW-27. |
 | Observability G: Server integration and qualification | CW-27/CW-46. |
 | Observability H: extended instrumentation | CW-26; candidates remain explicitly selected. |
-| Optional language, event time, execution, rate/window and wider guarantees | CW-48 through CW-55. |
+| Optional language, event time, rate/window and wider guarantees | CW-48/CW-49/CW-51 through CW-55. CW-50 is no longer optional. |
 
 ## Completion and maintenance rules
 
 One completed narrow fix does not close its whole work package. Record the
-specific remaining boundary, as for QX-04 and RT-02 above. A supported deliberate
-limitation is not a defect; changing it needs a selected contract.
+specific remaining boundary, as for QX-04, RT-02 and CW-05 above. A documented
+limitation that loses a required baseline capability is still an open migration
+gap; documentation or explicit rejection alone cannot make the replacement
+equivalent. A genuinely optional capability still needs a selected contract.
+
+Independent native execution and the priority gap register are required
+acceptance work, not a menu of optional optimizations. Preserve completed
+transaction/replay/ownership guarantees while restoring execution and operational
+independence. Limit serialization to actual conflicts and dependencies.
+Separate in-process unwind containment from native crash isolation, and never
+claim hard preemption or rollback of already completed external effects.
+
+The native capability matrix must map required earlier behavior to an actual
+native implementation and observable evidence before affected cutover. Record
+any deliberately changed behavior, accepted omission or persisted-state migration
+explicitly. Use historical artifacts/reference implementations to establish the
+contract without maintaining a second runtime or expanding retired adapters.
+The inventory's reprioritization does not itself upgrade the 48-row qualification
+ledger or make a benchmark, regression case or missing feature pass.
 
 For correctness work, add a regression that fails for the demonstrated reason
 before the fix and checks the actual result, saved progress or released owner.
@@ -1506,7 +1887,9 @@ dependencies, stored-state contract and scope before adapting it.
 
 Update this document when implementation or evidence changes. Keep the CW IDs
 stable, preserve aliases, and update linked guides for behavior changes instead
-of maintaining competing active inventories.
+of maintaining competing active inventories. The linked execution/isolation
+plan supplies sequencing and acceptance for its selected scope; this inventory
+continues to record actual completion and remaining boundaries.
 
 [requirements]: ../tests/runtime_parity/requirements.tsv
 [contracts]: ../tests/runtime_parity/computation-contracts.tsv

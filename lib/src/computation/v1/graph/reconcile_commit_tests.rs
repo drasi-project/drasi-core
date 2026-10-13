@@ -67,6 +67,75 @@ fn descriptor(value: &str, output: bool) -> ComponentDescriptor {
     .unwrap()
 }
 
+async fn preflight_waits_for_retained_metadata_retirement() {
+    let (mut graph, mut operations, mut controls, _, prepared) = fixture().await;
+    drop(prepared);
+    let plan = preview(&graph, vec![]).unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let identity = super::super::super::execution::GraphIdentity {
+        graph: graph.snapshot.id.clone(),
+        run_epoch: graph.observed().run_epoch,
+        phase: FailurePhase::Removal,
+    };
+    let (abort, _registration) = AbortHandle::new_pair();
+    let joined = graph
+        .tasks
+        .retirements
+        .spawn(identity, abort, async move {
+            released.await.map_err(|_| GraphError::ControllerClosed)?;
+            Ok(())
+        })
+        .unwrap();
+    operations.retirements.push(
+        async move {
+            RetirementCompletion {
+                slot: None,
+                result: joined.await.and_then(|result| result),
+            }
+        }
+        .boxed(),
+    );
+    let (_cancel, mut cancel) = watch::channel(false);
+    let (_sender, mut commands) = command_channel();
+    let prepared = {
+        let preparation = prepare_owned(
+            &mut graph,
+            &mut operations,
+            &mut controls,
+            &mut cancel,
+            &mut commands,
+            &plan,
+            TopologyBindings::default(),
+        );
+        tokio::pin!(preparation);
+        tokio::select! {
+            _ = &mut preparation => panic!("preflight must join the retained retirement"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), preparation)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    assert!(graph.tasks.retirements.is_empty());
+    assert!(graph.tasks.preparations.is_empty());
+    drop(prepared);
+    drop(operations);
+    drop(controls);
+    graph.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn preflight_waits_for_retained_metadata_retirement_current_thread() {
+    preflight_waits_for_retained_metadata_retirement().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preflight_waits_for_retained_metadata_retirement_multi_thread() {
+    preflight_waits_for_retained_metadata_retirement().await;
+}
+
 async fn fixture() -> (
     ComputationGraph,
     Operations,
@@ -98,8 +167,10 @@ async fn fixture() -> (
         .build()
         .unwrap();
     let (_cancel, mut cancel) = watch::channel(false);
-    let controls = deploy(&mut graph, &mut cancel).await.unwrap();
     let mut operations = Operations::default();
+    let controls = deploy(&mut graph, &mut cancel, &mut operations)
+        .await
+        .unwrap();
     for &index in &graph.order {
         operations.attach_control(&graph, index).unwrap();
     }
@@ -132,7 +203,7 @@ async fn fixture() -> (
         ],
     )
     .unwrap();
-    let prepared = prepare(&graph, &plan, bindings).unwrap();
+    let prepared = prepare(&PreparationSnapshot::capture(&graph), &plan, bindings).unwrap();
     (graph, operations, controls, plan, prepared)
 }
 
@@ -274,10 +345,7 @@ async fn draining_stop_keeps_suspended_start_members_in_their_original_report() 
         started.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
-    assert_eq!(
-        operations.starting.as_ref().unwrap().pending,
-        BTreeSet::from([source])
-    );
+    assert_eq!(operations.starting[0].pending, BTreeSet::from([source]));
     assert!(!operations.active.contains_key(&source));
     let (reply, _) = oneshot::channel();
     operations

@@ -38,12 +38,21 @@ manager-style accessors are graph-backed APIs, not a second execution engine.
 `component_graph()` provides a weak, read-only asynchronous view with no
 node/relationship mutation methods or runtime-instance storage.
 
-DrasiLib owns its ComputationGraph task, and each query owns its QueryGraph task.
-Inside a graph, the controller polls its component futures and serializes mutable
-calls to each component. Independent query tasks can use different Tokio workers.
+DrasiLib owns its ComputationGraph task; native processing operations have
+independently scheduled, graph-owned tasks, and ordinary queries retain their
+owned QueryGraph tasks. Mutable calls to each component remain serialized.
+Task joins and cleanup ownership survive cancelled waiters. Independent native
+nodes can use different Tokio workers; transactional inner steps are not
+independent execution units.
 The in-process graph APIs support both single-thread and multi-thread Tokio
 runtimes. A particular plugin or its foreign-function bridge can have additional
 requirements; those are not an alternative graph engine.
+
+The separate `drasi-instance-host` and `drasi-computation-bridge` packages provide
+normal child instances and native source/sink links. They do not add a child
+execution mode to DrasiLib. Current Unix hosting and tested link contracts do
+not imply complete platform, distributed-transaction or production-scale
+qualification; see the work inventory for remaining runtime/callback boundaries.
 
 ## Identifying the right object
 
@@ -365,6 +374,14 @@ replacement, subscription changes, restart and retry. In-place reconfiguration
 requires factory support and cannot silently change an interface or implementation.
 Otherwise replacement constructs a new component instance.
 
+Preflight, pipe creation, reconfiguration and retired resource/object destruction
+run in graph-owned tasks with retained joins and typed panic boundaries.
+Reconciliation continues servicing disjoint lifecycle commands while those
+tasks are pending. Conflicting mutations reject rather than entering an
+unbounded deferred queue. Resource/plugin notifications keep only the latest
+value per kind and generation until reconciliation finishes, then publish
+against the current topology.
+
 | Removal policy | Behaviour |
 |---|---|
 | Reject | Refuse a change that breaks required dependencies |
@@ -394,11 +411,26 @@ writes. A drain timeout reports failure and retains active work, rather than
 aborting it. Explicit `GraphControl::cancel()` or dropping the run forces
 cancellation and can require storage reconstruction.
 
+`force_cancel_components(revision, selection)` is explicit scoped escalation,
+not a graceful stop. Selection must cover the complete registered actual
+resource domain, including aliases, dependent users and required propagation
+boundaries. Pending resource metadata or unfinished resource construction,
+cleanup or retirement refuses an unprovable selection before effects.
+`ForceCancellationReport.interrupted` retains damaged generations separately
+from `cleanup`; completed cleanup never proves rollback or downstream effects.
+Same-generation restart remains prohibited. Reconstruct through an explicit
+changed specification after the required cleanup/recovery checks. Opaque,
+unreported sharing and non-yielding code are not a fine-grained safety guarantee.
+
 Rejected additions retain supplied objects through `GraphError::AdditionRejected`.
 The error's owner can return them through `take().await`, or graph disposal can
 clean up newly transferred owned resources. Do not discard the ownership-bearing
 error by converting it only to a string. Borrowed/already-managed objects are not
 shut down merely because an addition was rejected.
+Once disposal starts, `take()` cannot reclaim that addition. Cancelling the
+disposal waiter retains the actual resource jobs and final destruction for
+an awaited retry. Managed unsubmitted component batches use the same ownership
+mechanism.
 
 `graph.shutdown().await` finishes component cleanup.
 `graph.dispose().await` also releases owned resource bindings.
@@ -729,8 +761,13 @@ dropping a test file, losing a mapped replacement, or filtering required tests
 out of execution fails the run. The only
 [permitted ignores](../tests/runtime_parity/allowed-ignored.tsv) are the existing
 manual serialization benchmark and subprocess workers whose crash drivers must
-pass. The [runner self-check](../tests/runtime_parity/check-runner.sh) exercises
-these failure paths without compiling Rust.
+pass, plus explicitly owned, expiring environment/quarantine exceptions. The
+macOS/Linux network case runs when its Linux peer is prepared; its unprepared
+exception does not establish network acceptance. The existing Host SDK
+subscribe/drop flake remains a separate finite quarantine and does not qualify
+DLL ownership. The
+[runner self-check](../tests/runtime_parity/check-runner.sh) exercises these
+failure paths without compiling Rust.
 
 The [graph contract inventory](../tests/runtime_parity/computation-contracts.tsv)
 also requires named coverage for functionality with no ComponentGraph equivalent:
@@ -744,7 +781,9 @@ also requires named coverage for functionality with no ComponentGraph equivalent
 | Query/plugin integration | Matching join/middleware results, source progress, producer identity and handled-only reaction checkpoints |
 | Descriptor factories | Real source/reaction pipelines, configuration validation, isolated secrets and transactional provider commit/rollback/reopen |
 | Transaction sequences | Isolated values/elements, relation identity, rollback before another step consumes invalid output, standalone participation |
-| Durable reconstruction | Actual process exit before transaction commit and before/after partial fanout and delivery confirmation |
+| Durable reconstruction | Actual process exit before transaction commit and before/after partial fanout and delivery confirmation; real RocksDB query reset/deprovision and merger commit/handoff child deaths |
+| Independent execution and scoped force | Owned tasks on both runtime flavors; full actual-domain validation, retained interrupted-work joins, and no false interruption or wait on idle peer-control observers |
+| Native process/network hosting | Same normal DrasiLib in Unix parent/child/grandchild processes; prepared mutual-TLS macOS/Linux-VM faults, persistent reopen and independent remote ownership |
 
 Preserved main tests run against ComputationGraph, not a second copy of the old
 engine. The result trace additionally pins exact Add/Update/Delete values,

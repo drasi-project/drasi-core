@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import itertools
 import json
+import math
 from pathlib import Path
 import platform
 import statistics
@@ -25,6 +26,7 @@ METRICS = (
     "events_per_second", "query_evaluations_per_second",
     "latency_p50_ns", "latency_p99_ns", "process_cpu_seconds",
     "max_rss_bytes", "shutdown_ns",
+    "process_elapsed_seconds", "effective_cpu_cores",
 )
 
 
@@ -36,6 +38,12 @@ def validate_result(value, case, events):
         number = value.get(metric)
         if isinstance(number, bool) or not isinstance(number, (int, float)) or not 0 < number < float("inf"):
             raise ValueError(f"Invalid measurement for {metric}: {number}")
+    if not math.isclose(
+        value["effective_cpu_cores"],
+        value["process_cpu_seconds"] / value["process_elapsed_seconds"],
+        rel_tol=1e-9,
+    ):
+        raise ValueError("CPU utilization must use full-process CPU and elapsed measurements")
 
 
 def summarize(runs):
@@ -47,6 +55,14 @@ def summarize(runs):
         }
         for metric in METRICS
     }
+
+def cases_for_workers(axes, workers):
+    cases = []
+    for values in itertools.product(*axes.values()):
+        case = dict(zip(axes, values))
+        for count in workers if case["runtime"] == "multi-thread" else [1]:
+            cases.append({**case, "workers": count})
+    return cases
 
 
 def main():
@@ -60,12 +76,15 @@ def main():
     parser.add_argument("--payload-bytes", type=int, nargs="+", default=[0, 4096])
     parser.add_argument("--executions", nargs="+", choices=["ordinary", "native"], default=["ordinary", "native"])
     parser.add_argument("--runtimes", nargs="+", choices=["current-thread", "multi-thread"], default=["current-thread", "multi-thread"])
-    parser.add_argument("--workloads", nargs="+", choices=["projection", "aggregate", "join", "persistent-aggregate"], default=["projection", "aggregate"])
+    parser.add_argument("--workers", type=int, nargs="+", default=[2])
+    parser.add_argument("--workloads", nargs="+", choices=["projection", "aggregate", "join", "persistent-aggregate", "cpu-heavy"], default=["projection", "aggregate"])
     args = parser.parse_args()
     if not 1 <= args.events <= 10_000_000 or args.repetitions < 3:
         parser.error("events must be 1..10000000; at least three repetitions are required")
     if any(not 1 <= value <= 64 for value in args.queries + args.windows):
         parser.error("queries and windows must be 1..64")
+    if not args.workers or any(not 1 <= value <= 64 for value in args.workers) or len(set(args.workers)) != len(args.workers):
+        parser.error("workers must be unique values in 1..64")
     if any(not 0 <= value <= 1_048_576 for value in args.payload_bytes):
         parser.error("payload bytes must be 0..1048576")
     if "persistent-aggregate" in args.workloads and args.executions != ["native"]:
@@ -77,7 +96,8 @@ def main():
     }
     if any(len(values) != len(set(values)) for values in axes.values()):
         parser.error("matrix axes must not contain duplicate values")
-    cases = [dict(zip(axes, values)) for values in itertools.product(*axes.values())]
+    cases = cases_for_workers(axes, args.workers)
+    axes["workers"] = args.workers
     binary = args.binary.resolve(strict=True)
     report = {
         "schema_version": 1,
@@ -94,9 +114,11 @@ def main():
             "Every query result is checked against an independent projection, running-sum or 64-key join oracle.",
             "Latency ends when all queries have returned the expected result for an input.",
             "Ordinary/native use the same queries and input, but different pipeline plumbing; not a scheduler-only comparison.",
-            "Multi-thread uses two workers; native nodes still share one controller.",
+            "Worker count is explicit; current-thread always uses one worker. Source revision determines the native execution model.",
+            "effective_cpu_cores is full-process CPU seconds divided by full-process elapsed seconds, including startup/warmup/shutdown.",
             "Only persistent-aggregate uses real native RocksDB; other workloads are memory-only. No dynamic libraries or external services.",
             "Join mode seeds 64 reference nodes and validates each joined value and payload; persistent mode is a throughput workload, not a crash test.",
+            "CPU-heavy executes a 256-step reduce through the actual evaluator; an independent arithmetic oracle checks every result.",
             "Timers and actual process-crash recovery are qualified separately, not inferred from throughput.",
             "CPU and peak RSS include startup/warmup/shutdown; allocation traffic is not measured.",
             "shutdown_ns measures completed shutdown, not cancellation of in-flight business work.",
@@ -110,7 +132,7 @@ def main():
         for case in ordered:
             value = measurement.measure(
                 binary, args.events, case["window"],
-                arguments=[case["queries"], case["payload_bytes"], case["execution"], case["runtime"], case["workload"]],
+                arguments=[case["queries"], case["payload_bytes"], case["execution"], case["runtime"], case["workload"], case["workers"]],
                 require_allocations=False,
             )
             validate_result(value, case, args.events)

@@ -228,7 +228,7 @@ pub(super) async fn run(
     tokio::pin!(operation);
     let result = tokio::select! {
         biased;
-        result = &mut operation => result.map_err(anyhow::Error::from),
+        result = &mut operation => result.map_err(super::proxy::native_operation_cause),
         result = scope.serve(&handler) => {
             result?;
             unreachable!("request service never completes successfully")

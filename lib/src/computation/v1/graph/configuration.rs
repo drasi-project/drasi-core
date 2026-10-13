@@ -40,35 +40,43 @@ pub struct GraphConfigurationSnapshot {
 }
 
 impl Component {
-    pub(super) fn capture_configuration(&self) -> CapturedComponentConfiguration {
+    pub(super) fn capture_configuration(&self) -> anyhow::Result<CapturedComponentConfiguration> {
         let result = match self {
             Self::Source(component) => component.configuration(),
             Self::Transformer(component) | Self::Query(component) => component.configuration(),
             Self::Sink(component) => component.configuration(),
             Self::Service(component) => component.configuration(),
             Self::Deferred { specification, .. } => {
-                return CapturedComponentConfiguration::Declared {
+                return Ok(CapturedComponentConfiguration::Declared {
                     values: specification.configuration.clone(),
-                };
+                });
             }
             Self::Unresolved(definition) => match &definition.construction {
                 ComponentConstruction::Factory(specification) => {
-                    return CapturedComponentConfiguration::Declared {
+                    return Ok(CapturedComponentConfiguration::Declared {
                         values: specification.configuration.clone(),
-                    };
+                    });
                 }
                 ComponentConstruction::External { binding } => {
-                    return CapturedComponentConfiguration::Unavailable {
+                    return Ok(CapturedComponentConfiguration::Unavailable {
                         reason: format!("external component binding {binding} is not supplied"),
-                    };
+                    });
                 }
             },
         };
-        match result {
+        Ok(match result {
             Ok(values) => CapturedComponentConfiguration::Available { values },
+            Err(error)
+                if error
+                    .chain()
+                    .take(64)
+                    .any(|cause| cause.is::<super::super::ComponentPanic>()) =>
+            {
+                return Err(error);
+            }
             Err(error) => CapturedComponentConfiguration::Unavailable {
                 reason: format!("{error:#}"),
             },
-        }
+        })
     }
 }

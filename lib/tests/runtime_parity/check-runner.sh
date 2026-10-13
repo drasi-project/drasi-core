@@ -30,6 +30,10 @@ cargo() {
     local inventory=lib/tests/runtime_parity/original-cases.tsv
     local mappings=lib/tests/runtime_parity/case-mappings.tsv
     local package=drasi-lib profile=default
+    local qualified_network=false
+    if [[ " $* " == *" -p drasi-instance-host "* && " $* " == *" --include-ignored "* ]]; then
+        qualified_network=true
+    fi
     [[ "$*" != *--no-default-features* ]] || profile=no-default-features
     [[ "$*" != *computation-rocksdb-tests* ]] || profile=extra-capabilities
     local sources=(lib lib/tests/*.rs)
@@ -51,6 +55,18 @@ cargo() {
         package=drasi-host-sdk
         profile=host-sdk
         sources=(lib components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
+    elif [[ " $* " == *" -p drasi-computation-bridge "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-computation-bridge
+        profile=native-bridge
+        sources=(lib)
+    elif [[ " $* " == *" -p drasi-instance-host "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-instance-host
+        profile=native-instance-host
+        sources=(lib components/instance-host/tests/processes.rs)
     elif [[ " $* " == *" -p drasi-state-store-redb "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
@@ -202,7 +218,7 @@ cargo() {
             printf '     Running tests/%s.rs (target/debug/deps/%s-selfcheck)\n' "$binary" "$binary"
         fi
         awk -F '\t' -v binary="$binary" -v omit="${RUNNER_CHECK_OMIT:-}" -v listing="$listing" \
-            -v package="$package" -v profile="$profile" '
+            -v package="$package" -v profile="$profile" -v qualified_network="$qualified_network" '
             /^#/ || NF == 0 { next }
             FILENAME == ARGV[1] {
                 mapped[$1 SUBSEP $2] = 1;
@@ -247,6 +263,7 @@ cargo() {
                         print name ": test";
                     } else if (omit != "execution" || binary != "lib" || omitted++) {
                         outcome = name in ignored ? "ignored, approved" : "ok";
+                        if (qualified_network == "true" && name == "network::durable_tls_cross_os_faults_reopen_and_independent_peer_ownership") outcome = "ok";
                         if (omit == "ignored" && binary == "lib") outcome = "ignored, injected";
                         if (omit == "worker-driver" && name in drivers) outcome = "ignored, injected";
                         print "test " name " ... " outcome;
@@ -274,6 +291,10 @@ cargo() {
 export -f cargo
 
 bash lib/tests/run-runtime-parity.sh "$logs/valid" > "$logs/check.log" 2>&1
+DRASI_NETWORK_CONTAINER=synthetic-peer bash lib/tests/run-runtime-parity.sh "$logs/network-enabled" \
+    >> "$logs/check.log" 2>&1
+grep -Fx $'processes\tnetwork::durable_tls_cross_os_faults_reopen_and_independent_peer_ownership\tok' \
+    "$logs/network-enabled/native-instance-host.executed.tsv" > /dev/null
 RUNNER_CHECK_STYLE=interleaved bash lib/tests/run-runtime-parity.sh "$logs/interleaved" \
     >> "$logs/check.log" 2>&1
 for omitted in baseline suite discovery execution ignored failure capability mapping worker-driver lost-result requirement; do
@@ -282,7 +303,7 @@ for omitted in baseline suite discovery execution ignored failure capability map
         printf 'Runner accepted missing %s coverage.\n' "$omitted" >&2
         exit 1
     fi
-    for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+    for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
         test -f "$logs/missing-$omitted/$profile.exit-code"
     done
 done

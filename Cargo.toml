@@ -119,9 +119,11 @@ members = [
   # Native ComputationGraph plugins
   "components/computation-plugins/standard",
   "components/computation-plugins/network",
+  "components/computation-plugins/bridge",
 
   # Host SDK (host-side plugin loading and proxy types)
   "components/host-sdk",
+  "components/instance-host",
 
   # Build tooling
   "xtask",

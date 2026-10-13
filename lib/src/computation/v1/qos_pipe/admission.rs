@@ -526,6 +526,9 @@ impl QosChannel {
         if let Some(timestamp) = input.system().timestamp() {
             system = system.with_timestamp(timestamp);
         }
+        if let Some(position) = input.system().source_position() {
+            system = system.with_source_position(position.clone());
+        }
         let mut envelope = input.derive(
             EnvelopeId::try_new(
                 format!("admission:{}", admission.identity.incarnation()),

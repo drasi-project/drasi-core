@@ -3150,16 +3150,23 @@ async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
     });
     first_control.stop_entered.notified().await;
 
-    // An abandoned queued stop is dropped rather than run later.
+    // Only overlapping requests queue; unrelated components remain serviceable.
+    let first_handle = core.computation_component("first").unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), core.stop_source("third"))
+        tokio::time::timeout(Duration::from_millis(100), first_handle.stop())
             .await
             .is_err(),
-        "a stop behind an in-flight stop waits for it"
+        "a same-component stop waits for the existing cleanup owner"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), first_handle.start())
+            .await
+            .is_err(),
+        "an abandoned queued start must not revive the stopped component later"
     );
     let second_stop = tokio::spawn({
-        let core = core.clone();
-        async move { core.stop_source("second").await }
+        let first_handle = first_handle.clone();
+        async move { first_handle.stop().await }
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
@@ -3167,6 +3174,11 @@ async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
         "the second stop must queue, not fail"
     );
     assert_eq!(second_control.stops.load(Ordering::Acquire), 0);
+    assert_eq!(first_control.stops.load(Ordering::Acquire), 1);
+    tokio::time::timeout(Duration::from_secs(2), core.stop_source("second"))
+        .await
+        .expect("an unrelated component must stop while the first cleanup is pending")
+        .unwrap();
 
     first_control.stop_release.notify_one();
     first_stop.await.unwrap().unwrap();
@@ -3182,6 +3194,8 @@ async fn concurrent_component_stops_queue_behind_an_in_flight_stop() {
     ] {
         assert_eq!(core.get_source_status(id).await.unwrap(), status, "{id}");
     }
+    assert_eq!(first_control.starts.load(Ordering::Acquire), 1);
+    assert_eq!(first_control.stops.load(Ordering::Acquire), 1);
     assert_eq!(second_control.stops.load(Ordering::Acquire), 1);
     assert_eq!(third_control.stops.load(Ordering::Acquire), 0);
     core.shutdown().await.unwrap();
@@ -3208,51 +3222,49 @@ async fn component_starts_queue_and_a_later_stop_supersedes_a_queued_start() {
     };
     let hung_start = start("hung");
     hung_control.entered.notified().await;
-    let superseded_start = start("superseded");
+    let hung_handle = core.computation_component("hung").unwrap();
+    let superseded_start = tokio::spawn({
+        let hung_handle = hung_handle.clone();
+        async move { hung_handle.start().await }
+    });
     let queued_start = start("queued");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !superseded_start.is_finished(),
-        "a start behind a start must queue, not fail"
+        "a same-component start must queue, not fail"
     );
-    assert!(
-        !queued_start.is_finished(),
-        "a start behind a start must queue, not fail"
-    );
+    tokio::time::timeout(Duration::from_secs(2), queued_start)
+        .await
+        .expect("an unrelated start must progress independently")
+        .unwrap()
+        .unwrap();
 
-    // The API checks status before reaching the controller, and the queued
-    // start has not begun, so ordering this stop first is valid.
+    // An untouched component still retains the ordinary API's stopped check.
     let error = core.stop_source("superseded").await.unwrap_err();
     assert!(
         format!("{error:#}").contains("already stopped"),
         "{error:#}"
     );
+    core.computation_component("superseded")
+        .unwrap()
+        .stop()
+        .await
+        .unwrap();
     // A stop that reaches the controller supersedes the queued start without
     // waiting for the hung one.
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        core.computation_component("superseded").unwrap().stop(),
-    )
-    .await
-    .expect("a stop is not queued behind an in-flight start")
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), hung_handle.stop())
+        .await
+        .expect("a stop is not queued behind an in-flight start")
+        .unwrap();
     let error = superseded_start.await.unwrap().unwrap_err();
     assert!(
         format!("{error:#}").contains("superseded by a later stop"),
         "{error:#}"
     );
     assert_eq!(superseded_control.starts.load(Ordering::Acquire), 0);
-
-    tokio::time::timeout(Duration::from_secs(2), core.stop_source("hung"))
-        .await
-        .expect("a stop interrupts the hung start")
-        .unwrap();
+    assert_eq!(hung_control.starts.load(Ordering::Acquire), 1);
+    assert_eq!(hung_control.stops.load(Ordering::Acquire), 1);
     assert!(hung_start.await.unwrap().is_err());
-    tokio::time::timeout(Duration::from_secs(5), queued_start)
-        .await
-        .expect("the queued start begins once the controller is free")
-        .unwrap()
-        .unwrap();
     for (id, status) in [
         ("hung", ComponentStatus::Stopped),
         ("superseded", ComponentStatus::Stopped),

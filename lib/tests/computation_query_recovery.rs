@@ -28,6 +28,10 @@ use std::{
     },
 };
 
+#[cfg(all(unix, feature = "computation-rocksdb-tests"))]
+#[path = "computation_query_recovery/processes.rs"]
+mod processes;
+
 struct Bootstrap {
     calls: Arc<AtomicUsize>,
     fail: bool,

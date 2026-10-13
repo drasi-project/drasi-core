@@ -25,6 +25,8 @@ use tokio::sync::oneshot;
 pub struct RejectedAddition {
     value: tokio::sync::Mutex<Option<ComponentAddition>>,
     complete: std::sync::atomic::AtomicBool,
+    cleanup_started: std::sync::atomic::AtomicBool,
+    cleanup: super::resource_tasks::ResourceTasks,
 }
 
 impl std::fmt::Debug for RejectedAddition {
@@ -44,13 +46,23 @@ impl RejectedAddition {
         Arc::new(Self {
             value: tokio::sync::Mutex::new(Some(addition)),
             complete: std::sync::atomic::AtomicBool::new(false),
+            cleanup_started: std::sync::atomic::AtomicBool::new(false),
+            cleanup: super::resource_tasks::ResourceTasks::default(),
         })
     }
 
     /// Recover the supplied instances/resources instead of letting graph
-    /// disposal reclaim them. Only one caller can take the rejected value.
+    /// disposal reclaim them. Only one caller can take the rejected value, and
+    /// it cannot be reclaimed after cleanup has begun.
     pub async fn take(&self) -> Option<ComponentAddition> {
-        let result = self.value.lock().await.take();
+        let mut value = self.value.lock().await;
+        if self
+            .cleanup_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let result = value.take();
         self.complete
             .store(true, std::sync::atomic::Ordering::Release);
         result
@@ -69,62 +81,174 @@ impl RejectedAddition {
         let Some(addition) = value.as_mut() else {
             return Ok(());
         };
-        let owned: Vec<_> = addition
-            .resources
-            .iter()
-            .filter(|resource| resource.ownership == ResourceOwnership::Graph)
-            .map(|resource| resource.id.clone())
-            .collect();
-        let mut errors = Vec::new();
-        for id in owned {
-            let Some(handle) = addition.bindings.resources.get(&id).cloned() else {
-                continue;
-            };
-            if existing.values().any(|current| {
-                current.same_instance(&handle) || super::resources::same_provider(current, &handle)
-            }) {
-                addition.bindings.resources.remove(&id);
-                continue;
-            }
-            match tokio::time::timeout(timeout, handle.shutdown()).await {
-                Ok(Ok(())) => {
-                    addition.bindings.resources.remove(&id);
-                }
-                result => {
-                    let source = match result {
-                        Ok(Err(error)) => error,
-                        Err(error) => error.into(),
-                        Ok(Ok(())) => unreachable!(),
-                    };
-                    errors.push(GraphError::ResourceCleanup {
-                        resource: id,
-                        source,
-                    });
-                }
-            }
-        }
-        if errors.is_empty() {
-            value.take();
-            self.complete
-                .store(true, std::sync::atomic::Ordering::Release);
-            Ok(())
-        } else {
-            Err(GraphError::Cleanup {
-                primary: None,
-                errors,
+        self.cleanup_started
+            .store(true, std::sync::atomic::Ordering::Release);
+        cleanup_rejected_resources(
+            &addition.resources,
+            &mut addition.bindings.resources,
+            &self.cleanup,
+            existing,
+            timeout,
+        )
+        .await?;
+        let addition = value.take().expect("owned rejected addition");
+        let component = addition.definition.descriptor.id().clone();
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(addition)));
+        self.complete
+            .store(true, std::sync::atomic::Ordering::Release);
+        dropped.map_err(|payload| GraphError::Component {
+            component,
+            operation: "dispose rejected addition",
+            source: crate::computation::v1::ComponentPanic::new(anyhow::anyhow!(
+                "rejected extension destruction: {}",
+                crate::computation::v1::bounded_panic_message(payload)
+            ))
+            .into(),
+        })
+    }
+}
+
+pub(crate) struct RejectedResources {
+    specifications: Vec<ResourceSpecification>,
+    handles: tokio::sync::Mutex<BTreeMap<ResourceId, ResourceHandle>>,
+    cleanup: super::resource_tasks::ResourceTasks,
+    complete: std::sync::atomic::AtomicBool,
+}
+
+impl RejectedResources {
+    pub(crate) fn new(
+        specifications: impl IntoIterator<Item = ResourceSpecification>,
+        handles: &BTreeMap<ResourceId, ResourceHandle>,
+    ) -> Option<Arc<Self>> {
+        let specifications: Vec<_> = specifications
+            .into_iter()
+            .filter(|resource| {
+                resource.ownership == ResourceOwnership::Graph && handles.contains_key(&resource.id)
             })
+            .collect();
+        if specifications.is_empty() {
+            return None;
         }
+        let handles = specifications
+            .iter()
+            .map(|resource| (resource.id.clone(), handles[&resource.id].clone()))
+            .collect();
+        Some(Arc::new(Self {
+            specifications,
+            handles: tokio::sync::Mutex::new(handles),
+            cleanup: super::resource_tasks::ResourceTasks::default(),
+            complete: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
+    pub(crate) fn complete(&self) -> bool {
+        self.complete.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) async fn adopted(&self, existing: &BTreeMap<ResourceId, ResourceHandle>) {
+        let mut handles = self.handles.lock().await;
+        handles.retain(|_, handle| {
+            !existing
+                .values()
+                .any(|current| current.same_instance(handle))
+        });
+        self.complete
+            .store(handles.is_empty(), std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) async fn dispose(
+        &self,
+        existing: &BTreeMap<ResourceId, ResourceHandle>,
+        timeout: Duration,
+    ) -> GraphResult<()> {
+        let mut handles = self.handles.lock().await;
+        cleanup_rejected_resources(
+            &self.specifications,
+            &mut handles,
+            &self.cleanup,
+            existing,
+            timeout,
+        )
+        .await?;
+        self.complete
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Drop for RejectedResources {
+    fn drop(&mut self) {
+        if !self.handles.get_mut().is_empty() || !self.cleanup.is_empty() {
+            log::warn!("Unaccepted resource bindings dropped before retained cleanup completed");
+        }
+    }
+}
+
+async fn cleanup_rejected_resources(
+    specifications: &[ResourceSpecification],
+    handles: &mut BTreeMap<ResourceId, ResourceHandle>,
+    cleanup: &super::resource_tasks::ResourceTasks,
+    existing: &BTreeMap<ResourceId, ResourceHandle>,
+    timeout: Duration,
+) -> GraphResult<()> {
+    let owned: Vec<_> = specifications
+        .iter()
+        .filter(|resource| resource.ownership == ResourceOwnership::Graph)
+        .map(|resource| resource.id.clone())
+        .collect();
+    let mut errors = Vec::new();
+    for id in owned {
+        let handle = handles.remove(&id);
+        if handle.is_none() && !cleanup.contains(&id) {
+            continue;
+        }
+        let release_only = handle.as_ref().is_some_and(|handle| {
+            existing.values().any(|current| {
+                current.same_instance(handle) || super::resources::same_provider(current, handle)
+            })
+        });
+        let job = cleanup.shutdown_rejected(&id, handle, timeout, release_only)?;
+        let joined = tokio::time::timeout(timeout, job.wait()).await;
+        let result = match joined {
+            Ok(_) => {
+                let (handle, result) = cleanup.complete_rejected(&job);
+                if let Some(handle) = handle {
+                    handles.insert(id.clone(), handle);
+                }
+                result
+            }
+            Err(error) => Err(GraphError::ResourceCleanup {
+                resource: id.clone(),
+                source: error.into(),
+            }),
+        };
+        match result {
+            Ok(()) => {}
+            Err(error) => {
+                errors.push(error);
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(GraphError::Cleanup {
+            primary: None,
+            errors,
+        })
     }
 }
 
 impl Drop for RejectedAddition {
     fn drop(&mut self) {
-        if self.value.get_mut().as_ref().is_some_and(|addition| {
-            addition.resources.iter().any(|resource| {
-                resource.ownership == ResourceOwnership::Graph
-                    && addition.bindings.resources.contains_key(&resource.id)
+        if !self.cleanup.is_empty()
+            || self.value.get_mut().as_ref().is_some_and(|addition| {
+                addition.resources.iter().any(|resource| {
+                    resource.ownership == ResourceOwnership::Graph
+                        && addition.bindings.resources.contains_key(&resource.id)
+                })
             })
-        }) {
+        {
             log::warn!("Rejected addition dropped without returning its resources or awaiting graph disposal");
         }
     }

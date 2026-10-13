@@ -331,7 +331,11 @@ impl Batch {
             &wire::encode(&input)?,
             None,
         )?;
-        let generation: u64 = wire::decode(&operation.await?)?;
+        let generation: u64 = wire::decode(
+            &operation
+                .await
+                .map_err(super::proxy::native_operation_cause)?,
+        )?;
         anyhow::ensure!(
             generation != 0,
             "native consumer returned invalid batch generation"
@@ -386,8 +390,9 @@ fn begin(
             abi::BorrowedBytes::new(input),
             context.map_or(std::ptr::null(), |context| context),
             &mut operation,
-        ))?;
-        Ok(OperationFuture::new(operation)?)
+        ))
+        .map_err(super::proxy::native_operation_cause)?;
+        OperationFuture::new(operation).map_err(super::proxy::native_operation_cause)
     }
 }
 fn retryable(error: &anyhow::Error) -> bool {
@@ -409,7 +414,10 @@ impl DeliveryHandler for Batch {
             None,
         )?;
         anyhow::ensure!(
-            operation.await?.is_empty(),
+            operation
+                .await
+                .map_err(super::proxy::native_operation_cause)?
+                .is_empty(),
             "native consumer handling returned unexpected data"
         );
         Ok(())
@@ -446,7 +454,7 @@ impl TransactionalDeliveryHandler for Batch {
         tokio::pin!(operation);
         let result = tokio::select! {
             biased;
-            result = &mut operation => result.map_err(anyhow::Error::from),
+            result = &mut operation => result.map_err(super::proxy::native_operation_cause),
             result = scope.serve(&handler) => {
                 result?;
                 unreachable!("request service never completes successfully")

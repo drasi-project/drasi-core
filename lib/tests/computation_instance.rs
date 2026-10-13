@@ -471,10 +471,20 @@ async fn failed_builder_rollback_returns_the_actual_retryable_cleanup_owner() {
         .downcast_ref::<ComputationCleanupError>()
         .expect("typed cleanup ownership");
     assert!(matches!(owner.cause(), DrasiError::AlreadyExists { .. }));
-    assert!(owner
+    let cleanup = owner
         .cleanup_error()
-        .downcast_ref::<ResourceCleanupFailure>()
-        .is_some());
+        .downcast_ref::<GraphError>()
+        .expect("retained graph cleanup aggregate");
+    let GraphError::Cleanup { primary, errors } = cleanup else {
+        panic!("missing cleanup aggregate: {cleanup:?}");
+    };
+    assert!(primary.is_none());
+    assert_eq!(errors.len(), 1);
+    let GraphError::ResourceCleanup { resource, source } = errors[0].underlying() else {
+        panic!("missing owned resource failure: {:?}", errors[0]);
+    };
+    assert_eq!(resource.as_str(), "cleanup");
+    assert!(source.downcast_ref::<ResourceCleanupFailure>().is_some());
     assert_eq!(first.disposals.load(Ordering::SeqCst), 1);
     assert_eq!(second.disposals.load(Ordering::SeqCst), 1);
     owner.cleanup().await.expect("retry actual owned resource");

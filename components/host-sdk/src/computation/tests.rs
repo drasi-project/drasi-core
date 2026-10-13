@@ -167,11 +167,17 @@ impl ComputationComponent for TestComponent {
         &self.descriptor
     }
     fn configuration(&self) -> anyhow::Result<Value> {
+        if self.configuration["panic_configuration"] == true && self.seen > 0 {
+            panic!("requested configuration panic");
+        }
         let mut configuration = self.configuration.clone();
         configuration["seen"] = json!(self.seen);
         Ok(configuration)
     }
     async fn start(&mut self) -> anyhow::Result<()> {
+        if self.configuration["panic_start"] == true {
+            panic!("requested start panic");
+        }
         anyhow::ensure!(
             self.configuration["fail_start"] != true,
             "requested start failure"
@@ -185,6 +191,10 @@ impl ComputationComponent for TestComponent {
 #[async_trait]
 impl EnvelopeSource for TestComponent {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        if self.configuration["panic_next"] == true {
+            self.seen += 1;
+            panic!("requested processing panic");
+        }
         if self.configuration["blocked"] == true {
             std::future::pending::<()>().await;
         }
@@ -269,9 +279,13 @@ struct ReleaseHandler(Arc<tokio::sync::Notify>);
 impl sdk::NativeControlHandler for ReleaseHandler {
     async fn on_message(
         &self,
-        _: sdk::ControlMessage,
+        message: sdk::ControlMessage,
         _: sdk::ControlSender,
     ) -> anyhow::Result<()> {
+        if matches!(message.notification, sdk::ControlNotification::Custom { ref kind, .. } if kind == "panic")
+        {
+            panic!("requested control panic");
+        }
         self.0.notify_one();
         Ok(())
     }
@@ -336,6 +350,110 @@ fn plugin() -> Arc<NativePlugin> {
         )
     }
     .unwrap()
+}
+
+fn panic_code(error: &anyhow::Error) -> u32 {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<sdk::transport::Failure>())
+        .expect("native failure retained in the cause chain")
+        .code
+}
+
+#[tokio::test]
+async fn native_start_data_and_configuration_panics_require_a_new_instance() {
+    let plugin = plugin();
+    for mode in ["panic_start", "panic_next", "panic_configuration"] {
+        let mut source = plugin.factories()[0]
+            .create_component(
+                ComponentId::try_new("quarantined").unwrap(),
+                json!({(mode): true}),
+            )
+            .unwrap();
+        let error = if mode == "panic_start" {
+            source.start().await.unwrap_err()
+        } else {
+            source.start().await.unwrap();
+            if mode == "panic_next" {
+                source.next().await.unwrap_err()
+            } else {
+                assert!(source.next().await.unwrap().is_some());
+                source.configuration().unwrap_err()
+            }
+        };
+        assert_eq!(
+            panic_code(&error),
+            abi::status::PANICKED,
+            "{mode}: {error:#}"
+        );
+        for _ in 0..2 {
+            source.stop().await.unwrap();
+            assert_eq!(
+                panic_code(&source.start().await.unwrap_err()),
+                abi::status::PANICKED
+            );
+            assert_eq!(
+                panic_code(&source.next().await.unwrap_err()),
+                abi::status::PANICKED
+            );
+            assert_eq!(
+                panic_code(&source.configuration().unwrap_err()),
+                abi::status::PANICKED
+            );
+        }
+        let mut replacement = plugin.factories()[0]
+            .create_component(ComponentId::try_new("quarantined").unwrap(), json!({}))
+            .unwrap();
+        replacement.start().await.unwrap();
+        assert!(replacement.next().await.unwrap().is_some());
+        replacement.stop().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_control_panic_wakes_pending_data_and_cannot_be_cleared_by_stop() {
+    let plugin = plugin();
+    let mut source = plugin.factories()[4]
+        .create_component(
+            ComponentId::try_new("controlled-panic").unwrap(),
+            json!({"count":3}),
+        )
+        .unwrap();
+    source.start().await.unwrap();
+    source.next().await.unwrap().unwrap();
+    let inner = source.inner.clone();
+    let mut pending = Box::pin(source.next());
+    std::future::poll_fn(|cx| {
+        use std::future::Future;
+        assert!(pending.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let request = sdk::wire::encode(&sdk::ControlMessage {
+        from: ComponentId::try_new("observer").unwrap(),
+        generation: 1,
+        direction: sdk::ControlDirection::Upstream,
+        notification: sdk::ControlNotification::Custom {
+            kind: "panic".into(),
+            payload: Value::Null,
+        },
+    })
+    .unwrap();
+    let error = inner
+        .unit(abi::operation::CONTROL, &request)
+        .await
+        .unwrap_err();
+    assert_eq!(panic_code(&error), abi::status::PANICKED);
+    let error = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(panic_code(&error), abi::status::PANICKED);
+    source.stop().await.unwrap();
+    assert_eq!(
+        panic_code(&source.start().await.unwrap_err()),
+        abi::status::PANICKED
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

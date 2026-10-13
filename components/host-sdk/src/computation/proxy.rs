@@ -25,7 +25,19 @@ pub(super) fn native_failure_disposition(error: &Failure) -> FailureDisposition 
 }
 
 fn operation_failure(error: Failure) -> anyhow::Error {
-    ComponentOperationError::new(native_failure_disposition(&error), error).into()
+    ComponentOperationError::new(
+        native_failure_disposition(&error),
+        native_operation_cause(error),
+    )
+    .into()
+}
+
+pub(super) fn native_operation_cause(error: Failure) -> anyhow::Error {
+    if error.code == abi::status::PANICKED {
+        ComponentPanic::new(error).into()
+    } else {
+        error.into()
+    }
 }
 
 #[cfg(test)]
@@ -62,6 +74,11 @@ mod failure_tests {
                 .unwrap();
             assert_eq!(source.code, code);
             assert_eq!(source.message, "retained native cause");
+            assert_eq!(
+                error.chain().any(|cause| cause.is::<ComponentPanic>()),
+                code == abi::status::PANICKED,
+                "only native PANICKED marks the generation as damaged"
+            );
         }
     }
 }

@@ -1,6 +1,6 @@
 # ComputationGraph: current functionality
 
-**Snapshot: 12 October 2026**
+**Snapshot: 13 October 2026 development checkout**
 
 This document describes the implementation on
 `agentofreality-parallel-computation-graph` in the local drasi-core workspace,
@@ -60,12 +60,33 @@ bypassing cleanup or storage fencing. Managed reconstruction has one attempt per
 explicit reconciliation request; delivery has a separate bounded attempt/delay
 policy. This is returned-error containment, not native crash isolation.
 
-Ordinary DrasiLib queries own nested QueryGraphs with independent, owned Tokio
-tasks. They can execute on different workers in a multithreaded runtime; a
-current-thread runtime is also supported. Native nodes within one graph are
-cooperatively polled by its controller, not automatically assigned a task or
-thread per node. Per-node work budgets bound continuously ready work and allow
-other nodes and control operations to progress.
+Native processing loops now execute as independently scheduled, graph-owned
+Tokio tasks. Ordinary queries retain their owned QueryGraph tasks. Both models
+support a current-thread runtime; multiple independent native nodes can use
+different workers in a multithreaded runtime. Mutable work remains serialized
+per component, and a transaction container retains its ordered inner steps.
+Per-node work budgets bound continuously ready work but cannot preempt a
+synchronous callback that never yields.
+
+Owned operation/resource tasks retain joins across caller cancellation.
+Protected unwinding faults quarantine the affected generation and preserve
+independent work. Supported preparation, pipe construction, reconfiguration,
+metadata retirement and rejected-resource disposal use owned boundaries.
+Awaited reconciliation services unrelated commands under actual-domain
+reservations. Scoped force validates the complete registered physical domain,
+joins reported interrupted work and leaves untouched idle observers graph-owned.
+Cleanup does not repair generation damage; non-yielding synchronous work,
+started blocking I/O, native aborts and unsafe memory faults are not forcibly
+preemptible in-process.
+
+The new `drasi-instance-host` package runs normal DrasiLib instances in child
+processes. Native bridge sources/sinks provide explicit inter-instance data
+boundaries; the process supervisor is a separate portless service. Current
+macOS/Linux hosting has real-process hierarchy/failure/drain and selected actual
+query/merger child-crash evidence. A prepared mutual-TLS macOS/Linux-VM profile
+qualifies receipt faults, persistent reopen and independent remote ownership.
+Windows, hard kernel containment and physical production cross-machine
+qualification remain explicit gaps.
 
 ## Data contracts, ordering and connections
 
@@ -446,9 +467,20 @@ waiting and are not pure CPU measurements.
 
 Memory-only execution does not require durable admission, delivery ledgers,
 shared-storage journals or configuration persistence. Those services are opt-in.
-Independent ordinary queries can use multiple Tokio workers; native nodes in one
-graph do not imply independent CPU parallelism. Serialization, adapters, storage,
+Independent native nodes and ordinary query scopes can use multiple Tokio
+workers. That is not a measured production scaling promise. Serialization, adapters, storage,
 network delivery and slow consumers remain workload-dependent costs.
+
+The selected independent-execution reference is now qualified on the final
+runtime source: eight native CPU-heavy queries, 5,000 inputs, window 32 and
+three interleaved repetitions achieved 1.926x two-worker and 3.478x four-worker
+median throughput against one worker. Full-process CPU use was 1.971/3.711 cores.
+The actual evaluator's 256-step reduction and an independent arithmetic oracle
+verified 480,000 measured results across twelve processes, including
+current-thread correctness. See the
+[execution/isolation checkpoint](computation-graph-execution-isolation-plan.md#current-checkpoint---13-october-2026)
+for exact build/provenance and limits. These are approved local reference
+targets, not universal linear scaling or production latency SLOs.
 
 The repository includes an [ordinary fast-path benchmark](../examples/fast_path.rs),
 a [native Host benchmark](../../components/host-sdk/examples/native_fast_path.rs)
@@ -510,12 +542,18 @@ Additional core resilience evidence is bound into the executable
 These are scoped contracts, not proof for every plugin, backend, failure
 combination or sustained production workload.
 
-The local 28-profile compatibility gate passes with 7,393 successful test
+An earlier local 28-profile compatibility checkpoint passed with 7,393 successful test
 executions, including separately built plugins and real container-backed
 database checks through Podman's Docker-compatible API. Its 29 ignored entries
 are explicit worker/diagnostic/quarantine exceptions, not silently omitted
 tests; worker exceptions require their crash drivers to pass. Test executions
 include repeated cases across feature profiles, not 7,393 distinct scenarios.
+The final independent-execution checkpoint separately passed 1,685 cases each
+with default/no-default features, 1,838 with extra capabilities, 143 selected
+native integration cases and 448 Server unit/selected integration cases.
+Actual macOS/Linux Host, prepared VM network, query/merger child faults and
+rebuilt live/browser demos have their own stated evidence. This refresh does not
+claim a new full connector matrix or close unrelated release qualifications.
 The broader [qualification ledger](../tests/runtime_parity/requirements.tsv)
 remains at 20 covered, 23 partial and five unqualified contracts; the full
 replacement-qualification claim is not met. Remaining core evidence includes
@@ -536,9 +574,11 @@ The main boundaries when adopting the functionality are:
   storage migration and arbitrary provider replacement are not inferred.
 - **Plugin adoption and operational qualification remain selective.** Framework
   capability does not establish connector feature parity or deployment capacity.
-- **Panic/crash containment is unfinished.** Returned-error handling does not
-  guarantee survival of an in-process panic, abort or unsafe native memory fault.
-  The broader containment/isolation work is explicitly deferred.
+- **Containment is scoped, not universal.** Protected task/SDK unwinds quarantine
+  damaged generations. Non-yielding synchronous callbacks and started blocking
+  I/O cannot be forcibly preempted; native aborts and unsafe memory faults require
+  an actual process boundary. Current child-host evidence is Unix-specific,
+  not a hard resource sandbox or complete cross-platform qualification.
 
 ## Implementation and further reading
 

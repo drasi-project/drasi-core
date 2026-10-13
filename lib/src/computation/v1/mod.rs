@@ -60,9 +60,11 @@
 //! caller-polled [`GraphRun`]; constructing it alone runs nothing. Consumers are
 //! considered before producers, but activation is independent unless a relationship
 //! explicitly requires a running dependency. Every eligible component is attempted.
-//! Futures for different nodes run concurrently, with no detached graph tasks.
-//! Each component's mutable operations remain serialized. Components/providers
-//! must be cooperative, and must not block the runtime thread.
+//! Each top-level node runs in an independently scheduled, graph-owned Tokio
+//! task. Mutable operations on one instance remain serialized. A multithreaded
+//! runtime can run native CPU work in parallel; a current-thread runtime provides
+//! concurrency only. Cancellation is cooperative, not native fault isolation.
+//! Dropping the controller retains task joins and cleanup ownership on the graph.
 //!
 //! `Ready -> Starting -> Running -> Stopping -> Completed` is the clean path.
 //! Only `Completed` can restart with retained component ownership, retained
@@ -260,6 +262,7 @@ pub use consumer_recovery::*;
 pub use data::*;
 pub use envelope::*;
 pub use error::{ContractError, Result};
+pub(crate) use graph::RejectedResources;
 pub use graph::*;
 pub use graph_codec::*;
 pub use legacy_reaction::*;

@@ -201,6 +201,15 @@ impl ComputationComponent for Fixture {
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
+        assert!(
+            self.signals
+                .starts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id == self.descriptor.id().as_str()),
+            "cleanup cannot precede this component's own start"
+        );
         self.signals
             .stops
             .lock()
@@ -477,10 +486,14 @@ async fn startup_failures() {
             control.cancel();
         });
         assert!(matches!(result, Err(GraphError::Cancelled)));
-        let started = signals.starts.lock().expect("start log lock").clone();
-        let stopped = signals.stops.lock().expect("stop log lock").clone();
-        assert_eq!(started, ["sink", "transform", "source"]);
-        assert_eq!(stopped, started.into_iter().rev().collect::<Vec<_>>());
+        let mut started = signals.starts.lock().expect("start log lock").clone();
+        let mut stopped = signals.stops.lock().expect("stop log lock").clone();
+        // The controller considers consumers first; autonomous tasks may enter
+        // independent hooks in either order. Every attempted owner must stop once.
+        started.sort();
+        stopped.sort();
+        assert_eq!(started, ["sink", "source", "transform"]);
+        assert_eq!(stopped, started);
         assert_eq!(signals.active.load(Ordering::SeqCst), 0);
         assert_eq!(graph.state(), GraphState::Cancelled);
         assert!(matches!(
@@ -543,7 +556,11 @@ async fn cancel_operations() {
             wait_for_pending_operation(&mut run, &signals).await;
             control.cancel();
             control.cancel();
-            assert!(matches!(run.await, Err(GraphError::Cancelled)));
+            let result = run.await;
+            assert!(
+                matches!(result, Err(GraphError::Cancelled)),
+                "{position}/{startup}: {result:?}"
+            );
             assert_eq!(signals.active.load(Ordering::SeqCst), 0);
             assert_eq!(graph.state(), GraphState::Cancelled);
             let stops = signals.stops.lock().expect("stop log lock").len();
@@ -586,7 +603,11 @@ async fn drop_retains_cleanup_ownership_without_detached_operations() {
         let control = run.control();
         wait_for_pending_operation(&mut run, &signals).await;
         drop(run);
-        assert_eq!(signals.active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            signals.active.load(Ordering::SeqCst),
+            1,
+            "dropping the controller requests cancellation; the graph still owns the unjoined task"
+        );
         assert_eq!(control.state(), GraphState::CleanupRequired);
         assert!(
             signals.stops.lock().unwrap().is_empty(),
@@ -597,6 +618,7 @@ async fn drop_retains_cleanup_ownership_without_detached_operations() {
             Err(GraphError::InvalidState { .. })
         ));
         graph.shutdown().await.unwrap();
+        assert_eq!(signals.active.load(Ordering::SeqCst), 0);
         assert_eq!(graph.state(), GraphState::Cancelled);
         assert_eq!(
             signals.stops.lock().unwrap().len(),
@@ -757,7 +779,7 @@ async fn full_queue_cancel() {
     let mut run = Box::pin(graph.start().expect("start valid graph"));
     let control = run.control();
     // Source can hold one blocked emission, queue one, sink one: never all ten.
-    assert!(poll!(&mut run).is_pending());
+    wait_for_full_pipe(&mut run, &signals).await;
     assert!(signals.produced.load(Ordering::SeqCst) <= 3);
     let stale = senders.lock().expect("observed sender lock")[0].clone();
     let mut blocked = Box::pin(stale.send(envelope(999)));
@@ -779,6 +801,24 @@ async fn full_queue_cancel() {
             .error,
         PipeError::Closed
     ));
+}
+
+async fn wait_for_full_pipe(run: &mut std::pin::Pin<Box<GraphRun<'_>>>, signals: &Signals) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if signals.produced.load(Ordering::SeqCst) == 3
+                && signals.active.load(Ordering::SeqCst) == 1
+            {
+                return;
+            }
+            tokio::select! {
+                result = run.as_mut() => panic!("scope ended before backpressure: {result:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+    })
+    .await
+    .expect("component tasks did not fill the bounded pipe");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -810,7 +850,7 @@ async fn drop_closes_old_senders_before_explicit_async_cleanup() {
     .build()
     .unwrap();
     let mut run = Box::pin(graph.start().unwrap());
-    assert!(poll!(&mut run).is_pending());
+    wait_for_full_pipe(&mut run, &signals).await;
     let stale = senders.lock().unwrap()[0].clone();
     let mut blocked = Box::pin(stale.send(envelope(999)));
     assert!(poll!(&mut blocked).is_pending());

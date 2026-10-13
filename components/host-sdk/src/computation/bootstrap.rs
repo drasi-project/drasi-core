@@ -198,8 +198,9 @@ impl Remote {
                 generation,
                 state.map_or(std::ptr::null(), |state| state),
                 &mut raw,
-            ))?;
-            Ok(OperationFuture::new(raw)?)
+            ))
+            .map_err(super::proxy::native_operation_cause)?;
+            OperationFuture::new(raw).map_err(super::proxy::native_operation_cause)
         }
     }
     fn cancel(&self) {
@@ -263,7 +264,7 @@ impl Remote {
             tokio::pin!(operation);
             let result = tokio::select! {
                 biased;
-                result = &mut operation => result.map_err(anyhow::Error::from),
+                result = &mut operation => result.map_err(super::proxy::native_operation_cause),
                 result = requests.serve(&handler) => {
                     result?;
                     unreachable!("scoped request service does not complete successfully")
@@ -274,7 +275,9 @@ impl Remote {
             requests.finish()?;
             bytes
         } else {
-            self.begin(code, 0, None)?.await?
+            self.begin(code, 0, None)?
+                .await
+                .map_err(super::proxy::native_operation_cause)?
         };
         let decoded = wire::decode(&bytes)?;
         Ok((decoded, guard))
@@ -616,7 +619,7 @@ impl Stream for SnapshotStream {
         };
         self.operation = None;
         let result = result
-            .map_err(anyhow::Error::from)
+            .map_err(super::proxy::native_operation_cause)
             .and_then(|bytes| self.decode(bytes));
         if let Some(mut guard) = self.guard.take() {
             guard.completed = result.is_ok();

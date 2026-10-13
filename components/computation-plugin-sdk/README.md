@@ -92,6 +92,15 @@ terminal even if that flag is set. The consumer extension has its own explicit
 retry status and bounded `DeliveryRunner` attempt/delay policy; exhausting it
 does not authorize an implicit graph restart.
 
+The SDK retains a per-instance panic quarantine across data, control and
+lifecycle operations. A detected panic during polling, operation destruction or
+configuration capture wakes pending operations and prevents further normal work.
+Stop remains available for cleanup, but does not make the damaged instance
+restartable; reconstruction creates a fresh instance. The Host preserves
+`PANICKED` as a library-owned `ComponentPanic` cause so graph supervision can
+distinguish damage from an ordinary terminal error. Task cancellation alone is
+not classified as a panic.
+
 Returned terminal errors retain the graph node and its diagnostics. Unrelated
 branches and host management continue. Rejected custom control messages do not
 close the inbox. Graceful graph stop waits for an admitted data operation,

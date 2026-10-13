@@ -491,7 +491,13 @@ async fn cancelled_dispose_retains_dependencies_and_retry_finishes_in_reverse_or
     }
     assert!(!state.owner("z-root").closed.load(Ordering::Acquire));
     assert!(!state.owner("m-middle").closed.load(Ordering::Acquire));
-    state.gate_cleanup.store(false, Ordering::Release);
+    assert!(!state.owner("a-leaf").closed.load(Ordering::Acquire));
+    assert_eq!(
+        state.calls(),
+        ["open:z-root", "open:m-middle", "open:a-leaf", "close:a-leaf"],
+        "cancelling the waiter retains the original shutdown operation"
+    );
+    state.release.notify_one();
     graph.dispose().await?;
     assert_eq!(
         state.calls(),
@@ -499,7 +505,6 @@ async fn cancelled_dispose_retains_dependencies_and_retry_finishes_in_reverse_or
             "open:z-root",
             "open:m-middle",
             "open:a-leaf",
-            "close:a-leaf",
             "close:a-leaf",
             "close:m-middle",
             "close:z-root"

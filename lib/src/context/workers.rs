@@ -23,6 +23,26 @@ where
     register_owned_worker(slot, || tokio::spawn(future)).await
 }
 
+/// Registers in an already available ownership slot without suspending.
+///
+/// Intended for an owner's short registration/commit section. A busy slot is
+/// rejected before work is submitted, just like an occupied one.
+pub fn try_spawn_owned_worker<F>(
+    slot: &RwLock<Option<JoinHandle<F::Output>>>,
+    future: F,
+) -> Result<(), WorkerAlreadyOwned>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let mut slot = slot.try_write().map_err(|_| WorkerAlreadyOwned)?;
+    if slot.is_some() {
+        return Err(WorkerAlreadyOwned);
+    }
+    *slot = Some(tokio::spawn(future));
+    Ok(())
+}
+
 /// Acquires ownership before submitting blocking work to the runtime.
 pub async fn spawn_owned_blocking_worker<F, T>(
     slot: &RwLock<Option<JoinHandle<T>>>,

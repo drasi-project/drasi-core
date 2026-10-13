@@ -115,7 +115,7 @@ pub trait ComputationComponent: Send + Sync {
 }
 
 /// A constructed service or nested graph with lifecycle but no data ports.
-/// Its work is polled by the controller, not detached onto an executor.
+/// Its work runs in an independently scheduled, graph-owned Tokio task.
 #[async_trait]
 pub trait ComputationService: ComputationComponent {
     async fn run(&mut self) -> anyhow::Result<()>;
