@@ -308,6 +308,13 @@ impl ComponentFactory for NativeFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
+    fn specification_from_config(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+    ) -> anyhow::Result<ComponentSpecification> {
+        self.specification(id, configuration)
+    }
     fn record_schemas(&self) -> Vec<Arc<Schema>> {
         self.schemas.clone()
     }

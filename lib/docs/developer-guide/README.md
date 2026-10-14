@@ -2,6 +2,11 @@
 
 **Implementation snapshot: 13 October 2026 - current development checkout**
 
+The API and execution descriptions were checked against Core
+[`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8).
+For the concrete capabilities added over the older runtime, see the
+[ComponentGraph comparison](../componentgraph-vs-computationgraph.md#new-built-in-capabilities).
+
 For engineers changing Drasi itself, the separate
 [ComputationGraph maintainer's guide](../computation-graph-maintainers-guide.md)
 explains runtime design and implementation ownership.
@@ -1618,8 +1623,12 @@ repair rather than repeated construction. Overlapping individual lifecycle
 requests remain ordered; a stop can supersede a queued start with
 `StartSuperseded`. Disjoint starts/stops can progress while another owner waits
 for a lifecycle/drain boundary. Conflicting operations still reject or wait under
-their documented contract; bulk reconciliation command servicing remains a
-separate unfinished boundary.
+their documented contract. Awaited reconciliation phases service the same bounded
+command dispatcher: component and actual-resource reservations reject conflicting
+changes while disjoint lifecycle operations continue. Latest-only resource/plugin
+metadata is generation-fenced and deferred until reconciliation finishes. Broader
+combined accepted-management qualification remains open; this is not a promise
+that every arbitrary provider or non-yielding callback can be interrupted.
 Inspect returned lifecycle/deployment reports: a graph handle can exist while
 one component is CreationFailed, another is Running, and an edge is unbound.
 `OperationSummary::CompletedWithFailures` is not a successful start of every
@@ -1787,11 +1796,14 @@ impl ComputationService for Heartbeat {
 }
 ```
 
-The controller polls `run`; no worker is detached. Quiescence drops that future,
-and the default `quiesce` needs no extra action because no independently owned
-work remains. A service owning other workers must pause them in `quiesce` and
-resume them on the next `run`. This heartbeat has no durable timer contract
-and must not claim stateless recovery.
+The graph polls `run` in its owned service task, independently of the controller;
+no worker is detached. Quiescence drops the `run` future, calls `quiesce`, and
+waits for the owned processing operation to complete. The default hook needs
+no extra action here because the heartbeat owns no additional worker.
+A service owning other workers must pause them in
+`quiesce` and resume them on the next `run`. The service body must still yield:
+an infinite synchronous loop cannot be preempted by these task boundaries.
+This heartbeat has no durable timer contract and must not claim stateless recovery.
 
 Here is its complete factory:
 
@@ -2583,8 +2595,9 @@ replay while the logical query sequence remains the same.
 
 ### Bounded continuations and time-driven work
 
-A transformer returning a huge output vector can monopolize a graph poll.
-Retain pending emissions and emit bounded chunks instead:
+A transformer returning a huge output vector can monopolize its processing task
+and retain excessive pending data. Retain bounded pending emissions and emit
+bounded chunks instead:
 
 ```rust
 fn next_chunk(
@@ -2639,7 +2652,7 @@ rechecking, and hints preserve the scheduled timestamp. This is not a real-time
 deadline guarantee; deterministic scheduling-source clock tests do not establish
 all whole-query clock changes combined with persistent recovery.
 
-The runner bounds continuously ready work per node, allowing live inputs,
+The data runner bounds continuously ready work per node, allowing live inputs,
 timers and lifecycle controls to progress. Native processing runs in owned
 independent tasks, but custom component code must still yield and bound its
 work. Task cancellation cannot preempt a synchronous callback that never yields;

@@ -1,596 +1,631 @@
-# ComputationGraph: current functionality
-
-**Snapshot: 13 October 2026 development checkout**
-
-This document describes the implementation on
-`agentofreality-parallel-computation-graph` in the local drasi-core workspace,
-including its matching Server and test-framework integration. It is a development
-branch snapshot, not a statement about published packages or universal production
-readiness.
-
-## Summary
-
-**ComputationGraph is the sole runtime for DrasiLib, Drasi Server and embedded
-test-framework instances.** It owns component creation, execution, connections,
-resources, inspection and cleanup. It supports ordinary source/query/reaction
-pipelines and native graph components, including pipelines with no query.
-
-The implemented feature set includes transactional continuous queries, durable
-middleware, linear transaction containers, retained and multicast delivery,
-opt-in recovery-path validation, native plugin recovery services, and persisted
-desired-state management. Resource controls include opt-in full-envelope byte
-quotas, paged persistent history, bounded configuration receipts, snapshot cleanup
-and explicit encryption-key rotation. These are selectable capabilities, not
-guarantees automatically granted to every graph.
-
-**Acceptance, committed processing, durable publication and completed external
-effects are separate boundaries.** A deployment must select compatible sources,
-components, pipes and storage for the boundary it needs.
-
-## Runtime and component model
-
-Each DrasiLib instance owns one root ComputationGraph. Component batches join that
-graph and share its component namespace. The public `ComponentGraph` inspection
-facade is read-only; it does not own a separate registry or execution engine.
-ComputationGraph is available with default features disabled. The empty
-`computation` Cargo feature is a build-name alias, not a runtime selector.
-
-| Surface | Current behaviour |
-|---|---|
-| Ordinary APIs | Source, Query and Reaction APIs use graph-owned adapters and the shared query evaluator. |
-| Native components | Sources, transformers, sinks and portless services implement graph contracts directly. Built-in queries are transformer-shaped components. |
-| Construction | Callers can supply objects or factory specifications with implementation identity, configuration, ports and resource dependencies. |
-| Validation | Strict graph construction checks identities, cycles, schemas, ports, required connections and declared capabilities before activation. Incremental additions can retain incomplete declarations. |
-| Readiness | Acceptance, successful construction and readiness are distinct. Handles can wait for creation or startup and expose failures. |
-| Observation | Creation state, execution state and health are independent; a running instance does not imply that every component is ready. |
-| Control | Bounded command queues and separate coalescing readiness/availability notices do not wait behind data queues. Generation checks invalidate stale handles and bindings. |
-| Ownership | Components and graph-owned resources have explicit asynchronous cleanup; borrowed resources retain their external owner. |
-
-Accepted additions remain inspectable when initialization or activation fails.
-An addition can still be rejected for invalid ownership, duplicate IDs or a closed
-instance. Standard `add_source` and `add_reaction` receive preconstructed objects,
-so a caller-side constructor failure cannot appear as a graph node. Factory-backed
-declarations support construction within the managed lifecycle.
-
-Returned terminal errors, including invalid emissions, leave the failed node and
-its diagnostics inspectable while the controller and independent branches
-continue. A failed control notification does not close the inbox. Unknown errors
-default to terminal; typed causes preserve explicit retry eligibility without
-bypassing cleanup or storage fencing. Managed reconstruction has one attempt per
-explicit reconciliation request; delivery has a separate bounded attempt/delay
-policy. This is returned-error containment, not native crash isolation.
-
-Native processing loops now execute as independently scheduled, graph-owned
-Tokio tasks. Ordinary queries retain their owned QueryGraph tasks. Both models
-support a current-thread runtime; multiple independent native nodes can use
-different workers in a multithreaded runtime. Mutable work remains serialized
-per component, and a transaction container retains its ordered inner steps.
-Per-node work budgets bound continuously ready work but cannot preempt a
-synchronous callback that never yields.
-
-Owned operation/resource tasks retain joins across caller cancellation.
-Protected unwinding faults quarantine the affected generation and preserve
-independent work. Supported preparation, pipe construction, reconfiguration,
-metadata retirement and rejected-resource disposal use owned boundaries.
-Awaited reconciliation services unrelated commands under actual-domain
-reservations. Scoped force validates the complete registered physical domain,
-joins reported interrupted work and leaves untouched idle observers graph-owned.
-Cleanup does not repair generation damage; non-yielding synchronous work,
-started blocking I/O, native aborts and unsafe memory faults are not forcibly
-preemptible in-process.
-
-The new `drasi-instance-host` package runs normal DrasiLib instances in child
-processes. Native bridge sources/sinks provide explicit inter-instance data
-boundaries; the process supervisor is a separate portless service. Current
-macOS/Linux hosting has real-process hierarchy/failure/drain and selected actual
-query/merger child-crash evidence. A prepared mutual-TLS macOS/Linux-VM profile
-qualifies receipt faults, persistent reopen and independent remote ownership.
-Windows, hard kernel containment and physical production cross-machine
-qualification remain explicit gaps.
-
-## Data contracts, ordering and connections
-
-Native data boundaries carry `ChangeEnvelope`: immutable, schema-validated change
-records plus provenance, lineage and branch-local annotations. Adds, updates and
-deletes preserve operation order and distinguish full, partial and patch images.
-Fan-out shares immutable payloads. Exact schema descriptors and executable
-validators govern connections and decoding; a matching schema name alone is
-insufficient.
-
-An ordinary query has one bounded ranked inbox shared by its configured sources.
-Each producer's earlier admitted logical sequence remains ahead of its later
-work, even when timestamps move backwards. Available producer heads are compared
-by source event timestamp, query-local source order, then source sequence.
-Scheduled notifications share that queue but have a distinct kind and rank.
-This orders available work, not unseen events, and does not wait for every source
-to advance.
-
-For bounded waiting and reordering, the native
-[`SourceTimeMergeTransformer`](computation-graph-time-merge.md) accepts multiple
-source streams and emits one nondecreasing source-change-time stream. It requires
-explicit source timestamps rather than receipt time or record properties.
-Reorder allowance, maximum residence wait, optional idle timeout and count/byte
-limits are configurable. Late events fail-and-retain by default, with explicit
-separate-route or discard alternatives. Persistent mode retains its buffer,
-frontier and unconfirmed output atomically and requires durable output pipes.
-It does not claim completeness beyond the configured lateness window or repair
-already-published query state.
-
-The shared evaluator independently protects current state by source-scoped
-identity and `effective_from`. Strictly older mutations are reported and skipped;
-native input checkpoints still advance. Equal-time differences follow admitted
-order. Duplicate inserts upsert rather than double-count, inserts replace full
-properties, updates merge sparse properties, and live node/relationship identity
-collisions fail explicitly. Transactional deletion frontiers prevent stale
-resurrection after reconstruction. They do not expire automatically without a
-source-watermark/retention contract.
-
-Native query configuration identity formats 5/6 include these mutation semantics.
-Incompatible saved configurations require explicit reset/rebootstrap or a
-separately designed migration, with pending-output obligations preserved.
-
-The source's dispatch mode controls admission to the query inbox: Channel
-backpressures; Broadcast can drop arrivals when full. The query's dispatch mode
-controls its outgoing results. Source order is part of the query's configuration
-identity and cannot change invisibly underneath saved recovery state.
-
-| Connection | Behaviour and boundary |
-|---|---|
-| Bounded | Volatile FIFO with backpressure. |
-| Byte-bounded | Opt-in volatile FIFO limited by count and full serialized envelope bytes; one oversized envelope can occupy an otherwise empty pipe exclusively. |
-| Broadcast | Volatile bounded history with explicit lag handling. |
-| Ranked | Shared bounded query input with source-aware ordering and blocking or drop-newest admission. |
-| Retained | Single-consumer history with handling acknowledgement; memory or persistent storage. |
-| QoS multicast | One append to a shared channel, independent subscriber cursors, blocking or explicitly lossy retention, and optional persistent replay. |
-
-Acceptance into a queue is not completed handling. Acknowledgement-required
-connections reject acceptance-only sinks. Retained/QoS lossless capacity remains
-occupied until required consumers complete; a temporary disconnect does not
-retire a subscriber's obligation. Membership changes or explicit retirement do.
-Each acknowledged subscriber has one outstanding delivery. Neither queue
-capacity nor backpressure provides a configured events-per-second or burst-rate
-limit; there is no built-in rate-limiting pipe.
-
-Lossy QoS requires an explicit gap policy. `SkipWithNotification` logs the exact
-half-open skipped range only after cursor advancement succeeds; cancelled or
-failed advancement cannot report a successful skip. The log is diagnostic, not
-a durable audit-delivery guarantee.
-
-Fan-out to independent destinations is not atomic. Some branches can accept
-before another fails, and a slow required branch can backpressure the producer.
-Count-only bounds remain the default. `ByteBoundedPipeConfig { capacity, max_bytes }`
-also charges payloads, identifiers, metadata, annotations and lineage using their
-complete binary representation. Capacity is released on receipt, not handling.
-Separate fan-out pipes each charge the complete envelope. The oversized singleton
-exception and uncounted pending/downstream work mean this is not a process-memory
-limit. Retained stores and non-shared QoS journals also support opt-in binary-byte
-quotas, charged once per journal rather than once per subscriber. Reclaiming
-lossless history requires actual handling progress from every required consumer;
-a rejected append cannot partially prune history. An oversized record can be
-accepted only after the prior window can be removed safely. A reduced quota on
-reopen preserves existing obligations rather than deleting them.
-
-Persistent retained and QoS owners can opt into record/serialized-byte
-bounded read pages and a bounded payload cache. Startup still validates every
-record, including admission/output-replay progress and receipt consistency.
-This bounds cached payloads, not startup scan time or all metadata: optional
-journal-byte accounting keeps one size per retained record. Shared transactional
-QoS preserves a group-owned view across startup pages and refills, but still uses
-count-only admission; ranked and broadcast
-pipes remain count-bounded. Byte/page policies are resource-owner construction
-options, not automatically saved Host/Server recipes.
-
-## Continuous queries and transactional processing
-
-Cypher and GQL queries use the shared core evaluator for matching, joins,
-projection, aggregation, middleware and change detection. Queries maintain current
-result rows and produce result changes; graph composition does not introduce a
-second evaluator.
-
-`ContinuousQueryFactory` constructs a `TransactionTransformer` query body. With
-a complete atomic storage provider, indexes, source checkpoints, logical result
-sequence, materialized rows and retained output commit together. Forwarding
-confirmation is separate: a crash after commit can replay saved output without
-reevaluating the input. Logical result identity stays stable while replay
-transport sequences advance.
-
-`QueryScheduledSource` observes committed due work and emits notifications without
-deleting it. The query transaction removes actual due work, evaluates it and
-records resulting output together. A lost or duplicate notification does not by
-itself lose the persisted scheduled work. Future-deadline sleeps are capped at
-five seconds before rechecking wall-clock time; due notifications preserve the
-scheduled timestamp and use a separate increasing transport sequence. This is
-not a real-time execution deadline or a general clock-injection API.
-
-Default memory queries use direct in-memory indexes and a no-op session
-controller. Persistence requires an explicitly suitable provider; persistent
-indexes alone do not establish atomic output or replay.
-
-Two further processing arrangements are supported:
-
-- **Standalone middleware:** `MiddlewareTransformer` reuses the middleware
-  registry outside a query. Durable mode commits previous-element state, input
-  progress and pending output together. It replays unconfirmed output without
-  executing stateful middleware twice and requires compatible durable outputs.
-- **Linear transactions:** `TransactionTransformer` runs opted-in
-  `TransactionalTransformer` steps in order, with isolated step state and no
-  internal queues. State, input progress and final output share one commit.
-  Ordinary transformers are not automatically participants; sources, external
-  effects and nested transaction containers are excluded. A query uses its
-  dedicated body, not the linear-step interface.
-
-### Complete source transactions
-
-`SourceTransactionBuilder` and the complete-transaction schema can preserve a
-committed upstream transaction as one bounded input. A query explicitly enables
-`QueryExecutionSettings::source_transactions` and requires atomic publication.
-It evaluates the group under one transaction and exposes the final result changes,
-not intermediate row-by-row results.
-
-Change-count, byte and duration limits are explicit. An incomplete or rejected
-assembly cannot publish a successful prefix. Native Rust PostgreSQL, MySQL and
-SQLite implementations provide transaction-aware paths and coordinated snapshot
-options; their supported capture, retention and database features differ.
-SQLite replay captures writes through its owned native handle, not arbitrary
-external writers.
-
-This boundary is one query's processing of one source transaction. It does not
-make all downstream queries, consumers or remote effects visible atomically.
-General production packaging of these database implementations as native dynamic
-plugins is not supplied merely by the framework interfaces.
-
-## Recovery and durable delivery
-
-### Requested guarantees are checked against actual bindings
-
-`RecoveryRequirement`, `ComputationGraphBuilder::require_recovery` and
-`DesiredTopology::recovery_requirements` express opt-in requirements for a selected
-consumer boundary. Assessment includes its contributing upstream paths, ordinary
-subscriptions, component contracts, pipe policies and actual storage survival.
-It distinguishes in-memory lifetime from declared failure scopes.
-
-Checks cover acceptance, replay, committed processing and publication. Unknown
-capabilities, lossy links or mismatched progress owners cannot satisfy a stronger
-claim. Actual transaction/progress ownership matters, not matching resource names
-or paths. Requirements are checked across construction, activation and relevant
-live changes; they do not enable missing services or confer exactly-once external
-effects.
-
-### Durable admission, replay and shared storage
-
-`SourceAdmission` lets a source publish through the graph's bounded mailbox into
-its actual outgoing QoS channel. Producer sessions and consecutive client
-sequences identify requests. Matching retries return retained receipts;
-conflicting or expired retries fail. Acknowledgement follows the configured
-storage commit, not entry into a plugin's volatile queue.
-
-Output-replay receipts instead preserve a persistent component's logical output
-identity. They prevent duplicate journal appends within a bounded receipt window.
-Admission and output replay are different, mutually exclusive channel modes.
-Uncertain commits are reported as uncertain and fence the affected owner until
-cleanup and reconstruction; clients must resolve or retry the same identity.
-
-Built-in persistent queries, durable middleware and linear transaction containers
-can persist their required output destinations. Pending output cannot silently
-lose a port, subscriber or journal binding. Under the same destination identity,
-replacement configuration applies to pending work. Confirmation follows acceptance
-by all required branches, not completion of their external effects.
-
-`SharedStorageGroup` can place one built-in processing owner and participating
-QoS journals in one proven transaction domain. Producer state, input progress,
-retained output and journal appends then commit together. Capacity is reserved
-before processing; subscriber handling remains separate. The group supports one
-processor and at most 256 active journals, not transactions spanning arbitrary
-queries, storage providers or external systems.
-
-### Consumer completion and recovery policies
-
-`DeliveryRunner` records exact batch identity/content and advances the completed
-operation prefix. Failed handling leaves subsequent operations pending; retained
-input is acknowledged only after the whole batch completes. Stable operation keys
-survive replay and replacement under the same consumer identity.
-
-External handlers must report actual completion and may need destination-side
-deduplication: an effect can succeed before its local progress commit. Transactional
-handlers use a borrowed `TransactionContext` to commit business state and one
-operation's completion together. That is per-operation atomicity, not a transaction
-around the whole batch or a remote side effect.
-
-A PostgreSQL delivery handler supports effect-and-cursor commits in the destination
-database. A separate HTTP completion service validates and confirms the exact
-batch identity. Neither automatically upgrades ordinary HTTP/gRPC sinks or other
-acceptance-only plugins.
-
-Query recovery provides Strict refusal or AutoReset with supported bootstrap.
-Reaction recovery additionally permits explicit AutoSkipGap, including a changed
-query identity; this can leave external state incomplete. Source/query identity,
-generation and sequence checks prevent reuse of unrelated checkpoints. A missing
-checkpoint for one source does not authorize clearing other sources' committed
-state. Corrupt state follows supported recovery policy; storage read outages do
-not authorize treating it as empty.
-
-Coordinated bootstrap streams initial rows and commits completion with source
-watermarks. Native providers can retain bounded initialization intent in the
-query's actual storage domain. Partial loading remains incomplete; dropping a
-stream requests cancellation, and query cleanup awaits the provider's stop hook.
-Initial snapshot rows are not represented as one fictitious source transaction.
-
-## Plugin integration
-
-The host supports two independently versioned plugin families in the same runtime:
-
-| Family | Contract |
-|---|---|
-| Source/Reaction/Bootstrap | SDK ABI `0.17.0`; graph-owned adapters preserve these interfaces and their declared capabilities. |
-| Native ComputationGraph | ABI `1.0.0`, wire version `2`; direct source, transformer, sink and service factories using binary change envelopes. |
-
-Native metadata, schemas, role, capabilities and ABI layout are validated before
-use. Host-controlled poll/wake/cancel operations own scheduling; plugin buffers
-are released by their producer. Libraries remain loaded for the process lifetime.
-Native plugins are trusted in-process code, not isolated workers.
-
-The native SDK and Host implement optional transaction participation,
-graph-owned source admission, read-only committed source progress, query-owned
-bootstrap and host-owned consumer completion. Consumer completion supports
-external and transactional modes through the same `DeliveryRunner`. Revocable
-capabilities preserve actual ownership across cancellation and replacement;
-Rust storage handles do not cross the ABI.
-
-Concrete native packages include standard counter/middleware/arithmetic/capture
-components and HTTP/gRPC sources and sinks plus an SSE sink. Native HTTP/gRPC
-durable admission uses separate session/receipt protocols and an explicitly bound
-QoS service. Fast-mode ingestion acknowledges volatile admission.
-
-Native SSE consumes query envelopes directly. It is volatile and acceptance-only:
-disconnected browsers receive no retained history, and lag closes the stream so
-clients can reconnect and fetch a snapshot. Browser delivery is not a durable
-consumer-completion boundary.
-
-Framework bootstrap/progress/completion contracts have separately built native
-test-library coverage. This does not mean every production plugin implements
-them. Dynamic query-engine hosting, arbitrary resource injection, native in-place
-reconfiguration and hot unloading are not supported.
-
-## Configuration, live changes and cleanup
-
-`GraphControl::preview` and `reconcile` support revision-checked additions,
-replacement, connection changes, resource changes, restart and retry. In-place
-updates require a supporting factory. Component and binding generations prevent
-old handles from controlling replacements. Removal policies can reject dependent
-breakage, cascade, retain permitted unresolved relationships or drain a supported
-completed-handling boundary.
-
-Desired-topology commit acquires required leases and validates counters and peer
-attachments before mutation, then publishes a coherent desired/observed revision.
-Rejection cannot leave a partially committed topology; earlier draining and
-external cleanup are not rolled back. Postcommit realization failures retain a
-committed report. Resumption attempts every eligible paused producer.
-
-Graceful stop finishes admitted input, continuations, forwarding, required
-acknowledgement and active graph-owned admission writes before stop hooks.
-A drain timeout reports failure without abandoning active work. Explicit graph
-cancellation or dropping a run remains force cancellation and can require
-storage reconstruction.
-
-Resource dependencies order creation before use and cleanup after dependents.
-Failed or cancelled cleanup retains the owner and its prerequisites for retry.
-Await shutdown before releasing storage or reconstructing owners. DrasiLib
-`stop()` permits a subsequent `start()`; `shutdown()` is terminal. Dropping a Rust
-handle cannot complete asynchronous cleanup.
-
-Optional `ManagementOptions` adds registered factories, a resource resolver and
-an optional `ConfigurationStore`. Configuration persistence is off by default in
-DrasiLib. With a durable store, `apply_desired_state` commits the desired definition
-and idempotency receipt before construction or lifecycle effects. Expected
-revisions prevent lost updates; the same request ID and content resolve to the
-same receipt. Accepted but failed components remain declared and inspectable.
-Resource resolution has a 30-second deadline; custom resolvers must release
-partial acquisitions safely if cancelled. A deadline, missing secret or occupied
-port does not roll back an already accepted definition. Fix the dependency and
-reconcile the retained target rather than resubmitting unrelated state.
-
-Persisted managed instances restore accepted definitions on reconstruction and
-require configuration changes through the desired-state API. Missing factories
-or providers do not turn the definition into an empty graph. Supplied opaque
-objects are not automatically restorable. Configuration snapshots preserve
-factory definitions and explicit provider recipes; named snapshots and restoration
-are available through the Rust management API.
-Missing or incompatible implementations remain visible as restoration failures;
-damaged records and unsupported persisted versions fail explicitly, not as empty
-configuration. Cancelling restoration or a storage-call waiter does not release
-the configuration lease while reconciliation, storage I/O or cleanup still owns it.
-
-The external redb configuration store encrypts definitions, receipts and snapshots
-using a host-supplied key and supports isolated instance namespaces. It is separate
-from indexes, event journals and consumer progress. Restoring a configuration
-snapshot does not rewind processing state or external effects. Opt-in bounded
-receipt batches use generated IDs and explicitly reject expired retries; default
-stores retain arbitrary IDs indefinitely. Bounded snapshot listing and
-revision-conditional deletion support manual cleanup. Atomic live-record key
-rotation requires closed configuration sessions and externally retained old/new
-keys; it is not secure erasure of old pages or backups.
-
-Persistent recovery-domain changes are guarded before acceptance. Supported
-lossless retirement requires successful component stop/cleanup and verified drain
-under actual ownership gates. Unknown acceptance retains those gates until
-authoritative resolution. Explicit, revision-bound loss permission allows removal
-of complete named domains, not partial removal or in-place reset/reuse. It does
-not delete data, mark work handled or undo external effects.
-
-**A durable configuration commit is not an all-or-nothing deployment.** Creation,
-startup or cleanup can leave a partially realized target with visible failures.
-There is no automatic processing-state migration.
-
-## Server, inspection and operational surfaces
-
-Server supports native topology declarations, resource recipes and ordinary
-components in one instance. Recipes include query indexes/catalogs, middleware,
-QoS, shared storage, source progress, native bootstrap and native consumer
-resources. Built-in native queries participate in ordinary query inspection,
-result and supported lifecycle APIs. A connected query-results outlet/catalog
-provides ordinary reaction and attach-stream integration; direct native edges
-do not need that adapter path.
-
-Under `/api/v1/instances/{instanceId}/computation`, Server exposes:
-
-| Surface | Available operations |
-|---|---|
-| Inspection and export | `GET /`, `GET /configuration` |
-| Imperative components | `POST /components`, `DELETE /components`, `POST /start`, `POST /stop` |
-| Managed configuration | `GET /desired`, `PUT /desired`, `GET /receipts/{requestId}`, `GET /management`, `POST /reconcile` |
-
-Server's opt-in `configurationStore` uses encrypted redb and a provisioned key
-file. YAML seeds the definition only for an uninitialized instance; the accepted
-stored definition is authoritative thereafter. Managed mutations return a durable
-acceptance receipt before readiness. Imperative configuration changes are rejected
-for persistently managed instances. Server does not expose every low-level Rust
-graph operation or the complete named-snapshot management API.
-
-Ordinary configuration-file persistence and cloning preserve reconstructible
-native declarations and recipes. Clone disables auto-start and does not copy
-external processing storage. Opaque bindings without reconstruction recipes are
-rejected. Solution templates select ordinary source/query/reaction components.
-
-Inspection includes the root graph, nested query graphs, component states,
-connections, reported resources and exact plugin references. Resource dependency
-links describe ownership/bindings, not proof of per-event usage. Private plugin
-resources require explicit reporting. Each graph publication is coherent, but
-combined observations of running graphs are not one global transaction.
-
-Topology-as-data excludes configuration values, resolved secrets and failure
-messages. Full configuration exports are privileged and can contain secrets;
-Server's `no-store` responses are not access control. Logs, metrics, bounded
-inspection history and profiling support diagnosis. Profiling intervals include
-waiting and are not pure CPU measurements.
-
-## Performance and qualification boundaries
-
-Memory-only execution does not require durable admission, delivery ledgers,
-shared-storage journals or configuration persistence. Those services are opt-in.
-Independent native nodes and ordinary query scopes can use multiple Tokio
-workers. That is not a measured production scaling promise. Serialization, adapters, storage,
-network delivery and slow consumers remain workload-dependent costs.
-
-The selected independent-execution reference is now qualified on the final
-runtime source: eight native CPU-heavy queries, 5,000 inputs, window 32 and
-three interleaved repetitions achieved 1.926x two-worker and 3.478x four-worker
-median throughput against one worker. Full-process CPU use was 1.971/3.711 cores.
-The actual evaluator's 256-step reduction and an independent arithmetic oracle
-verified 480,000 measured results across twelve processes, including
-current-thread correctness. See the
-[execution/isolation checkpoint](computation-graph-execution-isolation-plan.md#current-checkpoint---13-october-2026)
-for exact build/provenance and limits. These are approved local reference
-targets, not universal linear scaling or production latency SLOs.
-
-The repository includes an [ordinary fast-path benchmark](../examples/fast_path.rs),
-a [native Host benchmark](../../components/host-sdk/examples/native_fast_path.rs)
-and a [measurement driver](../tests/measure-fast-path.py). These distinguish
-in-process query work from native-plugin work; neither establishes a general
-Server throughput or latency guarantee.
-
-An additional [core workload](../examples/core_workload.rs) and
-[matrix driver](../tests/measure-core-workloads.py) compare in-process ordinary
-and native projection, aggregation and synthetic joins with multiple queries,
-payload sizes, windows and runtime flavors. Native aggregation also has a real
-RocksDB workload. The local evidence contains 192 projection/aggregation runs,
-96 join runs and 48 persistent runs, with every measured result verified.
-These compare complete pipeline paths, not isolated schedulers; persistent
-throughput does not by itself establish crash recovery.
-
-Focused release qualification also covers 72 projection/aggregation/join runs
-and 12 persistent runs with 4 KiB payloads, window 32, one/four queries and both
-runtime flavors. Independent oracles verify 1,830,000 measured results.
-The ordinary fast-path comparison uses seven interleaved repetitions per window:
-median throughput is within 1.3% of the preserved control binary and allocation
-counts are effectively unchanged. Full-envelope FIFO budgeting adds about
-32 allocated bytes per input in that workload, not another allocation. These
-are local measurement results, not a zero-overhead or universal capacity claim.
-
-An [isolated resource soak](../examples/core_resource_soak.rs) checks 1,024
-create/start/stop-or-cancel/dispose cycles per runtime after 64 warmup cycles.
-Its replacement mode holds 16 services with real temporary files and loopback
-listening sockets, replacing 64 services per graph. Both runtimes completed
-87,040 file/socket owner pairs, starts and stops, including warmup. Every
-post-disposal sample returned to 14 process descriptors and zero Tokio tasks;
-live Rust bytes remained exactly flat at 54,412 (current-thread) and 60,756
-(two-worker), with zero measured growth slope. This is a scoped lifecycle
-fixture, not a process-RSS bound or a many-day production leak guarantee.
-
-Executable coverage includes schema/connection matrices, current-thread and
-multithreaded execution, ordering, transaction rollback, scheduled work, partial
-fan-out, corrupt storage, cancelled cleanup, live replacement and process crashes.
-Native Host and Server tests exercise actual separately built libraries,
-bootstrap reconstruction, consumer completion, uncertain commits and persisted
-retirement. Bounded core churn additionally checks multi-hop fan-out replacement
-and dependent-resource release over 128 cycles on each runtime flavor, including
-failed cleanup and retry. Persistent timer-burst cases on both runtimes schedule
-256 entries, cancel 64, reconstruct, and verify the remaining 192 results exactly
-once without advancing the 320-entry live-input frontier.
-
-Additional core resilience evidence is bound into the executable
-[contract inventory](../tests/runtime_parity/computation-contracts.tsv):
-
-| Area | Checked boundary |
-|---|---|
-| Managed resources | Real post-bind constructor timeout, external port contention, process exit before/after listener replacement, persistent cleanup failure, cancelled restoration and stale lease owners. Accepted intent remains available for retry. Full-queue handover runs 64 cycles per scenario on both runtimes. |
-| Configuration storage | Real redb I/O barriers serialize snapshots and commits despite cancellation. Missing secrets/providers/versions and damaged encrypted configuration, receipt and snapshot records fail explicitly without replacing intent or releasing another owner's lease. |
-| QoS | 128 seeded schedules execute 131,072 ledger-checked actions. Sixteen-member persistent fan-out verifies 2,048 exact deliveries and 2,048 cancelled admissions per runtime through eight disconnection/rebinding cycles. Membership process crashes and rejected capacity shrink preserve the exact pending obligations. Successful skip diagnostics follow confirmed cursor advancement, not cancelled attempts. |
-| Query transactions | Failures after actual scheduling push/remove/pop mutations roll back across native/legacy RocksDB and direct/transaction-body query entrypoints. Interrupted transaction replacement retries rolled-back input or replays committed output without repeating completed step evaluation. |
-| Mixed sources and timers | Grouped synthetic joins match an independent oracle with reversed timestamps, alternating source arrival and eight reconstructions per runtime. Scheduling-source tests control forward/backward wall-clock jumps without changing due timestamps or popping work. |
-| Responsiveness | With eight permanently ready producers and a 4,096-entry timer burst, both query branches progress in eight trials per runtime. Every live producer appears in actual results. The executable graceful-stop regression guard is two seconds, not a production latency promise. |
-
-These are scoped contracts, not proof for every plugin, backend, failure
-combination or sustained production workload.
-
-An earlier local 28-profile compatibility checkpoint passed with 7,393 successful test
-executions, including separately built plugins and real container-backed
-database checks through Podman's Docker-compatible API. Its 29 ignored entries
-are explicit worker/diagnostic/quarantine exceptions, not silently omitted
-tests; worker exceptions require their crash drivers to pass. Test executions
-include repeated cases across feature profiles, not 7,393 distinct scenarios.
-The final independent-execution checkpoint separately passed 1,685 cases each
-with default/no-default features, 1,838 with extra capabilities, 143 selected
-native integration cases and 448 Server unit/selected integration cases.
-Actual macOS/Linux Host, prepared VM network, query/merger child faults and
-rebuilt live/browser demos have their own stated evidence. This refresh does not
-claim a new full connector matrix or close unrelated release qualifications.
-The broader [qualification ledger](../tests/runtime_parity/requirements.tsv)
-remains at 20 covered, 23 partial and five unqualified contracts; the full
-replacement-qualification claim is not met. Remaining core evidence includes
-broader bootstrap/retention/writer failure combinations, whole-query
-clock/persistence combinations and production-duration persistent workloads.
-
-The main boundaries when adopting the functionality are:
-
-- **Recovery must be configured and supported end to end.** A durable index or
-  journal cannot repair an unreplayable source or an acceptance-only destination.
-- **Exactly-once external effects are destination-specific.** No general graph
-  setting makes arbitrary remote effects transactional.
-- **Whole-source-transaction visibility stops at its declared processing boundary.**
-  Downstream branches and per-operation consumers can become visible separately.
-- **Processing retention and replay receipts are bounded.** Expired receipts or unavailable
-  history fail explicitly; unlimited disconnected retention is not promised.
-- **Reconstruction needs real recipes and stable identities.** Opaque objects,
-  storage migration and arbitrary provider replacement are not inferred.
-- **Plugin adoption and operational qualification remain selective.** Framework
-  capability does not establish connector feature parity or deployment capacity.
-- **Containment is scoped, not universal.** Protected task/SDK unwinds quarantine
-  damaged generations. Non-yielding synchronous callbacks and started blocking
-  I/O cannot be forcibly preempted; native aborts and unsafe memory faults require
-  an actual process boundary. Current child-host evidence is Unix-specific,
-  not a hard resource sandbox or complete cross-platform qualification.
-
-## Implementation and further reading
-
-For the design rationale, execution model and code navigation behind this
-snapshot, see the [maintainer's guide](computation-graph-maintainers-guide.md).
-
-| Area | References |
-|---|---|
-| Runtime and contracts | [Design](computation-graph-design.md), [schemas/ports/pipes](computation-graph-schemas-ports-pipes.md), [graph implementation](../src/computation/v1/graph.rs) |
-| Query and transaction boundaries | [Transaction guide](computation-graph-transactions.md), [query factory](../src/computation/v1/query.rs), [source-transaction tests](../tests/computation_source_transactions.rs) |
-| Recovery and delivery | [QoS guide](computation-graph-qos.md), [path assessment](../src/computation/v1/graph/recovery.rs), [recovery-contract tests](../tests/computation_recovery_contracts.rs) |
-| Native plugins | [SDK](../../components/computation-plugin-sdk/README.md), [network components](../../components/computation-plugins/network/README.md), [Host implementation and tests](../../components/host-sdk/src/computation) |
-| Managed configuration | [Management guide](managed-configuration.md), [resource-lifecycle tests](../tests/computation_resource_dependencies.rs), [Server configuration and API](https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/docs/plugin-architecture.md) |
-| Using the library | [Rust developer guide](developer-guide/README.md), [usage](computation-graph-usage.md), [configuration](computation-graph-configuration.md), [API reference](computation-graph-reference.md) |
-| Qualification | [Current evidence and boundaries](computation-graph-backlog.md#current-compatibility-gate), [foundation runner](../tests/run-computation-foundations.sh), [full compatibility runner](../tests/run-runtime-parity.sh) |
+<a id="computationgraph-current-functionality"></a>
+<a id="componentgraph-vs-computationgraph-capabilities-and-limits"></a>
+
+# ComponentGraph and ComputationGraph: what changed, what was fixed, and what is unfinished
+
+**Development snapshot: 13 October 2026.**
+
+This compares the older ComponentGraph-based runtime at Core
+[`261b8d40`](https://github.com/drasi-project/drasi-core/commit/261b8d40d35ce203a7f4aaae0028956d76a8def4)
+with the current ComputationGraph code at Core
+[`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8)
+and Server
+[`f15706d`](https://github.com/drasi-project/drasi-server/commit/f15706d0d65c5c829c0a653c0d977f4cad617d6a).
+The `ComponentGraph` type still present today is a read-only view, not the old
+execution system being compared. Here **native** means a component using the
+newer processing/plugin interface, not merely code compiled for the local
+machine.
+
+This is not a published-release announcement. Code, recorded tests and
+unverified claims are distinguished below. This is a source-and-evidence review,
+not a fresh rerun of every test suite. The previous claim that the entire
+execution-and-isolation work package was complete was too strong: the full
+deadline policy and graph-size publication requirement remain unresolved.
+The [current work inventory][remaining] records those and the other limits.
+
+## In plain English
+
+<a id="summary"></a>
+
+ComputationGraph lets an application build a processing pipeline from separately
+managed steps: read data, validate or change it, run queries, save results and
+send them elsewhere. It can run steps without a query, keep selected work safe
+through restart, manage their resources, and run normal DrasiLib instances in
+separate processes when crash isolation is needed.
+
+There are three different achievements:
+
+- **More ways to build applications:** reusable processing steps, explicit
+  delivery choices, saved native definitions and connected child instances.
+- **Fixes to real problems:** several older input, recovery and shutdown paths
+  could lose work, use stale state or report cleanup more confidently than the
+  code justified.
+- **Clearer limits:** receiving an input, saving it, processing it and finishing
+  an external action are different events. A guarantee at one step is not a
+  guarantee that the entire application finished exactly once.
+
+The old runtime already had continuous queries, transactions and recovery.
+ComputationGraph did not invent those. Some work preserved existing behavior;
+some generalized it; some corrected bugs.
+
+## What the old runtime already did
+
+<a id="existing-capabilities-that-are-not-new"></a>
+
+The inspected ComponentGraph version already had:
+
+- A shared component registry, dependency information and lifecycle status.
+- Sources, continuous Cypher/GQL queries, reactions, middleware and initial
+  snapshots.
+- Independently running query workers, including use of multiple CPU workers.
+- Persistent indexes, saved source positions, current-result snapshots and
+  saved outgoing results, usually called the **outbox**.
+- Supported query transactions that saved index changes, source progress and
+  outgoing results together.
+- Replay, consumer recovery, credentials, provider integration, logs and metrics.
+
+It also already signalled due timer work without removing it; actual timer
+processing/removal happened in the query transaction. That particular behavior
+must not be advertised as a newly fixed old-runtime defect.
+
+Evidence is in the old [registry][old-registry],
+[query manager and transaction staging][old-query],
+[result/outbox state][old-output] and [timer source][old-timers].
+
+## Existing features that had bugs or incomplete failure behavior
+
+These are problems in the inspected old implementation, not claims that all old
+queries or transactions were broken. Each entry explains what changed and the
+limits of the evidence. Later ComputationGraph-only bugs are not relabelled as
+old ComponentGraph defects.
+
+### A storage read error could trigger deletion of valid recovery state
+
+**Old problem:** if reading a saved query configuration hash failed, the old
+query manager could enter a “clear persistent state and start fresh” path.
+A read error is not evidence that the configuration changed or that saved work
+may safely be discarded.
+
+**What changed:** current query recovery propagates that read error instead of
+using it as permission to reset. A deployment must fix the storage problem or
+take an explicit supported recovery action.
+
+**Evidence and limits:** the [old error branch][old-hash-error] and
+[current recovery code][query-code] show the change. This review did not locate
+a standalone current regression that injects this exact configuration-hash
+read error. Broader passing recovery tests are not proof of that particular
+trigger. The missing explicit evidence belongs in [CW-39][cw39], not a claim
+that the code change is absent.
+
+### Timestamp sorting could skip an input that had never been processed
+
+**Old problem:** the query queue sorted all available events by timestamp before
+source sequence. If a source's later event had an earlier timestamp, it could
+be processed first. The saved input position then advanced past an earlier
+event, and the replay filter could discard that earlier event as “already
+processed.” This could lose a different row's change, not merely reorder two
+equivalent updates.
+
+**What changed:** supported queues preserve each producer's input order and
+compare the next available events from different producers. A backward clock
+cannot move the saved position past still-unprocessed input from that producer.
+
+**Evidence and limits:** compare the old [queue ordering][old-ordering] and
+[sequence filter][old-dedup] with the current [queue implementation][ordered-queue]
+and [query input code/tests][ranked-input]. The focused
+[backward-timestamp regressions][ordering-tests] check that both source rows
+and reaction operations are processed rather than skipped. This fixes the
+already-queued input ordering problem. It does not promise to wait for every
+unseen earlier event from every source; bounded source-time reordering is a
+separate capability below.
+
+### Repeated inserts could count the same row more than once
+
+**Old problem:** the shared evaluator handled an Insert as a new contribution
+without first applying the current replacement rules for an already present
+identity. Re-delivering an insert under a new input sequence could therefore
+produce incorrect aggregates even though the index ultimately held one row.
+
+**What changed:** an insert for an existing identity replaces that row and
+adjusts its previous contribution. An identical insert is a no-op; a changed
+insert updates rather than double-counting it.
+
+**Evidence and limits:** [old Insert processing][old-mutations] versus the
+current [duplicate/upsert tests][mutation-tests] and
+[persistent independent model][persistent-mutations]. This is a shared evaluator
+fix used by native queries, not a new aggregation feature.
+
+### Old updates or deletes could undo newer data; deleted rows could reappear
+
+**Old problem:** the evaluator used the incoming change without the current
+source-time checks. After a delete, it also lacked the current saved deletion
+history needed to reject an older insert after reconstruction.
+
+**What changed:** strictly older mutations are reported and ignored while input
+progress still advances. Deletion history is saved in the supported query
+transaction, so a late old insert cannot resurrect a deleted row after restart.
+Equal-time differences follow admitted order.
+
+**Evidence and limits:** [old mutation processing][old-mutations],
+[current evaluator tests][mutation-tests] and [RocksDB reconstruction tests][persistent-mutations]
+cover the stated rules, rollback and saved positions. This is not a global
+ordering guarantee or permission to expire deletion history arbitrarily.
+
+### A node and relationship could reuse one live identity without the current check
+
+**Old problem:** old mutation/index code could replace the object stored under
+an identity without the current explicit rejection of a live node/relationship
+kind conflict. Such replacement could leave the graph different from what the
+caller intended.
+
+**What changed:** conflicting Insert or Update requests fail before modifying
+the existing object.
+
+**Evidence and limits:** [old evaluator][old-mutations],
+[old in-memory replacement][old-element-replacement] and the
+[current cross-kind tests][mutation-tests]. The tests check both directions.
+This is about a conflicting live identity, not a ban on recreating a properly
+deleted object.
+
+### Stopping a query could lose the ability to wait for its real worker
+
+**Old problem:** common query stop removed the worker handle before waiting.
+Cancelling that wait could discard the handle while the task still existed.
+On timeout it requested task abortion without then proving the task had ended,
+and could return success and mark the query stopped. That is not proof that
+processing, transactions or resource use finished.
+
+**What changed:** tracked graph work remains owned while a caller stops waiting.
+Graceful stop waits for admitted processing and its required handoff. An explicit
+force request is different from a successful graceful stop; interrupted owners
+may require reconstruction.
+
+**Evidence and limits:** [old stop code][old-query-stop],
+[owned work][execution], [cancelled-worker tests][worker-tests],
+[graceful-stop tests][graceful-tests] and [native execution tests][task-tests].
+These establish named supported paths. Arbitrary private plugin threads are
+not automatically controlled; the complete deadline policy is still [CW-06][cw06].
+
+### A failed stop could prevent retry, while final shutdown hid stop failures
+
+**Old problem:** instance stop cleared its running flag even after failure;
+a subsequent stop rejected the already-stopped instance. Final shutdown logged
+stop errors and continued toward a successful return. Callers could lack a
+truthful, retryable account of resources still in use.
+
+**What changed:** current instance cleanup retains member failures and unfinished
+ownership for retry. A failed component is not silently removed or considered
+repaired just because a stop attempt was made.
+
+**Evidence and limits:** [old instance stop/shutdown][old-instance-stop] and
+[current instance cleanup tests][instance-tests], including failed stop and
+cancelled shutdown. This does **not** close every cleanup problem: management
+store close/open cases remain in [CW-08][cw08].
+
+### Why these fixes matter to transactions
+
+The old transaction support was real: participating query state, input progress
+and output could share a commit. But an atomic commit cannot correct a queue
+that selected the wrong input, a recovery path that deletes valid history, or
+a stop path that claims work finished without waiting for it.
+
+The fixes above improve those surrounding behaviors. New transaction and
+delivery options below extend the set of things that can participate; they do
+not turn arbitrary external services into one distributed transaction.
+
+### Not every fix during the migration was a defect in ComponentGraph
+
+Some work restored source recovery, result access or consumer behavior while
+moving execution to ComputationGraph. That is necessary preservation work,
+not evidence that the old runtime never supplied those capabilities.
+
+Likewise, new graph reconciliation, multicast journals and native receipt
+protocols had their own bugs and follow-up fixes. Their repair should not be
+counted as repairing a feature that existed in the old runtime. Shared query
+edge cases still tracked in [CW-12][cw12] and [CW-13][cw13] are not claimed fixed
+by this comparison.
+
+## Things applications can now do
+
+<a id="new-built-in-capabilities"></a>
+<a id="runtime-and-component-model"></a>
+
+Here **new** means supplied directly by the framework, not something impossible
+for an application to have built itself before. Some entries generalize old
+query-specific behavior into reusable processing components.
+
+### Build a useful pipeline without inventing a query
+
+Connect input to validation, normalization, enrichment and output steps, adding
+queries only where needed. Background services can run alongside them without
+pretending to produce data. The old built-in pipeline model centered on sources,
+queries and reactions; it did not supply this general managed processing model.
+
+### Give each input and output a checked data format
+
+Components can have named inputs/outputs with explicit record formats.
+Incompatible connections and records that fail the declared checks are rejected.
+Different branches can attach their own context without modifying shared data.
+Old schema-discovery metadata was not the same as executable checks over
+arbitrary processing links.
+
+### Run reusable preprocessing once, with saved state and output
+
+For example, normalize customer records before sending them to several queries.
+Supported durable middleware saves its state, input position and unfinished
+output together. Restart can resend saved output without running already
+committed preprocessing twice. Old middleware existed inside queries, not as
+this independently connected, recoverable stage.
+
+### Commit a sequence of stateful processing steps together
+
+A supported transaction container runs opted-in steps in order and commits their
+state, input progress and final output together. It has no separate internal
+queues. Old atomic query evaluation already existed; the reusable ordered
+processing container is new. Ordinary arbitrary components, remote effects and
+nested transaction containers do not automatically participate.
+
+<a id="complete-source-transactions"></a>
+
+### Process a complete upstream transaction as one query input
+
+A stock transfer may update two rows. Opted-in complete-source-transaction input
+lets one supported query process both under one transaction and publish final
+results rather than the intermediate half-transfer. The old input model supplied
+individual changes even when their original database transaction was larger.
+Explicit count, byte and duration limits apply; initial snapshot rows are not
+pretended to be one database transaction.
+
+<a id="data-contracts-ordering-and-connections"></a>
+
+### Wait a bounded time to combine streams by source time
+
+The source-time merger can hold input within configured lateness, residence and
+size limits, then emit a nondecreasing source-time stream. Late input has an
+explicit fail, separate-route or discard policy. Its optional saved form survives
+restart. Old queues ranked available events; they did not supply this reusable
+waiting stage. It cannot prove that unseen older input will never arrive.
+
+### Choose delivery behavior separately for each connection
+
+One connection can be a small volatile queue; another can retain saved history
+until handling completes. Selected connections also support full-message byte
+limits and bounded persistent read caches. Old specialized queues/logs/outboxes
+existed, but arbitrary processing links did not expose this common choice.
+Queue size is not an events-per-second limit or a total-process memory cap.
+
+### Save one message for several consumers and keep each consumer's obligation
+
+For example, accounting and alerts can read one saved message history while
+acknowledging independently. A required consumer temporarily disconnecting does
+not release its outstanding work. Lossless mode keeps the message until every
+required consumer finishes. The old specialized fan-out was not this general
+saved multicast service with explicit membership and positions.
+
+<a id="durable-admission-replay-and-shared-storage"></a>
+
+### Resolve a lost input reply without submitting the input twice
+
+With durable input receipts enabled, retrying the same producer request and
+content can recover its saved acceptance result. A conflicting or expired retry
+fails instead of silently becoming fresh input. Source logs and saved source
+positions already existed; this reusable input-session/receipt protocol is new.
+It proves the selected input save, not completion of the entire application.
+
+### Resend committed output without adding it twice to the next saved queue
+
+Supported output replay receipts recognize a previously accepted logical output
+while its receipt remains saved. Pending output also retains its required
+destinations through supported replacement. Old query outboxes already replayed
+output; the new service extends duplicate prevention to explicit native
+processing-to-journal handoff. Receipt storage is bounded.
+
+### Include selected outgoing message journals in the processing commit
+
+When the actual storage supports it, one processing owner and selected outgoing
+queues can save their changes in one transaction. This avoids a separate
+processing-to-queue save for that arrangement. It generalizes old query
+state/checkpoint/outbox commits; it is not a transaction over arbitrary queries
+or databases. The current shared group supports one processor and up to 256
+active journals.
+
+<a id="consumer-completion-and-recovery-policies"></a>
+
+### Record which destination operations really finished
+
+A supported consumer can save the completed prefix of a result batch and resume
+the rest after failure. For a transactional local handler, one business change
+and its completion record can commit together. For a remote handler, stable keys
+can support destination-side duplicate prevention. Old consumer recovery existed;
+this is a reusable native per-operation completion service, not universal
+exactly-once remote delivery.
+
+<a id="requested-guarantees-are-checked-against-actual-bindings"></a>
+
+### Check whether the whole selected path can provide the requested recovery
+
+An application can request a recovery guarantee at a consumer and have the
+framework inspect upstream components, delivery choices and actual storage
+owners. An unknown capability or lossy connection cannot satisfy a stronger
+claim. Matching resource names do not prove shared transactions. The old
+specialized pipelines did not provide this check over arbitrary native paths.
+The check rejects inadequate setups; it does not create missing durability.
+
+<a id="configuration-live-changes-and-cleanup"></a>
+
+### Save native pipeline definitions and make changes with revision checks
+
+Supported definitions describe how to recreate components and resources.
+Configuration requests can be saved with retry receipts before construction;
+failed accepted components remain declared and inspectable. Unrelated commands
+can progress during selected slow updates. Old registration/configuration and
+graph metadata transactions existed, but not this general native reconstruction
+and managed-change system. Saving a definition is not proof it started.
+
+### State who owns a resource and when it may be released
+
+Graphs distinguish application-owned resources from resources they must shut
+down themselves. Dependencies order creation and cleanup. Reported actual
+providers and native connections are inspectable; replacement checks can retain
+storage until its users finish. This generalizes old provider references.
+Private plugin resources still need a real ownership/reporting mechanism.
+
+### Explicitly clean up saved configuration records and rotate encryption keys
+
+The redb configuration store supports bounded retry-receipt housekeeping,
+revision-checked deletion of named snapshots and atomic rotation of live records
+to a new key. These operate on the new saved-definition service, not query
+processing history. Deleting a configuration snapshot does not rewind results;
+rotating live records does not re-encrypt old backups or securely erase old pages.
+
+### Send a neighboring component control information without using its data queue
+
+Authorized components can exchange readiness and application signals separately
+from data capacity. A handle for an old connection cannot control its replacement.
+Old lifecycle/status events existed; this general native neighbor-control
+service is new. Handler failure is recorded without permanently closing control.
+
+<a id="plugin-integration"></a>
+
+### Use native processing plugins with tracked execution and failures
+
+Native plugins can provide sources, transformation steps, sinks and background
+services. The framework tracks supported work, keeps failed nodes visible and
+prevents reuse of an object damaged by a catchable panic. Independent native
+steps can run on different CPU workers. Old plugins and multicore query workers
+already existed; native roles and their graph-owned supervision are the change.
+The native interface is ABI 1.0.0/wire 2; the older SDK remains independently
+versioned at 0.17.0 while migration proceeds.
+
+### Put a risky plugin in another normal DrasiLib process
+
+The new host can own normal child/grandchild DrasiLib processes and connect them
+using explicit native input/output links. The parent need not load the child's
+plugin code. Separate data and control paths support bounded queues, saved
+receipts and local or mutual-TLS links. Previously an application could arrange
+processes itself, but the framework did not supply this ownership/link system.
+Current recorded evidence is macOS/Linux, not Windows or a security sandbox.
+
+## What a transaction or acknowledgement actually promises
+
+<a id="continuous-queries-and-transactional-processing"></a>
+<a id="recovery-and-durable-delivery"></a>
+
+For a supported atomic query, index changes, saved input progress, result
+identity, current result rows and outgoing saved results commit together.
+A failure after that commit can resend saved output without evaluating the
+input again.
+
+That does not mean the destination finished. There are four separate questions:
+
+1. Did Drasi receive the input?
+2. Was the input durably saved?
+3. Did processing commit its state and output?
+4. Did each destination actually complete its work?
+
+A queue acknowledgement, HTTP 202 or input receipt answers only its documented
+question. Arbitrary fan-out can partially succeed. Several queries can publish
+at different times. An external effect may succeed before its local completion
+record is saved, so the destination may need a stable duplicate-prevention key.
+Supported transactional consumers narrow that risk only for participants in
+their actual transaction.
+
+PostgreSQL delivery and exact-batch HTTP completion reference services exist.
+They do not automatically upgrade every HTTP/gRPC sink. Likewise, native Rust
+PostgreSQL/MySQL/SQLite source paths provide selected complete-transaction and
+snapshot behavior, but do not imply all are packaged as production native
+dynamic plugins. SQLite capture observes writes through its owned native handle,
+not arbitrary external writers.
+
+Recovery must work across the actual source, processor, links, storage and
+destination. A persistent index alone cannot recover input a source can no
+longer replay. Missing history must fail or follow an explicitly selected
+reset/skip policy, not silently look like successful catch-up.
+
+## Changing, stopping and rebuilding a pipeline
+
+Saving an accepted configuration means “this is now the requested definition,”
+not “every component is running.” Missing factories, unavailable secrets,
+occupied ports or failed startup remain visible. A client can resolve an
+uncertain configuration reply using the same request identity.
+
+The current graph can preview revision-checked changes, replace components and
+connections, and manage supported resource changes. It checks internal commit
+prerequisites before changing live membership. External stop/cleanup effects
+cannot be undone as if deployment were one database transaction.
+
+Normal stop drains supported admitted work. A timeout is not automatic force.
+Explicit force can interrupt an eligible complete registered resource-sharing
+group and require fresh runtime objects afterward. Cleanup does not repair a
+panicked object or erase pending outputs.
+
+Saved definitions need real reconstruction instructions. An opaque Rust object
+is not automatically rebuildable. Restoring a configuration snapshot does not
+restore old processing data or undo external effects. Supported retirement of
+storage checks stopped users and pending work; an explicit loss permission is
+not permission to delete data, mark it handled or reuse an unsafe owner.
+
+Separate time limits for each startup/cleanup step, each component or resource
+owner, and the whole shutdown are still unfinished ([CW-06][cw06]).
+Management-store close/open problems remain ([CW-08][cw08]).
+These are current implementation gaps, not just a statement that more tests
+would be desirable.
+
+## What Server and operators can use today
+
+<a id="server-inspection-and-operational-surfaces"></a>
+
+Server can read native graph state/configuration, add/remove/start/stop
+components, accept saved desired definitions, return receipts and reconcile
+them. These operations are under
+`/api/v1/instances/{instanceId}/computation`. Supported native resources include
+query storage, result catalogues, saved queues and native recovery services.
+The encrypted configuration store is opt-in; saved accepted state takes
+precedence over an obsolete startup seed.
+
+Snapshots, saved query results and live subscriptions have implementations.
+Live access needs an actual connected result output and catalogue. Merely
+creating a native processing query does not make that wiring appear in every
+assembly. Completing standard reconstruction/wiring is [CW-43][cw43].
+Named configuration snapshots are available through Rust management APIs;
+Server does not expose every low-level operation.
+
+The full native-only Server/plugin/UI migration is **not complete**
+([CW-44 through CW-47][migration]). Native network plugins still lack some
+required templates, batching and snapshot/recovery replacement behavior.
+Native gRPC currently accepts only a batch size of one. Explicitly rejecting
+an old supported option is safer than silently ignoring it, but is still a
+missing replacement feature.
+
+Inspection shows components, connections, reported resources and failures.
+Public topology data excludes secrets and detailed failure messages. Privileged
+configuration exports can contain secrets; a `no-store` HTTP header is not
+access control. Logs and profiling help diagnosis, but profile time includes
+waiting and is not pure CPU time.
+
+## What has been demonstrated, and what has not
+
+<a id="performance-and-qualification-boundaries"></a>
+
+### Implemented and tested on specified paths
+
+Recorded runs include exact query/transaction outcomes, saved queues and
+receipts, cancelled cleanup, failed replacement, native-library failures and
+actual process death with storage reopen. Protected test names and their
+specific checks are listed in the [test inventory][contracts].
+
+The local independent-execution reference used eight CPU-heavy native queries,
+5,000 inputs and three repetitions. It checked 480,000 results, including
+single-thread correctness. Median two/four-worker throughput was 1.926/3.478
+times the one-worker result, with measured CPU overlap. This meets the selected
+reference targets; it is not a universal scaling or production-latency promise.
+[Workload tools][workloads] and an isolated [resource soak][resource-soak]
+provide additional bounded evidence, not a many-day leak guarantee.
+
+Normal child/grandchild hosting has real-process macOS/Linux tests. Selected
+query-reset and merger crashes reopen real RocksDB storage. A prepared
+macOS/Linux-VM mutual-TLS test checks lost/delayed replies, version/authentication
+rejection, exact outputs and persistent reopen. That is useful network evidence,
+not qualification of every physical-machine failure or production partition.
+
+### Existing code with incomplete wider evidence
+
+The [48-row test ledger][requirements] remains at 20 covered, 23 partial and
+five unqualified named scenarios. These are not feature-completion counts.
+Additional evidence is needed for combined initial-loading/history/write
+failures, whole-query clock changes with persistent restart, prolonged outages,
+plugin versions/lifetimes and complete Server workflows.
+
+An earlier 28-profile compatibility run and the later selected execution tests
+are different checkpoints. Neither should be described as a freshly repeated
+full current-binary connector matrix. Nor do passing selected GPU/browser/restart
+checks close the GPU lab's still-rejected full transaction-completion acceptance.
+
+### Known unfinished implementation
+
+The complete startup/shutdown deadline policy is [CW-06][cw06]. Local status
+updates still rebuild whole-graph mappings, and acceptable graph-size cost is
+not demonstrated ([CW-31][cw31]). Native connector feature parity, standard
+result wiring and full Server/UI migration remain [CW-43 through CW-47][migration].
+Other items distinguish confirmed gaps from findings not yet reverified.
+
+### Deliberate limits, not hidden promises
+
+In-process scheduling is cooperative. A synchronous callback that never yields,
+started blocking work, a native abort or a memory fault cannot all be safely
+interrupted by a timeout. Separate processes can contain a child's crash, but
+current hosting is not a security sandbox that prevents file or network access.
+
+Links currently accept the three standard graph-change, query-change and
+complete-source-transaction formats, not arbitrary executable validators sent
+by a peer. Transactions and shared Rust resources stay inside one instance.
+There is no automatic distributed transaction, remote machine provisioning,
+state migration, graph partitioning or universal exactly-once external effect.
+
+Byte limits bound specified queues/caches, not all process memory. Delivery
+history and retry protection depend on their retention rules. Saved configuration
+receipts are indefinite by default unless housekeeping is selected. A slow
+required consumer can hold back a producer. Lossy delivery, reset and skip
+policies must be selected explicitly rather than inferred from successful startup.
+
+## Code and further reading
+
+<a id="implementation-and-further-reading"></a>
+
+- [Current work inventory][remaining]: each item separates implementation,
+  evidence, remaining work and implementation/testing complexity.
+- [Developer guide](developer-guide/README.md) and
+  [maintainer's guide](computation-graph-maintainers-guide.md): using and
+  maintaining the current code.
+- [Transactions][transaction-guide], [delivery/recovery][qos-guide],
+  [middleware](computation-graph-middleware.md) and
+  [source-time merging](computation-graph-time-merge.md): the supported choices.
+- [Managed configuration](managed-configuration.md),
+  [native plugins][native-sdk], [network plugins][network],
+  [child host][host-readme] and [instance links][bridge-readme].
+- [Recorded execution/isolation plan][execution-plan]: approved requirements
+  and selected evidence. Its earlier blanket completion statement is
+  superseded by the current work inventory, not silently treated as proof.
+
+[remaining]: computation-graph-remaining-work.md
+[cw06]: computation-graph-remaining-work.md#cw-06
+[cw08]: computation-graph-remaining-work.md#cw-08
+[cw12]: computation-graph-remaining-work.md#cw-12
+[cw13]: computation-graph-remaining-work.md#cw-13
+[cw31]: computation-graph-remaining-work.md#cw-31
+[cw39]: computation-graph-remaining-work.md#cw-39
+[cw43]: computation-graph-remaining-work.md#cw-43
+[migration]: computation-graph-remaining-work.md#hosting-connectors-server-and-examples
+[execution-plan]: computation-graph-execution-isolation-plan.md
+[old-registry]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/component_graph/graph.rs
+[old-query]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/manager.rs
+[old-output]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/output_state.rs
+[old-timers]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/sources/future_queue_source.rs
+[old-hash-error]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/manager.rs#L1969-L2017
+[old-ordering]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/priority_queue.rs#L47-L53
+[old-dedup]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/sequence_dedup.rs
+[old-mutations]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/core/src/query/continuous_query.rs#L298-L390
+[old-element-replacement]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/core/src/in_memory_index/in_memory_element_index.rs#L531-L552
+[old-query-stop]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/base.rs#L215-L244
+[old-instance-stop]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/lib_core.rs#L537-L630
+[query-code]: ../src/computation/v1/query.rs
+[ordered-queue]: ../src/channels/priority_queue.rs
+[ranked-input]: ../src/computation/v1/ranked_pipe.rs
+[ordering-tests]: ../../lib-integration-tests/tests/computation_reliability_ordering.rs
+[mutation-tests]: ../../core/src/query/tests/mutation_integrity.rs
+[persistent-mutations]: ../tests/computation_mutation_integrity.rs
+[execution]: ../src/computation/v1/graph/execution.rs
+[worker-tests]: ../tests/worker_lifecycle.rs
+[graceful-tests]: ../tests/computation_graceful_stop.rs
+[task-tests]: ../tests/computation_task_execution.rs
+[instance-tests]: ../tests/computation_instance.rs
+[contracts]: ../tests/runtime_parity/computation-contracts.tsv
+[requirements]: ../tests/runtime_parity/requirements.tsv
+[workloads]: ../tests/measure-core-workloads.py
+[resource-soak]: ../examples/core_resource_soak.rs
+[transaction-guide]: computation-graph-transactions.md
+[qos-guide]: computation-graph-qos.md
+[native-sdk]: ../../components/computation-plugin-sdk/README.md
+[network]: ../../components/computation-plugins/network/README.md
+[host-readme]: ../../components/instance-host/README.md
+[bridge-readme]: ../../components/computation-plugins/bridge/README.md

@@ -510,19 +510,23 @@ pub struct QueryResultsOutlet {
     descriptor: ComponentDescriptor,
     catalog: QueryResultsCatalog,
 }
+
+fn outlet_descriptor(id: ComponentId) -> GraphResult<ComponentDescriptor> {
+    Ok(ComponentDescriptor::try_new(
+        id,
+        vec![PortDescriptor::new(
+            PortId::try_new("in")?,
+            PortDirection::Input,
+            QueryChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )],
+    )?)
+}
+
 impl QueryResultsOutlet {
     pub fn new(id: ComponentId, catalog: QueryResultsCatalog) -> Self {
         Self {
-            descriptor: ComponentDescriptor::try_new(
-                id,
-                vec![PortDescriptor::new(
-                    PortId::try_new("in").expect("port"),
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )
-            .expect("outlet"),
+            descriptor: outlet_descriptor(id).expect("outlet"),
             catalog,
         }
     }
@@ -576,16 +580,28 @@ impl ComponentFactory for QueryResultsOutletFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
+    fn specification_from_config(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+    ) -> anyhow::Result<ComponentSpecification> {
+        let configuration: BTreeMap<Arc<str>, serde_json::Value> =
+            serde_json::from_value(configuration)?;
+        Ok(ComponentSpecification {
+            descriptor: outlet_descriptor(id)?,
+            role: self.descriptor.role,
+            completion: Some(SinkCompletion::Handled),
+            implementation: self.descriptor.implementation.clone(),
+            configuration_version: self.descriptor.configuration_version,
+            configuration: configuration
+                .into_iter()
+                .map(|(key, value)| (key, ConfigurationValue::Literal(value)))
+                .collect(),
+            dependencies: BTreeMap::new(),
+        })
+    }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
-        let expected = ComponentDescriptor::try_new(
-            spec.descriptor.id().clone(),
-            vec![PortDescriptor::new(
-                PortId::try_new("in")?,
-                PortDirection::Input,
-                QueryChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?;
+        let expected = outlet_descriptor(spec.descriptor.id().clone())?;
         if spec.descriptor != expected || spec.completion != Some(SinkCompletion::Handled) {
             anyhow::bail!("query result outlet requires a typed, locally handled input");
         }

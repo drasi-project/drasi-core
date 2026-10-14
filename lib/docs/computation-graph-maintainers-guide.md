@@ -2,6 +2,11 @@
 
 **Implementation baseline: 13 October 2026 development checkout, `agentofreality-parallel-computation-graph`.**
 
+The current-code descriptions were checked against Core
+[`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8),
+with matching Server integration at
+[`f15706d`](https://github.com/drasi-project/drasi-server/commit/f15706d0d65c5c829c0a653c0d977f4cad617d6a).
+
 This guide is for engineers changing Drasi itself: its runtime, query execution,
 storage integration, component lifecycle or plugin hosting. For building a
 solution *with* Drasi, use the [application developer guide](developer-guide/README.md).
@@ -55,6 +60,9 @@ The old ComponentGraph was already a shared source of component metadata,
 relationships, runtime-instance references and lifecycle history. Its managers
 already used registry-first registration. Do not attribute those ideas, or
 continuous queries and recovery in general, exclusively to ComputationGraph.
+Ordinary query workers were already independently spawned; multicore execution
+is not itself new. The [capability comparison](componentgraph-vs-computationgraph.md#new-built-in-capabilities)
+distinguishes new native contracts from preserved or generalized behavior.
 
 The structural change is **who coordinates the work**:
 
@@ -187,8 +195,9 @@ Consider an ordinary source feeding a continuous query and reaction:
    external effect completed.
 
 For a fully native pipeline, replace steps 1-2 and 6 with the source and sink's
-direct envelope contracts. The controller still owns routing, validation,
-confirmation and cleanup.
+direct envelope contracts. Graph-owned processing tasks enforce routing,
+validation and confirmation; the controller coordinates their lifecycle and
+owned cleanup rather than polling their business futures inline.
 
 [`graph.rs`](../src/computation/v1/graph.rs), `run_node`, is the best single
 place to understand this loop. It keeps at most one pending receive per input
@@ -263,9 +272,10 @@ an owned preflight.
 active operations and their completions. `NodeWorkBudget` in
 [`graph.rs`](../src/computation/v1/graph.rs) bounds continuously ready work
 per poll and requeues the **node's** waker. Suspension resets the budget.
-This prevents a ready producer or timer burst from monopolizing the controller
-without imposing periodic extra yields on paths already waiting for I/O.
-It cannot preempt a component that never yields.
+This prevents a ready producer or timer burst from monopolizing its data-runner
+poll and executor worker without imposing periodic extra yields on paths already
+waiting for I/O. It is not a budget around arbitrary service/plugin code and
+cannot preempt a component that never yields.
 
 The [query responsiveness tests](../tests/computation_query_responsiveness.rs)
 and [graph dataflow tests](../tests/computation_graph_dataflow.rs) are useful
@@ -383,10 +393,14 @@ owns the component's lifecycle. An incomplete stop is remembered, so calling
 stopped." See `stop_all` in [`runtime/mod.rs`](../src/computation/runtime/mod.rs)
 and [`lib_core.rs`](../src/lib_core.rs).
 
-Ordinary processing failures are recorded on the affected component and
-relationship policy determines the impact on dependents. Contract violations
-and routing failures can terminate the graph run. Preserve failure phase and
-cause rather than converting all outcomes to a single status string.
+Component processing failures, invalid emissions and failed outgoing delivery
+are recorded on the affected component; relationship policy determines the
+impact on dependents. They do not by themselves terminate the graph controller
+or unrelated runnable branches. Preserve partial-acceptance information when
+one destination accepted before another failed. Actual graph-driver/internal
+defects are a separate failure boundary and can end that run; report them as
+such rather than conflating them with a plugin failure. Preserve phase,
+generation and typed cause instead of converting all outcomes to one status string.
 
 ## Data contracts, identity and ordering
 
@@ -1204,10 +1218,10 @@ acknowledgement is a different case from rollback before commit.
 For example, from the repository root:
 
 ```bash
-# Routing, lifecycle and control ownership.
+# Routing, independent execution, lifecycle and control ownership.
 cargo test --locked -p drasi-lib \
   --test computation_graph_dataflow --test computation_runtime_lifecycle \
-  --test computation_controller
+  --test computation_controller --test computation_task_execution
 
 # Real RocksDB query reset/deprovision and merger child-crash reconstruction.
 cargo test --locked -p drasi-lib --no-default-features \

@@ -547,6 +547,19 @@ impl ConstructedComponent {
 #[async_trait]
 pub trait ComponentFactory: Send + Sync {
     fn descriptor(&self) -> &FactoryDescriptor;
+    /// Describe a literal configuration using the factory's actual ports and
+    /// schemas, without constructing a component, opening resources or starting
+    /// workers. The caller supplies resource dependencies before validation.
+    fn specification_from_config(
+        &self,
+        _id: ComponentId,
+        _configuration: serde_json::Value,
+    ) -> anyhow::Result<ComponentSpecification> {
+        anyhow::bail!(
+            "factory '{}' does not support configuration-only descriptions; use an explicit component specification",
+            self.descriptor().implementation.name
+        )
+    }
     /// Executable schemas needed to persist/replay this factory's records.
     /// This is metadata discovery, not component construction or I/O.
     fn record_schemas(&self) -> Vec<Arc<crate::computation::v1::Schema>> {

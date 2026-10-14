@@ -2094,6 +2094,34 @@ impl ComponentFactory for ContinuousQueryFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
+    fn specification_from_config(
+        &self,
+        id: ComponentId,
+        configuration: serde_json::Value,
+    ) -> anyhow::Result<ComponentSpecification> {
+        let mut configuration: BTreeMap<Arc<str>, serde_json::Value> =
+            serde_json::from_value(configuration)?;
+        configuration
+            .entry(Arc::from("stream"))
+            .or_insert_with(|| serde_json::json!(format!("{id}/out")));
+        let execution: QueryExecutionSettings = configuration
+            .get("execution")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(ComponentSpecification {
+            descriptor: query_descriptor(id, execution.source_transactions.is_some()),
+            role: self.descriptor.role,
+            completion: None,
+            implementation: self.descriptor.implementation.clone(),
+            configuration_version: self.descriptor.configuration_version,
+            configuration: configuration
+                .into_iter()
+                .map(|(key, value)| (key, ConfigurationValue::Literal(value)))
+                .collect(),
+            dependencies: BTreeMap::new(),
+        })
+    }
     fn validate_scope(
         &self,
         graph_id: &str,

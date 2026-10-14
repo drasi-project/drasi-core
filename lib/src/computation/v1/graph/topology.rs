@@ -138,6 +138,33 @@ impl FactoryRegistry {
         self.factories.get(implementation)
     }
 
+    /// Resolve a named factory only when the requested identity is unambiguous.
+    /// An omitted version never means "choose the first/latest loaded version".
+    pub fn get_by_name(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> GraphResult<&Arc<dyn ComponentFactory>> {
+        let mut matches = self.factories.iter().filter(|(identity, _)| {
+            identity.name.as_ref() == name
+                && version.map_or(true, |version| identity.version.as_ref() == version)
+        });
+        let (_, factory) = matches.next().ok_or_else(|| {
+            topology(format!(
+                "component factory '{name}'{} is not registered",
+                version
+                    .map(|version| format!(" version '{version}'"))
+                    .unwrap_or_default()
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(topology(format!(
+                "component factory '{name}' has multiple matching implementations; specify a unique version or use a full implementation identity"
+            )));
+        }
+        Ok(factory)
+    }
+
     pub fn envelope_codec(
         &self,
         max_bytes: NonZeroUsize,
