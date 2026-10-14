@@ -767,6 +767,33 @@ async fn test_stop_component_failure_reverts_to_error() {
 }
 
 #[tokio::test]
+async fn successful_source_stop_must_reach_stopped_before_cleanup_is_accepted() {
+    let (source, control) = ControlledSource::new("noop-stop");
+    let core = builder().with_source(source).build().await.unwrap();
+    core.start_source("noop-stop").await.unwrap();
+    core.computation_component("noop-stop")
+        .unwrap()
+        .wait_started()
+        .await
+        .unwrap();
+    control.noop_stop.store(true, Ordering::Release);
+    assert!(core.stop_source("noop-stop").await.is_err());
+    assert_eq!(
+        core.get_source_status("noop-stop").await.unwrap(),
+        ComponentStatus::Error
+    );
+    assert_eq!(control.stops.load(Ordering::Acquire), 1);
+    control.noop_stop.store(false, Ordering::Release);
+    core.stop_source("noop-stop").await.unwrap();
+    assert_eq!(control.stops.load(Ordering::Acquire), 2);
+    assert_eq!(
+        core.get_source_status("noop-stop").await.unwrap(),
+        ComponentStatus::Stopped
+    );
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_get_component_status_found() {
     let core = source_core("source", false).await;
     assert_eq!(

@@ -131,6 +131,12 @@ impl RuntimeComponent for SourceInstance {
         let mut life = self.life.lock().await;
         if life.needs_stop || life.initialized && !life.initialized_complete {
             self.observations.drive(self.source.stop(), true).await?;
+            let status = self.source.status().await;
+            anyhow::ensure!(
+                status == ComponentStatus::Stopped,
+                "Source '{}' returned from stop with status {status:?}, expected Stopped",
+                self.source.id()
+            );
             life.needs_stop = false;
         }
         self.notify();

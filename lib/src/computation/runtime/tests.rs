@@ -190,6 +190,7 @@ struct SourceControl {
     subscriptions: AtomicUsize,
     fail_starts: AtomicUsize,
     fail_stop: AtomicBool,
+    noop_stop: AtomicBool,
     pending_start: AtomicBool,
     starting_only: AtomicBool,
     subscription_fences: AtomicUsize,
@@ -873,6 +874,9 @@ impl Source for ControlledSource {
         }
         if self.control.fail_stop.load(Ordering::Acquire) {
             anyhow::bail!("injected stop failure");
+        }
+        if self.control.noop_stop.load(Ordering::Acquire) {
+            return Ok(());
         }
         self.inner.stop_common().await
     }

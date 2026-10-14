@@ -233,27 +233,58 @@ impl Source for MySqlReplicationSource {
 
     async fn stop(&self) -> Result<()> {
         let mut cleanup_required = self.cleanup_required.lock().await;
+        *cleanup_required = true;
         info!("Stopping MySQL replication source: {}", self.base.id);
 
         self.shutdown.send_replace(true);
         self.base.set_status(ComponentStatus::Stopping, None).await;
-        match join_owned_worker_gracefully(
+        let task_result = join_owned_worker_gracefully(
             &mut *self.replication_task.write().await,
             Duration::from_secs(5),
         )
         .await
-        .with_context(|| format!("MySQL '{}' replication cleanup", self.base.id))?
-        {
-            WorkerCompletion::Completed(result) => result.context("MySQL replication failed")?,
-            WorkerCompletion::Cancelled => {
-                anyhow::bail!("MySQL replication task was unexpectedly cancelled")
+        .with_context(|| format!("MySQL '{}' replication cleanup", self.base.id));
+        if self.replication_task.read().await.is_some() {
+            if let Err(error) = &task_result {
+                error!("{error:#}");
+                self.base
+                    .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+                    .await;
             }
-            WorkerCompletion::Absent => {}
+            return task_result.map(|_| ());
         }
+        let task_result = match task_result {
+            Ok(WorkerCompletion::Completed(result)) => result.context("MySQL replication failed"),
+            Ok(WorkerCompletion::Cancelled) => Err(anyhow::anyhow!(
+                "MySQL replication task was unexpectedly cancelled"
+            )),
+            Ok(WorkerCompletion::Absent) => Ok(()),
+            Err(error) => Err(error),
+        };
         self.subscriber_resume_positions.write().await.clear();
-        self.base.stop_common().await?;
-        *cleanup_required = false;
-        Ok(())
+        let cleanup_result = self.base.stop_common().await;
+
+        let error = match (task_result, cleanup_result) {
+            (Ok(()), Ok(())) => {
+                *cleanup_required = false;
+                return Ok(());
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => error,
+            (Err(task), Err(cleanup)) => {
+                anyhow::Error::new(drasi_lib::error::OperationFailures::new(
+                    "MySQL replication and cleanup failed",
+                    vec![task, cleanup],
+                ))
+            }
+        };
+        error!("{error:#}");
+        self.base
+            .set_status(
+                ComponentStatus::Error,
+                Some("MySQL replication task failed during shutdown; see logs for details".into()),
+            )
+            .await;
+        Err(error)
     }
 
     async fn status(&self) -> ComponentStatus {

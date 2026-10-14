@@ -78,6 +78,10 @@ then joins the worker before clearing subscriptions. Submitted connection,
 dispatch and state work is not aborted. A cancelled stop or five-second cleanup
 timeout retains ownership and prevents replacement; retry stop after the pending
 operation finishes. Worker errors and panics remain observable during cleanup.
+Cleanup also runs for starting or failed sources. Once a failed worker has been
+joined, stop still clears its subscriptions and resume filters before returning
+the failure with status `Error`. Retry stop to acknowledge that failure and reach
+`Stopped`; a failed stop never authorizes a replacement worker.
 
 This repairs the Drasi-owned worker, not every driver-owned resource.
 `mysql_async` 0.37.1 can detach connection cleanup on some failed connection or

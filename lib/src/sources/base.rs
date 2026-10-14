@@ -29,7 +29,7 @@
 //! 3. Optionally provides a bootstrap provider via `set_bootstrap_provider()`
 //! 4. Implements the Source trait delegating to SourceBase methods
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1661,6 +1661,24 @@ impl SourceBase {
             .expect("Failed to create test subscription receiver")
     }
 
+    /// Abort and join the source task without releasing its ownership slot.
+    ///
+    /// Expected cancellation is successful; unexpected task failures are returned
+    /// with their `JoinError` preserved. Callers must finish resource cleanup before
+    /// propagating an error. This does not change status or clear subscriptions.
+    ///
+    /// Cancellation or a five-second timeout retains an unfinished handle for
+    /// subsequent cleanup. Source tasks must use cooperative async I/O.
+    pub async fn abort_and_join_task(&self) -> Result<()> {
+        crate::context::workers::cancel_owned_worker(
+            &mut *self.task_handle.write().await,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .with_context(|| format!("Source '{}' task failed during shutdown", self.id))?;
+        Ok(())
+    }
+
     /// Handle common stop functionality
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping source '{}'", self.id);
@@ -1788,6 +1806,90 @@ impl SourceBase {
 mod tests {
     use super::*;
     use crate::sources::ByteLexPositionComparator;
+
+    #[tokio::test]
+    async fn abort_and_join_task_retains_ownership_until_joined() {
+        struct DropProbe {
+            base: SourceBase,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                assert!(
+                    self.base.task_handle.try_write().is_err(),
+                    "joining must retain exclusive ownership of the task slot"
+                );
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let base = SourceBase::new(SourceBaseParams::new("join-test")).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let probe = DropProbe {
+            base: base.clone_shared(),
+            dropped: dropped.clone(),
+        };
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _probe = probe;
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let abort_handle = task.abort_handle();
+        base.set_task_handle(task).await;
+        ready_rx.await.unwrap();
+
+        base.abort_and_join_task().await.unwrap();
+        assert!(abort_handle.is_finished());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(base.task_handle.read().await.is_none());
+        base.abort_and_join_task().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_abort_and_join_retains_unfinished_task() {
+        let base = SourceBase::new(SourceBaseParams::new("cancelled-join")).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        crate::context::workers::spawn_owned_blocking_worker(&base.task_handle, move || {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+        })
+        .await
+        .unwrap();
+        ready.await.unwrap();
+        {
+            let stop = base.abort_and_join_task();
+            tokio::pin!(stop);
+            assert!(futures::poll!(&mut stop).is_pending());
+        }
+        assert!(base.task_handle.read().await.is_some());
+        assert!(
+            crate::context::workers::spawn_owned_worker(&base.task_handle, async {})
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        base.abort_and_join_task().await.unwrap();
+        assert!(base.task_handle.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn abort_and_join_task_preserves_panic() {
+        let base = SourceBase::new(SourceBaseParams::new("panic-test")).unwrap();
+        let task = tokio::spawn(async { panic!("task panic") });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        base.set_task_handle(task).await;
+        let error = base.abort_and_join_task().await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref(),
+            Some(crate::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+        ));
+        assert!(base.task_handle.read().await.is_none());
+    }
 
     // =========================================================================
     // SourceBaseParams tests

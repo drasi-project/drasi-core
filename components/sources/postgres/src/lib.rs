@@ -743,25 +743,36 @@ impl PostgresReplicationSource {
         *owner = Some(task);
         drop(owner);
 
-        match startup_rx.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(message)) => Err(anyhow!(
-                "Failed to establish PostgreSQL replication: {message}"
+        let startup_error = match startup_rx.await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(message)) => {
+                anyhow!("Failed to establish PostgreSQL replication: {message}")
+            }
+            Err(_) => anyhow!("PostgreSQL replication task exited before confirming startup"),
+        };
+        let error = match self.abort_replication_task().await {
+            Ok(()) => startup_error,
+            Err(error) => anyhow::Error::new(drasi_lib::error::OperationFailures::new(
+                "PostgreSQL replication startup and cleanup failed",
+                vec![startup_error, error],
             )),
-            Err(_) => Err(anyhow!(
-                "PostgreSQL replication task exited before confirming startup"
-            )),
-        }
+        };
+        error!("Replication startup failed for {}: {error:#}", self.base.id);
+        // Joining can cancel the task before it reports its own failure.
+        self.base
+            .set_status(
+                ComponentStatus::Error,
+                Some("PostgreSQL replication failed during startup; see logs for details".into()),
+            )
+            .await;
+        Err(error)
     }
 
     async fn abort_replication_task(&self) -> Result<()> {
-        drasi_lib::context::workers::cancel_owned_worker(
-            &mut *self.base.task_handle.write().await,
-            std::time::Duration::from_secs(5),
-        )
-        .await
-        .with_context(|| format!("PostgreSQL source '{}' replication cleanup", self.base.id))?;
-        Ok(())
+        self.base
+            .abort_and_join_task()
+            .await
+            .with_context(|| format!("PostgreSQL source '{}' replication cleanup", self.base.id))
     }
 
     async fn pause_replication_for_restart(&self, start_lsn: u64) -> Result<()> {
@@ -779,7 +790,19 @@ impl PostgresReplicationSource {
             )
             .await;
 
-        self.abort_replication_task().await?;
+        if let Err(error) = self.abort_replication_task().await {
+            error!("{error:#}");
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(
+                        "PostgreSQL replication task failed during rewind; see logs for details"
+                            .into(),
+                    ),
+                )
+                .await;
+            return Err(error);
+        }
 
         // Clear stale sequence→position mappings from the pre-replay stream.
         // Without this, compute_confirmed_source_position() could map a
@@ -939,11 +962,34 @@ impl Source for PostgresReplicationSource {
 
         self.base.set_status(ComponentStatus::Stopping, None).await;
 
-        self.abort_replication_task().await?;
+        let task_result = self.abort_replication_task().await;
+        if self.base.task_handle.read().await.is_some() {
+            return task_result;
+        }
+        // Per-subscriber resume filters live in SourceBase, unlike MySQL's
+        // additional binlog-position cache. ReplayState holds stream-wide progress.
+        self.base.clear_dispatchers().await;
+        self.base.clear_sequence_position_map().await;
+        self.replay_state.read_lsn.store(0, Ordering::Release);
+        self.replay_state.clear_flush_fence();
 
         // Clear cached schema so a subsequent start() re-introspects
         if let Ok(mut cached) = self.cached_schema.write() {
             *cached = None;
+        }
+
+        if let Err(error) = task_result {
+            error!("{error:#}");
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(
+                        "PostgreSQL replication task failed during shutdown; see logs for details"
+                            .into(),
+                    ),
+                )
+                .await;
+            return Err(error);
         }
 
         self.base
@@ -1288,6 +1334,407 @@ impl PostgresSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod error_lifecycle {
+        use super::*;
+        use drasi_lib::bootstrap::{
+            BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+        };
+        use drasi_lib::channels::BootstrapEventSender;
+        use drasi_lib::component_graph::{wait_for_status, ComponentUpdate};
+        use drasi_lib::config::SourceSubscriptionSettings;
+        use drasi_lib::DrasiLib;
+        use std::time::Duration;
+
+        struct InvalidBoundaryBootstrap;
+
+        #[async_trait]
+        impl BootstrapProvider for InvalidBoundaryBootstrap {
+            async fn bootstrap(
+                &self,
+                _request: BootstrapRequest,
+                _context: &BootstrapContext,
+                _event_tx: BootstrapEventSender,
+                _settings: Option<&SourceSubscriptionSettings>,
+            ) -> Result<BootstrapResult> {
+                Ok(BootstrapResult {
+                    event_count: 0,
+                    source_position: Some(bytes::Bytes::from_static(b"invalid boundary")),
+                })
+            }
+        }
+
+        async fn rejecting_server() -> (u16, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let task = tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    drop(stream);
+                }
+            });
+            (port, task)
+        }
+
+        #[tokio::test]
+        async fn stop_cleans_up_after_replication_failure() {
+            let (port, server) = rejecting_server().await;
+            let source = PostgresSourceBuilder::new("failed-source")
+                .with_host("127.0.0.1")
+                .with_port(port)
+                .with_ssl_mode(SslMode::Disable)
+                .with_database("test")
+                .with_user("test")
+                .with_bootstrap_provider(InvalidBoundaryBootstrap)
+                .build()
+                .unwrap();
+
+            for _ in 0..2 {
+                source.start().await.unwrap();
+                let mut subscription = source
+                    .subscribe(SourceSubscriptionSettings {
+                        source_id: source.id().to_string(),
+                        query_id: "test-query".to_string(),
+                        enable_bootstrap: true,
+                        nodes: Default::default(),
+                        relations: Default::default(),
+                        resume_from: None,
+                        resume_sequence: None,
+                        request_position_handle: false,
+                    })
+                    .await
+                    .unwrap();
+                let mut status = source.base.status_handle().subscribe_status();
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    status.wait_for(|status| *status == ComponentStatus::Error),
+                )
+                .await
+                .expect("invalid bootstrap boundary must fail the replication task")
+                .unwrap();
+                assert!(source.base.task_handle.read().await.is_some());
+
+                source.stop().await.unwrap();
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                assert!(source.base.task_handle.read().await.is_none());
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
+                        .await
+                        .expect("stop must close the subscription")
+                        .is_err()
+                );
+                source.stop().await.unwrap();
+            }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn direct_start_failure_reports_error_and_can_stop() {
+            let (port, server) = rejecting_server().await;
+            let source = PostgresSourceBuilder::new("failed-start")
+                .with_host("127.0.0.1")
+                .with_port(port)
+                .with_ssl_mode(SslMode::Disable)
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+
+            for _ in 0..2 {
+                let error = tokio::time::timeout(Duration::from_secs(3), source.start())
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error
+                    .to_string()
+                    .contains("Failed to establish PostgreSQL replication"));
+                assert_eq!(source.status().await, ComponentStatus::Error);
+                assert!(source.base.task_handle.read().await.is_none());
+                source.stop().await.unwrap();
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+            }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn direct_start_reports_error_if_task_exits_before_confirmation() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (connected_tx, connected_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (_replication, _) = listener.accept().await.unwrap();
+                connected_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            let source = PostgresSourceBuilder::new("cancelled-start")
+                .with_host("127.0.0.1")
+                .with_port(port)
+                .with_ssl_mode(SslMode::Disable)
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(source.start(), async {
+                    connected_rx.await.unwrap();
+                    assert_eq!(source.status().await, ComponentStatus::Starting);
+                    source
+                        .base
+                        .task_handle
+                        .read()
+                        .await
+                        .as_ref()
+                        .unwrap()
+                        .abort();
+                })
+            })
+            .await
+            .unwrap();
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("exited before confirming startup"));
+            assert_eq!(source.status().await, ComponentStatus::Error);
+            assert!(source.base.task_handle.read().await.is_none());
+            source.stop().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn managed_lifecycle_cleans_failed_source() {
+            let (port, server) = rejecting_server().await;
+            for action in ["stop", "stop_all", "remove", "update"] {
+                let source = PostgresSourceBuilder::new("managed-source")
+                    .with_host("127.0.0.1")
+                    .with_port(port)
+                    .with_ssl_mode(SslMode::Disable)
+                    .with_database("test")
+                    .with_user("test")
+                    .with_bootstrap_provider(InvalidBoundaryBootstrap)
+                    .build()
+                    .unwrap();
+                let core = DrasiLib::builder()
+                    .with_source(source)
+                    .build()
+                    .await
+                    .unwrap();
+                core.start().await.unwrap();
+                let graph = core.component_graph();
+                let runtime = core
+                    .source_manager()
+                    .get_source_instance("managed-source")
+                    .await
+                    .unwrap();
+                let source = runtime
+                    .as_any()
+                    .downcast_ref::<PostgresReplicationSource>()
+                    .unwrap();
+                let mut subscription = source
+                    .subscribe(SourceSubscriptionSettings {
+                        source_id: source.id().into(),
+                        query_id: "test-query".into(),
+                        enable_bootstrap: true,
+                        nodes: Default::default(),
+                        relations: Default::default(),
+                        resume_from: None,
+                        resume_sequence: None,
+                        request_position_handle: false,
+                    })
+                    .await
+                    .unwrap();
+                wait_for_status(
+                    &graph,
+                    source.id(),
+                    &[ComponentStatus::Error],
+                    Duration::from_secs(3),
+                )
+                .await
+                .unwrap();
+                let task = source
+                    .base
+                    .task_handle
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .abort_handle();
+
+                match action {
+                    "stop" => core.stop_source(source.id()).await.unwrap(),
+                    "stop_all" => core.stop().await.unwrap(),
+                    "remove" => core.remove_source(source.id(), false).await.unwrap(),
+                    "update" => {
+                        core.update_source(
+                            source.id(),
+                            PostgresSourceBuilder::new(source.id())
+                                .with_database("test")
+                                .with_user("test")
+                                .build()
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+
+                assert!(
+                    task.is_finished(),
+                    "{action} must join the replication task"
+                );
+                assert!(source.base.task_handle.read().await.is_none());
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+                if action == "remove" {
+                    assert!(!graph.snapshot().await.unwrap().contains(source.id()));
+                } else {
+                    wait_for_status(
+                        &graph,
+                        source.id(),
+                        &[ComponentStatus::Stopped],
+                        Duration::from_secs(3),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        core.stop_source(source.id()).await.is_err(),
+                        "managed repeated stop is rejected"
+                    );
+                }
+                if action != "stop_all" {
+                    core.stop().await.unwrap();
+                }
+                core.shutdown().await.unwrap();
+            }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+
+        #[tokio::test]
+        async fn stop_joins_and_cleans_starting_and_running_sources() {
+            for status in [ComponentStatus::Starting, ComponentStatus::Running] {
+                let source = PostgresSourceBuilder::new("stopping-source")
+                    .with_database("test")
+                    .with_user("test")
+                    .build()
+                    .unwrap();
+                source.base.set_status(status, None).await;
+                let task = tokio::spawn(std::future::pending::<()>());
+                let abort_handle = task.abort_handle();
+                source.base.set_task_handle(task).await;
+                let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+                source.replay_state.read_lsn.store(42, Ordering::Release);
+                source.replay_state.set_flush_fence(21);
+                *source.cached_schema.write().unwrap() = Some(SourceSchema {
+                    nodes: vec![NodeSchema::new("old-schema")],
+                    relations: Vec::new(),
+                });
+
+                source.stop().await.unwrap();
+                assert!(abort_handle.is_finished());
+                assert!(source.base.task_handle.read().await.is_none());
+                assert_eq!(source.status().await, ComponentStatus::Stopped);
+                assert_eq!(source.replay_state.current_read_lsn(), 0);
+                assert_eq!(source.replay_state.effective_flush_fence(), u64::MAX);
+                assert!(source.cached_schema.read().unwrap().is_none());
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+                source.stop().await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn stop_reports_unexpected_task_failure_after_cleanup() {
+            let source = PostgresSourceBuilder::new("panicked-source")
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+            source.base.set_status(ComponentStatus::Running, None).await;
+            let failed = tokio::spawn(async { panic!("simulated replication task panic") });
+            while !failed.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            source.base.set_task_handle(failed).await;
+            let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+            source.replay_state.read_lsn.store(42, Ordering::Release);
+            source.replay_state.set_flush_fence(21);
+            let (update_tx, mut updates) = tokio::sync::mpsc::channel(8);
+            source.base.status_handle().wire(update_tx).await;
+
+            let error = source
+                .stop()
+                .await
+                .expect_err("task panic must be surfaced");
+            assert!(matches!(
+                error.downcast_ref(),
+                Some(drasi_lib::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+            ));
+            assert_eq!(source.status().await, ComponentStatus::Error);
+            assert!(source.base.task_handle.read().await.is_none());
+            assert_eq!(source.replay_state.current_read_lsn(), 0);
+            assert_eq!(source.replay_state.effective_flush_fence(), u64::MAX);
+            let mut error_message = None;
+            while let Ok(ComponentUpdate::Status {
+                status, message, ..
+            }) = updates.try_recv()
+            {
+                if status == ComponentStatus::Error {
+                    error_message = message;
+                }
+            }
+            assert_eq!(
+                error_message.as_deref(),
+                Some("PostgreSQL replication task failed during shutdown; see logs for details")
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            source.stop().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+
+        #[tokio::test]
+        async fn rewind_reports_unexpected_task_failure() {
+            let source = PostgresSourceBuilder::new("panicked-rewind")
+                .with_database("test")
+                .with_user("test")
+                .build()
+                .unwrap();
+            source.base.set_status(ComponentStatus::Running, None).await;
+            let failed = tokio::spawn(async { panic!("simulated replication task panic") });
+            while !failed.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            source.base.set_task_handle(failed).await;
+            let error = source.pause_replication_for_restart(42).await.unwrap_err();
+            assert!(matches!(
+                error.downcast_ref(),
+                Some(drasi_lib::context::workers::WorkerCleanupError::Join(error)) if error.is_panic()
+            ));
+            assert!(source.base.task_handle.read().await.is_none());
+            assert_eq!(source.status().await, ComponentStatus::Error);
+            source.stop().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+    }
 
     mod primary_key_map {
         use super::*;

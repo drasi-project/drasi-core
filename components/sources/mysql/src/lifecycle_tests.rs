@@ -120,7 +120,9 @@ async fn failed_and_panicked_replication_require_cleanup_even_in_error_status() 
             );
         }
         assert!(source.replication_task.read().await.is_none());
-        assert!(!source.subscriber_resume_positions.read().await.is_empty());
+        assert!(source.subscriber_resume_positions.read().await.is_empty());
+        assert_eq!(source.status().await, ComponentStatus::Error);
+        assert!(*source.cleanup_required.lock().await);
         assert!(source
             .start()
             .await

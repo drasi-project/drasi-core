@@ -86,6 +86,10 @@ impl SourceManager {
         self.runtime.start_component(&id, "source").await
     }
 
+    /// Stop a running, starting, or failed source by ID, transitioning it to Stopped.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found or the stop operation fails.
     pub async fn stop_source(&self, id: String) -> Result<()> {
         self.runtime.stop_component(&id, "source").await
     }

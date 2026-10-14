@@ -295,13 +295,17 @@ pub fn create_test_bootstrap_mock_source(
 /// This source uses the full SourceBase infrastructure including logger support.
 pub struct LoggingTestSource {
     base: crate::sources::SourceBase,
+    fail_start: bool,
 }
 
 impl LoggingTestSource {
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let params = crate::sources::SourceBaseParams::new(id);
         let base = crate::sources::SourceBase::new(params)?;
-        Ok(Self { base })
+        Ok(Self {
+            base,
+            fail_start: false,
+        })
     }
 
     /// Log a message at info level (for testing)
@@ -338,6 +342,10 @@ impl Source for LoggingTestSource {
     }
 
     async fn start(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.fail_start,
+            "injected failed start without local status change"
+        );
         self.base
             .set_status(ComponentStatus::Running, Some("Started".to_string()))
             .await;
@@ -744,6 +752,89 @@ mod manager_tests {
         })
         .await
         .expect("Timeout waiting for stop event");
+    }
+
+    #[tokio::test]
+    async fn test_stop_all_cleans_failed_source() {
+        let (manager, graph) = create_test_manager().await;
+        let source = LoggingTestSource::new("failed-source").unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
+        manager.start_source("failed-source".into()).await.unwrap();
+        let runtime = manager.get_source_instance("failed-source").await.unwrap();
+        let source = runtime
+            .as_any()
+            .downcast_ref::<LoggingTestSource>()
+            .unwrap();
+        source.base.set_status(ComponentStatus::Error, None).await;
+        let task = tokio::spawn(async {});
+        let abort_handle = task.abort_handle();
+        source.base.set_task_handle(task).await;
+        let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+        crate::component_graph::wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Error],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+        manager.stop_all().await.unwrap();
+        assert!(abort_handle.is_finished());
+        assert!(source.base.task_handle.read().await.is_none());
+        crate::component_graph::wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            manager.get_source_status(source.id().into()).await.unwrap(),
+            ComponentStatus::Stopped
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_failed_source_with_already_stopped_runtime() {
+        let (manager, graph) = create_test_manager().await;
+        let mut source = LoggingTestSource::new("failed-start").unwrap();
+        source.fail_start = true;
+        add_source(&manager, &graph, source).await.unwrap();
+        assert!(manager.start_source("failed-start".into()).await.is_err());
+        crate::component_graph::wait_for_status(
+            &graph,
+            "failed-start",
+            &[ComponentStatus::Error],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            manager
+                .get_source_instance("failed-start")
+                .await
+                .unwrap()
+                .status()
+                .await,
+            ComponentStatus::Stopped,
+        );
+        manager.stop_source("failed-start".into()).await.unwrap();
+        crate::component_graph::wait_for_status(
+            &graph,
+            "failed-start",
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

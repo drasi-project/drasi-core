@@ -971,6 +971,17 @@ database, then joins queued event dispatch before base cleanup. Its transaction
 and HTTP handles stay bound to the accepting worker so late continuations cannot
 operate on a replacement connection.
 
+Cleanup MUST also handle `Starting` and `Error`; a failed task can still leave
+subscriptions and other resources alive. A successful stop MUST report `Stopped`.
+Managed lifecycle operations reject a source that returns success without stopping.
+
+PostgreSQL uses `SourceBase::abort_and_join_task()` for immediate cancellation
+with ownership retained through joining. MySQL signals its replication worker
+and joins it gracefully. Unexpected task failures are returned after completed
+plugin-specific cleanup and leave the source in `Error`. Timed-out cleanup
+retains the worker and blocks replacement. See each plugin's lifecycle
+documentation for its policy.
+
 #### `status` — **MUST**
 
 Return the current `ComponentStatus`, usually `self.base.get_status().await`.
@@ -1159,7 +1170,7 @@ very specific reason not to.
 | Construction | `SourceBase::new(SourceBaseParams)` |
 | Configuration persistence | `set_raw_config`, `raw_config`, `properties_or_serialize` |
 | Runtime context | `initialize`, `context`, `state_store`, `identity_provider`, `set_identity_provider` |
-| Status and lifecycle | `get_status`, `set_status`, `status_handle`, `set_task_handle`, `set_shutdown_tx`, `stop_common`, `clear_dispatchers`, `deprovision_common` |
+| Status and lifecycle | `get_status`, `set_status`, `status_handle`, `set_task_handle`, `set_shutdown_tx`, `stop_common`, `abort_and_join_task`, `clear_dispatchers`, `deprovision_common` |
 | Subscription | `apply_subscription_settings`, `create_streaming_receiver`, `wait_for_subscribers`, `subscribe_with_bootstrap`, `subscribe_with_bootstrap_context`, `create_bootstrap_receiver`, `subscribe_with_replay` |
 | Dispatch | `dispatch_source_change`, `dispatch_event`, `dispatch_events_batch` |
 | Replay positions | `create_position_handle`, `remove_position_handle`, `compute_confirmed_position`, `compute_confirmed_source_position`, `prune_position_map`, `clear_sequence_position_map`, `set_next_sequence`, `set_position_comparator` |

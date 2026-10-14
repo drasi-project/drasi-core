@@ -28,15 +28,20 @@ The SSE Reaction component exposes Drasi continuous query results to web clients
 
 ## Lifecycle and Delivery Boundary
 
-`start()` binds the listener before reporting `Running`; bind failures return
-their original I/O cause without starting workers. Await `stop()` before restart.
+`start()` binds the listener before reporting `Running`; binding, including
+hostname resolution, has a five-second timeout. Bind failures return their
+original I/O cause without starting workers. Await `stop()` before restart.
 Processing, heartbeat and server workers are owned before spawning, and stop
 closes SSE streams and joins the HTTP server before publishing `Stopped`.
+Lifecycle transitions are serialized. A cancelled partial start requires cleanup
+before another start, even if its workers have not yet been spawned.
 
 Cancellation or a five-second server-drain timeout retains ownership and rejects
 restart until a later `stop()` completes. A timed-out server is not aborted while
 it owns unfinished HTTP requests. Worker panics and server errors remain typed
-causes. This preserves the existing broadcast behavior: no browser
+causes. Cleanup attempts the remaining independent workers after a task failure
+and reports `Error`, never successful shutdown, while cleanup remains unfinished.
+This preserves the existing broadcast behavior: no browser
 acknowledgement or durable receipt is provided, and lagged subscribers must
 reconnect and fetch a fresh snapshot.
 

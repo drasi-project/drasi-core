@@ -108,7 +108,7 @@ pub struct SseReaction {
     pub(crate) base: ReactionBase,
     config: SseReactionConfig,
     broadcasters: Arc<tokio::sync::RwLock<HashMap<String, broadcast::Sender<String>>>>,
-    lifecycle: Mutex<()>,
+    lifecycle: Mutex<bool>,
     heartbeat_task: RwLock<Option<JoinHandle<()>>>,
     server_task: RwLock<Option<JoinHandle<std::io::Result<()>>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -210,7 +210,7 @@ impl SseReaction {
             base: ReactionBase::new(params),
             config,
             broadcasters: Arc::new(tokio::sync::RwLock::new(broadcasters)),
-            lifecycle: Mutex::new(()),
+            lifecycle: Mutex::new(false),
             heartbeat_task: RwLock::new(None),
             server_task: RwLock::new(None),
             shutdown_tx: watch::channel(false).0,
@@ -279,16 +279,21 @@ impl Reaction for SseReaction {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
-        if self.server_task.read().await.is_some()
+        let mut cleanup_required = self.lifecycle.lock().await;
+        if *cleanup_required
+            || self.server_task.read().await.is_some()
             || self.heartbeat_task.read().await.is_some()
             || self.base.processing_task.read().await.is_some()
             || self.shutdown_tx.receiver_count() != 0
         {
-            return Err(WorkerAlreadyOwned.into());
+            return Err(anyhow::Error::new(WorkerAlreadyOwned).context(format!(
+                "SSE reaction '{}' is already started; stop it before starting again",
+                self.base.id
+            )));
         }
         log_component_start("SSE Reaction", &self.base.id);
 
+        *cleanup_required = true;
         // Transition to Starting
         self.base
             .set_status(
@@ -299,27 +304,26 @@ impl Reaction for SseReaction {
 
         let host = self.config.host.clone();
         let port = self.config.port;
-        let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
+        let listener = match tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpListener::bind((host.as_str(), port)),
+        )
+        .await
+        .context("SSE listener bind timed out")
+        .and_then(|result| result.map_err(anyhow::Error::from))
+        .with_context(|| format!("Failed to bind SSE server on {host}:{port}"))
+        {
             Ok(listener) => listener,
             Err(error) => {
+                *cleanup_required = false;
+                error!("[{}] {error:#}", self.base.id);
                 self.base
-                    .set_status(
-                        ComponentStatus::Error,
-                        Some(format!(
-                            "Failed to bind SSE server on {host}:{port}: {error}"
-                        )),
-                    )
+                    .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
                     .await;
-                return Err(error).context(format!("failed to bind SSE server on {host}:{port}"));
+                return Err(error);
             }
         };
         self.shutdown_tx.send_replace(false);
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("SSE reaction started".to_string()),
-            )
-            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -341,7 +345,7 @@ impl Reaction for SseReaction {
             super::register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Starting | ComponentStatus::Running) {
                     info!("[{reaction_id}] SSE reaction not running, breaking loop");
                     break;
                 }
@@ -705,31 +709,80 @@ impl Reaction for SseReaction {
         })
         .await?;
 
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("SSE reaction started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
+        let mut cleanup_required = self.lifecycle.lock().await;
+        *cleanup_required = true;
         self.shutdown_tx.send_replace(true);
-        cancel_owned_worker(
+        let mut failures = Vec::new();
+        if let Err(error) = cancel_owned_worker(
             &mut *self.heartbeat_task.write().await,
             Duration::from_secs(5),
         )
         .await
-        .with_context(|| format!("SSE '{}' heartbeat cleanup", self.base.id))?;
-        if let WorkerCompletion::Completed(result) = join_owned_worker_gracefully(
+        .with_context(|| format!("SSE '{}' heartbeat cleanup", self.base.id))
+        {
+            failures.push(error);
+        }
+        match join_owned_worker_gracefully(
             &mut *self.server_task.write().await,
             Duration::from_secs(5),
         )
         .await
-        .with_context(|| format!("SSE '{}' server cleanup", self.base.id))?
+        .with_context(|| format!("SSE '{}' server cleanup", self.base.id))
         {
-            result.with_context(|| format!("SSE '{}' server failed", self.base.id))?;
+            Ok(WorkerCompletion::Completed(result)) => {
+                if let Err(error) =
+                    result.with_context(|| format!("SSE '{}' server failed", self.base.id))
+                {
+                    failures.push(error);
+                }
+            }
+            Ok(WorkerCompletion::Cancelled) => failures.push(anyhow::anyhow!(
+                "SSE '{}' server was unexpectedly cancelled",
+                self.base.id
+            )),
+            Ok(WorkerCompletion::Absent) => {}
+            Err(error) => failures.push(error),
         }
-        tokio::time::timeout(Duration::from_secs(5), self.shutdown_tx.closed())
-            .await
-            .with_context(|| format!("SSE '{}' connection cleanup", self.base.id))?;
-        self.base.stop_common().await
+        if self.server_task.read().await.is_none() && self.heartbeat_task.read().await.is_none() {
+            match tokio::time::timeout(Duration::from_secs(5), self.shutdown_tx.closed()).await {
+                Ok(()) => {
+                    if let Err(error) = self.base.stop_common().await {
+                        failures.push(error);
+                    }
+                }
+                Err(error) => failures.push(
+                    anyhow::Error::new(error)
+                        .context(format!("SSE '{}' connection cleanup", self.base.id)),
+                ),
+            }
+        }
+        if failures.is_empty() {
+            *cleanup_required = false;
+            return Ok(());
+        }
+        let error = if failures.len() == 1 {
+            failures.remove(0)
+        } else {
+            anyhow::Error::new(drasi_lib::error::OperationFailures::new(
+                format!("Failed to stop SSE reaction '{}'", self.base.id),
+                failures,
+            ))
+        };
+        error!("[{}] {error:#}", self.base.id);
+        self.base
+            .set_status(ComponentStatus::Error, Some(format!("{error:#}")))
+            .await;
+        Err(error)
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -977,7 +1030,7 @@ mod lifecycle_tests {
         assert!(
             matches!(error.downcast_ref(), Some(WorkerCleanupError::TimedOut { timeout }) if *timeout == Duration::from_secs(5))
         );
-        assert_eq!(reaction.status().await, ComponentStatus::Running);
+        assert_eq!(reaction.status().await, ComponentStatus::Error);
         assert!(reaction.server_task.read().await.is_some());
         assert!(reaction
             .start()
@@ -992,6 +1045,190 @@ mod lifecycle_tests {
         assert_eq!(reaction.status().await, ComponentStatus::Stopped);
         let rebound = tokio::net::TcpListener::bind(address).await?;
         drop(rebound);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_before_binding_still_requires_lifecycle_cleanup() -> anyhow::Result<()> {
+        let (reaction, reservation) =
+            crate::tests::sse_reaction_with_reserved_port("early-cancel").await;
+        let address = reservation.local_addr()?;
+        drop(reservation);
+        let (updates, mut events) = tokio::sync::mpsc::channel(1);
+        updates
+            .send(drasi_lib::component_graph::ComponentUpdate::Status {
+                component_id: reaction.id().into(),
+                status: ComponentStatus::Stopped,
+                message: None,
+            })
+            .await?;
+        reaction.base.status_handle().wire(updates).await;
+        let mut start = Box::pin(reaction.start());
+        assert!(futures::poll!(&mut start).is_pending());
+        assert_eq!(reaction.status().await, ComponentStatus::Starting);
+        drop(start);
+        assert!(*reaction.lifecycle.lock().await);
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkerAlreadyOwned>()
+            .is_some());
+        let rebound = tokio::net::TcpListener::bind(address).await?;
+        drop(rebound);
+        events.recv().await.unwrap();
+        reaction.stop().await?;
+        assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+        assert!(!*reaction.lifecycle.lock().await);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn partial_start_requires_cleanup_even_without_spawned_workers() -> anyhow::Result<()> {
+        let (reaction, reservation) =
+            crate::tests::sse_reaction_with_reserved_port("partial").await;
+        drop(reservation);
+        let gate = reaction.base.shutdown_tx.write().await;
+        let mut start = Box::pin(reaction.start());
+        assert!(futures::poll!(&mut start).is_pending());
+        drop(start);
+        drop(gate);
+        assert!(*reaction.lifecycle.lock().await);
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert!(reaction
+            .start()
+            .await
+            .unwrap_err()
+            .downcast_ref::<WorkerAlreadyOwned>()
+            .is_some());
+        reaction.stop().await?;
+        reaction.start().await?;
+        reaction.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_processor_delivers_results_while_starting() -> anyhow::Result<()> {
+        let (reaction, reservation) =
+            crate::tests::sse_reaction_with_reserved_port("starting").await;
+        drop(reservation);
+        let mut results = reaction.broadcasters.read().await["/events"].subscribe();
+        let shutdown_gate = reaction.base.shutdown_tx.write().await;
+        let start = reaction.start();
+        tokio::pin!(start);
+        assert!(futures::poll!(&mut start).is_pending());
+        let server_gate = reaction.server_task.write().await;
+        drop(shutdown_gate);
+        assert!(futures::poll!(&mut start).is_pending());
+        assert_eq!(reaction.status().await, ComponentStatus::Starting);
+        assert!(reaction.base.processing_task.read().await.is_some());
+        reaction
+            .enqueue_query_result(drasi_lib::channels::QueryResult::new(
+                "starting-query".into(),
+                1,
+                chrono::Utc::now(),
+                vec![ResultDiff::Add {
+                    data: json!({"value": 42}),
+                    row_signature: 0,
+                }],
+                Default::default(),
+            ))
+            .await?;
+        let payload = tokio::time::timeout(Duration::from_secs(5), results.recv()).await??;
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload)?["queryId"],
+            "starting-query"
+        );
+        drop(server_gate);
+        start.await?;
+        reaction.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_failure_still_cleans_processor_and_listener() -> anyhow::Result<()> {
+        let (mut reaction, reservation) =
+            crate::tests::sse_reaction_with_reserved_port("heartbeat-failure").await;
+        let address = reservation.local_addr()?;
+        drop(reservation);
+        reaction.config.heartbeat_interval_ms = 0;
+        let (updates, mut events) = tokio::sync::mpsc::channel(16);
+        reaction.base.status_handle().wire(updates).await;
+        reaction.start().await?;
+        while !reaction
+            .heartbeat_task
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            tokio::task::yield_now().await;
+        }
+        let error = reaction.stop().await.unwrap_err();
+        assert!(
+            matches!(error.downcast_ref(), Some(WorkerCleanupError::Join(error)) if error.is_panic())
+        );
+        assert_eq!(reaction.status().await, ComponentStatus::Error);
+        assert!(reaction.base.processing_task.read().await.is_none());
+        assert!(reaction.server_task.read().await.is_none());
+        assert!(reaction.heartbeat_task.read().await.is_none());
+        let mut last = None;
+        while let Ok(event) = events.try_recv() {
+            last = Some(event);
+        }
+        assert!(
+            matches!(last, Some(drasi_lib::component_graph::ComponentUpdate::Status {
+            status: ComponentStatus::Error, message: Some(message), ..
+        }) if message.contains("panicked"))
+        );
+        let rebound = tokio::net::TcpListener::bind(address).await?;
+        drop(rebound);
+        reaction.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unabortable_heartbeat_retains_ownership_but_does_not_skip_server_cleanup(
+    ) -> anyhow::Result<()> {
+        let (reaction, reservation) =
+            crate::tests::sse_reaction_with_reserved_port("blocked-heartbeat").await;
+        let address = reservation.local_addr()?;
+        drop(reservation);
+        reaction.start().await?;
+        cancel_owned_worker(
+            &mut *reaction.heartbeat_task.write().await,
+            Duration::from_secs(5),
+        )
+        .await?;
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        drasi_lib::context::workers::spawn_owned_blocking_worker(
+            &reaction.heartbeat_task,
+            move || {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+            },
+        )
+        .await?;
+        ready.await?;
+        let result = tokio::time::timeout(Duration::from_secs(15), reaction.stop()).await;
+        release.send(())?;
+        let error = result?.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref(),
+            Some(WorkerCleanupError::TimedOut { .. })
+        ));
+        assert_eq!(reaction.status().await, ComponentStatus::Error);
+        assert!(reaction.heartbeat_task.read().await.is_some());
+        assert!(reaction.server_task.read().await.is_none());
+        assert!(reaction.start().await.is_err());
+        let rebound = tokio::net::TcpListener::bind(address).await?;
+        drop(rebound);
+        reaction.stop().await?;
+        reaction.start().await?;
+        reaction.stop().await?;
         Ok(())
     }
 
