@@ -33,7 +33,7 @@
 # `CMAKE_SYSTEM_NAME`, so it does not turn an otherwise native build into a cross
 # build.
 
-# Compiler wiring for cargo-zigbuild (-gnu glibc-pinned) builds.
+# Compiler wiring for cargo-zigbuild builds.
 #
 # `cmake-rs` suppresses its own `-DCMAKE_<LANG>_COMPILER` defines whenever a
 # toolchain file is supplied, so without this block CMake falls back to the host
@@ -43,8 +43,8 @@
 # with `-` replaced by `_`) pointing at its `zig cc` wrapper for the target;
 # wire those in here so librdkafka compiles with the same zig toolchain (and
 # glibc floor) as the rest of the link. Only the target's variable is defined at
-# build time, so at most one branch takes effect; on non-zigbuild builds none do
-# and CMake's normal detection is used.
+# build time, so at most one branch takes effect. Native manylinux and cross
+# builds do not set these variables, so CMake uses their normal compilers.
 foreach(_zig_triple x86_64_unknown_linux_gnu aarch64_unknown_linux_gnu)
   if(DEFINED ENV{CC_${_zig_triple}})
     set(CMAKE_C_COMPILER "$ENV{CC_${_zig_triple}}")
@@ -54,7 +54,7 @@ foreach(_zig_triple x86_64_unknown_linux_gnu aarch64_unknown_linux_gnu)
   endif()
 endforeach()
 
-# Work around an upstream librdkafka bug so the -gnu zigbuild compiles.
+# Work around an upstream librdkafka bug when optional HTTP support is disabled.
 #
 # `src/rdkafka_conf.c` includes the curl header unconditionally:
 #   #ifdef WITH_OAUTHBEARER_OIDC
@@ -63,10 +63,9 @@ endforeach()
 # but the generated `config.h` defines `WITH_OAUTHBEARER_OIDC` via
 # `#cmakedefine01`, which ALWAYS emits `#define WITH_OAUTHBEARER_OIDC 0` (or 1).
 # `#ifdef` on an always-defined macro is always true, so `<curl/curl.h>` is
-# included even though we build with `WITH_CURL=OFF` / OIDC disabled. A native
-# gcc build finds the host header (libcurl-dev is preinstalled on the runners),
-# but the `cargo-zigbuild` zig sysroot ships no curl headers, so the build fails
-# with "curl/curl.h: file not found".
+# included even though we build with `WITH_CURL=OFF` / OIDC disabled. Manylinux
+# and cargo-zigbuild builds intentionally avoid host curl development headers, so
+# the build fails with "curl/curl.h: file not found" without this workaround.
 #
 # Put a self-contained empty stub `<curl/curl.h>` (ci/cmake/rdkafka-stubs) on the
 # include path so the stray include resolves. `WITH_OAUTHBEARER_OIDC` is 0, so no
