@@ -34,6 +34,22 @@ pub struct FfiStateStoreProxy {
 unsafe impl Send for FfiStateStoreProxy {}
 unsafe impl Sync for FfiStateStoreProxy {}
 
+impl Drop for FfiStateStoreProxy {
+    fn drop(&mut self) {
+        if self.vtable.is_null() {
+            return;
+        }
+        unsafe {
+            let vtable = &*self.vtable;
+            // Free the inner state (Box<Arc<dyn StateStoreProvider>>)
+            (vtable.drop_fn)(vtable.state);
+            // Free the vtable struct itself (allocated via Box::into_raw by the
+            // host when it built the FfiRuntimeContext)
+            let _ = Box::from_raw(self.vtable as *mut StateStoreVtable);
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl StateStoreProvider for FfiStateStoreProxy {
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
@@ -172,5 +188,151 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 .into_result()
                 .map_err(drasi_lib::StateStoreError::Other)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::{FfiGetResult, FfiResult, FfiStringArray};
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    static DROP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn stub_get(_state: *mut c_void, _store_id: FfiStr, _key: FfiStr) -> FfiGetResult {
+        FfiGetResult::not_found()
+    }
+
+    extern "C" fn stub_set(
+        _state: *mut c_void,
+        _store_id: FfiStr,
+        _key: FfiStr,
+        _value: *const u8,
+        _value_len: usize,
+    ) -> FfiResult {
+        FfiResult::ok()
+    }
+
+    extern "C" fn stub_delete(_state: *mut c_void, _store_id: FfiStr, _key: FfiStr) -> FfiResult {
+        FfiResult::ok()
+    }
+
+    extern "C" fn stub_contains_key(
+        _state: *mut c_void,
+        _store_id: FfiStr,
+        _key: FfiStr,
+    ) -> FfiResult {
+        FfiResult::ok()
+    }
+
+    extern "C" fn stub_get_many(
+        _state: *mut c_void,
+        _store_id: FfiStr,
+        _keys: *const FfiStr,
+        _keys_count: usize,
+        _out_values: *mut FfiGetResult,
+    ) -> FfiResult {
+        FfiResult::ok()
+    }
+
+    extern "C" fn stub_set_many(
+        _state: *mut c_void,
+        _store_id: FfiStr,
+        _keys: *const FfiStr,
+        _values: *const *const u8,
+        _value_lens: *const usize,
+        _count: usize,
+    ) -> FfiResult {
+        FfiResult::ok()
+    }
+
+    extern "C" fn stub_delete_many(
+        _state: *mut c_void,
+        _store_id: FfiStr,
+        _keys: *const FfiStr,
+        _keys_count: usize,
+    ) -> i64 {
+        0
+    }
+
+    extern "C" fn stub_clear_store(_state: *mut c_void, _store_id: FfiStr) -> i64 {
+        0
+    }
+
+    extern "C" fn stub_list_keys(_state: *mut c_void, _store_id: FfiStr) -> FfiStringArray {
+        FfiStringArray::from_vec(Vec::new())
+    }
+
+    extern "C" fn stub_store_exists(_state: *mut c_void, _store_id: FfiStr) -> FfiResult {
+        FfiResult::ok()
+    }
+
+    extern "C" fn stub_key_count(_state: *mut c_void, _store_id: FfiStr) -> i64 {
+        0
+    }
+
+    extern "C" fn stub_sync(_state: *mut c_void) -> FfiResult {
+        FfiResult::ok()
+    }
+
+    /// Mirrors the host's `ss_drop`: reclaims the boxed `Arc` behind `state`.
+    extern "C" fn counting_drop(state: *mut c_void) {
+        DROP_CALLS.fetch_add(1, Ordering::SeqCst);
+        unsafe { drop(Box::from_raw(state as *mut Arc<()>)) };
+    }
+
+    fn test_vtable(state: *mut c_void) -> StateStoreVtable {
+        StateStoreVtable {
+            state,
+            get_fn: stub_get,
+            set_fn: stub_set,
+            delete_fn: stub_delete,
+            contains_key_fn: stub_contains_key,
+            get_many_fn: stub_get_many,
+            set_many_fn: stub_set_many,
+            delete_many_fn: stub_delete_many,
+            clear_store_fn: stub_clear_store,
+            list_keys_fn: stub_list_keys,
+            store_exists_fn: stub_store_exists,
+            key_count_fn: stub_key_count,
+            sync_fn: stub_sync,
+            drop_fn: counting_drop,
+        }
+    }
+
+    #[test]
+    fn drop_invokes_vtable_drop_fn_and_releases_state() {
+        DROP_CALLS.store(0, Ordering::SeqCst);
+
+        // Stands in for the host's `Box<Arc<dyn StateStoreProvider>>`; the strong
+        // count shows whether the provider reference is actually released.
+        let provider = Arc::new(());
+        let state = Box::into_raw(Box::new(provider.clone())) as *mut c_void;
+        assert_eq!(Arc::strong_count(&provider), 2);
+
+        let vtable = Box::into_raw(Box::new(test_vtable(state)));
+        let proxy = FfiStateStoreProxy {
+            vtable: vtable as *const _,
+        };
+
+        drop(proxy);
+
+        assert_eq!(DROP_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            Arc::strong_count(&provider),
+            1,
+            "provider reference must be released when the proxy is dropped"
+        );
+    }
+
+    #[test]
+    fn drop_is_a_noop_for_a_null_vtable() {
+        let proxy = FfiStateStoreProxy {
+            vtable: std::ptr::null(),
+        };
+
+        drop(proxy);
     }
 }

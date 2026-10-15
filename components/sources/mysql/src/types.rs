@@ -17,13 +17,31 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_lib::sources::PositionComparator;
+use std::cmp::Ordering;
 
+const MAX_POSITION_BYTES: usize = 64 * 1024;
+const MAX_BINLOG_FILE_BYTES: usize = 255;
+// Leave space for the filename, numeric fields and JSON framing.
+const MAX_GTID_SET_BYTES: usize = 60 * 1024;
+
+/// Opaque checkpoint within one binlog lineage. Row tokens retain the real
+/// transaction-end position and a native GTID/BEGIN/TableMap start cursor;
+/// their ordinal spans all emitted changes, including multiple statements.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReplicationState {
     pub binlog_file: String,
     pub binlog_position: u32,
     pub gtid_set: Option<String>,
     pub last_processed_timestamp: u64,
+    /// Native cursor before this transaction's GTID/BEGIN/TableMap event.
+    /// Set together with row_offset by flush_transaction for nonfinal rows.
+    /// Both are absent on final transaction rows, bootstrap boundaries and
+    /// unbuffered push_change tokens, marking a cursor after all rows at binlog_position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transaction_start_position: Option<u32>,
+    /// Zero-based ordinal of the emitted change within the committed transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_offset: Option<u64>,
 }
 
 impl ReplicationState {
@@ -38,6 +56,93 @@ impl ReplicationState {
             binlog_position,
             gtid_set: gtid_set.filter(|gtid| !gtid.trim().is_empty()),
             last_processed_timestamp,
+            transaction_start_position: None,
+            row_offset: None,
+        }
+    }
+
+    /// Attach a zero-based emitted-row ordinal and native transaction start.
+    /// Requires a nonempty binlog filename, 4 <= start_position < binlog_position,
+    /// and filename/GTID lengths within the checkpoint limits.
+    pub fn with_transaction_row(mut self, start_position: u32, row_offset: u64) -> Result<Self> {
+        self.transaction_start_position = Some(start_position);
+        self.row_offset = Some(row_offset);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn transaction_start_position(&self) -> Option<u32> {
+        self.transaction_start_position
+    }
+
+    pub fn row_offset(&self) -> Option<u64> {
+        self.row_offset
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.binlog_file.len() <= MAX_BINLOG_FILE_BYTES,
+            "MySQL binlog filename exceeds {MAX_BINLOG_FILE_BYTES} bytes"
+        );
+        anyhow::ensure!(
+            self.gtid_set
+                .as_ref()
+                .is_none_or(|gtid| gtid.len() <= MAX_GTID_SET_BYTES),
+            "MySQL GTID set exceeds {MAX_GTID_SET_BYTES} bytes"
+        );
+        match (self.transaction_start_position, self.row_offset) {
+            (None, None) => {
+                anyhow::ensure!(
+                    self.gtid_set
+                        .as_ref()
+                        .is_some_and(|gtid| !gtid.trim().is_empty())
+                        || (!self.binlog_file.trim().is_empty() && self.binlog_position >= 4),
+                    "Invalid MySQL boundary position: expected a GTID or a binlog filename \
+                     with a position at or after byte 4"
+                );
+                Ok(())
+            }
+            (Some(start), Some(_)) => {
+                anyhow::ensure!(
+                    !self.binlog_file.is_empty() && start >= 4 && start < self.binlog_position,
+                    "Invalid MySQL row position: expected a binlog file and transaction start \
+                     between byte 4 and commit position {}",
+                    self.binlog_position
+                );
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "Incomplete MySQL row position: transaction_start_position and row_offset \
+                 must both be present"
+            ),
+        }
+    }
+
+    /// Order by numeric file suffix, transaction-end position, then emitted-row ordinal.
+    /// A boundary token without an ordinal sorts after every row at that cursor.
+    /// Only positions from the same binlog lineage are comparable.
+    pub fn compare_cursor(&self, other: &Self) -> Ordering {
+        Self::binlog_file_key(&self.binlog_file)
+            .cmp(&Self::binlog_file_key(&other.binlog_file))
+            .then_with(|| self.binlog_position.cmp(&other.binlog_position))
+            .then_with(|| match (self.row_offset(), other.row_offset()) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            })
+    }
+
+    fn binlog_file_key(file: &str) -> (&str, Option<(usize, &str)>) {
+        match file.rsplit_once('.') {
+            Some((prefix, suffix))
+                if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                // Comparing significant digit counts first gives numeric order without overflow.
+                let digits = suffix.trim_start_matches('0');
+                (prefix, Some((digits.len(), digits)))
+            }
+            _ => (file, None),
         }
     }
 
@@ -61,14 +166,25 @@ pub fn encode_position(state: &ReplicationState) -> Result<Bytes> {
 
 /// Decode a MySQL source position token shared by bootstrap handover and CDC checkpoints.
 pub fn decode_position(bytes: &[u8]) -> Result<ReplicationState> {
-    serde_json::from_slice(bytes).context("Failed to decode MySQL replication position")
+    anyhow::ensure!(
+        bytes.len() < MAX_POSITION_BYTES,
+        "MySQL replication position must be smaller than {MAX_POSITION_BYTES} bytes"
+    );
+    let mut state: ReplicationState =
+        serde_json::from_slice(bytes).context("Failed to decode MySQL replication position")?;
+    state.gtid_set = state.gtid_set.filter(|gtid| !gtid.trim().is_empty());
+    state.validate()?;
+    Ok(state)
 }
 
 /// Position comparator for MySQL binlog positions.
 ///
-/// Compares two `ReplicationState` JSON-encoded positions. Uses GTID-based
-/// comparison when both positions have GTID sets; falls back to binlog
-/// file + position comparison otherwise.
+/// Orders positions by binlog file, commit position, and transaction row ordinal.
+/// A token without row fields marks a completed cursor, after every row at that
+/// position. Timestamps and GTID values are metadata, not per-row ordering keys.
+/// This PositionComparator implementation uses strict ordering (equal tokens
+/// are suppressed) and compares numeric filename suffixes regardless of padding
+/// or digit width. It assumes one binlog lineage, not positions across failover.
 #[derive(Debug, Clone, Default)]
 pub struct MySqlPositionComparator;
 
@@ -82,18 +198,186 @@ impl PositionComparator for MySqlPositionComparator {
             return true;
         };
 
-        // Compare using timestamp as the primary ordering metric.
-        // MySQL binlog positions are not globally comparable across file rotations,
-        // but timestamps provide a reliable monotonic ordering.
-        if event_state.last_processed_timestamp != resume_state.last_processed_timestamp {
-            return event_state.last_processed_timestamp > resume_state.last_processed_timestamp;
-        }
+        event_state.compare_cursor(&resume_state).is_gt()
+    }
+}
 
-        // Same timestamp — compare binlog file and position for finer granularity
-        match event_state.binlog_file.cmp(&resume_state.binlog_file) {
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => event_state.binlog_position > resume_state.binlog_position,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binlog_suffix_rollover_orders_files_numerically() {
+        for prefix in ["mysql-bin", "server.7.mysql-bin"] {
+            for (older, newer) in [
+                ("000009", "000010"),
+                ("999999", "1000000"),
+                ("9999999", "10000000"),
+                ("18446744073709551615", "18446744073709551616"),
+            ] {
+                let older = ReplicationState::new(format!("{prefix}.{older}"), 900, None, 0);
+                let newer = ReplicationState::new(format!("{prefix}.{newer}"), 200, None, 0)
+                    .with_transaction_row(4, 0)
+                    .unwrap();
+                assert!(older.compare_cursor(&newer).is_lt());
+                assert!(newer.compare_cursor(&older).is_gt());
+                assert!(MySqlPositionComparator
+                    .position_reached(&newer.to_position_bytes(), &older.to_position_bytes()));
+                assert!(!MySqlPositionComparator
+                    .position_reached(&older.to_position_bytes(), &newer.to_position_bytes()));
+            }
         }
+    }
+
+    #[test]
+    fn numeric_file_suffix_padding_does_not_change_cursor_order() {
+        for (padded, unpadded) in [("000000", "0"), ("000001", "1"), ("000010", "10")] {
+            let padded = ReplicationState::new(format!("mysql-bin.{padded}"), 200, None, 0);
+            let unpadded = ReplicationState::new(format!("mysql-bin.{unpadded}"), 200, None, 0);
+            assert_eq!(padded.compare_cursor(&unpadded), Ordering::Equal);
+            let row = unpadded.with_transaction_row(4, 1).unwrap();
+            assert!(row.compare_cursor(&padded).is_lt());
+        }
+    }
+
+    #[test]
+    fn file_order_is_transitive_for_mixed_filename_shapes() {
+        let positions: Vec<_> = [
+            "",
+            "mysql-bin",
+            "mysql-bin.",
+            "mysql-bin.000000",
+            "mysql-bin.1z",
+            "mysql-bin.2",
+            "mysql-bin.000002",
+            "mysql-bin.10",
+            "other-bin.000001",
+        ]
+        .into_iter()
+        .map(|file| ReplicationState::new(file, 200, None, 0))
+        .collect();
+        for first in &positions {
+            for second in &positions {
+                assert_eq!(
+                    first.compare_cursor(second),
+                    second.compare_cursor(first).reverse()
+                );
+                for third in &positions {
+                    if first.compare_cursor(second).is_le() && second.compare_cursor(third).is_le()
+                    {
+                        assert!(first.compare_cursor(third).is_le());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_tokens_require_a_usable_native_cursor() {
+        for file in ["", " \t", "mysql-bin.000001"] {
+            for pos in [0, 3, 4, 200] {
+                for gtid in [
+                    None,
+                    Some(""),
+                    Some(" \t"),
+                    Some("00000000-0000-0000-0000-000000000001:1-7"),
+                ] {
+                    let token = serde_json::json!({
+                        "binlog_file": file,
+                        "binlog_position": pos,
+                        "gtid_set": gtid,
+                        "last_processed_timestamp": 0,
+                    });
+                    let decoded = decode_position(&serde_json::to_vec(&token).unwrap());
+                    let usable = (!file.trim().is_empty() && pos >= 4)
+                        || gtid.is_some_and(|gtid| !gtid.trim().is_empty());
+                    assert_eq!(decoded.is_ok(), usable, "{token}");
+                    if let Ok(decoded) = decoded {
+                        assert_eq!(
+                            decoded.gtid_set.as_deref(),
+                            gtid.filter(|g| !g.trim().is_empty())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_string_limits_apply_to_boundary_and_row_tokens() {
+        let boundary = ReplicationState::new(
+            "f".repeat(MAX_BINLOG_FILE_BYTES),
+            200,
+            Some("g".repeat(MAX_GTID_SET_BYTES)),
+            0,
+        );
+        for state in [
+            boundary.clone(),
+            boundary.with_transaction_row(4, u64::MAX).unwrap(),
+        ] {
+            let decoded = decode_position(&state.to_position_bytes()).unwrap();
+            assert_eq!(
+                decoded.transaction_start_position(),
+                state.transaction_start_position()
+            );
+            assert_eq!(decoded.row_offset(), state.row_offset());
+
+            let mut too_long = state.clone();
+            too_long.binlog_file.push('f');
+            assert!(decode_position(&too_long.to_position_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("binlog filename exceeds"));
+
+            let mut too_long = state;
+            too_long.gtid_set.as_mut().unwrap().push('g');
+            assert!(decode_position(&too_long.to_position_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("GTID set exceeds"));
+        }
+    }
+
+    #[test]
+    fn encoded_token_limit_is_checked_before_deserialization() {
+        let mut token = ReplicationState::new("mysql-bin.000001", 200, None, 0)
+            .to_position_bytes()
+            .to_vec();
+        token.resize(MAX_POSITION_BYTES - 1, b' ');
+        assert!(decode_position(&token).is_ok());
+        token.push(b' ');
+        assert!(decode_position(&token)
+            .unwrap_err()
+            .to_string()
+            .contains("must be smaller than"));
+        assert!(decode_position(&vec![b'!'; MAX_POSITION_BYTES])
+            .unwrap_err()
+            .to_string()
+            .contains("must be smaller than"));
+    }
+
+    #[test]
+    fn row_constructor_validates_cursor_and_string_limits() {
+        for start in [0, 3, 200, 201] {
+            assert!(ReplicationState::new("mysql-bin.000001", 200, None, 0)
+                .with_transaction_row(start, 0)
+                .is_err());
+        }
+        assert!(ReplicationState::new("", 200, None, 0)
+            .with_transaction_row(4, 0)
+            .is_err());
+        assert!(
+            ReplicationState::new("f".repeat(MAX_BINLOG_FILE_BYTES + 1), 200, None, 0)
+                .with_transaction_row(4, 0)
+                .is_err()
+        );
+        assert!(ReplicationState::new(
+            "mysql-bin.000001",
+            200,
+            Some("g".repeat(MAX_GTID_SET_BYTES + 1)),
+            0,
+        )
+        .with_transaction_row(4, 0)
+        .is_err());
     }
 }

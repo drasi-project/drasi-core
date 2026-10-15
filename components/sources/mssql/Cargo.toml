@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-mssql"
-version = "0.2.11"
+version = "0.2.12"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Microsoft SQL Server CDC source plugin for Drasi"
@@ -71,7 +71,7 @@ dynamic-plugin = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure
-# Transport). Vendor it there so the glibc-pinned cargo-zigbuild -gnu plugins
+# Transport). Vendor it there so the glibc-pinned manylinux -gnu plugins
 # build without host OpenSSL headers; scoping it off Windows/macOS avoids
 # unnecessary and toolchain-sensitive OpenSSL-from-source builds.
 openssl = { version = "0.10", features = ["vendored"] }
