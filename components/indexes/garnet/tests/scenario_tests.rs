@@ -142,6 +142,47 @@ mod building_comfort {
         println!("Element Index Cleared");
     }
 
+    #[tokio::test]
+    async fn projected_floor_alert_snapshot_clears_after_reset() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        building_comfort::snapshots::projected_floor_alert_snapshot_clears_after_reset(
+            &test_config,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn projected_building_alert_snapshot_clears_after_reset() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        building_comfort::snapshots::projected_building_alert_snapshot_clears_after_reset(
+            &test_config,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn projected_alert_snapshots_track_room_deletion() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        building_comfort::snapshots::projected_alert_snapshots_track_room_deletion(&test_config)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn projected_alert_snapshots_respect_boundaries() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        building_comfort::snapshots::projected_alert_snapshots_respect_boundaries(&test_config)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn projected_floor_alert_snapshot_tracks_room_migration() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        building_comfort::snapshots::projected_floor_alert_snapshot_tracks_room_migration(
+            &test_config,
+        )
+        .await;
+    }
+
     // #[tokio::test]
     // async fn building_comfort_use_case_with_cache() {
     //     let test_config = GarnetQueryConfig::new(true);
