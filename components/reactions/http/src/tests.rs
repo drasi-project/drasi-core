@@ -126,6 +126,7 @@ fn builder_with_output_templates_round_trip() {
                     url: "/added".to_string(),
                     method: "POST".to_string(),
                     headers: HashMap::new(),
+                    reject_non_empty_json_pointer: Some("/errors".to_string()),
                 },
             }),
             updated: None,
@@ -150,6 +151,12 @@ fn builder_with_output_templates_round_trip() {
         .and_then(|v| v.as_object())
         .expect("routes object");
     assert!(routes.contains_key("q1"));
+    let added = &routes["q1"]["added"];
+    assert_eq!(
+        added.get("rejectNonEmptyJsonPointer"),
+        Some(&serde_json::json!("/errors"))
+    );
+    assert!(added.get("reject_non_empty_json_pointer").is_none());
 }
 
 #[test]
@@ -165,6 +172,7 @@ fn builder_with_query_template_adds_to_routes() {
                         url: "/q1".to_string(),
                         method: "POST".to_string(),
                         headers: HashMap::new(),
+                        ..Default::default()
                     },
                 }),
                 ..Default::default()
@@ -227,6 +235,32 @@ fn config_deserialize_with_output_templates() {
     let templates = c.output_templates.unwrap();
     assert!(templates.default_template.is_some());
     assert!(templates.routes.contains_key("q1"));
+}
+
+#[test]
+fn response_validator_serde_uses_exact_camel_case_key() {
+    let spec: crate::config::HttpCallSpec = serde_json::from_value(serde_json::json!({
+        "template": "{}",
+        "url": "/graphql",
+        "method": "POST",
+        "rejectNonEmptyJsonPointer": "/errors"
+    }))
+    .unwrap();
+    assert_eq!(
+        spec.extension.reject_non_empty_json_pointer.as_deref(),
+        Some("/errors")
+    );
+
+    let value = serde_json::to_value(&spec).unwrap();
+    assert_eq!(
+        value.get("rejectNonEmptyJsonPointer"),
+        Some(&serde_json::json!("/errors"))
+    );
+    assert!(value.get("reject_non_empty_json_pointer").is_none());
+    assert!(serde_json::from_value::<HttpCallExt>(
+        serde_json::json!({ "reject_non_empty_json_pointer": "/errors" })
+    )
+    .is_err());
 }
 
 #[test]
@@ -361,6 +395,7 @@ fn descriptor_kind_and_version() {
     assert!(schema.contains("HttpQueryConfig"));
     assert!(schema.contains("HttpCallSpec"));
     assert!(schema.contains("AdaptiveBatchConfig"));
+    assert!(schema.contains("\"rejectNonEmptyJsonPointer\""));
 }
 
 #[tokio::test]
@@ -422,6 +457,56 @@ async fn descriptor_creates_standard_reaction() {
     assert_eq!(
         p.get("baseUrl"),
         Some(&serde_json::Value::String("http://example.com".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn descriptor_maps_and_validates_response_validator() {
+    use drasi_plugin_sdk::ReactionPluginDescriptor;
+    let d = crate::descriptor::HttpReactionDescriptor;
+    let cfg = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "outputTemplates": {
+            "routes": {
+                "q1": {
+                    "added": {
+                        "url": "/graphql",
+                        "rejectNonEmptyJsonPointer": "/errors"
+                    }
+                }
+            }
+        }
+    });
+    let reaction = d
+        .create_reaction("my-r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .expect("descriptor must understand the response validator");
+    assert_eq!(
+        reaction.properties()["outputTemplates"]["routes"]["q1"]["added"]
+            ["rejectNonEmptyJsonPointer"],
+        serde_json::json!("/errors")
+    );
+
+    let invalid = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "outputTemplates": {
+            "routes": {
+                "q1": {
+                    "added": {
+                        "rejectNonEmptyJsonPointer": "/errors~2"
+                    }
+                }
+            }
+        }
+    });
+    let err = d
+        .create_reaction("my-r", vec!["q1".to_string()], &invalid, true)
+        .await
+        .err()
+        .expect("descriptor must pass the field into domain validation");
+    assert!(
+        format!("{err:#}").contains("rejectNonEmptyJsonPointer"),
+        "{err:#}"
     );
 }
 
@@ -516,6 +601,7 @@ fn spec_with(url: &str, template: &str, headers: HashMap<String, String>) -> Htt
                 url: url.to_string(),
                 method: "POST".to_string(),
                 headers,
+                ..Default::default()
             },
         }),
         ..Default::default()
@@ -576,6 +662,73 @@ fn build_succeeds_when_adaptive_combined_with_output_templates() {
         "adaptive + outputTemplates must build: {:?}",
         r.err()
     );
+}
+
+#[test]
+fn build_validates_rfc6901_response_pointer() {
+    for pointer in ["/errors", "/", "/a~1b/~0key"] {
+        let mut spec = spec_with("/graphql", "{}", HashMap::new());
+        spec.added
+            .as_mut()
+            .unwrap()
+            .extension
+            .reject_non_empty_json_pointer = Some(pointer.to_string());
+        assert!(
+            HttpReaction::builder("r")
+                .with_query("q1")
+                .with_query_template("q1", spec)
+                .build()
+                .is_ok(),
+            "{pointer} should be valid"
+        );
+    }
+
+    for pointer in [
+        "",
+        "errors",
+        "#/errors",
+        "/errors~",
+        "/errors~2",
+        "/errors~~0",
+    ] {
+        let mut spec = spec_with("/graphql", "{}", HashMap::new());
+        spec.added
+            .as_mut()
+            .unwrap()
+            .extension
+            .reject_non_empty_json_pointer = Some(pointer.to_string());
+        let err = HttpReaction::builder("r")
+            .with_query("q1")
+            .with_query_template("q1", spec)
+            .build()
+            .err()
+            .expect("invalid pointer must fail construction");
+        assert!(
+            format!("{err:#}").contains("rejectNonEmptyJsonPointer"),
+            "{pointer:?}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn build_rejects_response_validator_in_adaptive_mode() {
+    let mut spec = spec_with("/graphql", "{}", HashMap::new());
+    spec.added
+        .as_mut()
+        .unwrap()
+        .extension
+        .reject_non_empty_json_pointer = Some("/errors".to_string());
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_query_template("q1", spec)
+        .with_adaptive_defaults()
+        .with_batch_endpoint("/batch")
+        .build()
+        .err()
+        .expect("adaptive mode must not ignore a per-call response validator");
+    let message = format!("{err:#}");
+    assert!(message.contains("rejectNonEmptyJsonPointer"), "{message}");
+    assert!(message.contains("adaptive"), "{message}");
 }
 
 #[test]
@@ -1106,6 +1259,7 @@ fn validate_rejects_invalid_url_template_in_route() {
                     url: "/x/{{#if}}".to_string(), // unclosed block → compile error
                     method: "POST".to_string(),
                     headers: HashMap::new(),
+                    ..Default::default()
                 },
             }),
             ..Default::default()
@@ -1310,6 +1464,20 @@ async fn start_revalidates_and_sets_error_on_invalid_config() {
     let r = HttpReaction::new("r", vec!["q1".to_string()], cfg);
     assert!(r.start().await.is_err(), "start must reject invalid config");
     assert!(matches!(r.status().await, ComponentStatus::Error));
+}
+
+#[tokio::test]
+async fn start_rejects_invalid_response_pointer() {
+    let mut spec = spec_with("/graphql", "{}", HashMap::new());
+    spec.added
+        .as_mut()
+        .unwrap()
+        .extension
+        .reject_non_empty_json_pointer = Some("/errors~2".to_string());
+    let config = cfg_with_routes(None, HashMap::from([("q1".to_string(), spec)]));
+    let reaction = HttpReaction::new("r", vec!["q1".to_string()], config);
+    assert!(reaction.start().await.is_err());
+    assert!(matches!(reaction.status().await, ComponentStatus::Error));
 }
 
 // ---------------------------------------------------------------------------
