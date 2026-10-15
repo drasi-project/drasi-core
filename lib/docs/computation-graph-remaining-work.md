@@ -6,6 +6,8 @@
 
 **Targeted evidence update: 14 October 2026.** The reproduced durable network
 source-stop investigation is recorded under [CW-05](#cw-05-durable-network-source-stop).
+The selected migration of the native query component to an optional plugin is
+recorded under [CW-43](#cw-43-optional-native-query-plugin).
 This does not constitute a new review of the entire inventory.
 
 **The approved execution-and-isolation work package is not fully complete.**
@@ -1563,6 +1565,59 @@ Server; testing **High** for recreation and exact result/subscription behavior.
 [Server configuration][server-computation]. Earlier tracking: CG-10/15.
 The proposed ordinary-to-native bridge is retired, not a remaining deliverable.
 
+<a id="cw-43-optional-native-query-plugin"></a>
+
+#### Selected migration: make the native query component an optional plugin
+
+**Priority: P1 for native migration. Implementation: not implemented.
+Selected: 14 October 2026.**
+
+Here **optional** means a deployment can choose whether to load the query
+component. This is selected migration work, not an unselected future feature.
+
+**Current boundary:** `ContinuousQueryFactory` and its graph-owned query
+implementation live in `drasi-lib` and are unconditionally included in
+`FactoryRegistry::standard()`. The native plugin SDK explicitly rejects
+`ComponentRole::Query` because dynamic query recovery is not implemented.
+Splitting the existing source/transformer/sink plugins did not remove that
+limitation.
+
+**Remaining work:** move the native continuous-query component, configuration
+and factory into its own component crate under `components/computation-plugins/`.
+Reuse the existing shared query engine, parsers and function libraries rather
+than copying or replacing them. Hosts must register the query component when
+its plugin is selected/loaded, not rely on an unconditional built-in factory.
+Graphs without queries must work with the plugin absent; a graph requiring it
+must report a clear missing-plugin/factory error when it is unavailable.
+
+Define and implement the required SDK/resource and ABI contracts for the
+query's actual index, bootstrap, scheduling, source-progress and result-catalogue
+dependencies. Preserve graph-owned lifecycle, transaction/recovery guarantees,
+snapshot/result reads and live subscriptions across the plugin boundary.
+Do not bypass the missing query-role support by advertising a transformer,
+weakening recovery or supporting only an in-memory subset.
+
+Update supported Server/library assembly, discovery, configuration, saved
+recipes and examples to select the plugin normally. Preserve component
+identities, configuration, ports and schemas, or provide an explicit versioned
+migration where compatibility cannot be retained. Changed plugin provenance
+must not silently rewrite or discard processing state.
+
+**Closure criteria:** demonstrate independent build/load and operation with the
+plugin both present and absent. Qualify existing Cypher/GQL behavior, bootstrap
+and scheduled work, exact result changes, supported transactions, cancellation,
+reconstruction and recovery with the real dynamic library. Existing query API,
+snapshot and live-result workflows must retain their behavior; moving files or
+loading a factory alone is not completion.
+
+**Likely complexity:** implementation **High** across component extraction,
+SDK/ABI, resources and host assembly; testing **High** for exact results,
+ownership and recovery across the dynamic boundary.
+
+**Evidence:** [current query component][native-query],
+[built-in registration][standard-factories],
+[SDK query-role restriction][native-sdk-metadata], [shared evaluator][evaluator].
+
 <a id="cw-44"></a>
 <a id="cw-44-select-native-plugin-and-connector-breadth-explicitly"></a>
 
@@ -1572,7 +1627,9 @@ The proposed ordinary-to-native bridge is retired, not a remaining deliverable.
 
 **What works:** native HTTP/gRPC sources/sinks, SSE and reference components
 exist. Native admission, progress, initial-loading and completion services also
-exist. Built-in native queries do not require a new dynamically loaded evaluator.
+exist. Queries currently remain built-in; the selected migration to an optional
+native query component plugin is tracked under
+[CW-43](#cw-43-optional-native-query-plugin), not implemented by the connector split.
 
 **Testing:** selected real native network/service cases passed. That is not
 feature parity with all existing production connectors.
@@ -2015,6 +2072,8 @@ of current completion.
 [managed-tests]: ../../lib-integration-tests/tests/computation_management.rs
 [catalog]: ../src/computation/v1/query_catalog.rs
 [pipeline]: ../src/computation/v1/pipeline.rs
+[native-query]: ../src/computation/v1/query.rs
+[standard-factories]: ../src/computation/v1/factories.rs
 [evaluator]: ../../core/src/query/evaluator.rs
 [query-parts]: ../../core/src/evaluation/parts/mod.rs
 [average]: ../../core/src/evaluation/functions/aggregation/avg.rs
@@ -2045,6 +2104,7 @@ of current completion.
 [old-proxies]: ../../components/host-sdk/src/proxies/
 [old-sdk]: ../../components/plugin-sdk/src/ffi/
 [native-sdk]: ../../components/computation-plugin-sdk/README.md
+[native-sdk-metadata]: ../../components/computation-plugin-sdk/src/metadata.rs
 [host-tests]: ../../components/host-sdk/tests/
 [native-admission-tests]: ../../components/host-sdk/tests/native_network/durable.rs
 [network]: ../../components/computation-plugins/NETWORK.md
