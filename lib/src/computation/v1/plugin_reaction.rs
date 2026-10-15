@@ -58,7 +58,7 @@ pub trait ReactionPluginConstructor: Send + Sync {
 
 #[derive(Clone)]
 pub(super) struct OutputView {
-    snapshot: QuerySnapshot,
+    snapshot: QueryResultSnapshot,
     retained: Vec<ChangeEnvelope>,
     config_hash: u64,
     incarnation: Option<uuid::Uuid>,
@@ -70,7 +70,7 @@ pub(super) fn output_view(query: &CatalogQuery) -> anyhow::Result<OutputView> {
         .read()
         .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
     Ok(OutputView {
-        snapshot: QuerySnapshot {
+        snapshot: QueryResultSnapshot {
             rows: state.rows.clone(),
             as_of_sequence: state.sequence,
             generation: state.generation,
@@ -125,7 +125,7 @@ pub(super) fn snapshot_response(
 
 fn snapshot_stream(
     query_id: &str,
-    snapshot: QuerySnapshot,
+    snapshot: QueryResultSnapshot,
     config_hash: u64,
 ) -> anyhow::Result<SnapshotStream> {
     let rows = QueryChangeCodec::legacy_snapshot_rows(query_id, snapshot.rows)?;
@@ -1415,7 +1415,7 @@ mod tests {
             })
             .collect();
         OutputView {
-            snapshot: QuerySnapshot {
+            snapshot: QueryResultSnapshot {
                 rows,
                 as_of_sequence: count + 10,
                 generation: 7,
@@ -1624,7 +1624,7 @@ mod tests {
     fn outbox_head_lookup_preserves_generation_without_requiring_retained_history() {
         for sequence in [0, 42, u64::MAX] {
             let view = OutputView {
-                snapshot: QuerySnapshot {
+                snapshot: QueryResultSnapshot {
                     rows: im::HashMap::new(),
                     as_of_sequence: sequence,
                     generation: 7,

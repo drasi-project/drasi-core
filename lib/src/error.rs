@@ -68,6 +68,25 @@
 
 use thiserror::Error;
 
+/// Typed lookup failure carried through internal `anyhow` errors.
+///
+/// Public API boundaries can downcast to this cause without parsing messages.
+#[derive(Debug, Error)]
+#[error("{component_type} not found: {component_id}")]
+pub struct ComponentNotFoundError {
+    pub component_type: &'static str,
+    pub component_id: String,
+}
+
+impl ComponentNotFoundError {
+    pub fn new(component_type: &'static str, component_id: impl Into<String>) -> Self {
+        Self {
+            component_type,
+            component_id: component_id.into(),
+        }
+    }
+}
+
 /// Main error type for drasi-lib operations.
 ///
 /// This enum provides structured error variants that enable type-safe pattern matching

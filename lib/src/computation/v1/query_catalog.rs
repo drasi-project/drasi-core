@@ -797,7 +797,11 @@ impl QueryResultsCatalog {
             }
         }).await?
     }
-    pub async fn snapshot(&self, id: &str, timeout: Duration) -> anyhow::Result<QuerySnapshot> {
+    pub async fn snapshot(
+        &self,
+        id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<QueryResultSnapshot> {
         self.ready(id, timeout)
             .await?
             .results

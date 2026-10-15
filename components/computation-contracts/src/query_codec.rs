@@ -190,7 +190,7 @@ impl QueryChangeCodec {
 
     pub fn snapshot_envelope(
         query_id: &str,
-        snapshot: &super::QuerySnapshot,
+        snapshot: &super::QueryResultSnapshot,
         component: &ComponentId,
         system: SystemMetadata,
     ) -> Result<ChangeEnvelope, QueryCodecError> {
@@ -810,7 +810,7 @@ impl RecordValidator for RowValidator {
 #[cfg(test)]
 mod recovery_envelope_tests {
     use super::*;
-    use crate::{EnvelopeCodec, QuerySnapshot, StreamId};
+    use crate::{EnvelopeCodec, QueryResultSnapshot, StreamId};
     use std::num::NonZeroUsize;
 
     #[test]
@@ -852,7 +852,7 @@ mod recovery_envelope_tests {
 
         let snapshot = QueryChangeCodec::snapshot_envelope(
             "query",
-            &QuerySnapshot {
+            &QueryResultSnapshot {
                 rows: im::HashMap::new(),
                 as_of_sequence: 42,
                 generation: 9,

@@ -563,7 +563,10 @@ mod manager_tests {
         format!("{prefix}-{counter}")
     }
 
-    async fn create_test_manager() -> (Arc<SourceManager>, crate::component_graph::ComponentGraph) {
+    async fn create_test_manager() -> (
+        Arc<SourceManager>,
+        crate::component_graph::ComponentGraphView,
+    ) {
         let core = crate::test_helpers::managers::empty_core().await;
         (
             Arc::new(SourceManager(core.clone())),
@@ -572,15 +575,17 @@ mod manager_tests {
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph(
-    ) -> (Arc<SourceManager>, crate::component_graph::ComponentGraph) {
+    async fn create_test_manager_with_graph() -> (
+        Arc<SourceManager>,
+        crate::component_graph::ComponentGraphView,
+    ) {
         create_test_manager().await
     }
 
     /// Helper: register a source in the graph, then provision it in the manager.
     async fn add_source(
         manager: &SourceManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
         manager.add(source).await
@@ -589,7 +594,7 @@ mod manager_tests {
     /// Helper: teardown a source in the manager, then deregister from the graph.
     async fn delete_source(
         manager: &SourceManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
@@ -1194,7 +1199,7 @@ mod manager_tests {
             received.message
         );
         assert_eq!(received.component_id, source_id);
-        assert_eq!(received.level, crate::managers::LogLevel::Info);
+        assert_eq!(received.level, crate::observability::LogLevel::Info);
     }
 
     #[tokio::test]

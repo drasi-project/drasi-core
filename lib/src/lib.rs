@@ -111,6 +111,9 @@ pub mod profiling;
 // Observability metrics for the Resumable Reactions pipeline
 pub mod metrics;
 
+/// Component logs, tracing integration and lifecycle-event history.
+pub mod observability;
+
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
@@ -158,20 +161,20 @@ pub use channels::SubscriptionResponse;
 pub use channels::DispatchMode;
 
 /// Log level and log message types for component log streaming
-pub use managers::{LogLevel, LogMessage};
+pub use observability::{LogLevel, LogMessage};
 
 /// Tracing initialization function - call to set up component log routing
-pub use managers::get_or_init_global_registry;
+pub use observability::get_or_init_global_registry;
 
 /// Deprecated tracing initialization functions — use `get_or_init_global_registry()` instead.
 #[allow(deprecated)]
-pub use managers::{init_tracing, try_init_tracing};
+pub use observability::{init_tracing, try_init_tracing};
 
 // ============================================================================
 // Configuration Types
 // ============================================================================
 
-pub use config::snapshot::QuerySnapshot;
+pub use config::snapshot::{QueryConfigurationSnapshot, QuerySnapshot};
 /// Configuration types
 pub use config::{
     BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
@@ -250,7 +253,8 @@ pub use builder::Query;
 pub use component_graph::wait_for_status;
 /// Component graph types for dependency tracking and configuration queries
 pub use component_graph::{
-    ComponentGraph, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot, RelationshipKind,
+    ComponentGraph, ComponentGraphView, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot,
+    RelationshipKind,
 };
 
 // ============================================================================

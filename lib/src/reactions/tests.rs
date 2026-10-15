@@ -140,8 +140,10 @@ pub(crate) mod manager_tests {
         TestMockReaction::new(id, queries)
     }
 
-    async fn create_test_manager() -> (Arc<ReactionManager>, crate::component_graph::ComponentGraph)
-    {
+    async fn create_test_manager() -> (
+        Arc<ReactionManager>,
+        crate::component_graph::ComponentGraphView,
+    ) {
         let core = crate::test_helpers::managers::empty_core().await;
         (
             Arc::new(ReactionManager(core.clone())),
@@ -150,8 +152,10 @@ pub(crate) mod manager_tests {
     }
 
     /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph(
-    ) -> (Arc<ReactionManager>, crate::component_graph::ComponentGraph) {
+    async fn create_test_manager_with_graph() -> (
+        Arc<ReactionManager>,
+        crate::component_graph::ComponentGraphView,
+    ) {
         create_test_manager().await
     }
 
@@ -159,7 +163,7 @@ pub(crate) mod manager_tests {
     /// Registers placeholder query nodes for any referenced queries not already in the graph.
     async fn add_reaction(
         manager: &ReactionManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         reaction: impl crate::reactions::Reaction + 'static,
     ) -> anyhow::Result<()> {
         manager.add(reaction).await
@@ -168,7 +172,7 @@ pub(crate) mod manager_tests {
     /// Helper: teardown a reaction in the manager, then deregister from the graph.
     async fn delete_reaction(
         manager: &ReactionManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         id: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {

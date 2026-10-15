@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use drasi_host_sdk::callbacks::{instance_lifecycle_callback, InstanceCallbackContext};
 use drasi_lib::{
-    managers::get_or_init_global_registry,
+    observability::get_or_init_global_registry,
     reactions::common::base::{ReactionBase, ReactionBaseParams},
     ComponentStatus, DrasiLib, Query, Reaction, ReactionRuntimeContext,
 };

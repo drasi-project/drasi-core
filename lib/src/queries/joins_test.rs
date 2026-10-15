@@ -111,7 +111,7 @@ mod query_joins_tests {
     async fn create_test_environment() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         let core = crate::test_helpers::managers::empty_core().await;
         (
@@ -124,7 +124,7 @@ mod query_joins_tests {
     /// Helper: register a source in the graph, then provision it in the source manager.
     async fn add_source(
         source_manager: &SourceManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl crate::sources::Source + 'static,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
@@ -134,7 +134,7 @@ mod query_joins_tests {
     /// Registers placeholder source nodes for any referenced sources not already in the graph.
     async fn add_query(
         manager: &QueryManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.add(config).await

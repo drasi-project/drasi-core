@@ -48,7 +48,7 @@ use crate::{
 };
 
 pub use crate::computation::internal::query_state::{
-    QueryHistoryError, QueryRecoveryView, QueryResults, QuerySnapshot,
+    QueryHistoryError, QueryRecoveryView, QueryResultSnapshot, QueryResults, QuerySnapshot,
 };
 
 use super::{

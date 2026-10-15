@@ -232,7 +232,7 @@ impl DrasiLib {
             .await
             .map_err(|error| {
                 if error
-                    .downcast_ref::<crate::managers::ComponentNotFoundError>()
+                    .downcast_ref::<crate::error::ComponentNotFoundError>()
                     .is_some()
                 {
                     DrasiError::component_not_found("source", id)
@@ -254,7 +254,7 @@ impl DrasiLib {
             .await
             .map_err(|error| {
                 if error
-                    .downcast_ref::<crate::managers::ComponentNotFoundError>()
+                    .downcast_ref::<crate::error::ComponentNotFoundError>()
                     .is_some()
                 {
                     DrasiError::component_not_found("reaction", id)
@@ -354,13 +354,13 @@ impl DrasiLib {
         component_type: crate::channels::ComponentType,
         component_id: &str,
     ) -> Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.computation_component(component_id)?;
         super::v1::ComponentId::try_new(component_id)
             .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
-        let key = crate::managers::ComponentLogKey::new(
+        let key = crate::observability::ComponentLogKey::new(
             self.config.id.clone(),
             component_type,
             component_id,

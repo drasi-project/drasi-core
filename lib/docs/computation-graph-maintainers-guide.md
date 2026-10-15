@@ -85,8 +85,15 @@ For the previous design, read the pinned
 [manager-owned query path](https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/manager.rs)
 and [status-update loop in `lib_core.rs`](https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/lib_core.rs).
 The current [`component_graph/graph.rs`](../src/component_graph/graph.rs) is
-deliberately different: its `ComponentGraph` holds a weak runtime reference and
-provides read-only views. It is not a second mutable runtime.
+deliberately different: its `ComponentGraphView` holds a weak runtime reference
+and provides read-only views. It is not a second mutable runtime.
+`ComponentGraph` remains an alias for callers using the old name.
+
+Snapshot names also distinguish what is being captured:
+`config::QueryConfigurationSnapshot` contains a query's configuration and status;
+`computation::v1::QueryResultSnapshot` contains its result rows, output sequence
+and generation. The former `QuerySnapshot` imports remain aliases in their
+respective modules; they are not two names for the same kind of snapshot.
 
 ## Ownership and the two assembly paths
 
@@ -1162,12 +1169,14 @@ Use failure phase, generation and the relevant progress boundary together:
 | Replacement cannot acquire storage or a port | Previous generation's cleanup/retirement owner and retained worker joins |
 
 Logs and metrics complement these publications. The relevant paths are
-[`managers/tracing_layer.rs`](../src/managers/tracing_layer.rs),
+[`observability/tracing_layer.rs`](../src/observability/tracing_layer.rs),
 [`metrics/`](../src/metrics) and
 [`pipe_metrics.rs`](../src/computation/v1/pipe_metrics.rs).
 Profiling intervals can include queueing, waits and storage, so do not interpret
 every elapsed interval as evaluator CPU time. Bounded history/watch channels
 are diagnostic tools, not a lossless audit ledger.
+Logging and event-history implementations live in `observability`; `managers`
+retains only compatibility imports, not an execution layer.
 
 ## Making and validating a change
 

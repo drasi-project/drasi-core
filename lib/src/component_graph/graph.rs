@@ -21,18 +21,21 @@ use crate::{
 
 use super::{ComponentNode, GraphSnapshot, RelationshipKind};
 
-/// Read-only compatibility view of an instance's ComputationGraph.
+/// Read-only view of an instance's ComputationGraph.
 ///
 /// This handle owns no topology, component instances, or lifecycle state.
 /// Every snapshot is derived from one authoritative controller publication.
 /// Obtain it from [`crate::DrasiLib::component_graph`]; mutate the runtime through
 /// DrasiLib operations or its computation controller instead.
 #[derive(Clone)]
-pub struct ComponentGraph {
+pub struct ComponentGraphView {
     runtime: Weak<Runtime>,
 }
 
-impl ComponentGraph {
+/// Compatibility name for [`ComponentGraphView`], not a separate runtime graph.
+pub type ComponentGraph = ComponentGraphView;
+
+impl ComponentGraphView {
     pub(crate) fn from_runtime(runtime: &Arc<Runtime>) -> Self {
         Self {
             runtime: Arc::downgrade(runtime),

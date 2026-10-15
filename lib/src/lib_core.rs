@@ -18,11 +18,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
-use crate::component_graph::ComponentGraph;
+use crate::component_graph::ComponentGraphView;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::error::DrasiError;
 use crate::inspection::InspectionAPI;
-use crate::managers::ComponentLogRegistry;
+use crate::observability::ComponentLogRegistry;
 use crate::queries::QueryManager;
 use crate::state_guard::StateGuard;
 use drasi_core::middleware::MiddlewareTypeRegistry;
@@ -276,7 +276,7 @@ impl DrasiLib {
         middleware_registry: Arc<MiddlewareTypeRegistry>,
         wal: Option<Arc<dyn crate::wal::WalProvider>>,
     ) -> Self {
-        let log_registry = crate::managers::get_or_init_global_registry();
+        let log_registry = crate::observability::get_or_init_global_registry();
         let instance_id = config.id.clone();
         let instance_graph = Arc::new(crate::computation::instance::InstanceGraph::new(
             instance_id,
@@ -611,8 +611,8 @@ impl DrasiLib {
 
     /// Get a read-only facade for graph snapshots and component event history.
     /// Lifecycle and membership changes must go through the computation controller.
-    pub fn component_graph(&self) -> ComponentGraph {
-        ComponentGraph::from_runtime(&self.computation_runtime)
+    pub fn component_graph(&self) -> ComponentGraphView {
+        ComponentGraphView::from_runtime(&self.computation_runtime)
     }
 
     // ============================================================================

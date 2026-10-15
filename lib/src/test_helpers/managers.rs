@@ -65,7 +65,7 @@ impl SourceManager {
             Ok(source) => Some(source),
             Err(error)
                 if error
-                    .downcast_ref::<crate::managers::ComponentNotFoundError>()
+                    .downcast_ref::<crate::error::ComponentNotFoundError>()
                     .is_some() =>
             {
                 None

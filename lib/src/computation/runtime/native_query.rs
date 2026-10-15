@@ -300,7 +300,7 @@ impl Runtime {
             "{kind} removal is incomplete: {report:?}"
         );
         self.logs
-            .remove_component_by_key(&crate::managers::ComponentLogKey::new(
+            .remove_component_by_key(&crate::observability::ComponentLogKey::new(
                 self.config.id.clone(),
                 match kind {
                     "source" => crate::channels::ComponentType::Source,

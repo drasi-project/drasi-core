@@ -20,8 +20,8 @@ use crate::{
     channels::{ComponentEvent, ComponentStatus, ComponentType},
     computation::runtime::Runtime,
     config::ReactionRuntime,
-    managers::LogMessage,
     metrics::{LifecycleMetrics, ReactionMetricsSnapshot},
+    observability::LogMessage,
     reactions::Reaction,
 };
 

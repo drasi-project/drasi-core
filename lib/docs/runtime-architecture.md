@@ -56,7 +56,7 @@ flowchart TB
   facades -->|"shared Runtime"| runtime
   lib -->|"1"| inspect["InspectionAPI"]
   inspect -->|"shared Runtime"| runtime
-  view["ComponentGraph<br/>read-only compatibility view"]
+  view["ComponentGraphView<br/>read-only inspection view"]
   view -.->|"Weak Runtime; no owned topology"| runtime
   runtime -.->|"reads coherent root publications"| ctl
   lib -->|"1 shared OnceLock; 0..1 value"| management["Management<br/>optional desired-definition driver + store"]
@@ -276,7 +276,7 @@ instance”; the construction/lease paths and runtime assertions must establish 
 |---|---|---|
 | One root per DrasiLib | another root-owning field, collection of application graphs, new root construction path | `InstanceGraph::initialize` rejects repeat initialization; [instance tests](../tests/computation_instance.rs). Add a runtime instance-identity assertion spanning ordinary + native additions. |
 | Query-local graphs have explicit ownership | nested graph without a `QueryInstance`/`ScopedGraph` owner or unjoined task | [ScopedGraph](../src/computation/scoped_graph.rs) and [runtime lifecycle tests](../src/computation/runtime/lifecycle_tests.rs). Maintain a root-vs-query scope count in runtime inventory tests. |
-| No shadow registry | manager/view gains owned membership/topology or mutation state | [ComponentGraph](../src/component_graph/graph.rs), [generic architecture tests](../tests/computation_architecture.rs). Inspect new incoming/outgoing edges to Runtime and graph snapshots. |
+| No shadow registry | manager/view gains owned membership/topology or mutation state | [ComponentGraphView](../src/component_graph/graph.rs), [generic architecture tests](../tests/computation_architecture.rs). Inspect new incoming/outgoing edges to Runtime and graph snapshots. |
 | One query algorithm | graph implements matching/projection/aggregation separately | [QueryEvaluator](../../core/src/query/evaluator.rs); [query adapter](../../core/src/computation/query_adapter.rs). Require adapter changes to preserve evaluator reuse. |
 | Cleanup retains ownership | erased task/resource owner or removal of awaited cleanup | Instance/graph leases, rejected additions, resource cleanup maps. Add failure/cancellation-path evidence alongside each new owner. |
 | Observation does not pin retired owners | weak registry/view edge becomes strong | [registry](../src/computation/v1/graph/registry.rs) and [inspection](../src/computation/v1/inspection.rs). Diff relationship modes, not only endpoint names. |
@@ -314,7 +314,7 @@ The fingerprint covers parsed Rust sources and all four scoped crate manifests.
 
 ## Alphabetical type inventory
 
-Generated from **363 source files**; **1183 named types**. Source fingerprint: `fnv1a64:679783944e5888d8`.
+Generated from **364 source files**; **1186 named types**. Source fingerprint: `fnv1a64:30ae9a664bb535f0`.
 
 Names below are definition-site paths, not duplicate public re-export paths. Block-local declarations use an explicit `<local@line>` lexical identifier because Rust provides no importable path for them. Traits and aliases are included, but are not extra runtime objects.
 
@@ -482,7 +482,8 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_computation_contracts::query_identity::IdentityRecord` — struct; [source](../../components/computation-contracts/src/query_identity.rs#L57).
 - `drasi_computation_contracts::query_identity::QueryIdentityError` — enum; [source](../../components/computation-contracts/src/query_identity.rs#L43).
 - `drasi_computation_contracts::query_identity::QueryRecoveryIdentity` — struct; [source](../../components/computation-contracts/src/query_identity.rs#L23).
-- `drasi_computation_contracts::snapshot::QuerySnapshot` — struct; [source](../../components/computation-contracts/src/snapshot.rs#L6).
+- `drasi_computation_contracts::snapshot::QueryResultSnapshot` — struct; [source](../../components/computation-contracts/src/snapshot.rs#L6).
+- `drasi_computation_contracts::snapshot::QuerySnapshot` — type alias; [source](../../components/computation-contracts/src/snapshot.rs#L19).
 - `drasi_computation_contracts::source_transaction::Frame` — struct; [source](../../components/computation-contracts/src/source_transaction.rs#L100).
 - `drasi_computation_contracts::source_transaction::PreparedSourceTransaction` — struct; [source](../../components/computation-contracts/src/source_transaction.rs#L273).
 - `drasi_computation_contracts::source_transaction::ReplayProgress` — struct; [source](../../components/computation-contracts/src/source_transaction.rs#L36).
@@ -831,7 +832,8 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::channels::priority_queue::StreamKey` — enum; [source](../../lib/src/channels/priority_queue.rs#L92).
 - `drasi_lib::compatibility::query_base::QueryBase` — struct; [source](../../lib/src/compatibility/query_base.rs#L32).
 - `drasi_lib::compatibility::sequence_dedup::SequenceDedup` — struct; [source](../../lib/src/compatibility/sequence_dedup.rs#L22).
-- `drasi_lib::component_graph::graph::ComponentGraph` — struct; [source](../../lib/src/component_graph/graph.rs#L24).
+- `drasi_lib::component_graph::graph::ComponentGraph` — type alias; [source](../../lib/src/component_graph/graph.rs#L35).
+- `drasi_lib::component_graph::graph::ComponentGraphView` — struct; [source](../../lib/src/component_graph/graph.rs#L24).
 - `drasi_lib::component_graph::node::ComponentKind` — enum; [source](../../lib/src/component_graph/node.rs#L29).
 - `drasi_lib::component_graph::node::ComponentNode` — struct; [source](../../lib/src/component_graph/node.rs#L124).
 - `drasi_lib::component_graph::node::GraphEdge` — struct; [source](../../lib/src/component_graph/node.rs#L160).
@@ -1373,8 +1375,9 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::config::schema::SourceSubscriptionSettings` — struct; [source](../../lib/src/config/schema.rs#L152).
 - `drasi_lib::config::snapshot::BootstrapSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L91).
 - `drasi_lib::config::snapshot::ConfigurationSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L33).
-- `drasi_lib::config::snapshot::QuerySnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L100).
-- `drasi_lib::config::snapshot::ReactionSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L111).
+- `drasi_lib::config::snapshot::QueryConfigurationSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L100).
+- `drasi_lib::config::snapshot::QuerySnapshot` — type alias; [source](../../lib/src/config/snapshot.rs#L115).
+- `drasi_lib::config::snapshot::ReactionSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L118).
 - `drasi_lib::config::snapshot::SourceSnapshot` — struct; [source](../../lib/src/config/snapshot.rs#L70).
 - `drasi_lib::context::QueryRuntimeContext` — struct; [source](../../lib/src/context/mod.rs#L355).
 - `drasi_lib::context::ReactionRuntimeContext` — struct; [source](../../lib/src/context/mod.rs#L214).
@@ -1382,9 +1385,10 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::context::resource_observer::ComponentResource` — enum; [source](../../lib/src/context/resource_observer.rs#L46).
 - `drasi_lib::context::resource_observer::ComponentResourceObserver` — trait; [source](../../lib/src/context/resource_observer.rs#L72).
 - `drasi_lib::context::resource_observer::PluginOrigin` — struct; [source](../../lib/src/context/resource_observer.rs#L36).
-- `drasi_lib::error::DrasiError` — enum; [source](../../lib/src/error.rs#L71).
-- `drasi_lib::error::OperationFailures` — struct; [source](../../lib/src/error.rs#L286).
-- `drasi_lib::error::Result` — type alias; [source](../../lib/src/error.rs#L280).
+- `drasi_lib::error::ComponentNotFoundError` — struct; [source](../../lib/src/error.rs#L71).
+- `drasi_lib::error::DrasiError` — enum; [source](../../lib/src/error.rs#L90).
+- `drasi_lib::error::OperationFailures` — struct; [source](../../lib/src/error.rs#L305).
+- `drasi_lib::error::Result` — type alias; [source](../../lib/src/error.rs#L299).
 - `drasi_lib::identity::CredentialContext` — struct; [source](../../lib/src/identity/mod.rs#L21).
 - `drasi_lib::identity::Credentials` — enum; [source](../../lib/src/identity/mod.rs#L83).
 - `drasi_lib::identity::IdentityProvider` — trait; [source](../../lib/src/identity/mod.rs#L58).
@@ -1416,18 +1420,6 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::management::transitions::PreparedRecoveryTransition` — struct; [source](../../lib/src/management/transitions.rs#L94).
 - `drasi_lib::management::transitions::RecoveryRetirementAuthorization` — struct; [source](../../lib/src/management/transitions.rs#L19).
 - `drasi_lib::management::transitions::RecoveryTransitionRequired` — struct; [source](../../lib/src/management/transitions.rs#L11).
-- `drasi_lib::managers::ComponentNotFoundError` — struct; [source](../../lib/src/managers/mod.rs#L27).
-- `drasi_lib::managers::component_log::ComponentLogChannel` — struct; [source](../../lib/src/managers/component_log.rs#L231).
-- `drasi_lib::managers::component_log::ComponentLogKey` — struct; [source](../../lib/src/managers/component_log.rs#L69).
-- `drasi_lib::managers::component_log::ComponentLogRegistry` — struct; [source](../../lib/src/managers/component_log.rs#L271).
-- `drasi_lib::managers::component_log::LogLevel` — enum; [source](../../lib/src/managers/component_log.rs#L142).
-- `drasi_lib::managers::component_log::LogMessage` — struct; [source](../../lib/src/managers/component_log.rs#L172).
-- `drasi_lib::managers::event_history::ComponentEventChannel` — struct; [source](../../lib/src/managers/event_history.rs#L34).
-- `drasi_lib::managers::event_history::ComponentEventHistory` — struct; [source](../../lib/src/managers/event_history.rs#L82).
-- `drasi_lib::managers::tracing_layer::ComponentInfo` — struct; [source](../../lib/src/managers/tracing_layer.rs#L332).
-- `drasi_lib::managers::tracing_layer::ComponentInfoVisitor` — struct; [source](../../lib/src/managers/tracing_layer.rs#L352).
-- `drasi_lib::managers::tracing_layer::ComponentLogLayer` — struct; [source](../../lib/src/managers/tracing_layer.rs#L253).
-- `drasi_lib::managers::tracing_layer::MessageVisitor` — struct; [source](../../lib/src/managers/tracing_layer.rs#L411).
 - `drasi_lib::metrics::lifecycle_metrics::LifecycleMetrics` — struct; [source](../../lib/src/metrics/lifecycle_metrics.rs#L19).
 - `drasi_lib::metrics::lifecycle_metrics::LifecycleMetricsSnapshot` — struct; [source](../../lib/src/metrics/lifecycle_metrics.rs#L125).
 - `drasi_lib::metrics::lifecycle_metrics::StartupRejectionReason` — enum; [source](../../lib/src/metrics/lifecycle_metrics.rs#L35).
@@ -1436,6 +1428,17 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::metrics::reaction_metrics::ReactionMetrics` — struct; [source](../../lib/src/metrics/reaction_metrics.rs#L27).
 - `drasi_lib::metrics::reaction_metrics::ReactionMetricsSnapshot` — struct; [source](../../lib/src/metrics/reaction_metrics.rs#L126).
 - `drasi_lib::metrics::reaction_metrics::RecoveryPolicyKind` — enum; [source](../../lib/src/metrics/reaction_metrics.rs#L19).
+- `drasi_lib::observability::component_log::ComponentLogChannel` — struct; [source](../../lib/src/observability/component_log.rs#L231).
+- `drasi_lib::observability::component_log::ComponentLogKey` — struct; [source](../../lib/src/observability/component_log.rs#L69).
+- `drasi_lib::observability::component_log::ComponentLogRegistry` — struct; [source](../../lib/src/observability/component_log.rs#L271).
+- `drasi_lib::observability::component_log::LogLevel` — enum; [source](../../lib/src/observability/component_log.rs#L142).
+- `drasi_lib::observability::component_log::LogMessage` — struct; [source](../../lib/src/observability/component_log.rs#L172).
+- `drasi_lib::observability::event_history::ComponentEventChannel` — struct; [source](../../lib/src/observability/event_history.rs#L34).
+- `drasi_lib::observability::event_history::ComponentEventHistory` — struct; [source](../../lib/src/observability/event_history.rs#L82).
+- `drasi_lib::observability::tracing_layer::ComponentInfo` — struct; [source](../../lib/src/observability/tracing_layer.rs#L332).
+- `drasi_lib::observability::tracing_layer::ComponentInfoVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L352).
+- `drasi_lib::observability::tracing_layer::ComponentLogLayer` — struct; [source](../../lib/src/observability/tracing_layer.rs#L253).
+- `drasi_lib::observability::tracing_layer::MessageVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L411).
 - `drasi_lib::queries::config_hash::JoinIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L86).
 - `drasi_lib::queries::config_hash::QueryIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L46).
 - `drasi_lib::queries::config_hash::SourceIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L72).
@@ -1534,7 +1537,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_computation_contracts::progress` | 100 | 5 |
 | `drasi_computation_contracts::query_codec` | 733 | 7 |
 | `drasi_computation_contracts::query_identity` | 145 | 3 |
-| `drasi_computation_contracts::snapshot` | 7 | 1 |
+| `drasi_computation_contracts::snapshot` | 8 | 2 |
 | `drasi_computation_contracts::source_transaction` | 462 | 10 |
 | `drasi_computation_contracts::workers` | 126 | 3 |
 | `drasi_core` | 11 | 0 |
@@ -1688,7 +1691,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_core_types::profiling` | 243 | 6 |
 | `drasi_core_types::query` | 77 | 2 |
 | `drasi_core_types::schema` | 181 | 8 |
-| `drasi_lib` | 86 | 0 |
+| `drasi_lib` | 88 | 0 |
 | `drasi_lib::api` | 3 | 0 |
 | `drasi_lib::bootstrap` | 170 | 10 |
 | `drasi_lib::bootstrap::component_graph` | 161 | 1 |
@@ -1702,7 +1705,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::compatibility::query_base` | 159 | 1 |
 | `drasi_lib::compatibility::sequence_dedup` | 32 | 1 |
 | `drasi_lib::component_graph` | 6 | 0 |
-| `drasi_lib::component_graph::graph` | 58 | 1 |
+| `drasi_lib::component_graph::graph` | 59 | 2 |
 | `drasi_lib::component_graph::node` | 84 | 5 |
 | `drasi_lib::component_graph::wait` | 29 | 0 |
 | `drasi_lib::component_ops` | 20 | 0 |
@@ -1715,7 +1718,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::runtime` | 1913 | 7 |
 | `drasi_lib::computation::runtime::component` | 345 | 4 |
 | `drasi_lib::computation::runtime::events` | 153 | 1 |
-| `drasi_lib::computation::runtime::inspection` | 735 | 0 |
+| `drasi_lib::computation::runtime::inspection` | 737 | 0 |
 | `drasi_lib::computation::runtime::native_query` | 873 | 3 |
 | `drasi_lib::computation::runtime::query` | 872 | 6 |
 | `drasi_lib::computation::runtime::reaction` | 255 | 1 |
@@ -1783,7 +1786,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::v1::query::recovery` | 555 | 1 |
 | `drasi_lib::computation::v1::query_api` | 76 | 1 |
 | `drasi_lib::computation::v1::query_bootstrap` | 144 | 8 |
-| `drasi_lib::computation::v1::query_catalog` | 780 | 14 |
+| `drasi_lib::computation::v1::query_catalog` | 784 | 14 |
 | `drasi_lib::computation::v1::query_codec` | 1 | 0 |
 | `drasi_lib::computation::v1::query_configuration` | 115 | 2 |
 | `drasi_lib::computation::v1::query_identity` | 1 | 0 |
@@ -1800,14 +1803,14 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::v1::transaction_state` | 266 | 2 |
 | `drasi_lib::computation::v1::transaction_transformer` | 995 | 16 |
 | `drasi_lib::computation::v1::wal_source` | 312 | 3 |
-| `drasi_lib::config` | 8 | 0 |
+| `drasi_lib::config` | 9 | 0 |
 | `drasi_lib::config::runtime` | 160 | 4 |
 | `drasi_lib::config::schema` | 194 | 7 |
-| `drasi_lib::config::snapshot` | 43 | 5 |
+| `drasi_lib::config::snapshot` | 45 | 6 |
 | `drasi_lib::context` | 181 | 3 |
 | `drasi_lib::context::resource_observer` | 40 | 3 |
 | `drasi_lib::context::workers` | 1 | 0 |
-| `drasi_lib::error` | 146 | 3 |
+| `drasi_lib::error` | 160 | 4 |
 | `drasi_lib::identity` | 99 | 3 |
 | `drasi_lib::identity::application` | 49 | 2 |
 | `drasi_lib::identity::password` | 28 | 1 |
@@ -1826,15 +1829,16 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::management::runtime` | 1153 | 4 |
 | `drasi_lib::management::store` | 80 | 6 |
 | `drasi_lib::management::transitions` | 511 | 3 |
-| `drasi_lib::managers` | 22 | 1 |
-| `drasi_lib::managers::component_log` | 236 | 5 |
-| `drasi_lib::managers::event_history` | 138 | 2 |
-| `drasi_lib::managers::logging` | 10 | 0 |
-| `drasi_lib::managers::tracing_layer` | 256 | 4 |
+| `drasi_lib::managers` | 2 | 0 |
 | `drasi_lib::metrics` | 6 | 0 |
 | `drasi_lib::metrics::lifecycle_metrics` | 98 | 3 |
 | `drasi_lib::metrics::query_metrics` | 96 | 2 |
 | `drasi_lib::metrics::reaction_metrics` | 96 | 3 |
+| `drasi_lib::observability` | 8 | 0 |
+| `drasi_lib::observability::component_log` | 236 | 5 |
+| `drasi_lib::observability::event_history` | 138 | 2 |
+| `drasi_lib::observability::logging` | 10 | 0 |
+| `drasi_lib::observability::tracing_layer` | 256 | 4 |
 | `drasi_lib::profiling` | 1 | 0 |
 | `drasi_lib::queries` | 25 | 0 |
 | `drasi_lib::queries::base` | 2 | 0 |

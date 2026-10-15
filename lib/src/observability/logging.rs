@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Consistent lifecycle log messages for component implementations.
+
 use log::{error, info};
 
 /// Log an info-level message indicating a component is starting.

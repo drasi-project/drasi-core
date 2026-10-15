@@ -1877,7 +1877,7 @@ mod tests {
                 "0..*",
             ),
             (
-                "drasi_lib::component_graph::graph::ComponentGraph",
+                "drasi_lib::component_graph::graph::ComponentGraphView",
                 "runtime",
                 "drasi_lib::computation::runtime::Runtime",
                 "0..1",

@@ -31,7 +31,7 @@ fn classify_component_error(
     component_id: &str,
     operation: &str,
 ) -> DrasiError {
-    if let Some(not_found) = e.downcast_ref::<crate::managers::ComponentNotFoundError>() {
+    if let Some(not_found) = e.downcast_ref::<crate::error::ComponentNotFoundError>() {
         DrasiError::component_not_found(not_found.component_type, &not_found.component_id)
     } else {
         DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
@@ -596,8 +596,8 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -614,8 +614,8 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.state_guard.require_initialized()?;
         self.computation
@@ -632,8 +632,8 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.state_guard.require_initialized()?;
         self.computation

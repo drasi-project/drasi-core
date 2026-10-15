@@ -21,7 +21,7 @@ mod mock_source;
 use drasi_lib::{
     channels::{ComponentStatusHandle, ComponentUpdate},
     component_graph::{ComponentKind, RelationshipKind},
-    ComponentStatus, DrasiLib, Query,
+    ComponentGraph, ComponentGraphView, ComponentStatus, DrasiLib, Query,
 };
 use std::time::Duration;
 use tokio::{sync::mpsc, time::timeout};
@@ -212,8 +212,8 @@ async fn graph_snapshots_and_events_follow_the_controller_without_a_mutable_shad
 #[tokio::test]
 async fn read_only_graph_handles_do_not_keep_the_runtime_alive() {
     let core = DrasiLib::builder().build().await.unwrap();
-    let view = core.component_graph();
-    let clone = view.clone();
+    let view: ComponentGraphView = core.component_graph();
+    let clone: ComponentGraph = view.clone();
     core.shutdown().await.unwrap();
     drop(core);
     assert!(view.snapshot().await.is_err());

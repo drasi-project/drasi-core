@@ -16,7 +16,7 @@ use super::*;
 use crate::{
     channels::{ComponentEvent, ComponentType},
     config::{QueryRuntime, ReactionRuntime, SourceRuntime},
-    managers::{ComponentLogKey, LogMessage},
+    observability::{ComponentLogKey, LogMessage},
 };
 
 pub(super) fn status(record: &Record, observed: &ObservedComponent) -> ComponentStatus {
@@ -100,7 +100,7 @@ impl Runtime {
                 node.descriptor.id().as_str() == id
                     && Self::public_component_kind(&publication.desired, node) == Some(kind)
             })
-            .ok_or_else(|| crate::managers::ComponentNotFoundError::new(kind, id))?;
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new(kind, id))?;
         publication
             .observed
             .components
@@ -171,7 +171,7 @@ impl Runtime {
             .nodes
             .iter()
             .find(|node| node.descriptor.id().as_str() == id && Self::is_query_node(node))
-            .ok_or_else(|| crate::managers::ComponentNotFoundError::new("query", id))?;
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new("query", id))?;
         let component = node.descriptor.id();
         let mut config = if let Some(api) = publication.query_api(component) {
             api.config.clone()
@@ -315,7 +315,7 @@ impl Runtime {
             .await?
             .remove(id)
             .filter(|record| record.value.instance().kind() == kind)
-            .ok_or_else(|| crate::managers::ComponentNotFoundError::new(kind, id))?;
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new(kind, id))?;
         let observed = publication
             .observed
             .components
@@ -662,14 +662,16 @@ impl Runtime {
         {
             let id = node.descriptor.id().as_str();
             if !snapshot.queries.iter().any(|query| query.id == id) {
-                snapshot.queries.push(crate::config::QuerySnapshot {
-                    id: id.to_owned(),
-                    config: self.native_query_configuration_at(&publication, id)?,
-                    status: events::observed_status(
-                        self.query_observation_at(&publication, id)?,
-                        ComponentStatus::Added,
-                    ),
-                });
+                snapshot
+                    .queries
+                    .push(crate::config::QueryConfigurationSnapshot {
+                        id: id.to_owned(),
+                        config: self.native_query_configuration_at(&publication, id)?,
+                        status: events::observed_status(
+                            self.query_observation_at(&publication, id)?,
+                            ComponentStatus::Added,
+                        ),
+                    });
                 snapshot
                     .edges
                     .extend(super::snapshot::ownership_edges(&self.config.id, id));
@@ -685,7 +687,7 @@ impl Runtime {
         use crate::{
             component_graph::{GraphEdge, RelationshipKind},
             config::snapshot::{
-                ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot, SourceSnapshot,
+                ConfigurationSnapshot, QueryConfigurationSnapshot, ReactionSnapshot, SourceSnapshot,
             },
         };
         let records = self.records_at(publication).await?;
@@ -719,7 +721,7 @@ impl Runtime {
                 Value::Query(query) => {
                     let mut config = query.config.clone();
                     config.auto_start = auto_start;
-                    snapshot.queries.push(QuerySnapshot {
+                    snapshot.queries.push(QueryConfigurationSnapshot {
                         id: id.clone(),
                         config,
                         status,

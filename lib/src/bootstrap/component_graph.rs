@@ -14,7 +14,7 @@
 
 //! Component Graph Bootstrap Provider
 //!
-//! Generates bootstrap data from the [`ComponentGraph`] for the component graph source.
+//! Generates bootstrap data from the [`ComponentGraphView`] for the component graph source.
 //! Takes a single atomic snapshot of the graph and translates all nodes and edges
 //! into `SourceChange::Insert` elements, guaranteeing a consistent view of the
 //! component topology.
@@ -27,21 +27,21 @@ use std::sync::Arc;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use crate::channels::*;
-use crate::component_graph::{ComponentGraph, ComponentKind, RelationshipKind};
+use crate::component_graph::{ComponentGraphView, ComponentKind, RelationshipKind};
 use crate::config::SourceSubscriptionSettings;
 use crate::sources::component_graph_source::COMPONENT_GRAPH_SOURCE_ID;
 use crate::sources::graph_elements::{make_node, make_relation, status_str};
 
-/// Bootstrap provider that generates a consistent snapshot from the [`ComponentGraph`].
+/// Bootstrap provider that generates a consistent snapshot from the [`ComponentGraphView`].
 ///
 /// Reads one authoritative computation publication and translates its component
 /// snapshot into `SourceChange::Insert` elements.
 pub struct ComponentGraphBootstrapProvider {
-    graph: ComponentGraph,
+    graph: ComponentGraphView,
 }
 
 impl ComponentGraphBootstrapProvider {
-    pub fn new(graph: ComponentGraph) -> Self {
+    pub fn new(graph: ComponentGraphView) -> Self {
         Self { graph }
     }
 }

@@ -271,7 +271,7 @@ impl ComponentLogChannel {
 /// Central registry for component log channels.
 ///
 /// Manages per-component log storage and broadcast channels for live streaming.
-/// This is typically owned by `DrasiLib` and shared across all managers.
+/// This is shared by `DrasiLib` instances and their graph-backed inspection APIs.
 pub struct ComponentLogRegistry {
     /// Log channels per component ID
     channels: RwLock<HashMap<String, ComponentLogChannel>>,

@@ -60,7 +60,7 @@ pub struct ConfigurationSnapshot {
     /// All source components with their configuration properties
     pub sources: Vec<SourceSnapshot>,
     /// All query components with their full query configurations
-    pub queries: Vec<QuerySnapshot>,
+    pub queries: Vec<QueryConfigurationSnapshot>,
     /// All reaction components with their configuration properties
     pub reactions: Vec<ReactionSnapshot>,
     /// Dependency edges between components (source→query, query→reaction)
@@ -97,9 +97,13 @@ pub struct BootstrapSnapshot {
     pub properties: HashMap<String, serde_json::Value>,
 }
 
-/// Snapshot of a query component's configuration.
+/// A query's configuration and lifecycle status, not its result rows.
+///
+/// Result rows are represented by
+/// [`QueryResultSnapshot`](crate::computation::v1::QueryResultSnapshot).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuerySnapshot {
+#[serde(rename = "QuerySnapshot")]
+pub struct QueryConfigurationSnapshot {
     /// Query component identifier
     pub id: String,
     /// Full query configuration (query string, source subscriptions, joins, etc.)
@@ -107,6 +111,9 @@ pub struct QuerySnapshot {
     /// Lifecycle status at the time of snapshot
     pub status: ComponentStatus,
 }
+
+/// Compatibility name for [`QueryConfigurationSnapshot`].
+pub type QuerySnapshot = QueryConfigurationSnapshot;
 
 /// Snapshot of a reaction component's configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,4 +134,35 @@ pub struct ReactionSnapshot {
     /// It intentionally contains sensitive values — see the persistence contract
     /// on [`Reaction::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::TypeId;
+
+    #[test]
+    fn query_configuration_snapshot_preserves_legacy_type_and_serialization() {
+        assert_eq!(
+            TypeId::of::<QueryConfigurationSnapshot>(),
+            TypeId::of::<QuerySnapshot>()
+        );
+        assert_eq!(
+            TypeId::of::<QueryConfigurationSnapshot>(),
+            TypeId::of::<crate::QuerySnapshot>()
+        );
+        let config = crate::Query::cypher("query")
+            .query("MATCH (n:Item) RETURN n.name AS name")
+            .from_source("source")
+            .build();
+        let expected = serde_json::json!({
+            "id": "query",
+            "config": config,
+            "status": "Stopped"
+        });
+        let snapshot: QueryConfigurationSnapshot =
+            serde_json::from_value(expected.clone()).unwrap();
+        let legacy: QuerySnapshot = snapshot;
+        assert_eq!(serde_json::to_value(legacy).unwrap(), expected);
+    }
 }

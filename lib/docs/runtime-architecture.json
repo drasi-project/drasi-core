@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "source_fingerprint": "fnv1a64:679783944e5888d8",
+  "source_fingerprint": "fnv1a64:30ae9a664bb535f0",
   "source_files": [
     "components/computation-contracts/src/a2_bridge.rs",
     "components/computation-contracts/src/admission_messages.rs",
@@ -317,15 +317,16 @@
     "lib/src/management/runtime.rs",
     "lib/src/management/store.rs",
     "lib/src/management/transitions.rs",
-    "lib/src/managers/component_log.rs",
-    "lib/src/managers/event_history.rs",
-    "lib/src/managers/logging.rs",
     "lib/src/managers/mod.rs",
-    "lib/src/managers/tracing_layer.rs",
     "lib/src/metrics/lifecycle_metrics.rs",
     "lib/src/metrics/mod.rs",
     "lib/src/metrics/query_metrics.rs",
     "lib/src/metrics/reaction_metrics.rs",
+    "lib/src/observability/component_log.rs",
+    "lib/src/observability/event_history.rs",
+    "lib/src/observability/logging.rs",
+    "lib/src/observability/mod.rs",
+    "lib/src/observability/tracing_layer.rs",
     "lib/src/profiling/mod.rs",
     "lib/src/queries/base.rs",
     "lib/src/queries/config_hash.rs",
@@ -5629,7 +5630,7 @@
       ]
     },
     {
-      "name": "drasi_computation_contracts::snapshot::QuerySnapshot",
+      "name": "drasi_computation_contracts::snapshot::QueryResultSnapshot",
       "kind": "struct",
       "file": "components/computation-contracts/src/snapshot.rs",
       "line": 6,
@@ -5639,24 +5640,32 @@
           "name": "as_of_sequence",
           "declaration": "u64",
           "variant": "",
-          "line": 8,
+          "line": 11,
           "condition": ""
         },
         {
           "name": "generation",
           "declaration": "u64",
           "variant": "",
-          "line": 9,
+          "line": 13,
           "condition": ""
         },
         {
           "name": "rows",
           "declaration": "im :: HashMap < RecordId , Record >",
           "variant": "",
-          "line": 10,
+          "line": 15,
           "condition": ""
         }
       ]
+    },
+    {
+      "name": "drasi_computation_contracts::snapshot::QuerySnapshot",
+      "kind": "type alias",
+      "file": "components/computation-contracts/src/snapshot.rs",
+      "line": 19,
+      "condition": "",
+      "fields": []
     },
     {
       "name": "drasi_computation_contracts::source_transaction::Frame",
@@ -11758,7 +11767,7 @@
       "fields": [
         {
           "name": "graph",
-          "declaration": "ComponentGraph",
+          "declaration": "ComponentGraphView",
           "variant": "",
           "line": 40,
           "condition": ""
@@ -13136,6 +13145,14 @@
     },
     {
       "name": "drasi_lib::component_graph::graph::ComponentGraph",
+      "kind": "type alias",
+      "file": "lib/src/component_graph/graph.rs",
+      "line": 35,
+      "condition": "",
+      "fields": []
+    },
+    {
+      "name": "drasi_lib::component_graph::graph::ComponentGraphView",
       "kind": "struct",
       "file": "lib/src/component_graph/graph.rs",
       "line": 24,
@@ -13826,7 +13843,7 @@
         },
         {
           "name": "snapshot",
-          "declaration": "QuerySnapshot",
+          "declaration": "QueryResultSnapshot",
           "variant": "",
           "line": 34,
           "condition": ""
@@ -14109,7 +14126,7 @@
         },
         {
           "name": "logs",
-          "declaration": "Arc < crate :: managers :: ComponentLogRegistry >",
+          "declaration": "Arc < crate :: observability :: ComponentLogRegistry >",
           "variant": "",
           "line": 305,
           "condition": ""
@@ -25459,7 +25476,7 @@
       "fields": [
         {
           "name": "snapshot",
-          "declaration": "QuerySnapshot",
+          "declaration": "QueryResultSnapshot",
           "variant": "",
           "line": 61,
           "condition": ""
@@ -32404,7 +32421,7 @@
         },
         {
           "name": "queries",
-          "declaration": "Vec < QuerySnapshot >",
+          "declaration": "Vec < QueryConfigurationSnapshot >",
           "variant": "",
           "line": 62,
           "condition": ""
@@ -32426,7 +32443,7 @@
       ]
     },
     {
-      "name": "drasi_lib::config::snapshot::QuerySnapshot",
+      "name": "drasi_lib::config::snapshot::QueryConfigurationSnapshot",
       "kind": "struct",
       "file": "lib/src/config/snapshot.rs",
       "line": 100,
@@ -32436,72 +32453,80 @@
           "name": "id",
           "declaration": "String",
           "variant": "",
-          "line": 103,
+          "line": 107,
           "condition": ""
         },
         {
           "name": "config",
           "declaration": "QueryConfig",
           "variant": "",
-          "line": 105,
+          "line": 109,
           "condition": ""
         },
         {
           "name": "status",
           "declaration": "ComponentStatus",
           "variant": "",
-          "line": 107,
+          "line": 111,
           "condition": ""
         }
       ]
     },
     {
+      "name": "drasi_lib::config::snapshot::QuerySnapshot",
+      "kind": "type alias",
+      "file": "lib/src/config/snapshot.rs",
+      "line": 115,
+      "condition": "",
+      "fields": []
+    },
+    {
       "name": "drasi_lib::config::snapshot::ReactionSnapshot",
       "kind": "struct",
       "file": "lib/src/config/snapshot.rs",
-      "line": 111,
+      "line": 118,
       "condition": "",
       "fields": [
         {
           "name": "id",
           "declaration": "String",
           "variant": "",
-          "line": 114,
+          "line": 121,
           "condition": ""
         },
         {
           "name": "reaction_type",
           "declaration": "String",
           "variant": "",
-          "line": 116,
+          "line": 123,
           "condition": ""
         },
         {
           "name": "status",
           "declaration": "ComponentStatus",
           "variant": "",
-          "line": 118,
+          "line": 125,
           "condition": ""
         },
         {
           "name": "auto_start",
           "declaration": "bool",
           "variant": "",
-          "line": 120,
+          "line": 127,
           "condition": ""
         },
         {
           "name": "queries",
           "declaration": "Vec < String >",
           "variant": "",
-          "line": 122,
+          "line": 129,
           "condition": ""
         },
         {
           "name": "properties",
           "declaration": "HashMap < String , serde_json :: Value >",
           "variant": "",
-          "line": 124,
+          "line": 131,
           "condition": ""
         }
       ]
@@ -32779,94 +32804,117 @@
       ]
     },
     {
-      "name": "drasi_lib::error::DrasiError",
-      "kind": "enum",
+      "name": "drasi_lib::error::ComponentNotFoundError",
+      "kind": "struct",
       "file": "lib/src/error.rs",
       "line": 71,
       "condition": "",
       "fields": [
         {
           "name": "component_type",
+          "declaration": "& 'static str",
+          "variant": "",
+          "line": 77,
+          "condition": ""
+        },
+        {
+          "name": "component_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 78,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::error::DrasiError",
+      "kind": "enum",
+      "file": "lib/src/error.rs",
+      "line": 90,
+      "condition": "",
+      "fields": [
+        {
+          "name": "component_type",
           "declaration": "String",
           "variant": "ComponentNotFound",
-          "line": 80,
+          "line": 99,
           "condition": ""
         },
         {
           "name": "component_id",
           "declaration": "String",
           "variant": "ComponentNotFound",
-          "line": 82,
+          "line": 101,
           "condition": ""
         },
         {
           "name": "component_type",
           "declaration": "String",
           "variant": "AlreadyExists",
-          "line": 89,
+          "line": 108,
           "condition": ""
         },
         {
           "name": "component_id",
           "declaration": "String",
           "variant": "AlreadyExists",
-          "line": 91,
+          "line": 110,
           "condition": ""
         },
         {
           "name": "message",
           "declaration": "String",
           "variant": "InvalidConfig",
-          "line": 98,
+          "line": 117,
           "condition": ""
         },
         {
           "name": "message",
           "declaration": "String",
           "variant": "InvalidState",
-          "line": 105,
+          "line": 124,
           "condition": ""
         },
         {
           "name": "message",
           "declaration": "String",
           "variant": "Validation",
-          "line": 112,
+          "line": 131,
           "condition": ""
         },
         {
           "name": "component_type",
           "declaration": "String",
           "variant": "OperationFailed",
-          "line": 119,
+          "line": 138,
           "condition": ""
         },
         {
           "name": "component_id",
           "declaration": "String",
           "variant": "OperationFailed",
-          "line": 121,
+          "line": 140,
           "condition": ""
         },
         {
           "name": "operation",
           "declaration": "String",
           "variant": "OperationFailed",
-          "line": 123,
+          "line": 142,
           "condition": ""
         },
         {
           "name": "reason",
           "declaration": "String",
           "variant": "OperationFailed",
-          "line": 125,
+          "line": 144,
           "condition": ""
         },
         {
           "name": "0",
           "declaration": "anyhow :: Error",
           "variant": "Internal",
-          "line": 132,
+          "line": 151,
           "condition": ""
         }
       ]
@@ -32875,21 +32923,21 @@
       "name": "drasi_lib::error::OperationFailures",
       "kind": "struct",
       "file": "lib/src/error.rs",
-      "line": 286,
+      "line": 305,
       "condition": "",
       "fields": [
         {
           "name": "message",
           "declaration": "String",
           "variant": "",
-          "line": 292,
+          "line": 311,
           "condition": ""
         },
         {
           "name": "failures",
           "declaration": "Vec < anyhow :: Error >",
           "variant": "",
-          "line": 293,
+          "line": 312,
           "condition": ""
         }
       ]
@@ -32898,7 +32946,7 @@
       "name": "drasi_lib::error::Result",
       "kind": "type alias",
       "file": "lib/src/error.rs",
-      "line": 280,
+      "line": 299,
       "condition": "",
       "fields": []
     },
@@ -34065,337 +34113,6 @@
       ]
     },
     {
-      "name": "drasi_lib::managers::ComponentNotFoundError",
-      "kind": "struct",
-      "file": "lib/src/managers/mod.rs",
-      "line": 27,
-      "condition": "",
-      "fields": [
-        {
-          "name": "component_type",
-          "declaration": "& 'static str",
-          "variant": "",
-          "line": 34,
-          "condition": ""
-        },
-        {
-          "name": "component_id",
-          "declaration": "String",
-          "variant": "",
-          "line": 35,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::component_log::ComponentLogChannel",
-      "kind": "struct",
-      "file": "lib/src/managers/component_log.rs",
-      "line": 231,
-      "condition": "",
-      "fields": [
-        {
-          "name": "history",
-          "declaration": "VecDeque < LogMessage >",
-          "variant": "",
-          "line": 233,
-          "condition": ""
-        },
-        {
-          "name": "max_history",
-          "declaration": "usize",
-          "variant": "",
-          "line": 235,
-          "condition": ""
-        },
-        {
-          "name": "sender",
-          "declaration": "broadcast :: Sender < LogMessage >",
-          "variant": "",
-          "line": 237,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::component_log::ComponentLogKey",
-      "kind": "struct",
-      "file": "lib/src/managers/component_log.rs",
-      "line": 69,
-      "condition": "",
-      "fields": [
-        {
-          "name": "instance_id",
-          "declaration": "String",
-          "variant": "",
-          "line": 75,
-          "condition": ""
-        },
-        {
-          "name": "component_type",
-          "declaration": "ComponentType",
-          "variant": "",
-          "line": 77,
-          "condition": ""
-        },
-        {
-          "name": "component_id",
-          "declaration": "String",
-          "variant": "",
-          "line": 79,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::component_log::ComponentLogRegistry",
-      "kind": "struct",
-      "file": "lib/src/managers/component_log.rs",
-      "line": 271,
-      "condition": "",
-      "fields": [
-        {
-          "name": "channels",
-          "declaration": "RwLock < HashMap < String , ComponentLogChannel > >",
-          "variant": "",
-          "line": 276,
-          "condition": ""
-        },
-        {
-          "name": "max_history",
-          "declaration": "usize",
-          "variant": "",
-          "line": 278,
-          "condition": ""
-        },
-        {
-          "name": "channel_capacity",
-          "declaration": "usize",
-          "variant": "",
-          "line": 280,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::component_log::LogLevel",
-      "kind": "enum",
-      "file": "lib/src/managers/component_log.rs",
-      "line": 142,
-      "condition": "",
-      "fields": []
-    },
-    {
-      "name": "drasi_lib::managers::component_log::LogMessage",
-      "kind": "struct",
-      "file": "lib/src/managers/component_log.rs",
-      "line": 172,
-      "condition": "",
-      "fields": [
-        {
-          "name": "timestamp",
-          "declaration": "DateTime < Utc >",
-          "variant": "",
-          "line": 178,
-          "condition": ""
-        },
-        {
-          "name": "level",
-          "declaration": "LogLevel",
-          "variant": "",
-          "line": 180,
-          "condition": ""
-        },
-        {
-          "name": "message",
-          "declaration": "String",
-          "variant": "",
-          "line": 182,
-          "condition": ""
-        },
-        {
-          "name": "instance_id",
-          "declaration": "String",
-          "variant": "",
-          "line": 184,
-          "condition": ""
-        },
-        {
-          "name": "component_id",
-          "declaration": "String",
-          "variant": "",
-          "line": 186,
-          "condition": ""
-        },
-        {
-          "name": "component_type",
-          "declaration": "ComponentType",
-          "variant": "",
-          "line": 188,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::event_history::ComponentEventChannel",
-      "kind": "struct",
-      "file": "lib/src/managers/event_history.rs",
-      "line": 34,
-      "condition": "",
-      "fields": [
-        {
-          "name": "history",
-          "declaration": "VecDeque < ComponentEvent >",
-          "variant": "",
-          "line": 36,
-          "condition": ""
-        },
-        {
-          "name": "max_history",
-          "declaration": "usize",
-          "variant": "",
-          "line": 38,
-          "condition": ""
-        },
-        {
-          "name": "sender",
-          "declaration": "broadcast :: Sender < ComponentEvent >",
-          "variant": "",
-          "line": 40,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::event_history::ComponentEventHistory",
-      "kind": "struct",
-      "file": "lib/src/managers/event_history.rs",
-      "line": 82,
-      "condition": "",
-      "fields": [
-        {
-          "name": "channels",
-          "declaration": "HashMap < String , ComponentEventChannel >",
-          "variant": "",
-          "line": 89,
-          "condition": ""
-        },
-        {
-          "name": "max_events_per_component",
-          "declaration": "usize",
-          "variant": "",
-          "line": 91,
-          "condition": ""
-        },
-        {
-          "name": "channel_capacity",
-          "declaration": "usize",
-          "variant": "",
-          "line": 93,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::tracing_layer::ComponentInfo",
-      "kind": "struct",
-      "file": "lib/src/managers/tracing_layer.rs",
-      "line": 332,
-      "condition": "",
-      "fields": [
-        {
-          "name": "instance_id",
-          "declaration": "String",
-          "variant": "",
-          "line": 335,
-          "condition": ""
-        },
-        {
-          "name": "component_id",
-          "declaration": "String",
-          "variant": "",
-          "line": 336,
-          "condition": ""
-        },
-        {
-          "name": "component_type",
-          "declaration": "ComponentType",
-          "variant": "",
-          "line": 337,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::tracing_layer::ComponentInfoVisitor",
-      "kind": "struct",
-      "file": "lib/src/managers/tracing_layer.rs",
-      "line": 352,
-      "condition": "",
-      "fields": [
-        {
-          "name": "instance_id",
-          "declaration": "Option < String >",
-          "variant": "",
-          "line": 355,
-          "condition": ""
-        },
-        {
-          "name": "component_id",
-          "declaration": "Option < String >",
-          "variant": "",
-          "line": 356,
-          "condition": ""
-        },
-        {
-          "name": "component_type",
-          "declaration": "Option < String >",
-          "variant": "",
-          "line": 357,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::tracing_layer::ComponentLogLayer",
-      "kind": "struct",
-      "file": "lib/src/managers/tracing_layer.rs",
-      "line": 253,
-      "condition": "",
-      "fields": [
-        {
-          "name": "registry",
-          "declaration": "Arc < ComponentLogRegistry >",
-          "variant": "",
-          "line": 259,
-          "condition": ""
-        }
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::tracing_layer::MessageVisitor",
-      "kind": "struct",
-      "file": "lib/src/managers/tracing_layer.rs",
-      "line": 411,
-      "condition": "",
-      "fields": [
-        {
-          "name": "message",
-          "declaration": "Option < String >",
-          "variant": "",
-          "line": 414,
-          "condition": ""
-        },
-        {
-          "name": "fields",
-          "declaration": "Vec < String >",
-          "variant": "",
-          "line": 415,
-          "condition": ""
-        }
-      ]
-    },
-    {
       "name": "drasi_lib::metrics::lifecycle_metrics::LifecycleMetrics",
       "kind": "struct",
       "file": "lib/src/metrics/lifecycle_metrics.rs",
@@ -34800,6 +34517,314 @@
       "line": 19,
       "condition": "",
       "fields": []
+    },
+    {
+      "name": "drasi_lib::observability::component_log::ComponentLogChannel",
+      "kind": "struct",
+      "file": "lib/src/observability/component_log.rs",
+      "line": 231,
+      "condition": "",
+      "fields": [
+        {
+          "name": "history",
+          "declaration": "VecDeque < LogMessage >",
+          "variant": "",
+          "line": 233,
+          "condition": ""
+        },
+        {
+          "name": "max_history",
+          "declaration": "usize",
+          "variant": "",
+          "line": 235,
+          "condition": ""
+        },
+        {
+          "name": "sender",
+          "declaration": "broadcast :: Sender < LogMessage >",
+          "variant": "",
+          "line": 237,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::component_log::ComponentLogKey",
+      "kind": "struct",
+      "file": "lib/src/observability/component_log.rs",
+      "line": 69,
+      "condition": "",
+      "fields": [
+        {
+          "name": "instance_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 75,
+          "condition": ""
+        },
+        {
+          "name": "component_type",
+          "declaration": "ComponentType",
+          "variant": "",
+          "line": 77,
+          "condition": ""
+        },
+        {
+          "name": "component_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 79,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::component_log::ComponentLogRegistry",
+      "kind": "struct",
+      "file": "lib/src/observability/component_log.rs",
+      "line": 271,
+      "condition": "",
+      "fields": [
+        {
+          "name": "channels",
+          "declaration": "RwLock < HashMap < String , ComponentLogChannel > >",
+          "variant": "",
+          "line": 276,
+          "condition": ""
+        },
+        {
+          "name": "max_history",
+          "declaration": "usize",
+          "variant": "",
+          "line": 278,
+          "condition": ""
+        },
+        {
+          "name": "channel_capacity",
+          "declaration": "usize",
+          "variant": "",
+          "line": 280,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::component_log::LogLevel",
+      "kind": "enum",
+      "file": "lib/src/observability/component_log.rs",
+      "line": 142,
+      "condition": "",
+      "fields": []
+    },
+    {
+      "name": "drasi_lib::observability::component_log::LogMessage",
+      "kind": "struct",
+      "file": "lib/src/observability/component_log.rs",
+      "line": 172,
+      "condition": "",
+      "fields": [
+        {
+          "name": "timestamp",
+          "declaration": "DateTime < Utc >",
+          "variant": "",
+          "line": 178,
+          "condition": ""
+        },
+        {
+          "name": "level",
+          "declaration": "LogLevel",
+          "variant": "",
+          "line": 180,
+          "condition": ""
+        },
+        {
+          "name": "message",
+          "declaration": "String",
+          "variant": "",
+          "line": 182,
+          "condition": ""
+        },
+        {
+          "name": "instance_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 184,
+          "condition": ""
+        },
+        {
+          "name": "component_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 186,
+          "condition": ""
+        },
+        {
+          "name": "component_type",
+          "declaration": "ComponentType",
+          "variant": "",
+          "line": 188,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::event_history::ComponentEventChannel",
+      "kind": "struct",
+      "file": "lib/src/observability/event_history.rs",
+      "line": 34,
+      "condition": "",
+      "fields": [
+        {
+          "name": "history",
+          "declaration": "VecDeque < ComponentEvent >",
+          "variant": "",
+          "line": 36,
+          "condition": ""
+        },
+        {
+          "name": "max_history",
+          "declaration": "usize",
+          "variant": "",
+          "line": 38,
+          "condition": ""
+        },
+        {
+          "name": "sender",
+          "declaration": "broadcast :: Sender < ComponentEvent >",
+          "variant": "",
+          "line": 40,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::event_history::ComponentEventHistory",
+      "kind": "struct",
+      "file": "lib/src/observability/event_history.rs",
+      "line": 82,
+      "condition": "",
+      "fields": [
+        {
+          "name": "channels",
+          "declaration": "HashMap < String , ComponentEventChannel >",
+          "variant": "",
+          "line": 89,
+          "condition": ""
+        },
+        {
+          "name": "max_events_per_component",
+          "declaration": "usize",
+          "variant": "",
+          "line": 91,
+          "condition": ""
+        },
+        {
+          "name": "channel_capacity",
+          "declaration": "usize",
+          "variant": "",
+          "line": 93,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::tracing_layer::ComponentInfo",
+      "kind": "struct",
+      "file": "lib/src/observability/tracing_layer.rs",
+      "line": 332,
+      "condition": "",
+      "fields": [
+        {
+          "name": "instance_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 335,
+          "condition": ""
+        },
+        {
+          "name": "component_id",
+          "declaration": "String",
+          "variant": "",
+          "line": 336,
+          "condition": ""
+        },
+        {
+          "name": "component_type",
+          "declaration": "ComponentType",
+          "variant": "",
+          "line": 337,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::tracing_layer::ComponentInfoVisitor",
+      "kind": "struct",
+      "file": "lib/src/observability/tracing_layer.rs",
+      "line": 352,
+      "condition": "",
+      "fields": [
+        {
+          "name": "instance_id",
+          "declaration": "Option < String >",
+          "variant": "",
+          "line": 355,
+          "condition": ""
+        },
+        {
+          "name": "component_id",
+          "declaration": "Option < String >",
+          "variant": "",
+          "line": 356,
+          "condition": ""
+        },
+        {
+          "name": "component_type",
+          "declaration": "Option < String >",
+          "variant": "",
+          "line": 357,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::tracing_layer::ComponentLogLayer",
+      "kind": "struct",
+      "file": "lib/src/observability/tracing_layer.rs",
+      "line": 253,
+      "condition": "",
+      "fields": [
+        {
+          "name": "registry",
+          "declaration": "Arc < ComponentLogRegistry >",
+          "variant": "",
+          "line": 259,
+          "condition": ""
+        }
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::tracing_layer::MessageVisitor",
+      "kind": "struct",
+      "file": "lib/src/observability/tracing_layer.rs",
+      "line": 411,
+      "condition": "",
+      "fields": [
+        {
+          "name": "message",
+          "declaration": "Option < String >",
+          "variant": "",
+          "line": 414,
+          "condition": ""
+        },
+        {
+          "name": "fields",
+          "declaration": "Vec < String >",
+          "variant": "",
+          "line": 415,
+          "condition": ""
+        }
+      ]
     },
     {
       "name": "drasi_lib::queries::config_hash::JoinIdentity",
@@ -40073,23 +40098,23 @@
       "condition": ""
     },
     {
-      "from": "drasi_computation_contracts::snapshot::QuerySnapshot",
+      "from": "drasi_computation_contracts::snapshot::QueryResultSnapshot",
       "to": "drasi_computation_contracts::data::Record",
       "field": "rows",
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 10,
+      "line": 15,
       "condition": ""
     },
     {
-      "from": "drasi_computation_contracts::snapshot::QuerySnapshot",
+      "from": "drasi_computation_contracts::snapshot::QueryResultSnapshot",
       "to": "drasi_computation_contracts::data::RecordId",
       "field": "rows",
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 10,
+      "line": 15,
       "condition": ""
     },
     {
@@ -43914,7 +43939,7 @@
     },
     {
       "from": "drasi_lib::bootstrap::component_graph::ComponentGraphBootstrapProvider",
-      "to": "drasi_lib::component_graph::graph::ComponentGraph",
+      "to": "drasi_lib::component_graph::graph::ComponentGraphView",
       "field": "graph",
       "variant": "",
       "cardinality": "1",
@@ -44933,7 +44958,7 @@
       "condition": ""
     },
     {
-      "from": "drasi_lib::component_graph::graph::ComponentGraph",
+      "from": "drasi_lib::component_graph::graph::ComponentGraphView",
       "to": "drasi_lib::computation::runtime::Runtime",
       "field": "runtime",
       "variant": "",
@@ -45494,7 +45519,7 @@
     },
     {
       "from": "drasi_lib::computation::internal::query_state::QueryRecoveryView",
-      "to": "drasi_computation_contracts::snapshot::QuerySnapshot",
+      "to": "drasi_computation_contracts::snapshot::QueryResultSnapshot",
       "field": "snapshot",
       "variant": "",
       "cardinality": "1",
@@ -45754,22 +45779,22 @@
     },
     {
       "from": "drasi_lib::computation::runtime::Runtime",
-      "to": "drasi_lib::managers::component_log::ComponentLogRegistry",
-      "field": "logs",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "shared strong",
-      "line": 305,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::computation::runtime::Runtime",
       "to": "drasi_lib::metrics::lifecycle_metrics::LifecycleMetrics",
       "field": "lifecycle_metrics",
       "variant": "",
       "cardinality": "1",
       "relationship": "shared strong",
       "line": 306,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::computation::runtime::Runtime",
+      "to": "drasi_lib::observability::component_log::ComponentLogRegistry",
+      "field": "logs",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "shared strong",
+      "line": 305,
       "condition": ""
     },
     {
@@ -45974,7 +45999,7 @@
     },
     {
       "from": "drasi_lib::computation::runtime::events::Events",
-      "to": "drasi_lib::managers::event_history::ComponentEventHistory",
+      "to": "drasi_lib::observability::event_history::ComponentEventHistory",
       "field": "history",
       "variant": "",
       "cardinality": "1",
@@ -56924,7 +56949,7 @@
     },
     {
       "from": "drasi_lib::computation::v1::plugin_reaction::OutputView",
-      "to": "drasi_computation_contracts::snapshot::QuerySnapshot",
+      "to": "drasi_computation_contracts::snapshot::QueryResultSnapshot",
       "field": "snapshot",
       "variant": "",
       "cardinality": "1",
@@ -62714,7 +62739,7 @@
     },
     {
       "from": "drasi_lib::config::snapshot::ConfigurationSnapshot",
-      "to": "drasi_lib::config::snapshot::QuerySnapshot",
+      "to": "drasi_lib::config::snapshot::QueryConfigurationSnapshot",
       "field": "queries",
       "variant": "",
       "cardinality": "0..*",
@@ -62763,33 +62788,33 @@
       "condition": ""
     },
     {
-      "from": "drasi_lib::config::snapshot::QuerySnapshot",
+      "from": "drasi_lib::config::snapshot::QueryConfigurationSnapshot",
       "to": "drasi_lib::channels::events::ComponentStatus",
       "field": "status",
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 107,
+      "line": 111,
       "condition": ""
     },
     {
-      "from": "drasi_lib::config::snapshot::QuerySnapshot",
+      "from": "drasi_lib::config::snapshot::QueryConfigurationSnapshot",
       "to": "drasi_lib::config::schema::QueryConfig",
       "field": "config",
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 105,
+      "line": 109,
       "condition": ""
     },
     {
-      "from": "drasi_lib::config::snapshot::QuerySnapshot",
+      "from": "drasi_lib::config::snapshot::QueryConfigurationSnapshot",
       "to": "std::string::String",
       "field": "id",
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 103,
+      "line": 107,
       "condition": ""
     },
     {
@@ -62799,7 +62824,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 118,
+      "line": 125,
       "condition": ""
     },
     {
@@ -62809,7 +62834,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 124,
+      "line": 131,
       "condition": ""
     },
     {
@@ -62819,7 +62844,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 114,
+      "line": 121,
       "condition": ""
     },
     {
@@ -62829,7 +62854,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "HashMap entries",
-      "line": 124,
+      "line": 131,
       "condition": ""
     },
     {
@@ -62839,7 +62864,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 122,
+      "line": 129,
       "condition": ""
     },
     {
@@ -62849,7 +62874,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 116,
+      "line": 123,
       "condition": ""
     },
     {
@@ -63153,13 +63178,23 @@
       "condition": ""
     },
     {
+      "from": "drasi_lib::error::ComponentNotFoundError",
+      "to": "std::string::String",
+      "field": "component_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 78,
+      "condition": ""
+    },
+    {
       "from": "drasi_lib::error::DrasiError",
       "to": "anyhow::Error",
       "field": "0",
       "variant": "Internal",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 132,
+      "line": 151,
       "condition": ""
     },
     {
@@ -63169,7 +63204,7 @@
       "variant": "AlreadyExists",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 91,
+      "line": 110,
       "condition": ""
     },
     {
@@ -63179,7 +63214,7 @@
       "variant": "AlreadyExists",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 89,
+      "line": 108,
       "condition": ""
     },
     {
@@ -63189,7 +63224,7 @@
       "variant": "ComponentNotFound",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 82,
+      "line": 101,
       "condition": ""
     },
     {
@@ -63199,7 +63234,7 @@
       "variant": "ComponentNotFound",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 80,
+      "line": 99,
       "condition": ""
     },
     {
@@ -63209,7 +63244,7 @@
       "variant": "InvalidConfig",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 98,
+      "line": 117,
       "condition": ""
     },
     {
@@ -63219,7 +63254,7 @@
       "variant": "InvalidState",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 105,
+      "line": 124,
       "condition": ""
     },
     {
@@ -63229,7 +63264,7 @@
       "variant": "OperationFailed",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 121,
+      "line": 140,
       "condition": ""
     },
     {
@@ -63239,7 +63274,7 @@
       "variant": "OperationFailed",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 119,
+      "line": 138,
       "condition": ""
     },
     {
@@ -63249,7 +63284,7 @@
       "variant": "OperationFailed",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 123,
+      "line": 142,
       "condition": ""
     },
     {
@@ -63259,7 +63294,7 @@
       "variant": "OperationFailed",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 125,
+      "line": 144,
       "condition": ""
     },
     {
@@ -63269,7 +63304,7 @@
       "variant": "Validation",
       "cardinality": "0..1",
       "relationship": "stored value",
-      "line": 112,
+      "line": 131,
       "condition": ""
     },
     {
@@ -63279,7 +63314,7 @@
       "variant": "",
       "cardinality": "0..*",
       "relationship": "Vec entries",
-      "line": 293,
+      "line": 312,
       "condition": ""
     },
     {
@@ -63289,7 +63324,7 @@
       "variant": "",
       "cardinality": "1",
       "relationship": "stored value",
-      "line": 292,
+      "line": 311,
       "condition": ""
     },
     {
@@ -63664,7 +63699,7 @@
     },
     {
       "from": "drasi_lib::lib_core::DrasiLib",
-      "to": "drasi_lib::managers::component_log::ComponentLogRegistry",
+      "to": "drasi_lib::observability::component_log::ComponentLogRegistry",
       "field": "log_registry",
       "variant": "",
       "cardinality": "1",
@@ -64393,276 +64428,6 @@
       "condition": ""
     },
     {
-      "from": "drasi_lib::managers::ComponentNotFoundError",
-      "to": "std::string::String",
-      "field": "component_id",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 35,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::ComponentLogChannel",
-      "to": "drasi_lib::managers::component_log::LogMessage",
-      "field": "history",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "VecDeque entries",
-      "line": 233,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::ComponentLogChannel",
-      "to": "drasi_lib::managers::component_log::LogMessage",
-      "field": "sender",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "channel payload access (not exclusive ownership)",
-      "line": 237,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::ComponentLogKey",
-      "to": "drasi_lib::channels::events::ComponentType",
-      "field": "component_type",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 77,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::ComponentLogKey",
-      "to": "std::string::String",
-      "field": "component_id",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 79,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::ComponentLogKey",
-      "to": "std::string::String",
-      "field": "instance_id",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 75,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::ComponentLogRegistry",
-      "to": "drasi_lib::managers::component_log::ComponentLogChannel",
-      "field": "channels",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "RwLock / HashMap entries",
-      "line": 276,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::ComponentLogRegistry",
-      "to": "std::string::String",
-      "field": "channels",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "RwLock / HashMap entries",
-      "line": 276,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::LogMessage",
-      "to": "chrono::DateTime",
-      "field": "timestamp",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 178,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::LogMessage",
-      "to": "drasi_lib::channels::events::ComponentType",
-      "field": "component_type",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 188,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::LogMessage",
-      "to": "drasi_lib::managers::component_log::LogLevel",
-      "field": "level",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 180,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::LogMessage",
-      "to": "std::string::String",
-      "field": "component_id",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 186,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::LogMessage",
-      "to": "std::string::String",
-      "field": "instance_id",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 184,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::component_log::LogMessage",
-      "to": "std::string::String",
-      "field": "message",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 182,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::event_history::ComponentEventChannel",
-      "to": "drasi_lib::channels::events::ComponentEvent",
-      "field": "history",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "VecDeque entries",
-      "line": 36,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::event_history::ComponentEventChannel",
-      "to": "drasi_lib::channels::events::ComponentEvent",
-      "field": "sender",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "channel payload access (not exclusive ownership)",
-      "line": 40,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::event_history::ComponentEventHistory",
-      "to": "drasi_lib::managers::event_history::ComponentEventChannel",
-      "field": "channels",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "HashMap entries",
-      "line": 89,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::event_history::ComponentEventHistory",
-      "to": "std::string::String",
-      "field": "channels",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "HashMap entries",
-      "line": 89,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::ComponentInfo",
-      "to": "drasi_lib::channels::events::ComponentType",
-      "field": "component_type",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 337,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::ComponentInfo",
-      "to": "std::string::String",
-      "field": "component_id",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 336,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::ComponentInfo",
-      "to": "std::string::String",
-      "field": "instance_id",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "stored value",
-      "line": 335,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::ComponentInfoVisitor",
-      "to": "std::string::String",
-      "field": "component_id",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option",
-      "line": 356,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::ComponentInfoVisitor",
-      "to": "std::string::String",
-      "field": "component_type",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option",
-      "line": 357,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::ComponentInfoVisitor",
-      "to": "std::string::String",
-      "field": "instance_id",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option",
-      "line": 355,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::ComponentLogLayer",
-      "to": "drasi_lib::managers::component_log::ComponentLogRegistry",
-      "field": "registry",
-      "variant": "",
-      "cardinality": "1",
-      "relationship": "shared strong",
-      "line": 259,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::MessageVisitor",
-      "to": "std::string::String",
-      "field": "fields",
-      "variant": "",
-      "cardinality": "0..*",
-      "relationship": "Vec entries",
-      "line": 415,
-      "condition": ""
-    },
-    {
-      "from": "drasi_lib::managers::tracing_layer::MessageVisitor",
-      "to": "std::string::String",
-      "field": "message",
-      "variant": "",
-      "cardinality": "0..1",
-      "relationship": "Option",
-      "line": 414,
-      "condition": ""
-    },
-    {
       "from": "drasi_lib::metrics::lifecycle_metrics::LifecycleMetrics",
       "to": "std::sync::atomic::AtomicU64",
       "field": "auto_reset_completions",
@@ -64900,6 +64665,266 @@
       "cardinality": "1",
       "relationship": "stored value",
       "line": 37,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::ComponentLogChannel",
+      "to": "drasi_lib::observability::component_log::LogMessage",
+      "field": "history",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "VecDeque entries",
+      "line": 233,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::ComponentLogChannel",
+      "to": "drasi_lib::observability::component_log::LogMessage",
+      "field": "sender",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "channel payload access (not exclusive ownership)",
+      "line": 237,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::ComponentLogKey",
+      "to": "drasi_lib::channels::events::ComponentType",
+      "field": "component_type",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 77,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::ComponentLogKey",
+      "to": "std::string::String",
+      "field": "component_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 79,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::ComponentLogKey",
+      "to": "std::string::String",
+      "field": "instance_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 75,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::ComponentLogRegistry",
+      "to": "drasi_lib::observability::component_log::ComponentLogChannel",
+      "field": "channels",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "RwLock / HashMap entries",
+      "line": 276,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::ComponentLogRegistry",
+      "to": "std::string::String",
+      "field": "channels",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "RwLock / HashMap entries",
+      "line": 276,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::LogMessage",
+      "to": "chrono::DateTime",
+      "field": "timestamp",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 178,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::LogMessage",
+      "to": "drasi_lib::channels::events::ComponentType",
+      "field": "component_type",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 188,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::LogMessage",
+      "to": "drasi_lib::observability::component_log::LogLevel",
+      "field": "level",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 180,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::LogMessage",
+      "to": "std::string::String",
+      "field": "component_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 186,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::LogMessage",
+      "to": "std::string::String",
+      "field": "instance_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 184,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::component_log::LogMessage",
+      "to": "std::string::String",
+      "field": "message",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 182,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::event_history::ComponentEventChannel",
+      "to": "drasi_lib::channels::events::ComponentEvent",
+      "field": "history",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "VecDeque entries",
+      "line": 36,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::event_history::ComponentEventChannel",
+      "to": "drasi_lib::channels::events::ComponentEvent",
+      "field": "sender",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "channel payload access (not exclusive ownership)",
+      "line": 40,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::event_history::ComponentEventHistory",
+      "to": "drasi_lib::observability::event_history::ComponentEventChannel",
+      "field": "channels",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "HashMap entries",
+      "line": 89,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::event_history::ComponentEventHistory",
+      "to": "std::string::String",
+      "field": "channels",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "HashMap entries",
+      "line": 89,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::ComponentInfo",
+      "to": "drasi_lib::channels::events::ComponentType",
+      "field": "component_type",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 337,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::ComponentInfo",
+      "to": "std::string::String",
+      "field": "component_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 336,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::ComponentInfo",
+      "to": "std::string::String",
+      "field": "instance_id",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "stored value",
+      "line": 335,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::ComponentInfoVisitor",
+      "to": "std::string::String",
+      "field": "component_id",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option",
+      "line": 356,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::ComponentInfoVisitor",
+      "to": "std::string::String",
+      "field": "component_type",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option",
+      "line": 357,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::ComponentInfoVisitor",
+      "to": "std::string::String",
+      "field": "instance_id",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option",
+      "line": 355,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::ComponentLogLayer",
+      "to": "drasi_lib::observability::component_log::ComponentLogRegistry",
+      "field": "registry",
+      "variant": "",
+      "cardinality": "1",
+      "relationship": "shared strong",
+      "line": 259,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::MessageVisitor",
+      "to": "std::string::String",
+      "field": "fields",
+      "variant": "",
+      "cardinality": "0..*",
+      "relationship": "Vec entries",
+      "line": 415,
+      "condition": ""
+    },
+    {
+      "from": "drasi_lib::observability::tracing_layer::MessageVisitor",
+      "to": "std::string::String",
+      "field": "message",
+      "variant": "",
+      "cardinality": "0..1",
+      "relationship": "Option",
+      "line": 414,
       "condition": ""
     },
     {
@@ -66304,8 +66329,8 @@
     },
     {
       "name": "drasi_computation_contracts::snapshot",
-      "code_lines": 7,
-      "types": 1,
+      "code_lines": 8,
+      "types": 2,
       "files": [
         "components/computation-contracts/src/snapshot.rs"
       ]
@@ -67536,7 +67561,7 @@
     },
     {
       "name": "drasi_lib",
-      "code_lines": 86,
+      "code_lines": 88,
       "types": 0,
       "files": [
         "lib/src/lib.rs"
@@ -67648,8 +67673,8 @@
     },
     {
       "name": "drasi_lib::component_graph::graph",
-      "code_lines": 58,
-      "types": 1,
+      "code_lines": 59,
+      "types": 2,
       "files": [
         "lib/src/component_graph/graph.rs"
       ]
@@ -67752,7 +67777,7 @@
     },
     {
       "name": "drasi_lib::computation::runtime::inspection",
-      "code_lines": 735,
+      "code_lines": 737,
       "types": 0,
       "files": [
         "lib/src/computation/runtime/inspection.rs"
@@ -68296,7 +68321,7 @@
     },
     {
       "name": "drasi_lib::computation::v1::query_catalog",
-      "code_lines": 780,
+      "code_lines": 784,
       "types": 14,
       "files": [
         "lib/src/computation/v1/query_catalog.rs"
@@ -68432,7 +68457,7 @@
     },
     {
       "name": "drasi_lib::config",
-      "code_lines": 8,
+      "code_lines": 9,
       "types": 0,
       "files": [
         "lib/src/config/mod.rs"
@@ -68456,8 +68481,8 @@
     },
     {
       "name": "drasi_lib::config::snapshot",
-      "code_lines": 43,
-      "types": 5,
+      "code_lines": 45,
+      "types": 6,
       "files": [
         "lib/src/config/snapshot.rs"
       ]
@@ -68488,8 +68513,8 @@
     },
     {
       "name": "drasi_lib::error",
-      "code_lines": 146,
-      "types": 3,
+      "code_lines": 160,
+      "types": 4,
       "files": [
         "lib/src/error.rs"
       ]
@@ -68640,42 +68665,10 @@
     },
     {
       "name": "drasi_lib::managers",
-      "code_lines": 22,
-      "types": 1,
-      "files": [
-        "lib/src/managers/mod.rs"
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::component_log",
-      "code_lines": 236,
-      "types": 5,
-      "files": [
-        "lib/src/managers/component_log.rs"
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::event_history",
-      "code_lines": 138,
-      "types": 2,
-      "files": [
-        "lib/src/managers/event_history.rs"
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::logging",
-      "code_lines": 10,
+      "code_lines": 2,
       "types": 0,
       "files": [
-        "lib/src/managers/logging.rs"
-      ]
-    },
-    {
-      "name": "drasi_lib::managers::tracing_layer",
-      "code_lines": 256,
-      "types": 4,
-      "files": [
-        "lib/src/managers/tracing_layer.rs"
+        "lib/src/managers/mod.rs"
       ]
     },
     {
@@ -68708,6 +68701,46 @@
       "types": 3,
       "files": [
         "lib/src/metrics/reaction_metrics.rs"
+      ]
+    },
+    {
+      "name": "drasi_lib::observability",
+      "code_lines": 8,
+      "types": 0,
+      "files": [
+        "lib/src/observability/mod.rs"
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::component_log",
+      "code_lines": 236,
+      "types": 5,
+      "files": [
+        "lib/src/observability/component_log.rs"
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::event_history",
+      "code_lines": 138,
+      "types": 2,
+      "files": [
+        "lib/src/observability/event_history.rs"
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::logging",
+      "code_lines": 10,
+      "types": 0,
+      "files": [
+        "lib/src/observability/logging.rs"
+      ]
+    },
+    {
+      "name": "drasi_lib::observability::tracing_layer",
+      "code_lines": 256,
+      "types": 4,
+      "files": [
+        "lib/src/observability/tracing_layer.rs"
       ]
     },
     {

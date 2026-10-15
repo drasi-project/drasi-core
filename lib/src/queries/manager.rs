@@ -21,7 +21,7 @@ use crate::{
     channels::{ComponentEvent, ComponentStatus, ComponentType},
     computation::runtime::Runtime,
     config::{QueryConfig, QueryRuntime},
-    managers::LogMessage,
+    observability::LogMessage,
     queries::{LabelExtractor, QueryLabels},
 };
 

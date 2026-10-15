@@ -15,7 +15,7 @@
 use super::*;
 use crate::{
     channels::{ComponentEvent, ComponentEventBroadcastSender, ComponentType},
-    managers::ComponentEventHistory,
+    observability::ComponentEventHistory,
 };
 use std::sync::Mutex as SyncMutex;
 

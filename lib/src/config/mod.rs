@@ -27,5 +27,6 @@ pub use schema::*;
 
 // Re-export snapshot types
 pub use snapshot::{
-    BootstrapSnapshot, ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot, SourceSnapshot,
+    BootstrapSnapshot, ConfigurationSnapshot, QueryConfigurationSnapshot, QuerySnapshot,
+    ReactionSnapshot, SourceSnapshot,
 };

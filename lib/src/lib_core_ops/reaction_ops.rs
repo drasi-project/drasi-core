@@ -353,8 +353,8 @@ impl DrasiLib {
         &self,
         id: &str,
     ) -> Result<(
-        Vec<crate::managers::LogMessage>,
-        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
         self.inspection.subscribe_reaction_logs(id).await
     }

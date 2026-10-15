@@ -112,8 +112,8 @@ are historical sources, not additional active work lists.
 ### Runtime work versus migration work
 
 ComputationGraph is already the only execution engine. Older source, query and
-reaction interfaces still run through it. The remaining `ComponentGraph` type
-is a read-only view, not a second executor.
+reaction interfaces still run through it. `ComponentGraphView` (also available
+under the old `ComponentGraph` name) is a read-only view, not a second executor.
 
 Here **native** means a component using the newer processing/plugin interface,
 not merely code compiled for the local machine. **Durable** means saved in
@@ -2037,8 +2037,8 @@ of current completion.
 [pipe-metrics]: ../src/computation/v1/pipe_metrics.rs
 [legacy-source]: ../src/computation/v1/legacy_source.rs
 [workers]: ../src/context/workers.rs
-[component-logs]: ../src/managers/component_log.rs
-[tracing-layer]: ../src/managers/tracing_layer.rs
+[component-logs]: ../src/observability/component_log.rs
+[tracing-layer]: ../src/observability/tracing_layer.rs
 [metrics]: ../src/metrics/
 [errors]: ../src/error.rs
 [change-receiver]: ../../components/host-sdk/src/proxies/change_receiver.rs

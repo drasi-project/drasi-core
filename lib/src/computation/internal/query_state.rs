@@ -24,14 +24,14 @@ use crate::computation::v1::{
     ChangeEnvelope, ChangeOperation, QueryRecoveryIdentity, Record, RecordId,
 };
 
-pub use drasi_computation_contracts::QuerySnapshot;
+pub use drasi_computation_contracts::{QueryResultSnapshot, QuerySnapshot};
 
 /// One coherent recovery observation. Rows share the immutable snapshot tree;
 /// retained envelopes are copied only when a caller requests a replay suffix.
 #[derive(Clone)]
 pub struct QueryRecoveryView {
     pub identity: QueryRecoveryIdentity,
-    pub snapshot: QuerySnapshot,
+    pub snapshot: QueryResultSnapshot,
     pub oldest_sequence: Option<u64>,
     pub retained: Option<Vec<ChangeEnvelope>>,
 }
@@ -182,9 +182,9 @@ impl QueryResults {
         }
     }
 
-    pub fn snapshot(&self) -> Result<QuerySnapshot, QueryHistoryError> {
+    pub fn snapshot(&self) -> Result<QueryResultSnapshot, QueryHistoryError> {
         let state = self.state.read().map_err(|_| QueryHistoryError::Poisoned)?;
-        Ok(QuerySnapshot {
+        Ok(QueryResultSnapshot {
             as_of_sequence: state.sequence,
             generation: state.generation,
             rows: state.rows.clone(),
@@ -204,7 +204,7 @@ impl QueryResults {
                 .identity
                 .clone()
                 .ok_or(QueryHistoryError::MissingIdentity)?,
-            snapshot: QuerySnapshot {
+            snapshot: QueryResultSnapshot {
                 as_of_sequence: state.sequence,
                 generation: state.generation,
                 rows: state.rows.clone(),

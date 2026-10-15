@@ -216,7 +216,7 @@ mod tests {
     async fn create_test_env() -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
@@ -235,7 +235,7 @@ mod tests {
 
     async fn add_source(
         source_manager: &crate::test_helpers::managers::SourceManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
@@ -243,7 +243,7 @@ mod tests {
 
     async fn add_query(
         manager: &crate::test_helpers::managers::QueryManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.declare(config).await
@@ -1543,7 +1543,7 @@ mod tests {
     async fn create_test_env_with_persistent_backend() -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
@@ -2482,7 +2482,7 @@ mod tests {
     ) -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
@@ -3544,7 +3544,7 @@ mod orchestration_tests {
 
     async fn add_source(
         source_manager: &crate::test_helpers::managers::SourceManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl Source + 'static,
     ) -> anyhow::Result<()> {
         let source_id = source.id().to_string();
@@ -3554,7 +3554,7 @@ mod orchestration_tests {
 
     async fn add_query(
         manager: &crate::test_helpers::managers::QueryManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.declare(config).await
@@ -3566,7 +3566,7 @@ mod orchestration_tests {
     ) -> (
         Arc<crate::test_helpers::managers::QueryManager>,
         Arc<crate::test_helpers::managers::SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         let providers: std::collections::HashMap<
             String,

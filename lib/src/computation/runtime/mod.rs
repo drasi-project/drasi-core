@@ -302,7 +302,7 @@ pub(crate) struct Runtime {
     changed: watch::Sender<u64>,
     catalog: QueryResultsCatalog,
     factory: Arc<RuntimeFactory>,
-    logs: Arc<crate::managers::ComponentLogRegistry>,
+    logs: Arc<crate::observability::ComponentLogRegistry>,
     pub(crate) lifecycle_metrics: Arc<LifecycleMetrics>,
 }
 
@@ -310,7 +310,7 @@ impl Runtime {
     pub(crate) fn new(
         config: Arc<RuntimeConfig>,
         middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
-        logs: Arc<crate::managers::ComponentLogRegistry>,
+        logs: Arc<crate::observability::ComponentLogRegistry>,
         wal: Option<Arc<dyn crate::wal::WalProvider>>,
     ) -> Arc<Self> {
         let services = LegacyPluginServices {
@@ -983,7 +983,7 @@ impl Runtime {
             .filter(|record| record.value.instance().kind() == kind)
             .cloned()
             .ok_or_else(|| {
-                crate::managers::ComponentNotFoundError::new(
+                crate::error::ComponentNotFoundError::new(
                     match kind {
                         "source" => "source",
                         "query" => "query",
@@ -1317,7 +1317,7 @@ impl Runtime {
         }
         self.cleanup_candidates.write().await.remove(&record.token);
         self.logs
-            .remove_component_by_key(&crate::managers::ComponentLogKey::new(
+            .remove_component_by_key(&crate::observability::ComponentLogKey::new(
                 self.config.id.clone(),
                 match kind {
                     "source" => crate::channels::ComponentType::Source,

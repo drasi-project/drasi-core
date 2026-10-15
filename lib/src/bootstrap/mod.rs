@@ -21,7 +21,7 @@
 //!
 //! # Included Providers
 //!
-//! - [`ComponentGraphBootstrapProvider`]: Bootstraps from the [`ComponentGraph`] snapshot
+//! - [`ComponentGraphBootstrapProvider`]: Bootstraps from a [`ComponentGraphView`](crate::ComponentGraphView) snapshot
 //!   for the built-in component graph source.
 
 pub mod component_graph;

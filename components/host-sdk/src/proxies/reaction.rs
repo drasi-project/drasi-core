@@ -301,7 +301,7 @@ impl Reaction for ReactionProxy {
         let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
             instance_id: instance_id_str.clone(),
             runtime_handle: tokio::runtime::Handle::current(),
-            log_registry: drasi_lib::managers::get_or_init_global_registry(),
+            log_registry: drasi_lib::observability::get_or_init_global_registry(),
             update_tx: context.update_tx.clone(),
         });
 

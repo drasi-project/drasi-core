@@ -11,10 +11,10 @@ with the current ComputationGraph code at Core
 [`707d27c5`](https://github.com/drasi-project/drasi-core/commit/707d27c584dcbb27218936ed6fe06d8055b738f8)
 and Server
 [`f15706d`](https://github.com/drasi-project/drasi-server/commit/f15706d0d65c5c829c0a653c0d977f4cad617d6a).
-The `ComponentGraph` type still present today is a read-only view, not the old
-execution system being compared. Here **native** means a component using the
-newer processing/plugin interface, not merely code compiled for the local
-machine.
+The current `ComponentGraphView` (`ComponentGraph` remains an alias) is a
+read-only view, not the old execution system being compared. Here **native**
+means a component using the newer processing/plugin interface, not merely
+code compiled for the local machine.
 
 This is not a published-release announcement. Code, recorded tests and
 unverified claims are distinguished below. This is a source-and-evidence review,

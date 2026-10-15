@@ -15,7 +15,7 @@
 //! Component event history tracking with live streaming support.
 //!
 //! This module provides centralized storage for component lifecycle events,
-//! allowing managers to track and query the history of status changes for
+//! allowing runtime observers to track and query the history of status changes for
 //! sources, queries, and reactions. It also supports live streaming of events
 //! via broadcast channels.
 

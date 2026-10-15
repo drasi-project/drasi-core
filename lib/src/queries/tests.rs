@@ -98,7 +98,7 @@ mod manager_tests {
     async fn create_test_manager() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         let core = crate::test_helpers::managers::empty_core().await;
         (
@@ -112,7 +112,7 @@ mod manager_tests {
     async fn create_test_manager_with_graph() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         create_test_manager().await
     }
@@ -120,7 +120,7 @@ mod manager_tests {
     /// Helper: register a source in the graph, then provision it in the source manager.
     async fn add_source(
         source_manager: &SourceManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl crate::sources::Source + 'static,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
@@ -130,7 +130,7 @@ mod manager_tests {
     /// Registers placeholder source nodes for any referenced sources not already in the graph.
     async fn add_query(
         manager: &QueryManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.declare(config).await
@@ -139,7 +139,7 @@ mod manager_tests {
     /// Helper: teardown a query in the manager, then deregister from the graph.
     async fn delete_query(
         manager: &QueryManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         id: &str,
     ) -> anyhow::Result<()> {
         manager.delete(id).await
@@ -929,7 +929,7 @@ mod output_state_integration_tests {
     async fn create_test_manager_with_graph() -> (
         Arc<QueryManager>,
         Arc<SourceManager>,
-        crate::component_graph::ComponentGraph,
+        crate::component_graph::ComponentGraphView,
     ) {
         let core = crate::test_helpers::managers::empty_core().await;
         (
@@ -941,7 +941,7 @@ mod output_state_integration_tests {
 
     async fn add_source(
         source_manager: &SourceManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         source: impl crate::sources::Source + 'static,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
@@ -949,7 +949,7 @@ mod output_state_integration_tests {
 
     async fn add_query(
         manager: &QueryManager,
-        _graph: &crate::component_graph::ComponentGraph,
+        _graph: &crate::component_graph::ComponentGraphView,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
         manager.declare(config).await

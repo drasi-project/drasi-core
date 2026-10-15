@@ -14,6 +14,7 @@
 
 //! Read-only component inspection DTOs and plugin status compatibility imports.
 //! ComputationGraph exclusively owns runtime membership, resources, and lifecycle.
+//! [`ComponentGraphView`] holds only a weak reference to that runtime.
 
 mod graph;
 mod node;

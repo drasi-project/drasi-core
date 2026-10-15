@@ -37,6 +37,9 @@ lib::managers::component_log::tests::	shared	Unchanged scoped log store used by 
 lib::managers::event_history::tests::	shared	Unchanged inspection event history.
 lib::managers::lifecycle_helpers::tests::	legacy-structure	Direct helper/ComponentGraph mutations are implementation units; native lifecycle is exercised through ordinary APIs and controller tests.
 lib::managers::tracing_layer::tests::	shared	Unchanged tracing conversion and component-type parsing.
+lib::observability::component_log::tests::	shared	Scoped log storage moved from managers without changing behavior.
+lib::observability::event_history::tests::	shared	Inspection event history moved from managers without changing behavior.
+lib::observability::tracing_layer::tests::	shared	Tracing conversion and component-type parsing moved from managers.
 lib::metrics::	shared	Unchanged atomic metric values; runtime metric increments are separately exercised in metrics_e2e.
 lib::profiling::tests::	shared	Unchanged profiling values and timestamp helpers.
 lib::queries::base::tests::	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.

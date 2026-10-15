@@ -3000,7 +3000,7 @@ plugin version.
 ### Tracing, component logs and events
 
 When Drasi owns tracing initialization, call
-`drasi_lib::managers::get_or_init_global_registry()`.
+`drasi_lib::observability::get_or_init_global_registry()`.
 It initializes the global registry and worker and attempts subscriber
 installation once. A builder also uses this shared registry. Install tracing
 once per process, not per query.
@@ -3012,7 +3012,7 @@ the slot:
 
 ```rust
 fn init_host_tracing() -> anyhow::Result<()> {
-    use drasi_lib::managers::{
+    use drasi_lib::observability::{
         get_or_init_global_registry, ComponentLogLayer,
     };
     use tracing_subscriber::prelude::*;

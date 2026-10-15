@@ -1229,7 +1229,7 @@ async fn test_plugin_logs_routed_to_log_registry() {
     //! SourceRuntimeContext (which sets up per-instance callbacks).
     use drasi_lib::channels::ComponentType;
     use drasi_lib::context::SourceRuntimeContext;
-    use drasi_lib::managers::{get_or_init_global_registry, ComponentLogKey};
+    use drasi_lib::observability::{get_or_init_global_registry, ComponentLogKey};
     use drasi_lib::sources::Source;
 
     if !plugin_exists("drasi-source-mock") {
@@ -1664,7 +1664,7 @@ async fn test_per_instance_logs_include_correct_component_id() {
     //! in the ComponentLogRegistry contain the correct component_id.
     use drasi_lib::channels::ComponentType;
     use drasi_lib::context::SourceRuntimeContext;
-    use drasi_lib::managers::{get_or_init_global_registry, ComponentLogKey};
+    use drasi_lib::observability::{get_or_init_global_registry, ComponentLogKey};
     use drasi_lib::sources::Source;
 
     if !plugin_exists("drasi-source-mock") {

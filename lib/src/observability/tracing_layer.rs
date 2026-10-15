@@ -156,7 +156,7 @@ fn spawn_log_worker(
 /// # Example
 ///
 /// ```ignore
-/// use drasi_lib::managers::ComponentLogRegistry;
+/// use drasi_lib::observability::ComponentLogRegistry;
 /// use std::sync::Arc;
 ///
 /// let log_registry = Arc::new(ComponentLogRegistry::new());

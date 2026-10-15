@@ -23,7 +23,7 @@ use crate::{
     channels::{ComponentEvent, ComponentStatus, ComponentType},
     computation::runtime::Runtime,
     config::SourceRuntime,
-    managers::LogMessage,
+    observability::LogMessage,
     schema::SourceSchema,
     sources::Source,
 };

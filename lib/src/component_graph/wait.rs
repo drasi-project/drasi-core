@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ComponentGraph;
+use super::ComponentGraphView;
 use crate::channels::ComponentStatus;
 
 /// Wait on authoritative computation publications, without polling or a second
 /// mutable component graph.
 pub async fn wait_for_status(
-    graph: &ComponentGraph,
+    graph: &ComponentGraphView,
     component_id: &str,
     target_statuses: &[ComponentStatus],
     timeout: std::time::Duration,
