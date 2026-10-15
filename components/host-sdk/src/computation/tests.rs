@@ -27,6 +27,8 @@ use std::{
 mod bootstrap_fixture;
 #[path = "bootstrap_tests.rs"]
 mod bootstrap_tests;
+#[path = "configuration_tests.rs"]
+mod configuration_tests;
 #[path = "../../tests/fixtures/native_consumer.rs"]
 mod consumer_fixture;
 #[path = "consumer_tests.rs"]

@@ -10,8 +10,8 @@ use axum::{
     Router,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata,
+    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata,
 };
 use drasi_lib::{
     computation::v1::*,
@@ -22,6 +22,8 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, convert::Infallible, net::IpAddr, time::Duration};
 use tokio::{net::TcpListener, sync::broadcast, sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+const MAX_BROADCAST_CAPACITY: usize = 1_048_576;
 
 fn host() -> String {
     "0.0.0.0".into()
@@ -55,6 +57,20 @@ pub struct SseSinkConfig {
     pub broadcast_capacity: usize,
 }
 impl SseSinkConfig {
+    pub fn definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+        use drasi_computation_plugin_sdk::{
+            ConfigDefinition, ConfigOption as Field, ConfigType::*,
+        };
+        ConfigDefinition::try_new([
+            Field::new("queryStreams", Object, true, "Nonempty map from query identifiers to their connected output stream identifiers."),
+            Field::new("host", String, false, "IP address on which to listen.").default(host()),
+            Field::new("port", Integer, false, "TCP port; zero requests an available local port.").default(port()).minimum(0).maximum(u16::MAX as u64),
+            Field::new("ssePath", String, false, "Absolute event-stream path without query, fragment or control characters.").default(path()),
+            Field::new("heartbeatIntervalMs", Integer, false, "Positive heartbeat interval in milliseconds, representable by the system clock.").default(heartbeat()).minimum(1),
+            Field::new("broadcastCapacity", Integer, false, "Maximum retained notifications in the shared broadcast buffer; a lagging client is disconnected and must obtain a fresh snapshot.").default(capacity()).minimum(1).maximum(MAX_BROADCAST_CAPACITY as u64),
+        ]).expect("constant SSE sink configuration")
+    }
+
     pub fn parse(value: Value) -> Result<Self> {
         let config: Self = serde_json::from_value(value)?;
         ensure!(
@@ -73,7 +89,7 @@ impl SseSinkConfig {
         );
         crate::config::duration(config.heartbeat_interval_ms, "heartbeatIntervalMs")?;
         ensure!(
-            (1..=1_048_576).contains(&config.broadcast_capacity),
+            (1..=MAX_BROADCAST_CAPACITY).contains(&config.broadcast_capacity),
             "broadcastCapacity must be in 1..=1048576"
         );
         Ok(config)
@@ -82,20 +98,17 @@ impl SseSinkConfig {
 
 pub struct SseFactory;
 impl Factory for SseFactory {
+    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
+        Some(SseSinkConfig::definition().details())
+    }
+
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(crate::SSE_SINK, "1")
                 .expect("constant SSE implementation"),
             role: ComponentRole::Sink,
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
-                ("queryStreams", ConfigType::Object, true),
-                ("host", ConfigType::String, false),
-                ("port", ConfigType::Integer, false),
-                ("ssePath", ConfigType::String, false),
-                ("heartbeatIntervalMs", ConfigType::Integer, false),
-                ("broadcastCapacity", ConfigType::Integer, false),
-            ]),
+            configuration: SseSinkConfig::definition().schema(),
             ports: vec![PortDescriptor::new(
                 PortId::try_new("in").expect("constant port"),
                 PortDirection::Input,

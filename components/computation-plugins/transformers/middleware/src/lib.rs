@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata, PluginDefinition,
 };
 use drasi_core::{middleware::MiddlewareTypeRegistry, models::SourceMiddlewareConfig};
 use drasi_lib::computation::v1::{
@@ -19,6 +19,26 @@ pub const MIDDLEWARE: &str = "drasi.standard/middleware";
 
 pub struct MiddlewareFactory;
 
+fn configuration_definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption as Field, ConfigType::*};
+    ConfigDefinition::try_new([
+        Field::new("stream", String, true, "Nonempty output stream identifier."),
+        Field::new(
+            "middleware",
+            Array,
+            true,
+            "Named middleware configurations; this component supplies map and relabel.",
+        ),
+        Field::new(
+            "pipeline",
+            Array,
+            true,
+            "Ordered middleware names to apply; every name must refer to a declared configuration.",
+        ),
+    ])
+    .expect("constant middleware configuration")
+}
+
 pub fn plugin() -> anyhow::Result<PluginDefinition> {
     PluginDefinition::new(
         PLUGIN_ID,
@@ -32,16 +52,16 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for MiddlewareFactory {
+    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
+        Some(configuration_definition().details())
+    }
+
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(MIDDLEWARE, "1").expect("constant"),
             role: ComponentRole::Transformer,
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
-                ("stream", ConfigType::String, true),
-                ("middleware", ConfigType::Array, true),
-                ("pipeline", ConfigType::Array, true),
-            ]),
+            configuration: configuration_definition().schema(),
             ports: [("in", PortDirection::Input), ("out", PortDirection::Output)]
                 .into_iter()
                 .map(|(id, direction)| {

@@ -31,6 +31,22 @@ pub struct HttpSinkConfig {
 }
 
 impl HttpSinkConfig {
+    pub fn definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+        use drasi_computation_plugin_sdk::{
+            ConfigDefinition, ConfigOption as Field, ConfigType::*,
+        };
+        use serde_json::json;
+        ConfigDefinition::try_new([
+            Field::new("queryId", String, true, "Query whose result changes this sink accepts."),
+            Field::new("stream", String, false, "Input stream identifier.").default_description("queryId followed by /out."),
+            Field::new("url", String, true, "HTTP or HTTPS destination URL without embedded credentials or a fragment."),
+            Field::new("headers", Object, false, "Request headers. JSON content type and the query identity header are supplied automatically.").default(json!({})),
+            Field::new("timeoutMs", Integer, false, "HTTP request timeout in milliseconds; must be representable by the system clock.").default(timeout_ms()).minimum(1),
+            Field::new("maxRetries", Integer, false, "Additional delivery attempts after the first attempt.").default(retries()).minimum(0).maximum(drasi_computation_network_common::config::MAX_RETRIES as u64),
+            Field::new("failurePolicy", String, false, "strict reports delivery failure; skip deliberately discards failed output with an error report.").default(json!(FailurePolicy::default())).allowed([json!(FailurePolicy::Strict), json!(FailurePolicy::Skip)]),
+        ]).expect("constant HTTP sink configuration")
+    }
+
     pub fn parse(mut value: Value) -> Result<Self> {
         input_stream(&mut value)?;
         let mut config: Self = serde_json::from_value(value)?;
@@ -44,7 +60,10 @@ impl HttpSinkConfig {
             "unsupported HTTP URL"
         );
         duration(config.timeout_ms, "timeoutMs")?;
-        ensure!(config.max_retries <= 100, "maxRetries must not exceed 100");
+        ensure!(
+            config.max_retries <= drasi_computation_network_common::config::MAX_RETRIES,
+            "maxRetries must not exceed 100"
+        );
         config.headers = normalized_headers(&config.headers, &config.query_id)?;
         if let Some(value) = config.headers.get("content-type") {
             ensure!(

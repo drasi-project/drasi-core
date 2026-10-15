@@ -3,6 +3,10 @@
 `GrpcSinkConfig`, `OutputFormat` and their validation live in this crate's
 `config` module. The component also owns its `proto_item` output conversion.
 
+Published configuration metadata includes the actual defaults and allowed values.
+`batchSize` permits only `1`. `batchFlushTimeoutMs` remains accepted for compatibility
+but has no effect for single-item requests; it is marked deprecated in the schema.
+
 `drasi-computation-sink-grpc` provides only `drasi.network/grpc-sink`
 (implementation `"1"`, configuration `1`).
 

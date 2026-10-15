@@ -122,7 +122,29 @@ impl NativePlugin {
         bootstrap: Option<abi::bootstrap::BootstrapFn>,
         consumer: Option<abi::consumer::ConsumerFn>,
     ) -> anyhow::Result<Arc<Self>> {
+        unsafe {
+            Self::from_entry_points_with_configuration(
+                metadata, entry, services, recovery, bootstrap, consumer, None,
+            )
+        }
+    }
+
+    /// Host optional configuration descriptions without changing the base ABI.
+    ///
+    /// # Safety
+    /// All entry points must belong to the same pinned binary and their metadata
+    /// must remain immutable and valid for the lifetime of that binary.
+    pub unsafe fn from_entry_points_with_configuration(
+        metadata: abi::MetadataFn,
+        entry: abi::EntryFn,
+        services: Option<abi::services::ServicesFn>,
+        recovery: Option<abi::recovery::RecoveryFn>,
+        bootstrap: Option<abi::bootstrap::BootstrapFn>,
+        consumer: Option<abi::consumer::ConsumerFn>,
+        configuration: Option<abi::configuration::ConfigurationFn>,
+    ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata)? };
+        let mut configurations = unsafe { read_configuration(configuration, &manifest)? };
         let consumer = consumer
             .map(|entry| -> anyhow::Result<_> {
                 let table = *unsafe { checked_table(entry())? };
@@ -288,6 +310,7 @@ impl NativePlugin {
                     source_progress,
                 )?
                 .with_consumer(consumer_binding)?
+                .with_configuration_details(configurations.remove(&metadata.implementation))
             }));
         }
         let mut bootstrap_factories = Vec::new();
@@ -365,12 +388,17 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     let consumer = unsafe { library.get::<abi::consumer::ConsumerFn>(abi::consumer::SYMBOL) }
         .ok()
         .map(|symbol| *symbol);
+    let configuration =
+        unsafe { library.get::<abi::configuration::ConfigurationFn>(abi::configuration::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
         && recovery.is_none()
         && bootstrap.is_none()
         && consumer.is_none()
+        && configuration.is_none()
     {
         return Ok(None);
     }
@@ -383,8 +411,14 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     let entry =
         entry.ok_or_else(|| anyhow::anyhow!("native computation entry symbol is missing"))?;
     Ok(Some(unsafe {
-        NativePlugin::from_entry_points_with_consumer(
-            metadata, entry, services, recovery, bootstrap, consumer,
+        NativePlugin::from_entry_points_with_configuration(
+            metadata,
+            entry,
+            services,
+            recovery,
+            bootstrap,
+            consumer,
+            configuration,
         )?
     }))
 }
@@ -404,6 +438,36 @@ unsafe fn read_metadata(metadata: abi::MetadataFn) -> anyhow::Result<PluginMetad
     Ok(manifest)
 }
 
+unsafe fn read_configuration(
+    entry: Option<abi::configuration::ConfigurationFn>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<
+    std::collections::BTreeMap<
+        drasi_lib::computation::v1::ImplementationIdentity,
+        drasi_computation_plugin_sdk::ConfigDetails,
+    >,
+> {
+    let Some(entry) = entry else {
+        return Ok(Default::default());
+    };
+    let metadata = unsafe { checked_table(entry())? };
+    anyhow::ensure!(
+        metadata.version == abi::configuration::VERSION && metadata.reserved == 0,
+        "incompatible native configuration-description extension"
+    );
+    let details: drasi_computation_plugin_sdk::configuration::ConfigurationMetadata =
+        serde_json::from_slice(unsafe {
+            borrowed_bytes(metadata.manifest, abi::MAX_METADATA_BYTES)?
+        })
+        .context("invalid native configuration descriptions")?;
+    details.validate(manifest)?;
+    Ok(details
+        .factories
+        .into_iter()
+        .map(|factory| (factory.implementation, factory.details))
+        .collect())
+}
+
 /// Inspect the native family without creating plugin factory handles.
 pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<PluginMetadata>> {
     let metadata = unsafe { library.get::<abi::MetadataFn>(abi::METADATA_SYMBOL) }
@@ -418,12 +482,17 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::bootstrap::BootstrapFn>(abi::bootstrap::SYMBOL) }.is_ok();
     let has_consumer =
         unsafe { library.get::<abi::consumer::ConsumerFn>(abi::consumer::SYMBOL) }.is_ok();
+    let configuration =
+        unsafe { library.get::<abi::configuration::ConfigurationFn>(abi::configuration::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && !has_services
         && !has_recovery
         && !has_bootstrap
         && !has_consumer
+        && configuration.is_none()
     {
         return Ok(None);
     }
@@ -431,7 +500,9 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     anyhow::ensure!(has_entry, "native computation entry symbol is missing");
     let metadata =
         metadata.ok_or_else(|| anyhow::anyhow!("native computation metadata symbol is missing"))?;
-    Ok(Some(unsafe { read_metadata(metadata)? }))
+    let manifest = unsafe { read_metadata(metadata)? };
+    unsafe { read_configuration(configuration, &manifest)? };
+    Ok(Some(manifest))
 }
 
 pub(super) struct PluginOwner {

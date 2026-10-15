@@ -41,7 +41,7 @@ impl ConfigType {
             Self::Json => ConfigurationType::Json,
         }
     }
-    fn accepts(self, value: &Value) -> bool {
+    pub(crate) fn accepts(self, value: &Value) -> bool {
         match self {
             Self::Boolean => value.is_boolean(),
             Self::Integer => value.as_i64().is_some() || value.as_u64().is_some(),

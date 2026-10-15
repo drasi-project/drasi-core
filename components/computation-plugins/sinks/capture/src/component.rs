@@ -10,6 +10,26 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use tokio::io::AsyncWriteExt;
 
+pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption as Field, ConfigType::*};
+    ConfigDefinition::try_new([
+        Field::new(
+            "path",
+            String,
+            true,
+            "Nonempty output file path; its parent directory must already exist.",
+        ),
+        Field::new(
+            "append",
+            Boolean,
+            false,
+            "Append to the file instead of truncating it when the component starts.",
+        )
+        .default(false),
+    ])
+    .expect("constant capture configuration")
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {

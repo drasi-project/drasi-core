@@ -21,6 +21,7 @@ pub(super) mod recovery_tests;
 
 pub struct NativeFactory {
     metadata: FactoryMetadata,
+    configuration_details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
     descriptor: FactoryDescriptor,
     raw: abi::FactoryHandle,
     _plugin: Arc<PluginOwner>,
@@ -71,6 +72,7 @@ impl NativeFactory {
         Ok(Self {
             descriptor,
             metadata,
+            configuration_details: None,
             raw,
             _plugin: plugin,
             codec,
@@ -82,6 +84,29 @@ impl NativeFactory {
     }
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
+    }
+    pub(super) fn with_configuration_details(
+        mut self,
+        details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
+    ) -> Self {
+        self.configuration_details = details;
+        self
+    }
+    pub fn configuration_details(&self) -> Option<&drasi_computation_plugin_sdk::ConfigDetails> {
+        self.configuration_details.as_ref()
+    }
+    pub fn configuration_schema(&self) -> serde_json::Value {
+        drasi_computation_plugin_sdk::configuration::configuration_json_schema(
+            &self.metadata.configuration,
+            self.configuration_details(),
+        )
+    }
+    fn validate_configuration(&self, configuration: &serde_json::Value) -> anyhow::Result<()> {
+        self.metadata.configuration.validate(configuration)?;
+        if let Some(details) = &self.configuration_details {
+            details.validate(configuration)?;
+        }
+        Ok(())
     }
     pub(super) fn with_consumer(
         mut self,
@@ -181,7 +206,7 @@ impl NativeFactory {
         id: ComponentId,
         configuration: serde_json::Value,
     ) -> anyhow::Result<ComponentSpecification> {
-        self.metadata.configuration.validate(&configuration)?;
+        self.validate_configuration(&configuration)?;
         let configuration = configuration
             .as_object()
             .expect("validated object")
@@ -223,9 +248,7 @@ impl NativeFactory {
             consumer == self.consumer.is_some(),
             "native consumer requires its host-owned delivery binding"
         );
-        self.metadata
-            .configuration
-            .validate(&request.configuration)?;
+        self.validate_configuration(&request.configuration)?;
         let bytes = wire::encode(&request)?;
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
@@ -379,7 +402,7 @@ impl ComponentFactory for NativeFactory {
                     })
                     .collect(),
             );
-            self.metadata.configuration.validate(&configuration)?;
+            self.validate_configuration(&configuration)?;
         }
         Ok(())
     }

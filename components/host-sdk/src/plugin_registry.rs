@@ -177,6 +177,13 @@ impl PluginRegistry {
             .collect()
     }
 
+    /// Registered native plugins, including their negotiated configuration details.
+    pub fn computation_plugins(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::computation::NativePlugin>> {
+        self.computation_plugins.values()
+    }
+
     pub fn computation_factory_registry(
         &self,
     ) -> anyhow::Result<drasi_lib::computation::v1::FactoryRegistry> {

@@ -14,6 +14,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+pub const MAX_INGRESS_CAPACITY: usize = 1_048_576;
+pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_RETRIES: u32 = 100;
+
 pub fn duration(value: u64, field: &str) -> Result<Duration> {
     let value = Duration::from_millis(value);
     ensure!(
@@ -66,11 +70,11 @@ impl IngressConfig {
         self.host.parse::<std::net::IpAddr>()?;
         duration(self.timeout_ms, "timeoutMs")?;
         ensure!(
-            (1..=1_048_576).contains(&self.ingress_capacity),
+            (1..=MAX_INGRESS_CAPACITY).contains(&self.ingress_capacity),
             "ingressCapacity must be in 1..=1048576"
         );
         ensure!(
-            (1..=32 * 1024 * 1024).contains(&self.max_message_bytes),
+            (1..=MAX_MESSAGE_BYTES).contains(&self.max_message_bytes),
             "maxMessageBytes must be in 1..=33554432"
         );
         Ok(())

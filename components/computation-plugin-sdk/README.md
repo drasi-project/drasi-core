@@ -76,6 +76,35 @@ typed object-field contract, not arbitrary JSON Schema: it checks required keys,
 allowed additional fields and field types. The constructor validates any further
 domain-specific constraints. Secret fields require host-side unresolved references.
 
+## Configuration descriptions
+
+The optional `configuration-v1` entry point publishes field descriptions, defaults,
+integer limits and allowed values without changing the frozen ABI 1.0 metadata or
+wire version 2. Older hosts ignore it; newer hosts continue loading older plugins
+without inventing missing descriptions. A present but malformed extension is an
+error, including during metadata-only discovery.
+
+Use one `ConfigDefinition` to supply both `metadata().configuration` through
+`definition.schema()` and `Factory::configuration_details()` through
+`Some(definition.details())`. Build it with `ConfigDefinition::try_new` and
+`ConfigOption`; duplicate fields, incompatible limits and invalid defaults reject.
+Reuse the typed configuration's default functions and limit constants instead of
+maintaining another set of values. Descriptions must never publish literal secret
+defaults.
+
+The SDK and host validate advertised limits and allowed values before constructing
+a component. Constructors still apply defaults and check relationships between
+fields, paths and resources. The descriptions do not replace those checks or imply
+that arbitrary JSON Schema validation is implemented.
+
+`NativeFactory::configuration_schema()` produces the shared JSON Schema used by
+Server's kind-schema API, version-qualified `configurationSchemas` metadata and
+OpenAPI definitions. A factory without the extension retains its original
+field/type schema and reports that detailed descriptions are unavailable.
+The bundled network components explicitly describe unsupported choices:
+`adaptiveEnabled` allows only `false`, gRPC `batchSize` allows only `1`, and the
+unused single-item flush timeout is identified as a compatibility setting.
+
 ## Scheduling and ownership
 
 The host owns start, data processing, stop and cancellation. Each operation is a

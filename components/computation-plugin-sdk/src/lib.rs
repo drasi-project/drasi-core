@@ -7,6 +7,7 @@
 pub use drasi_computation_plugin_abi as abi;
 pub mod admission;
 pub mod bootstrap;
+pub mod configuration;
 pub mod consumer;
 mod control;
 mod export;
@@ -18,6 +19,7 @@ pub mod wire;
 
 pub use admission::{AdmissionError, AdmissionErrorKind, NativeAdmission};
 pub use bootstrap::{BootstrapFactory, BootstrapFactoryMetadata};
+pub use configuration::{ConfigDefinition, ConfigDetails, ConfigOption};
 pub use consumer::{ConsumerMode, NativeConsumer, NativeTransactionalConsumer};
 pub use control::{
     ControlDirection, ControlMessage, ControlNotification, ControlSender, ControlTarget,
@@ -56,6 +58,17 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.metadata(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_configuration_v1(
+        ) -> *const $crate::abi::configuration::ConfigurationMetadataV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.configuration(),
                     Err(_) => std::ptr::null(),
                 }
             }))

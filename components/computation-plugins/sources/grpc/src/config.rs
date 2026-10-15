@@ -37,6 +37,23 @@ pub struct GrpcSourceConfig {
 }
 
 impl GrpcSourceConfig {
+    pub fn definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+        use drasi_computation_plugin_sdk::{
+            ConfigDefinition, ConfigOption as Field, ConfigType::*,
+        };
+        use serde_json::json;
+        ConfigDefinition::try_new([
+            Field::new("stream", String, true, "Nonempty output stream identifier."),
+            Field::new("sourceId", String, false, "Source identifier; incoming events must name the same source.").default(shared::source_id()),
+            Field::new("host", String, false, "IP address on which to listen.").default(shared::host()),
+            Field::new("port", Integer, false, "TCP port; zero requests an available local port.").default(port()).minimum(0).maximum(u16::MAX as u64),
+            Field::new("timeoutMs", Integer, false, "Request, admission and stream-idle timeout in milliseconds; must be representable by the system clock.").default(shared::timeout_ms()).minimum(1),
+            Field::new("ingressCapacity", Integer, false, "Maximum simultaneous network requests; also bounds the volatile ingress queue.").default(shared::ingress_capacity()).minimum(1).maximum(shared::MAX_INGRESS_CAPACITY as u64),
+            Field::new("maxMessageBytes", Integer, false, "Maximum decoded gRPC message size in bytes.").default(message_bytes()).minimum(1).maximum(shared::MAX_MESSAGE_BYTES as u64),
+            Field::new("adaptiveEnabled", Boolean, false, "Adaptive ingress is not implemented; this compatibility option must remain false.").default(false).allowed([json!(false)]),
+        ]).expect("constant gRPC source configuration")
+    }
+
     pub fn from_value(value: Value) -> Result<Self> {
         let config: Self = serde_json::from_value(value)?;
         config.ingress().validate()?;

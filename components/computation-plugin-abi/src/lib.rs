@@ -33,6 +33,7 @@ pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 pub mod bootstrap;
+pub mod configuration;
 pub mod consumer;
 pub mod recovery;
 pub mod services;

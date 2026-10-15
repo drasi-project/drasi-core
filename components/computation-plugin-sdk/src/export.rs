@@ -27,6 +27,10 @@ use crate::{
 /// standalone and transactional construction use this same immutable contract.
 pub trait Factory: Send + Sync + 'static {
     fn metadata(&self) -> FactoryMetadata;
+    /// Optional pure metadata describing defaults and supported field values.
+    fn configuration_details(&self) -> Option<crate::ConfigDetails> {
+        None
+    }
     fn consumer_mode(&self) -> Option<crate::ConsumerMode> {
         None
     }
@@ -131,6 +135,7 @@ pub struct PluginDefinition {
     schemas: Vec<Arc<Schema>>,
     bootstrap_factories: Vec<Arc<dyn crate::BootstrapFactory>>,
     bootstrap_metadata: Vec<crate::BootstrapFactoryMetadata>,
+    configurations: crate::configuration::ConfigurationMetadata,
 }
 impl PluginDefinition {
     pub fn new(
@@ -169,12 +174,29 @@ impl PluginDefinition {
                 .collect(),
         };
         metadata.validate()?;
+        let configurations = crate::configuration::ConfigurationMetadata {
+            version: abi::configuration::VERSION,
+            factories: factories
+                .iter()
+                .zip(&metadata.factories)
+                .filter_map(|(factory, metadata)| {
+                    factory.configuration_details().map(|details| {
+                        crate::configuration::FactoryConfiguration {
+                            implementation: metadata.implementation.clone(),
+                            details,
+                        }
+                    })
+                })
+                .collect(),
+        };
+        configurations.validate(&metadata)?;
         Ok(Self {
             metadata,
             factories,
             schemas,
             bootstrap_factories: Vec::new(),
             bootstrap_metadata: Vec::new(),
+            configurations,
         })
     }
     pub fn with_bootstrap_factories(
@@ -223,6 +245,8 @@ struct PluginState {
 pub struct ExportedPlugin {
     metadata: abi::Metadata,
     _manifest: Box<[u8]>,
+    configuration: abi::configuration::ConfigurationMetadataV1,
+    _configuration_manifest: Box<[u8]>,
     state: Arc<PluginState>,
 }
 // Metadata borrows immutable allocations owned by this object/static TARGET.
@@ -237,6 +261,13 @@ impl ExportedPlugin {
             "native metadata exceeds size limit"
         );
         let codec = Arc::new(wire::codec(&definition.schemas)?);
+        definition.configurations.validate(&definition.metadata)?;
+        let configuration_manifest =
+            serde_json::to_vec(&definition.configurations)?.into_boxed_slice();
+        anyhow::ensure!(
+            configuration_manifest.len() <= abi::MAX_METADATA_BYTES,
+            "native configuration descriptions exceed size limit"
+        );
         Ok(Self {
             metadata: abi::Metadata {
                 header: Header::new::<abi::Metadata>(),
@@ -244,11 +275,21 @@ impl ExportedPlugin {
                 manifest: BorrowedBytes::new(&manifest),
             },
             _manifest: manifest,
+            configuration: abi::configuration::ConfigurationMetadataV1 {
+                header: Header::new::<abi::configuration::ConfigurationMetadataV1>(),
+                version: abi::configuration::VERSION,
+                reserved: 0,
+                manifest: BorrowedBytes::new(&configuration_manifest),
+            },
+            _configuration_manifest: configuration_manifest,
             state: Arc::new(PluginState { definition, codec }),
         })
     }
     pub fn metadata(&self) -> *const abi::Metadata {
         &self.metadata
+    }
+    pub fn configuration(&self) -> *const abi::configuration::ConfigurationMetadataV1 {
+        &self.configuration
     }
     pub fn services(&self) -> *const abi::services::PluginServicesV1 {
         &PLUGIN_SERVICES
@@ -790,6 +831,16 @@ unsafe fn create_component_with_services(
                 "native implementation/configuration version mismatch"
             );
             metadata.configuration.validate(&request.configuration)?;
+            if let Some(configuration) = state
+                .plugin
+                .definition
+                .configurations
+                .factories
+                .iter()
+                .find(|configuration| configuration.implementation == metadata.implementation)
+            {
+                configuration.details.validate(&request.configuration)?;
+            }
             let control = ControlSender::default();
             let factory = &state.plugin.definition.factories[state.index];
             let consumer_mode = factory.consumer_mode();

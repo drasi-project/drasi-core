@@ -7,8 +7,8 @@ mod durable_grpc;
 
 use drasi_computation_network_common::{durable, ingress, wire};
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, NativeAdmission, PluginDefinition,
+    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata, NativeAdmission, PluginDefinition,
 };
 use drasi_lib::computation::v1::{
     ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
@@ -44,26 +44,19 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for GrpcSourceFactory {
+    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
+        Some(GrpcSourceConfig::definition().details())
+    }
     fn supports_source_admission(&self) -> bool {
         true
     }
 
     fn metadata(&self) -> FactoryMetadata {
-        use ConfigType::*;
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(GRPC_SOURCE, "1").expect("constant"),
             role: ComponentRole::Source,
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
-                ("stream", String, true),
-                ("sourceId", String, false),
-                ("host", String, false),
-                ("port", Integer, false),
-                ("timeoutMs", Integer, false),
-                ("ingressCapacity", Integer, false),
-                ("maxMessageBytes", Integer, false),
-                ("adaptiveEnabled", Boolean, false),
-            ]),
+            configuration: GrpcSourceConfig::definition().schema(),
             ports: vec![PortDescriptor::new(
                 PortId::try_new("out").expect("constant"),
                 PortDirection::Output,

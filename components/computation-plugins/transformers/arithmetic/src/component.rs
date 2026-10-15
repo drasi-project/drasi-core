@@ -20,6 +20,47 @@ fn counter_field() -> String {
 fn one() -> i64 {
     1
 }
+
+pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption as Field, ConfigType::*};
+    ConfigDefinition::try_new([
+        Field::new("stream", String, true, "Nonempty output stream identifier."),
+        Field::new(
+            "field",
+            String,
+            false,
+            "Nonempty integer property to transform; must differ from counter_property.",
+        )
+        .default(value_field()),
+        Field::new(
+            "add",
+            Integer,
+            false,
+            "Signed amount added before multiplying; processing rejects arithmetic overflow.",
+        )
+        .default(0)
+        .minimum(i64::MIN)
+        .maximum(i64::MAX as u64),
+        Field::new(
+            "multiply",
+            Integer,
+            false,
+            "Signed multiplier applied after addition; processing rejects arithmetic overflow.",
+        )
+        .default(one())
+        .minimum(i64::MIN)
+        .maximum(i64::MAX as u64),
+        Field::new(
+            "counter_property",
+            String,
+            false,
+            "Nonempty output property for the batch count; must differ from field.",
+        )
+        .default(counter_field()),
+    ])
+    .expect("constant arithmetic configuration")
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {

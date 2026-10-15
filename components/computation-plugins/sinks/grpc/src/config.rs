@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+const SUPPORTED_BATCH_SIZE: usize = 1;
+
 fn endpoint() -> String {
     "grpc://localhost:50052".into()
 }
@@ -23,7 +25,7 @@ fn connect_timeout() -> u64 {
     15_000
 }
 fn batch_size() -> usize {
-    1
+    SUPPORTED_BATCH_SIZE
 }
 fn flush_timeout() -> u64 {
     100
@@ -66,6 +68,27 @@ pub struct GrpcSinkConfig {
 }
 
 impl GrpcSinkConfig {
+    pub fn definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+        use drasi_computation_plugin_sdk::{
+            ConfigDefinition, ConfigOption as Field, ConfigType::*,
+        };
+        use serde_json::json;
+        ConfigDefinition::try_new([
+            Field::new("queryId", String, true, "Query whose result changes this sink accepts."),
+            Field::new("stream", String, false, "Input stream identifier.").default_description("queryId followed by /out."),
+            Field::new("endpoint", String, false, "Plaintext grpc:// or http:// destination; TLS endpoints are not supported.").default(endpoint()),
+            Field::new("metadata", Object, false, "ASCII gRPC request metadata; the query identity header is supplied automatically.").default(json!({})),
+            Field::new("timeoutMs", Integer, false, "gRPC request timeout in milliseconds; must be representable by the system clock.").default(timeout_ms()).minimum(1),
+            Field::new("maxRetries", Integer, false, "Additional delivery attempts after the first attempt.").default(retries()).minimum(0).maximum(drasi_computation_network_common::config::MAX_RETRIES as u64),
+            Field::new("failurePolicy", String, false, "strict reports delivery failure; skip deliberately discards failed output with an error report.").default(json!(FailurePolicy::default())).allowed([json!(FailurePolicy::Strict), json!(FailurePolicy::Skip)]),
+            Field::new("connectionRetryAttempts", Integer, false, "Total connection attempts during startup, including the first.").default(attempts()).minimum(1).maximum(drasi_computation_network_common::config::MAX_RETRIES as u64),
+            Field::new("initialConnectionTimeoutMs", Integer, false, "Timeout for each startup connection attempt, in milliseconds.").default(connect_timeout()).minimum(1),
+            Field::new("batchSize", Integer, false, "Only one result item per request is implemented; larger batches are not supported.").default(batch_size()).allowed([json!(SUPPORTED_BATCH_SIZE)]),
+            Field::new("batchFlushTimeoutMs", Integer, false, "Compatibility setting in milliseconds; it has no effect while only single-item requests are supported.").default(flush_timeout()).minimum(1).deprecated(),
+            Field::new("outputFormat", String, false, "canonicalJson includes the canonical JSON payload; proto sends the typed before/after fields without that payload.").default(json!(OutputFormat::default())).allowed([json!(OutputFormat::CanonicalJson), json!(OutputFormat::Proto)]),
+        ]).expect("constant gRPC sink configuration")
+    }
+
     pub fn parse(mut value: Value) -> Result<Self> {
         input_stream(&mut value)?;
         let mut config: Self = serde_json::from_value(value)?;
@@ -87,10 +110,12 @@ impl GrpcSinkConfig {
         )?;
         duration(config.batch_flush_timeout_ms, "batchFlushTimeoutMs")?;
         ensure!(
-            config.max_retries <= 100 && (1..=100).contains(&config.connection_retry_attempts),
+            config.max_retries <= drasi_computation_network_common::config::MAX_RETRIES
+                && (1..=drasi_computation_network_common::config::MAX_RETRIES)
+                    .contains(&config.connection_retry_attempts),
             "retry attempts exceed supported bounds"
         );
-        ensure!(config.batch_size == 1, "native gRPC supports batchSize=1 only; fixed multi-item/adaptive batching is unsupported");
+        ensure!(config.batch_size == SUPPORTED_BATCH_SIZE, "native gRPC supports batchSize=1 only; fixed multi-item/adaptive batching is unsupported");
         for (key, value) in &config.metadata {
             let _: tonic::metadata::MetadataKey<tonic::metadata::Ascii> = key.parse()?;
             let _: tonic::metadata::MetadataValue<tonic::metadata::Ascii> = value.parse()?;

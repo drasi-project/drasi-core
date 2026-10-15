@@ -22,6 +22,19 @@ fn count_default() -> u64 {
 fn step_default() -> i64 {
     1
 }
+
+pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption as Field, ConfigType::*};
+    ConfigDefinition::try_new([
+        Field::new("stream", String, true, "Nonempty output stream identifier."),
+        Field::new("count", Integer, false, "Number of events; zero produces no events. The complete start/step range must fit signed 64-bit integers.").default(count_default()).minimum(0).maximum(u64::MAX),
+        Field::new("start", Integer, false, "First counter value.").default(0).minimum(i64::MIN).maximum(i64::MAX as u64),
+        Field::new("step", Integer, false, "Signed increment for each event.").default(step_default()).minimum(i64::MIN).maximum(i64::MAX as u64),
+        Field::new("interval_ms", Integer, false, "Delay between events in milliseconds; zero emits without a timer. Must be representable by the system clock.").default(0).minimum(0),
+        Field::new("paused", Boolean, false, "Start paused until the component receives a resume command.").default(false),
+    ]).expect("constant counter configuration")
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {

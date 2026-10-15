@@ -4,8 +4,8 @@
 mod component;
 
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata, PluginDefinition,
 };
 use drasi_lib::computation::v1::{
     ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
@@ -31,15 +31,16 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for CaptureFactory {
+    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
+        Some(component::configuration_definition().details())
+    }
+
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(CAPTURE, "1").expect("constant"),
             role: ComponentRole::Sink,
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
-                ("path", ConfigType::String, true),
-                ("append", ConfigType::Boolean, false),
-            ]),
+            configuration: component::configuration_definition().schema(),
             ports: vec![PortDescriptor::new(
                 PortId::try_new("in").expect("constant"),
                 PortDirection::Input,

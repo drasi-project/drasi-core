@@ -6,8 +6,8 @@ pub mod config;
 mod wire;
 
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata, PluginDefinition,
 };
 use drasi_lib::computation::v1::{
     ComponentRole, ImplementationIdentity, PipeRequirements, PortDescriptor, PortDirection, PortId,
@@ -37,26 +37,16 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for GrpcSinkFactory {
+    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
+        Some(GrpcSinkConfig::definition().details())
+    }
+
     fn metadata(&self) -> FactoryMetadata {
-        use ConfigType::*;
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(GRPC_SINK, "1").expect("constant"),
             role: ComponentRole::Sink,
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
-                ("queryId", String, true),
-                ("stream", String, false),
-                ("timeoutMs", Integer, false),
-                ("maxRetries", Integer, false),
-                ("failurePolicy", String, false),
-                ("endpoint", String, false),
-                ("metadata", Object, false),
-                ("batchSize", Integer, false),
-                ("batchFlushTimeoutMs", Integer, false),
-                ("connectionRetryAttempts", Integer, false),
-                ("initialConnectionTimeoutMs", Integer, false),
-                ("outputFormat", String, false),
-            ]),
+            configuration: GrpcSinkConfig::definition().schema(),
             ports: vec![PortDescriptor::new(
                 PortId::try_new("in").expect("constant"),
                 PortDirection::Input,

@@ -43,6 +43,20 @@ For contributors, `make build-native-plugins` builds the nine separate libraries
 `make build-native-standard-plugins` and `make build-native-network-plugins` build
 the corresponding test selections. These are build conveniences, not bundles.
 
+## Inspect configuration
+
+Each dynamic component publishes descriptions, defaults and supported values from
+its own configuration declaration. With the plugins loaded in Drasi Server,
+`GET /api/v1/plugins/computation` returns their version-qualified
+`configurationSchemas`. The kind-schema endpoint and OpenAPI use the same schema.
+`detailsAvailable` distinguishes these descriptions from an older binary's
+field/type-only metadata.
+
+For example, gRPC batching is advertised as `batchSize: 1`, not as an unrestricted
+integer, and adaptive ingress is restricted to `false`. These descriptions do not
+enable missing features. Rebuild the component library to publish the new details;
+loading an older native ABI 1.0 library remains supported.
+
 ## Shared code and contracts
 
 - [common/network](common/network) shares source admission/lifecycle, configuration

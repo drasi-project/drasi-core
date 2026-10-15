@@ -117,6 +117,68 @@ fn component(kind: &str, name: &str, config: Value) -> Result<NativeComponentPro
         .context("native factory")?
         .create_component(ComponentId::try_new(name)?, config)
 }
+
+#[test]
+fn configuration_descriptions_match_the_loaded_network_components() -> Result<()> {
+    for kind in [
+        HTTP_SOURCE,
+        GRPC_SOURCE,
+        HTTP_SINK,
+        GRPC_SINK,
+        drasi_computation_sink_sse::SSE_SINK,
+    ] {
+        let plugin = plugin(kind)?;
+        let factory = &plugin.factories()[0];
+        let details = factory
+            .configuration_details()
+            .context("missing configuration descriptions")?;
+        assert_eq!(
+            details.fields.len(),
+            factory.metadata().configuration.fields.len(),
+            "{kind}"
+        );
+        let schema = factory.configuration_schema();
+        if kind == HTTP_SOURCE || kind == GRPC_SOURCE {
+            assert_eq!(
+                schema["properties"]["adaptiveEnabled"]["enum"],
+                json!([false])
+            );
+            assert_eq!(schema["properties"]["timeoutMs"]["default"], 60000);
+            assert_eq!(schema["properties"]["port"]["maximum"], 65535);
+            assert!(factory
+                .specification(
+                    ComponentId::try_new("metadata")?,
+                    json!({"stream":"metadata/out","adaptiveEnabled":true})
+                )
+                .is_err());
+        }
+        if kind == GRPC_SINK {
+            assert_eq!(schema["properties"]["batchSize"]["enum"], json!([1]));
+            assert_eq!(
+                schema["properties"]["batchFlushTimeoutMs"]["deprecated"],
+                true
+            );
+            assert_eq!(schema["properties"]["maxRetries"]["default"], 5);
+            assert!(factory
+                .specification(
+                    ComponentId::try_new("metadata")?,
+                    json!({"queryId":"q","batchSize":2})
+                )
+                .is_err());
+        }
+        if kind == drasi_computation_sink_sse::SSE_SINK {
+            assert_eq!(
+                schema["properties"]["heartbeatIntervalMs"]["default"],
+                30000
+            );
+            assert_eq!(
+                schema["properties"]["broadcastCapacity"]["maximum"],
+                1048576
+            );
+        }
+    }
+    Ok(())
+}
 fn free_port() -> Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
