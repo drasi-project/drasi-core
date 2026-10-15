@@ -1088,6 +1088,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binlog_suffix_rollover_preserves_resume_order_and_delivery() {
+        let mut stream = test_stream("mysql-suffix-rollover");
+        stream
+            .base
+            .set_position_comparator(MySqlPositionComparator)
+            .await;
+        let older = ReplicationState::new("mysql-bin.999999", 900, None, 0)
+            .with_transaction_row(100, 1)
+            .unwrap();
+        let newer = ReplicationState::new("mysql-bin.1000000", 200, None, 0)
+            .with_transaction_row(4, 1)
+            .unwrap();
+        let mut older_sub = subscribe_at(&stream, "older", &older).await;
+        let mut newer_sub = subscribe_at(&stream, "newer", &newer).await;
+        assert_eq!(
+            stream.determine_start_position().await.unwrap(),
+            StartPosition::FromPosition {
+                file: older.binlog_file.clone(),
+                position: 100,
+            }
+        );
+
+        stream.current_binlog_file = older.binlog_file;
+        flush_test_transaction(&mut stream, 100, 900).await;
+        for row in 3..=4 {
+            let event = tokio::time::timeout(Duration::from_secs(1), older_sub.receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(&event.event, SourceEvent::Change(change)
+                if change.get_reference().element_id.as_ref() == format!("row-{row}")));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), newer_sub.receiver.recv())
+                .await
+                .is_err()
+        );
+
+        stream.current_binlog_file = newer.binlog_file.clone();
+        stream.current_binlog_position = 4;
+        flush_test_transaction(&mut stream, 4, 200).await;
+        for (subscription, first_row) in [(&mut older_sub, 1), (&mut newer_sub, 3)] {
+            for row in first_row..=4 {
+                let event =
+                    tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(matches!(&event.event, SourceEvent::Change(change)
+                    if change.get_reference().element_id.as_ref() == format!("row-{row}")));
+                let position =
+                    crate::types::decode_position(event.source_position.as_ref().unwrap()).unwrap();
+                assert_eq!(position.binlog_file, newer.binlog_file);
+                assert_eq!(position.binlog_position, 200);
+                assert_eq!(position.row_offset(), (row < 4).then_some(row - 1));
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), subscription.receiver.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn row_positions_follow_the_new_binlog_file_after_rotation() {
         let mut stream = test_stream("mysql-rotation");
         stream

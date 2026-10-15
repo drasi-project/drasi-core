@@ -118,12 +118,12 @@ impl ReplicationState {
         }
     }
 
-    /// Order by file, transaction-end position, then emitted-row ordinal.
+    /// Order by numeric file suffix, transaction-end position, then emitted-row ordinal.
     /// A boundary token without an ordinal sorts after every row at that cursor.
     /// Only positions from the same binlog lineage are comparable.
     pub fn compare_cursor(&self, other: &Self) -> Ordering {
-        self.binlog_file
-            .cmp(&other.binlog_file)
+        Self::binlog_file_key(&self.binlog_file)
+            .cmp(&Self::binlog_file_key(&other.binlog_file))
             .then_with(|| self.binlog_position.cmp(&other.binlog_position))
             .then_with(|| match (self.row_offset(), other.row_offset()) {
                 (Some(left), Some(right)) => left.cmp(&right),
@@ -131,6 +131,19 @@ impl ReplicationState {
                 (Some(_), None) => Ordering::Less,
                 (None, None) => Ordering::Equal,
             })
+    }
+
+    fn binlog_file_key(file: &str) -> (&str, Option<(usize, &str)>) {
+        match file.rsplit_once('.') {
+            Some((prefix, suffix))
+                if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                // Comparing significant digit counts first gives numeric order without overflow.
+                let digits = suffix.trim_start_matches('0');
+                (prefix, Some((digits.len(), digits)))
+            }
+            _ => (file, None),
+        }
     }
 
     /// Serialize this state to bytes for use as a source position token.
@@ -170,8 +183,8 @@ pub fn decode_position(bytes: &[u8]) -> Result<ReplicationState> {
 /// A token without row fields marks a completed cursor, after every row at that
 /// position. Timestamps and GTID values are metadata, not per-row ordering keys.
 /// This PositionComparator implementation uses strict ordering (equal tokens
-/// are suppressed) and assumes one binlog lineage with consistently padded
-/// numeric filename suffixes; it cannot compare positions across failover.
+/// are suppressed) and compares numeric filename suffixes regardless of padding
+/// or digit width. It assumes one binlog lineage, not positions across failover.
 #[derive(Debug, Clone, Default)]
 pub struct MySqlPositionComparator;
 
@@ -192,6 +205,72 @@ impl PositionComparator for MySqlPositionComparator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binlog_suffix_rollover_orders_files_numerically() {
+        for prefix in ["mysql-bin", "server.7.mysql-bin"] {
+            for (older, newer) in [
+                ("000009", "000010"),
+                ("999999", "1000000"),
+                ("9999999", "10000000"),
+                ("18446744073709551615", "18446744073709551616"),
+            ] {
+                let older = ReplicationState::new(format!("{prefix}.{older}"), 900, None, 0);
+                let newer = ReplicationState::new(format!("{prefix}.{newer}"), 200, None, 0)
+                    .with_transaction_row(4, 0)
+                    .unwrap();
+                assert!(older.compare_cursor(&newer).is_lt());
+                assert!(newer.compare_cursor(&older).is_gt());
+                assert!(MySqlPositionComparator
+                    .position_reached(&newer.to_position_bytes(), &older.to_position_bytes()));
+                assert!(!MySqlPositionComparator
+                    .position_reached(&older.to_position_bytes(), &newer.to_position_bytes()));
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_file_suffix_padding_does_not_change_cursor_order() {
+        for (padded, unpadded) in [("000000", "0"), ("000001", "1"), ("000010", "10")] {
+            let padded = ReplicationState::new(format!("mysql-bin.{padded}"), 200, None, 0);
+            let unpadded = ReplicationState::new(format!("mysql-bin.{unpadded}"), 200, None, 0);
+            assert_eq!(padded.compare_cursor(&unpadded), Ordering::Equal);
+            let row = unpadded.with_transaction_row(4, 1).unwrap();
+            assert!(row.compare_cursor(&padded).is_lt());
+        }
+    }
+
+    #[test]
+    fn file_order_is_transitive_for_mixed_filename_shapes() {
+        let positions: Vec<_> = [
+            "",
+            "mysql-bin",
+            "mysql-bin.",
+            "mysql-bin.000000",
+            "mysql-bin.1z",
+            "mysql-bin.2",
+            "mysql-bin.000002",
+            "mysql-bin.10",
+            "other-bin.000001",
+        ]
+        .into_iter()
+        .map(|file| ReplicationState::new(file, 200, None, 0))
+        .collect();
+        for first in &positions {
+            for second in &positions {
+                assert_eq!(
+                    first.compare_cursor(second),
+                    second.compare_cursor(first).reverse()
+                );
+                for third in &positions {
+                    if first.compare_cursor(second).is_le() && second.compare_cursor(third).is_le()
+                    {
+                        assert!(first.compare_cursor(third).is_le());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn boundary_tokens_require_a_usable_native_cursor() {

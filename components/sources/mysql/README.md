@@ -92,6 +92,8 @@ position after all rows at the cursor: resume uses its GTID when present or its
 commit-end file position, rather than rewinding to the transaction start.
 The token's `transaction_start_position` and `row_offset` fields are internal,
 not source configuration options.
+Binlog filename suffixes are ordered numerically, so rotation from
+`mysql-bin.999999` to `mysql-bin.1000000` preserves checkpoint and replay order.
 
 **Partial-row resume requires the same binlog history**, even with GTID enabled.
 The source logs a warning when a partial token includes a GTID and uses the
