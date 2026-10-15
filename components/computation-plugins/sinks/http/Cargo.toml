@@ -1,0 +1,37 @@
+[package]
+name = "drasi-computation-sink-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native ComputationGraph HTTP query-output sink and completion endpoint"
+readme = "README.md"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "1.0.0"
+kind = "sink-http"
+
+[dependencies]
+drasi-computation-plugin-sdk = { workspace = true }
+drasi-computation-network-common = { workspace = true, features = ["http-sink"] }
+drasi-lib = { workspace = true }
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.7"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "1"
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[lints]
+workspace = true

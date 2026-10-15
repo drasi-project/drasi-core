@@ -54,6 +54,13 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+drasi-computation-network-common = { workspace = true, features = ["http-source", "grpc-source", "http-sink", "grpc-sink"] }
+drasi-computation-source-grpc = { workspace = true }
+drasi-computation-sink-sse = { workspace = true }
+drasi-source-http = { path = "../sources/http" }
+drasi-source-grpc = { path = "../sources/grpc" }
+drasi-reaction-http = { workspace = true }
+drasi-reaction-grpc = { workspace = true }
 drasi-source-sqlite = { path = "../sources/sqlite" }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }
@@ -67,8 +74,11 @@ futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 serial_test = "3"
 im = "15"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }
 async-stream = "0.3"
+axum = "0.7"
+prost-types = "0.14"
+tonic = "0.14"
 
 [[example]]
 name = "native_recovery"

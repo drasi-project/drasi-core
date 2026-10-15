@@ -255,7 +255,7 @@ transaction. Seven real database cases cover failures, partial progress,
 concurrent duplicates and database crash recovery. This is a separate Rust service;
 it does not upgrade the legacy stored-procedure reaction or ordinary HTTP sinks.
 
-The separate [HTTP completion service](../../components/computation-plugins/network/README.md#opt-in-http-completion-service)
+The separate [HTTP completion service](../../components/computation-plugins/NETWORK.md#opt-in-http-completion-service)
 sends a whole batch once and confirms its exact `DeliveryBatchIdentity`, which
 includes consumer scope, producer identity, sequence, operation count and canonical
 content. The endpoint derives that identity independently before effects and
@@ -462,7 +462,7 @@ same-domain publication participation remains unfinished, and the broad
 `QosChannel` can also own durable client acceptance. Rust sources delegate
 publication to the graph using `SourceAdmission`. Native HTTP/gRPC sources can
 bind the same service through the optional native service-v1 interface and their
-[separate durable protocols](../../components/computation-plugins/network/README.md#optional-durable-admission).
+[separate durable protocols](../../components/computation-plugins/NETWORK.md#optional-durable-admission).
 Enabling the channel alone does not upgrade an arbitrary connector's responses;
 legacy source adoption remains unfinished.
 

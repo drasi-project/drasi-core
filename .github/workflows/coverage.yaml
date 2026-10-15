@@ -99,13 +99,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-llvm-cov-core-
 
-      - name: Build native network test library
-        run: make build-native-network-plugin
-
       - name: Generate core coverage
         env:
           REDIS_URL: redis://localhost:6379
-          DRASI_NATIVE_NETWORK_PLUGIN: ${{ github.workspace }}/target/debug/libdrasi_computation_network.so
         run: |
           cargo llvm-cov clean --profraw-only
           cargo llvm-cov --workspace \
@@ -226,7 +222,12 @@ jobs:
             -p drasi-bootstrap-application \
             -p drasi-plugin-sdk \
             --no-report
-          cargo llvm-cov --no-report -p drasi-host-sdk --lib
+          make build-native-network-plugins
+          cargo build -p drasi-host-sdk --example native_recovery
+          DRASI_NATIVE_PLUGIN_DIR="$PWD/target/debug" \
+            DRASI_NATIVE_RECOVERY_PLUGIN="$PWD/target/debug/examples/libnative_recovery.so" \
+            cargo llvm-cov --no-report \
+            -p drasi-host-sdk --lib --test native_network_loopback --test native_network_wire
           cargo llvm-cov report --lcov --output-path plugins-lcov.info
 
       - name: Upload plugin coverage to Coveralls

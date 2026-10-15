@@ -1,0 +1,16 @@
+// Copyright 2026 The Drasi Authors.
+// Licensed under the Apache License, Version 2.0.
+
+pub mod config;
+#[cfg(feature = "ingress")]
+pub mod durable;
+#[cfg(feature = "ingress")]
+pub mod ingress;
+pub mod wire;
+
+pub mod proto {
+    #[cfg(feature = "grpc-sink")]
+    pub use drasi_reaction_grpc::proto::drasi_v1 as reaction;
+    #[cfg(feature = "grpc-source")]
+    pub use drasi_source_grpc::proto as source;
+}

@@ -1283,7 +1283,7 @@ release-blocking claim or starting a large redesign.
 [query-runtime]: ../src/computation/runtime/query.rs
 [controller]: ../src/computation/v1/graph/controller.rs
 [native-sdk]: ../../components/computation-plugin-sdk/README.md#remaining-native-limitations
-[network]: ../../components/computation-plugins/network/README.md
+[network]: ../../components/computation-plugins/NETWORK.md
 [server-routes]: https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/src/api/v1/routes.rs
 [server-computation]: https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/src/computation.rs
 [native-ui]: https://github.com/drasi-project/drasi-server/blob/agentofreality-parallel-computation-graph/ui/src/components/inspector/ComputationDetails.tsx

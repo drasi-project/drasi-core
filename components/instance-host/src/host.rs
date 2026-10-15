@@ -18,7 +18,7 @@ use std::{
 };
 
 use anyhow::{ensure, Context, Result};
-use drasi_computation_bridge::{BridgeEgressControl, BridgeIngressControl, IngressCut};
+use drasi_computation_bridge_common::{BridgeEgressControl, BridgeIngressControl, IngressCut};
 use drasi_host_sdk::{management::HostManagementResources, PluginRegistry};
 use drasi_lib::{
     computation::v1::{
@@ -720,7 +720,10 @@ async fn initialize(shared: &Arc<Shared>) -> Result<()> {
     }
     let mut factories = plugins.computation_factory_registry()?;
     factories.register(Arc::new(SupervisorFactory::new(shared.supervisor.clone())))?;
-    for factory in drasi_computation_bridge::factories() {
+    for factory in [
+        drasi_computation_source_bridge::factory(),
+        drasi_computation_sink_bridge::factory(),
+    ] {
         factories.register(factory)?;
     }
     let mut middleware = drasi_core::middleware::MiddlewareTypeRegistry::new();

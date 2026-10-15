@@ -5,7 +5,7 @@ use super::*;
 use std::{num::NonZeroUsize, sync::Arc};
 
 use async_trait::async_trait;
-use drasi_computation_bridge::{
+use drasi_computation_bridge_common::{
     BridgeConfig, BridgeEgressControl, BridgeEndpointControl, Limits, Namespace, PortableSchema,
     Profile, TlsRecipeKind, TlsResourceRecipe, TlsRole, Transport,
 };
@@ -452,7 +452,12 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         ComponentRole::Sink,
         json!({"path":format!("{root}/results")}),
     )?;
-    config.plugins[0].path = "/build/debug/libdrasi_computation_standard.so".into();
+    for plugin in &mut config.plugins {
+        let filename = plugin.path.file_name().context("native plugin filename")?;
+        plugin.path = Path::new("/build/debug")
+            .join(filename)
+            .with_extension("so");
+    }
     let server_tls = tls(
         Path::new(&format!("{root}/tls")),
         "server",
@@ -614,7 +619,7 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
             }))
             .component(
                 specification,
-                drasi_computation_bridge::factories()[1].clone(),
+                drasi_computation_sink_bridge::factory(),
             );
         for (name, role, handle) in [
             ("upstream", ResourceRole::StateStore, journal.resource()),

@@ -4,6 +4,10 @@
 
 **Reviewed: 13 October 2026. This is the current work inventory, not a completion announcement.**
 
+**Targeted evidence update: 14 October 2026.** The reproduced durable network
+source-stop investigation is recorded under [CW-05](#cw-05-durable-network-source-stop).
+This does not constitute a new review of the entire inventory.
+
 **The approved execution-and-isolation work package is not fully complete.**
 Independent component execution, tracked background work, several failure and
 cleanup protections, child-process hosting and inter-instance links are
@@ -371,6 +375,66 @@ real commits and reconstruction.
 [controller][controller]. Earlier tracking: GC-02/09, DP-01. The older ordinary
 subscription-setup investigation PX-04 is not a new native repair task.
 
+<a id="cw-05-durable-network-source-stop"></a>
+
+#### Reproduced investigation: stopping a durable network source during commit
+
+**Priority: P1. Status: reproduced failing test; root cause and stop-contract
+interpretation unresolved. Recorded: 14 October 2026.**
+
+**Scenario:** the [native durable-admission test][native-admission-tests] gates a
+real RocksDB commit immediately before or after persistence. It exercises
+HTTP/gRPC, request timeout without stopping, and source stop while the commit
+call remains suspended. The admission request has a 100 ms timeout and reports
+`AcceptanceUnknown`: the client must resolve or retry the same producer session
+and sequence, not assume the event was rejected.
+
+**Observed failure:** from the test's ordering, the first failing stop case is
+HTTP after persistence, before the asynchronous commit call returns. Ordinary
+`stop_components` does not produce the test's expected completed-stop report;
+it returns `ReconciliationTimeout` at the graph's default five-second cleanup
+deadline:
+
+```text
+reconciliation did not reach its processing or cleanup boundary before the deadline
+```
+
+That failure occurs before this case's reconstruction and duplicate-acceptance
+assertions, and before the later gRPC cases. It demonstrates a stop/recovery
+qualification gap, not observed event loss or duplication, and does not
+establish that both protocols have the same failure.
+
+**Baseline evidence:** the same isolated test fails with the unchanged
+pre-split network plugin library and the same host/runtime. This is not a
+regression attributable to the component-crate reorganization; reproduction
+against current upstream `main` has not been established.
+
+**Reproduce:** from `drasi-core`, build the actual dynamic plugins before running
+the focused test; Rust path dependencies alone do not rebuild them.
+
+```sh
+make build-native-network-plugins
+cargo test -p drasi-host-sdk --test native_network_loopback \
+  durable_tests::network_timeouts_and_source_stop_resolve_real_commits_without_duplicate_acceptance \
+  -- --exact --nocapture --test-threads=1
+```
+
+**Remaining investigation and closure criteria:** trace ownership of the
+in-flight admission through quiescence, cancellation, fencing and cleanup.
+Determine whether ordinary stop is correctly waiting for accepted work and
+the test instead requires explicit force or release of its commit gate, or
+whether runtime lifecycle handling violates the intended contract. Do not
+assume the broader [CW-06](#cw-06) deadline work is the proven cause.
+
+Resolve the stop expectation explicitly and qualify all eight combinations
+across both protocols, both commit boundaries and both interruption modes.
+After supported stop/cleanup and reconstruction, retrying the same session
+and sequence must leave exactly one accepted event and one downstream
+delivery. A completed-stop report must not hide retained work or lost
+ownership. Do not close this investigation by ignoring the test or merely
+raising its timeout; any changed expectation must follow the documented
+stop contract and retain exact recovery checks.
+
 <a id="cw-06"></a>
 <a id="cw-06-give-lifecycle-phases-independent-enforceable-deadlines"></a>
 
@@ -384,7 +448,9 @@ wait does not lose the tracked cleanup task.
 
 **Testing:** recorded tests check slow independent cleanup, retained work after
 cancelled waits, and graceful-stop timeout/retry. They do not establish the
-complete deadline policy promised by E2.
+complete deadline policy promised by E2. The separately recorded
+[durable network source-stop failure](#cw-05-durable-network-source-stop)
+remains an unresolved investigation, not proof of a particular deadline defect.
 
 **Remaining work:** provide separate time limits for each startup/cleanup step,
 each component or resource owner, and the whole shutdown. A component's startup
@@ -1980,11 +2046,12 @@ of current completion.
 [old-sdk]: ../../components/plugin-sdk/src/ffi/
 [native-sdk]: ../../components/computation-plugin-sdk/README.md
 [host-tests]: ../../components/host-sdk/tests/
-[network]: ../../components/computation-plugins/network/README.md
+[native-admission-tests]: ../../components/host-sdk/tests/native_network/durable.rs
+[network]: ../../components/computation-plugins/NETWORK.md
 [host-readme]: ../../components/instance-host/README.md
-[bridge-readme]: ../../components/computation-plugins/bridge/README.md
-[bridge-codec]: ../../components/computation-plugins/bridge/src/codec.rs
-[bridge-codec-tests]: ../../components/computation-plugins/bridge/src/tests/codec.rs
+[bridge-readme]: ../../components/computation-plugins/common/bridge/README.md
+[bridge-codec]: ../../components/computation-plugins/common/bridge/src/codec.rs
+[bridge-codec-tests]: ../../components/computation-plugins/common/bridge/tests/bridge/codec.rs
 [otel-source]: ../../components/sources/otel/
 [redb-wal]: ../../components/wals/redb/src/provider.rs
 [rocksdb]: ../../components/indexes/rocksdb/

@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
-use drasi_computation_bridge::{
+use drasi_computation_bridge_common::{
     BridgeEgressControl, BridgeIngressControl, TlsResourceRecipe, TlsRole,
 };
 use drasi_lib::{computation::v1::*, management::ManagementResourceResolver};

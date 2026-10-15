@@ -131,7 +131,7 @@ impl EnvelopeSource for ReleasedSource {
 }
 
 fn graph(
-    plugin: &NativePlugin,
+    plugin: &[Arc<NativePlugin>],
     group: &Arc<SharedStorageGroup>,
     channels: &[Arc<QosChannel>; 2],
     sequence: u64,
@@ -163,7 +163,7 @@ fn graph(
 }
 
 fn graph_with_sinks(
-    plugin: &NativePlugin,
+    plugin: &[Arc<NativePlugin>],
     storage: ResourceHandle,
     channels: &[Arc<QosChannel>; 2],
     input: ChangeEnvelope,

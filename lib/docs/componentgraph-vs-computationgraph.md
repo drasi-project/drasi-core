@@ -626,6 +626,6 @@ policies must be selected explicitly rather than inferred from successful startu
 [transaction-guide]: computation-graph-transactions.md
 [qos-guide]: computation-graph-qos.md
 [native-sdk]: ../../components/computation-plugin-sdk/README.md
-[network]: ../../components/computation-plugins/network/README.md
+[network]: ../../components/computation-plugins/NETWORK.md
 [host-readme]: ../../components/instance-host/README.md
-[bridge-readme]: ../../components/computation-plugins/bridge/README.md
+[bridge-readme]: ../../components/computation-plugins/common/bridge/README.md

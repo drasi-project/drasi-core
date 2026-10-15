@@ -668,7 +668,7 @@ Input normalization is deterministic; HTTP requires an explicit event timestamp.
 Batches/streams acknowledge individual committed inputs, not atomic whole batches.
 Timeouts and lost responses preserve uncertainty and must be resolved using the
 original identity. Native network source configuration must match the bound stream.
-The [network protocol guide](../../components/computation-plugins/network/README.md#optional-durable-admission)
+The [network protocol guide](../../components/computation-plugins/NETWORK.md#optional-durable-admission)
 defines wire shapes and errors. Legacy ingestion endpoints do not yet use this
 service, and this is not a claim of once-only downstream effects or completed W2.
 

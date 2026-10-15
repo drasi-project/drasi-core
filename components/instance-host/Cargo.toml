@@ -14,7 +14,9 @@ anyhow = "1"
 async-trait = "0.1"
 drasi-core = { workspace = true }
 drasi-host-sdk = { path = "../host-sdk" }
-drasi-computation-bridge = { path = "../computation-plugins/bridge" }
+drasi-computation-bridge-common = { workspace = true }
+drasi-computation-source-bridge = { workspace = true }
+drasi-computation-sink-bridge = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }

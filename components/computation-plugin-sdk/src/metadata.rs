@@ -70,6 +70,26 @@ pub struct ConfigSchema {
 }
 
 impl ConfigSchema {
+    /// Builds a closed schema with non-secret fields.
+    pub fn from_fields(fields: impl IntoIterator<Item = (&'static str, ConfigType, bool)>) -> Self {
+        Self {
+            fields: fields
+                .into_iter()
+                .map(|(name, value_type, required)| {
+                    (
+                        name.to_owned(),
+                        ConfigField {
+                            value_type,
+                            required,
+                            secret: false,
+                        },
+                    )
+                })
+                .collect(),
+            allow_additional: false,
+        }
+    }
+
     pub fn runtime(&self) -> ConfigurationSchema {
         ConfigurationSchema {
             fields: self
@@ -288,6 +308,34 @@ impl PluginMetadata {
                 "duplicate native factory"
             );
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn field_schema_preserves_types_requiredness_and_closed_input() -> anyhow::Result<()> {
+        let schema = ConfigSchema::from_fields([
+            ("stream", ConfigType::String, true),
+            ("count", ConfigType::Integer, false),
+        ]);
+        assert!(!schema.allow_additional);
+        assert_eq!(schema.fields["stream"].value_type, ConfigType::String);
+        assert!(schema.fields["stream"].required);
+        assert!(!schema.fields["count"].required);
+        assert!(schema.fields.values().all(|field| !field.secret));
+        schema.validate(&json!({"stream": "events"}))?;
+        schema.validate(&json!({"stream": "events", "count": 3}))?;
+        assert!(schema.validate(&json!({})).is_err());
+        assert!(schema.validate(&json!({"stream": 3})).is_err());
+        assert!(schema
+            .validate(&json!({"stream": "events", "extra": 1}))
+            .is_err());
+        assert!(!schema.runtime().allow_additional);
         Ok(())
     }
 }

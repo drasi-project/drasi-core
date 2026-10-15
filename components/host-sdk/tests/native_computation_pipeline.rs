@@ -1,11 +1,11 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Build the producer separately before running:
-//! CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo build --offline -p drasi-computation-standard --features dynamic-plugin
+//! Build the components separately before running:
+//! make build-native-standard-plugins
 //! CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo test --offline -p drasi-host-sdk --test native_computation_pipeline
 //!
-//! There is deliberately no Rust dependency on drasi-computation-standard here.
+//! There is deliberately no Rust dependency on these component crates here.
 //! All component calls use computation::load and the exported C tables.
 
 use anyhow::{Context, Result};
@@ -57,35 +57,67 @@ fn workspace() -> PathBuf {
         .expect("workspace")
         .to_owned()
 }
-fn plugin_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("DRASI_NATIVE_STANDARD_PLUGIN") {
-        return path.into();
+fn plugin_package(name: &str) -> &'static str {
+    match name {
+        COUNTER => "drasi-computation-source-counter",
+        MIDDLEWARE => "drasi-computation-transformer-middleware",
+        CAPTURE => "drasi-computation-sink-capture",
+        ARITHMETIC => "drasi-computation-transformer-arithmetic",
+        _ => panic!("unknown test factory {name}"),
     }
+}
+fn plugin_path(name: &str) -> PathBuf {
     let target = match std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
         Some(path) if path.is_absolute() => path,
         Some(path) => workspace().join(path),
         None => workspace().join("target"),
     };
-    target.join("debug").join(format!(
-        "{}drasi_computation_standard{}",
+    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| target.join("debug"));
+    directory.join(format!(
+        "{}{}{}",
         std::env::consts::DLL_PREFIX,
+        plugin_package(name).replace('-', "_"),
         std::env::consts::DLL_SUFFIX
     ))
 }
-fn plugin() -> Result<Arc<NativePlugin>> {
-    static PLUGIN: OnceLock<std::result::Result<Arc<NativePlugin>, String>> = OnceLock::new();
-    PLUGIN.get_or_init(|| {
-        let path = plugin_path();
-        if !path.is_file() {
-            return Err(format!("missing native plugin at {}; first run CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3 cargo build --offline -p drasi-computation-standard --features dynamic-plugin (or set DRASI_NATIVE_STANDARD_PLUGIN)", path.display()));
-        }
-        computation::load(path).map_err(|error| format!("{error:#}"))
-    }).clone().map_err(anyhow::Error::msg)
+fn plugin() -> Result<Vec<Arc<NativePlugin>>> {
+    static PLUGINS: OnceLock<std::result::Result<Vec<Arc<NativePlugin>>, String>> = OnceLock::new();
+    PLUGINS
+        .get_or_init(|| {
+            [COUNTER, MIDDLEWARE, CAPTURE, ARITHMETIC]
+                .into_iter()
+                .map(|name| {
+                    let path = plugin_path(name);
+                    if !path.is_file() {
+                        return Err(format!(
+                            "missing native plugin at {}; first run make build-native-standard-plugins (or set DRASI_NATIVE_PLUGIN_DIR)",
+                            path.display()
+                        ));
+                    }
+                    let plugin = computation::load(path)
+                        .map_err(|error| format!("{error:#}"))?;
+                    if plugin.factories().len() != 1
+                        || plugin.factories()[0].metadata().implementation.name.as_ref() != name
+                        || plugin.metadata().plugin.id.as_ref() != plugin_package(name)
+                    {
+                        return Err(format!(
+                            "{} must expose only {name} under its own plugin identity",
+                            plugin_package(name)
+                        ));
+                    }
+                    Ok(plugin)
+                })
+                .collect()
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
 }
-fn factory(plugin: &NativePlugin, name: &str) -> Result<Arc<NativeFactory>> {
+fn factory(plugin: &[Arc<NativePlugin>], name: &str) -> Result<Arc<NativeFactory>> {
     plugin
-        .factories()
         .iter()
+        .flat_map(|plugin| plugin.factories())
         .find(|factory| factory.metadata().implementation.name.as_ref() == name)
         .cloned()
         .with_context(|| format!("missing native factory {name}"))
@@ -179,7 +211,9 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
         [19; 32],
     )?);
     let mut plugins = PluginRegistry::new();
-    plugins.register_computation_plugin(plugin.clone())?;
+    for plugin in &plugin {
+        plugins.register_computation_plugin(plugin.clone())?;
+    }
     let resources = Arc::new(drasi_host_sdk::management::HostManagementResources::new(
         &plugins,
         Arc::new(drasi_core::middleware::MiddlewareTypeRegistry::new()),
@@ -408,7 +442,9 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
         )
         .build()?;
     let mut plugins = PluginRegistry::new();
-    plugins.register_computation_plugin(plugin)?;
+    for plugin in plugin {
+        plugins.register_computation_plugin(plugin)?;
+    }
     let mut factories = plugins.computation_factory_registry()?;
     factories.register(sink)?;
     let resources = Arc::new(drasi_host_sdk::management::HostManagementResources::new(
@@ -481,7 +517,7 @@ fn configuration(snapshot: &GraphConfigurationSnapshot, name: &str) -> Result<Va
 #[tokio::test(flavor = "current_thread")]
 async fn shared_family_loader_and_registry_execute_native_factories() -> Result<()> {
     let direct = plugin()?;
-    let path = plugin_path();
+    let path = plugin_path(COUNTER);
     let family = load_plugin_family_from_path(
         &path,
         std::ptr::null_mut(),
@@ -497,12 +533,13 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
         anyhow::bail!("shared loader misclassified the native library as legacy");
     };
     assert_eq!(file_path, path);
-    assert_eq!(shared.metadata(), direct.metadata());
+    assert_eq!(shared.metadata(), direct[0].metadata());
+    assert_eq!(shared.factories().len(), 1);
     let qualified_id = computation_plugin_id(shared.metadata());
     assert_eq!(
         qualified_id,
         format!(
-            "computation:drasi-computation-standard@{}",
+            "computation:drasi-computation-source-counter@{}",
             shared.metadata().plugin.version
         )
     );
@@ -544,10 +581,10 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
     let kinds = registry.register_computation_plugin(discovered.clone())?;
     assert_eq!(registry.version(), 1);
     assert!(!registry.is_empty());
-    assert_eq!(registry.descriptor_count(), 4);
+    assert_eq!(registry.descriptor_count(), 1);
     assert!(registry.source_kinds().is_empty());
     assert!(registry.reaction_kinds().is_empty());
-    assert_eq!(kinds.len(), 4);
+    assert_eq!(kinds.len(), 1);
     for kind in &kinds {
         assert_eq!(kind.category, PluginCategory::Computation);
         assert_eq!(kind.config_version, "1");
@@ -555,7 +592,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
     }
     let mut names: Vec<_> = kinds.iter().map(|kind| kind.kind.as_str()).collect();
     names.sort_unstable();
-    let mut expected = [COUNTER, MIDDLEWARE, CAPTURE, ARITHMETIC];
+    let mut expected = [COUNTER];
     expected.sort_unstable();
     assert_eq!(names, expected);
     assert_eq!(
@@ -568,12 +605,19 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
         1,
         "duplicate admission is not a mutation"
     );
+    assert_eq!(registry.descriptor_count(), 1);
+    for plugin in direct.iter().skip(1) {
+        let kinds = registry.register_computation_plugin(plugin.clone())?;
+        assert_eq!(kinds.len(), 1);
+        assert_eq!(plugin.factories().len(), 1);
+    }
+    assert_eq!(registry.version(), 4);
     assert_eq!(registry.descriptor_count(), 4);
 
     let directory = directory()?;
     let capture_path = directory.path().join("shared-loader.jsonl");
-    let source = factory(&discovered, COUNTER)?;
-    let sink = factory(&discovered, CAPTURE)?;
+    let source = factory(std::slice::from_ref(&discovered), COUNTER)?;
+    let sink = factory(&direct, CAPTURE)?;
     let desired = ComputationGraph::builder("shared-family")
         .component(
             source.specification(
@@ -613,7 +657,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
         drasi_core::middleware::MiddlewareTypeRegistry::new(),
     ))?;
     let mut transaction = TransactionTransformer::new(
-        transaction_definition(&discovered)?,
+        transaction_definition(&direct)?,
         participants,
         storage(&directory.path().join("registered-transactions")),
     )
@@ -685,12 +729,15 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
 ) -> Result<()> {
     let plugin = plugin()?;
     assert_eq!(
-        plugin.metadata().plugin.id.as_ref(),
-        "drasi-computation-standard"
+        plugin[0].metadata().plugin.id.as_ref(),
+        "drasi-computation-source-counter"
     );
-    assert_eq!(plugin.metadata().abi_version, "1.0.0");
+    assert!(plugin
+        .iter()
+        .all(|plugin| plugin.metadata().abi_version == "1.0.0"));
     assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
-    assert_eq!(plugin.factories().len(), 4);
+    assert_eq!(plugin.len(), 4);
+    assert!(plugin.iter().all(|plugin| plugin.factories().len() == 1));
     let source = factory(&plugin, COUNTER)?;
     let middleware = factory(&plugin, MIDDLEWARE)?;
     let sink = factory(&plugin, CAPTURE)?;
@@ -806,10 +853,12 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
             .context("provenance")?
             .id
             .as_ref(),
-        "drasi-computation-standard"
+        "drasi-computation-source-counter"
     );
     let mut bindings = TopologyBindings::default();
-    plugin.register_factories(&mut bindings.factories)?;
+    for plugin in &plugin {
+        plugin.register_factories(&mut bindings.factories)?;
+    }
     let restored_outputs = Arc::new(Mutex::new(Vec::new()));
     bindings.components.insert(
         "host".into(),
@@ -1014,8 +1063,13 @@ async fn control_and_configuration_progress_while_native_next_is_pending_and_can
     Ok(())
 }
 
-fn transaction_registry(plugin: &NativePlugin) -> Result<Arc<TransactionalTransformerRegistry>> {
-    let factories = plugin.transactional_factories();
+fn transaction_registry(
+    plugin: &[Arc<NativePlugin>],
+) -> Result<Arc<TransactionalTransformerRegistry>> {
+    let factories: Vec<_> = plugin
+        .iter()
+        .flat_map(|plugin| plugin.transactional_factories())
+        .collect();
     assert_eq!(factories.len(), 1);
     assert_eq!(factories[0].implementation().name.as_ref(), ARITHMETIC);
     let mut registry = TransactionalTransformerRegistry::default();
@@ -1024,7 +1078,9 @@ fn transaction_registry(plugin: &NativePlugin) -> Result<Arc<TransactionalTransf
     }
     Ok(Arc::new(registry))
 }
-fn transaction_definition(plugin: &NativePlugin) -> Result<TransactionTransformerDefinition> {
+fn transaction_definition(
+    plugin: &[Arc<NativePlugin>],
+) -> Result<TransactionTransformerDefinition> {
     let implementation = factory(plugin, ARITHMETIC)?
         .metadata()
         .implementation
@@ -1043,7 +1099,7 @@ fn transaction_definition(plugin: &NativePlugin) -> Result<TransactionTransforme
 fn storage(root: &Path) -> Arc<LegacyIndexProviderAdapter> {
     LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(root, false, false)))
 }
-async fn transaction(plugin: &NativePlugin, root: &Path) -> Result<TransactionTransformer> {
+async fn transaction(plugin: &[Arc<NativePlugin>], root: &Path) -> Result<TransactionTransformer> {
     let mut value = TransactionTransformer::new(
         transaction_definition(plugin)?,
         transaction_registry(plugin)?,
@@ -1289,7 +1345,7 @@ impl ElementIndex for FaultElements {
     }
 }
 async fn fault_transaction(
-    plugin: &NativePlugin,
+    plugin: &[Arc<NativePlugin>],
     root: &Path,
     gate: Arc<Gate>,
 ) -> Result<TransactionTransformer> {
@@ -1579,7 +1635,9 @@ async fn persistent_resource_recipe_and_native_transaction_configuration_roundtr
         factories: FactoryRegistry::standard(),
         ..TopologyBindings::default()
     };
-    plugin.register_factories(&mut bindings.factories)?;
+    for plugin in &plugin {
+        plugin.register_factories(&mut bindings.factories)?;
+    }
     bindings.resources.insert(
         indexes.clone(),
         restore_indexes(&decoded.topology.resource_configurations[&indexes])?.resource(),
@@ -1644,7 +1702,9 @@ async fn managed_qos_recipes_replay_real_native_records_and_isolate_instances() 
     let plugin = plugin()?;
     let root = directory()?;
     let mut plugins = PluginRegistry::new();
-    plugins.register_computation_plugin(plugin.clone())?;
+    for plugin in &plugin {
+        plugins.register_computation_plugin(plugin.clone())?;
+    }
     let resources = HostManagementResources::new(
         &plugins,
         Arc::new(drasi_core::middleware::MiddlewareTypeRegistry::new()),

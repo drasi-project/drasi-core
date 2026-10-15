@@ -72,16 +72,16 @@ for profile in default no-default-features extra-capabilities integration plugin
             package=drasi-host-sdk
             inventory=/dev/null
             mappings=/dev/null
-            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
-            targets=(--lib --test integration_test --test native_computation_pipeline --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
+            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
+            targets=(--lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
             test_arguments+=(--test-threads=1)
             ;;
         native-bridge)
-            package=drasi-computation-bridge
+            package=drasi-computation-bridge-common
             inventory=/dev/null
             mappings=/dev/null
-            sources=(lib)
-            targets=(--lib)
+            sources=(lib components/computation-plugins/common/bridge/tests/bridge.rs)
+            targets=(--lib --test bridge)
             ;;
         native-instance-host)
             package=drasi-instance-host

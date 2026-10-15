@@ -19,7 +19,7 @@ import time
 def measure(binary, events, window, plugin=None, *, arguments=(), require_allocations=True):
     environment = {**os.environ, "RUST_LOG": "error"}
     if plugin is not None:
-        environment["DRASI_NATIVE_STANDARD_PLUGIN"] = str(plugin)
+        environment["DRASI_NATIVE_ARITHMETIC_PLUGIN"] = str(plugin)
     system = platform.system()
     if system == "Darwin":
         command = ["/usr/bin/time", "-l", str(binary), str(events), str(window)]

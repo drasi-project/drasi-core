@@ -48,8 +48,9 @@ The in-process graph APIs support both single-thread and multi-thread Tokio
 runtimes. A particular plugin or its foreign-function bridge can have additional
 requirements; those are not an alternative graph engine.
 
-The separate `drasi-instance-host` and `drasi-computation-bridge` packages provide
-normal child instances and native source/sink links. They do not add a child
+The separate `drasi-instance-host`, `drasi-computation-source-bridge` and
+`drasi-computation-sink-bridge` packages provide normal child instances and
+native source/sink links. They do not add a child
 execution mode to DrasiLib. Current Unix hosting and tested link contracts do
 not imply complete platform, distributed-transaction or production-scale
 qualification; see the work inventory for remaining runtime/callback boundaries.
@@ -629,7 +630,7 @@ rejected. Existing query implementations and durable source adapters remain
 available in mixed graphs; this does not confer durability on a volatile native
 source.
 
-The [native network plugin](../../components/computation-plugins/network/README.md)
+The [native network components](../../components/computation-plugins/NETWORK.md)
 provides HTTP and gRPC sources and query-result sinks for standard Server
 performance workloads. It reuses the existing external wire contracts, not
 Source/Reaction runtime adapters. Sources mark their nonpersistent streams with

@@ -130,8 +130,8 @@ enabled. Each output is checked; 2,048 warmup events precede measurement.
 ```sh
 export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3
 cargo build --offline -p drasi-host-sdk --example native_fast_path --release
-cargo build --offline -p drasi-computation-standard --features dynamic-plugin --release
-DRASI_NATIVE_STANDARD_PLUGIN="$PWD/target/release/libdrasi_computation_standard.dylib" \
+cargo build --offline -p drasi-computation-transformer-arithmetic --features dynamic-plugin --release
+DRASI_NATIVE_ARITHMETIC_PLUGIN="$PWD/target/release/libdrasi_computation_transformer_arithmetic.dylib" \
   target/release/examples/native_fast_path 300000 32
 ```
 

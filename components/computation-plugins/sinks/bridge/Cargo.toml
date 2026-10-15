@@ -1,0 +1,21 @@
+[package]
+name = "drasi-computation-sink-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Statically hosted native inter-instance ComputationGraph bridge sink"
+readme = "README.md"
+
+[dependencies]
+drasi-computation-bridge-common = { workspace = true }
+drasi-core = { workspace = true }
+drasi-lib = { workspace = true }
+anyhow = "1"
+async-trait = "0.1"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[lints]
+workspace = true

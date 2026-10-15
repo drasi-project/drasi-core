@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Recovery-disabled native arithmetic through the actual graph and cdylib ABI.
-//! Set DRASI_NATIVE_STANDARD_PLUGIN to a separately built release standard plugin.
+//! Set DRASI_NATIVE_ARITHMETIC_PLUGIN to the separately built release arithmetic plugin.
 //! Arguments: <events> <in-flight window>. Allocation counters cover the host,
 //! not the cdylib's separate System allocator; process CPU/RSS include both.
 
@@ -176,8 +176,8 @@ async fn main() -> Result<()> {
         "expected events 1..10000000 and window 1..64"
     );
     let plugin = computation::load(
-        std::env::var("DRASI_NATIVE_STANDARD_PLUGIN")
-            .context("set DRASI_NATIVE_STANDARD_PLUGIN to the release cdylib")?,
+        std::env::var("DRASI_NATIVE_ARITHMETIC_PLUGIN")
+            .context("set DRASI_NATIVE_ARITHMETIC_PLUGIN to the release arithmetic cdylib")?,
     )?;
     let factory = plugin
         .factories()

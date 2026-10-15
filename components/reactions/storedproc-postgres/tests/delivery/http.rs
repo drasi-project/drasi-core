@@ -4,7 +4,7 @@
 use super::*;
 use anyhow::Result;
 use axum::{body::Body, extract::Request, http::StatusCode, middleware::Next};
-use drasi_computation_network::delivery::{
+use drasi_computation_sink_http::delivery::{
     HttpDeliveryEndpoint, HttpDeliveryError, HttpDeliveryHandler, DELIVERY_PATH,
 };
 use std::sync::{atomic::AtomicUsize, Mutex};

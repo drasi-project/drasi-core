@@ -94,8 +94,8 @@ jobs:
           cargo build --lib -p drasi-reaction-snapshot-test
           cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
           cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
-          cargo build --lib -p drasi-computation-standard --features drasi-computation-standard/dynamic-plugin
-          cargo build --lib -p drasi-computation-network --features drasi-computation-network/dynamic-plugin
+          cargo build --lib -p drasi-computation-source-counter -p drasi-computation-transformer-middleware -p drasi-computation-sink-capture -p drasi-computation-transformer-arithmetic --features dynamic-plugin
+          cargo build --lib -p drasi-computation-source-http -p drasi-computation-source-grpc -p drasi-computation-sink-http -p drasi-computation-sink-grpc -p drasi-computation-sink-sse --features dynamic-plugin
 
       - name: Copy plugins to test directory
         shell: bash
@@ -103,7 +103,7 @@ jobs:
           mkdir -p target/debug/plugins
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_standard drasi_computation_network; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_source_counter drasi_computation_transformer_middleware drasi_computation_sink_capture drasi_computation_transformer_arithmetic drasi_computation_source_http drasi_computation_source_grpc drasi_computation_sink_http drasi_computation_sink_grpc drasi_computation_sink_sse; do
             SRC="target/debug/${PREFIX}${name}.${EXT}"
             if [ -f "$SRC" ]; then
               cp "$SRC" target/debug/plugins/
@@ -119,7 +119,7 @@ jobs:
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
           MISSING=0
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_standard drasi_computation_network; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_reaction_snapshot_test drasi_identity_test drasi_bootstrap_scriptfile drasi_computation_source_counter drasi_computation_transformer_middleware drasi_computation_sink_capture drasi_computation_transformer_arithmetic drasi_computation_source_http drasi_computation_source_grpc drasi_computation_sink_http drasi_computation_sink_grpc drasi_computation_sink_sse; do
             FILE="target/debug/plugins/${PREFIX}${name}.${EXT}"
             if [ ! -f "$FILE" ]; then
               echo "ERROR: Expected plugin not found: $FILE"
@@ -131,7 +131,7 @@ jobs:
             ls -la target/debug/plugins/ || true
             exit 1
           fi
-          echo "All 8 test plugins verified."
+          echo "All 15 test plugins verified."
 
       - name: Run host-sdk FFI integration tests
         shell: bash
@@ -143,4 +143,4 @@ jobs:
         shell: bash
         env:
           RUST_BACKTRACE: full
-        run: cargo test -p drasi-computation-network --test network_loopback --test wire_contract -- --nocapture
+        run: cargo test -p drasi-host-sdk --test native_network_loopback --test native_network_wire -- --nocapture

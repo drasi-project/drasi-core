@@ -117,9 +117,19 @@ members = [
   "components/computation-plugin-sdk",
 
   # Native ComputationGraph plugins
-  "components/computation-plugins/standard",
-  "components/computation-plugins/network",
-  "components/computation-plugins/bridge",
+  "components/computation-plugins/common/bridge",
+  "components/computation-plugins/common/network",
+  "components/computation-plugins/sources/bridge",
+  "components/computation-plugins/sources/counter",
+  "components/computation-plugins/sources/grpc",
+  "components/computation-plugins/sources/http",
+  "components/computation-plugins/transformers/arithmetic",
+  "components/computation-plugins/transformers/middleware",
+  "components/computation-plugins/sinks/bridge",
+  "components/computation-plugins/sinks/capture",
+  "components/computation-plugins/sinks/grpc",
+  "components/computation-plugins/sinks/http",
+  "components/computation-plugins/sinks/sse",
 
   # Host SDK (host-side plugin loading and proxy types)
   "components/host-sdk",
@@ -171,7 +181,19 @@ drasi-ffi-primitives = { version = "0.11.3", path = "components/ffi-primitives" 
 drasi-plugin-sdk = { version = "0.11.3", path = "components/plugin-sdk" }
 drasi-computation-plugin-abi = { version = "0.11.3", path = "components/computation-plugin-abi" }
 drasi-computation-plugin-sdk = { version = "0.11.3", path = "components/computation-plugin-sdk" }
-drasi-computation-network = { version = "0.11.3", path = "components/computation-plugins/network" }
+drasi-computation-bridge-common = { version = "0.11.3", path = "components/computation-plugins/common/bridge" }
+drasi-computation-network-common = { version = "0.11.3", path = "components/computation-plugins/common/network" }
+drasi-computation-source-bridge = { version = "0.11.3", path = "components/computation-plugins/sources/bridge" }
+drasi-computation-source-counter = { version = "0.11.3", path = "components/computation-plugins/sources/counter" }
+drasi-computation-source-grpc = { version = "0.11.3", path = "components/computation-plugins/sources/grpc" }
+drasi-computation-source-http = { version = "0.11.3", path = "components/computation-plugins/sources/http" }
+drasi-computation-transformer-arithmetic = { version = "0.11.3", path = "components/computation-plugins/transformers/arithmetic" }
+drasi-computation-transformer-middleware = { version = "0.11.3", path = "components/computation-plugins/transformers/middleware" }
+drasi-computation-sink-bridge = { version = "0.11.3", path = "components/computation-plugins/sinks/bridge" }
+drasi-computation-sink-capture = { version = "0.11.3", path = "components/computation-plugins/sinks/capture" }
+drasi-computation-sink-grpc = { version = "0.11.3", path = "components/computation-plugins/sinks/grpc" }
+drasi-computation-sink-http = { version = "0.11.3", path = "components/computation-plugins/sinks/http" }
+drasi-computation-sink-sse = { version = "0.11.3", path = "components/computation-plugins/sinks/sse" }
 drasi-host-sdk = { version = "0.11.3", path = "components/host-sdk" }
 
 # Common dependencies

@@ -758,7 +758,7 @@ repository boundaries for any subsequent work.
 | Read/inspection publications | Existing graph registry/inspection, query API/catalogue and event surfaces. Keep one authoritative publication per local graph. |
 | Native host reuse | `components/host-sdk/` native loader, factory/management integration and configuration resolution. Do not teach `drasi-lib` to load libraries or launch processes. |
 | Host package | Reusable hosting/supervision library plus thin `components/instance-host` executable, outside `lib`. It depends on DrasiLib/Host SDK, never the reverse. |
-| Bridge package | Native bridge source/sink factories and transport adapters in `components/computation-plugins/bridge/`. Transport support does not change the graph executor. |
+| Bridge packages | Independent native factories in `components/computation-plugins/sources/bridge/` and `sinks/bridge/`; shared protocol/transport in `common/bridge/`. Transport support does not change the graph executor. |
 | Persistent link state | Existing Core transaction/index/journal/admission primitives plus explicitly owned protocol-specific state; no invented duplicate delivery engine. |
 | Qualification | Existing `lib/tests`, `lib-integration-tests`, Host SDK/native fixtures and applicable backend scenarios. Rebuild real cdylibs when exercising changed SDK/Host boundaries. |
 | Server | Register supported native factories/resources/configuration and expose truthful hosting/link outcomes. Reuse the hosting facility; no forked Server-only DrasiLib. |

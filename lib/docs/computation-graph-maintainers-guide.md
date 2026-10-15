@@ -363,7 +363,7 @@ Native abort/memory-fault isolation and complete coverage of every synchronous
 callback are not implied.
 
 The separate [instance host](../../components/instance-host/README.md) runs a
-normal DrasiLib per process; [bridge sources/sinks](../../components/computation-plugins/bridge/README.md)
+normal DrasiLib per process; [bridge sources/sinks](../../components/computation-plugins/common/bridge/README.md)
 carry data. This is composition, not a special remote-component execution mode.
 Local child/group termination and inter-instance message recovery remain distinct.
 

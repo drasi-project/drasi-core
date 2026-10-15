@@ -1,0 +1,36 @@
+[package]
+name = "drasi-computation-network-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared native network configuration, admission and wire helpers; no component factories"
+readme = "README.md"
+
+[features]
+default = []
+ingress = []
+http-source = ["ingress", "dep:drasi-source-http"]
+grpc-source = ["ingress", "dep:drasi-source-grpc", "dep:prost-types"]
+http-sink = ["dep:reqwest"]
+grpc-sink = ["dep:drasi-reaction-grpc", "dep:prost-types", "dep:reqwest", "dep:tonic"]
+
+[dependencies]
+drasi-computation-plugin-sdk = { workspace = true }
+drasi-core = { workspace = true }
+drasi-lib = { workspace = true }
+drasi-source-http = { version = "0.2.12", path = "../../../sources/http", optional = true }
+drasi-source-grpc = { version = "0.2.11", path = "../../../sources/grpc", optional = true }
+drasi-reaction-grpc = { workspace = true, optional = true }
+anyhow = "1"
+chrono = "0.4"
+futures-util = "0.3"
+prost-types = { version = "0.14", optional = true }
+reqwest = { version = "0.12", default-features = false, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tonic = { version = "0.14", optional = true }
+
+[lints]
+workspace = true

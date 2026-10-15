@@ -161,10 +161,10 @@ declaration still does not imply durable or once-only external effects:
 | Native sink | Declared boundary and remaining limitation |
 |---|---|
 | [Application](application/README.md#native-application-delivery) | Bounded channel is `Accepted`; awaited callback is `Handled` only after its future succeeds. Interrupted callback work stays owned through cleanup. Neither has automatic durable recovery, atomic external effects or serializable application bindings. |
-| [Standard capture](../computation-plugins/standard/src/capture.rs) | `Handled` after file write and flush; errors propagate. No `sync_all`, atomic receipt, or deduplication; append replay may duplicate and non-append startup truncates. |
-| [Network HTTP](../computation-plugins/network/src/http.rs) | `Handled` after notification attempts. Strict propagates exhausted failure; explicit Skip logs and succeeds. Any successful HTTP status, including 202, is accepted; remote business completion is not established. |
-| [Network gRPC](../computation-plugins/network/src/grpc.rs) | `Handled` after the receiver reports success. Strict propagates exhausted failure; explicit Skip logs and succeeds. The remote effect/receipt transaction is not established. |
-| [Network SSE](../computation-plugins/network/README.md#native-browser-sse) | `Accepted` after volatile broadcast to current listeners; no browser acknowledgement, persistence or replay. Lag closes the subscriber for reconnect and resnapshot. |
+| [Native capture](../computation-plugins/sinks/capture) | `Handled` after file write and flush; errors propagate. No `sync_all`, atomic receipt, or deduplication; append replay may duplicate and non-append startup truncates. |
+| [Native HTTP](../computation-plugins/sinks/http) | `Handled` after notification attempts. Strict propagates exhausted failure; explicit Skip logs and succeeds. Any successful HTTP status, including 202, is accepted; remote business completion is not established. |
+| [Native gRPC](../computation-plugins/sinks/grpc) | `Handled` after the receiver reports success. Strict propagates exhausted failure; explicit Skip logs and succeeds. The remote effect/receipt transaction is not established. |
+| [Native SSE](../computation-plugins/sinks/sse) | `Accepted` after volatile broadcast to current listeners; no browser acknowledgement, persistence or replay. Lag closes the subscriber for reconnect and resnapshot. |
 
 For new stronger integrations, use the opt-in
 [shared operation-completion service](../../lib/docs/computation-graph-qos.md#opt-in-operation-completion).
@@ -172,7 +172,7 @@ Its transactional mode commits consumer business state with each completed
 operation. The separate
 [PostgreSQL delivery handler](storedproc-postgres/README.md#opt-in-computationgraph-transactional-delivery)
 atomically commits database effects and a bounded destination cursor. The separate
-[HTTP completion service](../computation-plugins/network/README.md#opt-in-http-completion-service)
+[HTTP completion service](../computation-plugins/NETWORK.md#opt-in-http-completion-service)
 confirms the actual whole-batch identity instead of queued acceptance. These Rust
 services have recovery evidence; factory/ABI integration remains separate work.
 Wrapping a legacy enqueue method in `DeliveryRunner` MUST NOT claim completion.

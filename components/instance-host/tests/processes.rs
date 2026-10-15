@@ -672,19 +672,29 @@ async fn cancelling_embedded_host_retains_independent_child_reaping() -> Result<
     anyhow::bail!("embedded cancellation did not reap its child and release the parent namespace")
 }
 
-fn standard_plugin() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("DRASI_NATIVE_STANDARD_PLUGIN") {
-        return Ok(path.into());
-    }
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_drasi-instance-host"));
-    let name = if cfg!(target_os = "macos") {
-        "libdrasi_computation_standard.dylib"
-    } else {
-        "libdrasi_computation_standard.so"
+fn standard_plugin(implementation: &str) -> Result<(&'static str, PathBuf)> {
+    let package = match implementation {
+        "drasi.standard/volatile-counter" => "drasi-computation-source-counter",
+        "drasi.standard/middleware" => "drasi-computation-transformer-middleware",
+        "drasi.standard/arithmetic" => "drasi-computation-transformer-arithmetic",
+        "drasi.standard/capture" => "drasi-computation-sink-capture",
+        _ => anyhow::bail!("unknown native test implementation {implementation}"),
     };
-    let path = executable.parent().unwrap().join(name);
-    ensure!(path.is_file(), "build the existing native standard plugin: cargo build -p drasi-computation-standard --features dynamic-plugin");
-    Ok(path)
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_drasi-instance-host"));
+    let directory = std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| executable.parent().unwrap().to_owned());
+    let path = directory.join(format!(
+        "{}{}{}",
+        std::env::consts::DLL_PREFIX,
+        package.replace('-', "_"),
+        std::env::consts::DLL_SUFFIX
+    ));
+    ensure!(
+        path.is_file(),
+        "build the native component library: cargo build -p {package} --features dynamic-plugin"
+    );
+    Ok((package, path))
 }
 
 fn standard(
@@ -694,7 +704,7 @@ fn standard(
     role: ComponentRole,
     values: serde_json::Value,
 ) -> Result<()> {
-    let plugin = standard_plugin()?;
+    let (package, plugin) = standard_plugin(implementation)?;
     if !config.plugins.iter().any(|value| value.path == plugin) {
         config.plugins.push(NativePlugin {
             path: plugin,
@@ -703,7 +713,7 @@ fn standard(
     }
     let mut identity = ImplementationIdentity::try_new(implementation, "1")?;
     identity.plugin = Some(PluginIdentity {
-        id: "drasi-computation-standard".into(),
+        id: package.into(),
         version: env!("CARGO_PKG_VERSION").into(),
     });
     let mut ports = Vec::new();
@@ -727,7 +737,10 @@ fn standard(
         config,
         ComponentSpecification {
             descriptor: ComponentDescriptor::try_new(id(name), ports)?.with_plugin_identity(
-                identity.plugin.clone().expect("standard plugin provenance"),
+                identity
+                    .plugin
+                    .clone()
+                    .expect("component plugin provenance"),
             )?,
             role,
             completion: (role == ComponentRole::Sink).then_some(SinkCompletion::Handled),
@@ -778,7 +791,7 @@ fn connect(config: &mut HostConfig, producer: &str, consumer: &str) -> Result<()
 
 fn bridge(
     config: &mut HostConfig,
-    value: &drasi_computation_bridge::BridgeConfig,
+    value: &drasi_computation_bridge_common::BridgeConfig,
     role: ComponentRole,
 ) -> Result<()> {
     let mut specification = value.specification(role)?;
@@ -817,7 +830,7 @@ fn bridge(
 
 #[test]
 fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit() -> Result<()> {
-    use drasi_computation_bridge::{
+    use drasi_computation_bridge_common::{
         BridgeConfig, Limits, Namespace, PortableSchema, Profile, Transport,
     };
     let directory = Directory::new()?;
@@ -989,7 +1002,7 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
 
 #[test]
 fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Result<()> {
-    use drasi_computation_bridge::{
+    use drasi_computation_bridge_common::{
         BridgeConfig, BridgeEndpointControl, Limits, Namespace, PortableSchema, Profile, Transport,
     };
     let directory = Directory::new()?;

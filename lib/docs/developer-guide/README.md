@@ -848,7 +848,8 @@ existing owner rather than creating a second runtime.
 The `drasi-instance-host` package hosts a normal DrasiLib in each process.
 Parent, child and grandchild use the same library implementation and native
 component contracts. Process supervision is a portless native service;
-`drasi-computation-bridge` supplies separate source/sink components for data.
+`drasi-computation-source-bridge` and `drasi-computation-sink-bridge` supply
+independently selectable data endpoints.
 There is no remote `transform()` method or special child evaluator.
 
 The current owned-child host is Unix-only. It retains process handles, stable
@@ -885,7 +886,7 @@ owner and recover its producer before retiring pending output or replacing
 bindings; force is not rollback or permission to discard that output.
 
 See the [host configuration/lifecycle guide](../../../components/instance-host/README.md)
-and [bridge profiles, resources and cuts](../../../components/computation-plugins/bridge/README.md)
+and [bridge profiles, resources and cuts](../../../components/computation-plugins/common/bridge/README.md)
 for the exact implemented configuration. The
 [execution/isolation plan](../computation-graph-execution-isolation-plan.md) and
 [inventory](../computation-graph-remaining-work.md) identify remaining work;

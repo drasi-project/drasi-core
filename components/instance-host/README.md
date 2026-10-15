@@ -101,7 +101,7 @@ private-key permissions and peer pinning. Key material is loaded only when the
 owning instance constructs the resource. Durable ingress additionally uses the
 existing `QosChannel` **`StateStore`** resource in `admission`; durable egress uses
 the existing `QueryIndexProviderResource` in `state`. See the
-[bridge contract](../computation-plugins/bridge/README.md) for those recipes.
+[bridge contract](../computation-plugins/common/bridge/README.md) for those recipes.
 
 ### Declaring an owned child
 
@@ -325,7 +325,7 @@ mkdir -p target/instance-host-build
 export TMPDIR="$PWD/target/instance-host-build"
 export CARGO_BUILD_JOBS=3 CARGO_INCREMENTAL=0
 cargo build --locked --offline -p drasi-instance-host --features dynamic-plugin --example instance_host_fixture
-cargo build --locked --offline -p drasi-computation-standard --features dynamic-plugin
+make build-native-standard-plugins
 cargo test --locked --offline -p drasi-instance-host --lib --test processes -- --test-threads=1
 ```
 
