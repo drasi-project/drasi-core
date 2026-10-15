@@ -386,6 +386,24 @@ core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
 ```
 
+`stop_query()` also cleans up queries in `Error`, including failures during
+startup or bootstrap. It releases active subscriptions and processing tasks before
+reporting `Stopped`, while preserving the query configuration and persisted state.
+The managed `stop_query()` command rejects an already stopped query through the
+component graph's transition validation. In contrast, calling a query runtime's
+`Query::stop()` directly is idempotent and returns `Ok(())` when already stopped.
+Updating or removing a failed query, and stopping the instance, also release its
+active lifecycle resources. Updating a failed query leaves its replacement stopped
+until explicitly started.
+
+`stop_source()` likewise invokes cleanup for sources in `Error`. Source plugins
+must release their resources and report `Stopped` before returning success; a
+legacy plugin that no-ops in `Error` is rejected instead of leaving the graph at
+`Stopping`. Updating/removing failed sources and instance shutdown also invoke
+cleanup. Updating a failed source leaves its replacement stopped. Managed
+`stop_source()` rejects an already stopped source, even if its direct `stop()`
+is idempotent.
+
 ### Inspecting Components
 
 ```rust
@@ -411,6 +429,14 @@ let config: QueryConfig = core.get_query_config("my-query").await?;
 // Export full DrasiLib configuration
 let config: DrasiLibConfig = core.get_current_config().await?;
 ```
+
+Aggregate snapshots use the engine's grouping identity even when an ordinary
+`RETURN` follows an aggregating `WITH`. Changes to numeric grouping identity,
+lazy extrema keys, or older contributor-keyed output require explicit complete
+reconstruction of affected queries; upgrading does not automatically rekey
+persisted state. See
+[aggregate result identity and migration boundaries](../docs/aggregate-result-identity.md)
+for regression coverage, empty-group semantics, and compatibility limits.
 
 ### `ComponentStatus` Values
 
@@ -933,6 +959,26 @@ let query = Query::cypher("q1")
 ```
 
 If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap** — and the recovery policy activates.
+
+#### Persisted Outbox Compatibility
+
+New persisted `QueryResult` records use named-field MessagePack encoding, so omitted
+optional fields (including `Update.grouping_keys`) cannot shift subsequent values.
+The existing reader also accepts valid older compact records, including inserts
+and updates with present grouping keys (including an empty list). Valid compact
+and named records can coexist in a retained outbox; no reader or result schema
+change is required. Compact records must still have their positional fields
+intact; this compatibility guarantee does not extend to malformed compact records
+with other omitted fields, such as `QueryResult.profiling`.
+
+This writer fix does **not** repair older compact updates with omitted grouping
+keys. Those malformed records still fail visibly during query startup under
+`RecoveryPolicy::Strict`; they are not silently dropped or reconstructed. Recovery
+requires an explicit rebuild decision with replay/bootstrap data available and
+downstream checkpoint consequences considered. The existing opt-in query
+`AutoReset` policy rebuilds output **and** indexes/checkpoints; clearing only the
+outbox is not a safe migration. This change performs no automatic migration and
+does not change recovery policies.
 
 ### Result Format
 

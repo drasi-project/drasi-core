@@ -328,6 +328,12 @@ impl QueryOutputState {
         self.initialized = true;
     }
 
+    /// Raise the in-memory generation to at least `persisted` so the next
+    /// [`reset`](Self::reset) writes `persisted + 1` instead of restarting at 1.
+    pub fn adopt_persisted_generation(&mut self, persisted: u64) {
+        self.generation = self.generation.max(persisted);
+    }
+
     /// Whether startup hydrate (or a wipe/rebuild) has already initialized this state.
     pub fn initialized(&self) -> bool {
         self.initialized

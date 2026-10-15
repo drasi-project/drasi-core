@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod aggregate_update_tests;
+mod retained_multi_source_tests;
 mod row_signature_tests;
 
 use std::sync::Arc;

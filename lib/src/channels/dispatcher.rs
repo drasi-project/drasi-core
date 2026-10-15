@@ -187,6 +187,9 @@ where
     /// Dispatch a single change to all subscribers
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()>;
 
+    /// Non-blocking dispatch. Must not wait for a subscriber to drain.
+    fn try_dispatch_change(&self, change: Arc<T>) -> Result<()>;
+
     /// Dispatch multiple changes to all subscribers
     async fn dispatch_changes(&self, changes: Vec<Arc<T>>) -> Result<()> {
         for change in changes {
@@ -238,6 +241,10 @@ where
     T: Clone + Send + Sync + 'static,
 {
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()> {
+        self.try_dispatch_change(change)
+    }
+
+    fn try_dispatch_change(&self, change: Arc<T>) -> Result<()> {
         // Ignore send errors if there are no receivers
         let _ = self.tx.send(change);
         Ok(())
@@ -314,6 +321,17 @@ where
             .await
             .map_err(|_| anyhow::anyhow!("Failed to send on channel"))?;
         Ok(())
+    }
+
+    fn try_dispatch_change(&self, change: Arc<T>) -> Result<()> {
+        self.tx.try_send(change).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                anyhow::anyhow!("channel full")
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                anyhow::anyhow!("channel closed")
+            }
+        })
     }
 
     async fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {

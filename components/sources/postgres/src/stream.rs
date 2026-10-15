@@ -762,12 +762,12 @@ impl ReplicationStream {
             SourceEvent::Change(change),
             chrono::Utc::now(),
             profiling,
+            self.base.next_sequence(),
         );
 
         // Attach the opaque source_position bytes for checkpoint/recovery and replay dedup
         wrapper.set_source_position(position);
 
-        // Use dispatch_event() which stamps the monotonic sequence
         if let Err(e) = self.base.dispatch_event(wrapper).await {
             debug!(
                 "[{}] Failed to dispatch change (no subscribers): {}",

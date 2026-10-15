@@ -590,7 +590,7 @@ async fn group_switch() {
         vec![
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
-                default_before: false,
+                default_before: true,
                 default_after: false,
                 before: Some(variablemap![
                   "key" => json!("bar"),
@@ -605,7 +605,7 @@ async fn group_switch() {
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
-                default_after: false,
+                default_after: true,
                 before: Some(variablemap![
                   "key" => json!("foo"),
                   "my_sum" => json!(3.0)
@@ -730,7 +730,7 @@ async fn group_switch_complex_accumulator() {
         vec![
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
-                default_before: false,
+                default_before: true,
                 default_after: false,
                 before: Some(variablemap![
                   "key" => json!("bar"),
@@ -745,7 +745,7 @@ async fn group_switch_complex_accumulator() {
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
-                default_after: false,
+                default_after: true,
                 before: Some(variablemap![
                   "key" => json!("foo"),
                   "my_avg" => json!(1.5)

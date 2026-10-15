@@ -22,8 +22,6 @@ use crate::mapping::{
 use crate::rest::HyperliquidRestClient;
 use crate::types::{FundingSnapshot, L2Book, Liquidation, Trade, WsMessage};
 use anyhow::{anyhow, Result};
-use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
-use drasi_lib::profiling;
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -424,17 +422,7 @@ pub(crate) async fn dispatch_changes(
     changes: Vec<drasi_core::models::SourceChange>,
 ) {
     for change in changes {
-        let mut profiling = profiling::ProfilingMetadata::new();
-        profiling.source_send_ns = Some(profiling::timestamp_ns());
-
-        let wrapper = SourceEventWrapper::with_profiling(
-            source_id.to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-            profiling,
-        );
-
-        if let Err(e) = base.dispatch_event(wrapper).await {
+        if let Err(e) = base.dispatch_source_change(change).await {
             debug!("[{source_id}] Dispatch failed (no subscribers): {e}");
         }
     }

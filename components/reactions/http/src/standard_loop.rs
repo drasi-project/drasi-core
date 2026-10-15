@@ -134,9 +134,16 @@ pub(crate) async fn run_standard_loop(
                         "[{reaction_name}] Delivery failed for query '{query_name}' (seq {seq}); \
                          skipping and advancing checkpoint per AutoSkipGap recovery policy"
                     );
-                    if checkpoint_advance(&mut checkpoints, &base, &reaction_name, query_name, seq)
-                        .await
-                        .is_err()
+                    if checkpoint_advance(
+                        &mut checkpoints,
+                        &base,
+                        &reaction_name,
+                        query_name,
+                        seq,
+                        policy,
+                    )
+                    .await
+                    .is_err()
                     {
                         // AutoSkipGap: a checkpoint-write failure is non-fatal.
                     }
@@ -146,10 +153,16 @@ pub(crate) async fn run_standard_loop(
         }
 
         // All diffs delivered: advance the checkpoint after the side effect.
-        if checkpoint_advance(&mut checkpoints, &base, &reaction_name, query_name, seq)
-            .await
-            .is_err()
-            && FailureAction::from_policy(policy) == FailureAction::Stop
+        if checkpoint_advance(
+            &mut checkpoints,
+            &base,
+            &reaction_name,
+            query_name,
+            seq,
+            policy,
+        )
+        .await
+        .is_err()
         {
             status_handle
                 .set_status(
@@ -181,8 +194,12 @@ async fn checkpoint_advance(
     reaction_name: &str,
     query_id: &str,
     sequence: u64,
+    policy: ReactionRecoveryPolicy,
 ) -> anyhow::Result<()> {
-    if let Err(e) = checkpoints.advance(base, query_id, sequence).await {
+    if let Err(e) = checkpoints
+        .advance_with_policy(base, query_id, sequence, policy)
+        .await
+    {
         error!(
             "[{reaction_name}] Failed to write checkpoint for query '{query_id}' (seq {sequence}): {e}"
         );

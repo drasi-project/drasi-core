@@ -40,6 +40,9 @@ pub struct TestMockSource {
     status_handle: crate::component_graph::ComponentStatusHandle,
     /// Dispatchers for sending events to subscribed queries
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    /// Monotonic sequence counter — this mock dispatches directly (bypassing
+    /// SourceBase), so it stamps its own increasing sequences.
+    next_sequence: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TestMockSource {
@@ -50,6 +53,7 @@ impl TestMockSource {
             auto_start: true,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
@@ -61,16 +65,21 @@ impl TestMockSource {
             auto_start,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         })
     }
 
     /// Inject an event into all subscribed queries.
     pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
         let dispatchers = self.dispatchers.read().await;
+        let seq = self
+            .next_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let wrapper = SourceEventWrapper::new(
             self.id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
+            seq,
         );
         let arc_wrapper = Arc::new(wrapper);
         for dispatcher in dispatchers.iter() {
@@ -356,6 +365,55 @@ impl Source for LoggingTestSource {
 mod contract_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn test_mock_source_sequences_start_at_one() {
+        use crate::config::SourceSubscriptionSettings;
+        use drasi_core::models::{ElementMetadata, ElementReference};
+
+        let sources = [
+            TestMockSource::new("default-source".to_string()).unwrap(),
+            TestMockSource::with_auto_start("auto-source".to_string(), true).unwrap(),
+            TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap(),
+        ];
+
+        for source in sources {
+            let mut receiver = source
+                .subscribe(SourceSubscriptionSettings {
+                    source_id: source.id().to_string(),
+                    query_id: "sequence-test".to_string(),
+                    enable_bootstrap: false,
+                    nodes: Default::default(),
+                    relations: Default::default(),
+                    resume_sequence: None,
+                    request_position_handle: false,
+                    resume_from: None,
+                })
+                .await
+                .unwrap()
+                .receiver;
+
+            for expected_sequence in 1..=2 {
+                source
+                    .inject_event(SourceChange::Delete {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(source.id(), "test-node"),
+                            labels: vec![].into(),
+                            effective_from: 0,
+                        },
+                    })
+                    .await
+                    .unwrap();
+
+                let event =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                        .await
+                        .expect("timed out waiting for injected event")
+                        .expect("event stream closed unexpectedly");
+                assert_eq!(event.sequence, expected_sequence, "source {}", source.id());
+            }
+        }
+    }
+
     #[test]
     fn test_source_supports_replay_default_true() {
         let source = create_test_mock_source("test-replay".to_string());
@@ -633,6 +691,93 @@ mod manager_tests {
         })
         .await
         .expect("Timeout waiting for stop event");
+    }
+
+    #[tokio::test]
+    async fn test_stop_all_cleans_failed_source() {
+        let (manager, graph) = create_test_manager().await;
+        let source = LoggingTestSource::new("failed-source").unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
+        manager.start_source("failed-source".into()).await.unwrap();
+        let runtime = manager.get_source_instance("failed-source").await.unwrap();
+        let source = runtime
+            .as_any()
+            .downcast_ref::<LoggingTestSource>()
+            .unwrap();
+        source.base.set_status(ComponentStatus::Error, None).await;
+        let task = tokio::spawn(async {});
+        let abort_handle = task.abort_handle();
+        source.base.set_task_handle(task).await;
+        let mut receiver = source.base.create_streaming_receiver().await.unwrap();
+        crate::component_graph::wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Error],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+        manager.stop_all().await.unwrap();
+        assert!(abort_handle.is_finished());
+        assert!(source.base.task_handle.read().await.is_none());
+        crate::component_graph::wait_for_status(
+            &graph,
+            source.id(),
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            manager.get_source_status(source.id().into()).await.unwrap(),
+            ComponentStatus::Stopped
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_failed_source_with_already_stopped_runtime() {
+        let (manager, graph) = create_test_manager().await;
+        add_source(
+            &manager,
+            &graph,
+            LoggingTestSource::new("failed-start").unwrap(),
+        )
+        .await
+        .unwrap();
+        {
+            let mut graph = graph.write().await;
+            graph
+                .validate_and_transition("failed-start", ComponentStatus::Starting, None)
+                .unwrap();
+            graph
+                .validate_and_transition("failed-start", ComponentStatus::Error, None)
+                .unwrap();
+        }
+        assert_eq!(
+            manager
+                .get_source_instance("failed-start")
+                .await
+                .unwrap()
+                .status()
+                .await,
+            ComponentStatus::Stopped,
+        );
+        manager.stop_source("failed-start".into()).await.unwrap();
+        crate::component_graph::wait_for_status(
+            &graph,
+            "failed-start",
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

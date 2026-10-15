@@ -102,16 +102,18 @@ pub unsafe fn take_ffi_payload<T>(
 /// Serialized form of a `SourceEventWrapper` for FFI transfer.
 ///
 /// Carries everything the host needs to rebuild a host-owned
-/// `SourceEventWrapper`. `profiling` is intentionally omitted: it is `None` at the
-/// point a source emits an event and is populated later by the framework.
+/// `SourceEventWrapper`. `profiling` is intentionally omitted: it is `None` at
+/// the point a source emits an event and is populated later by the framework.
+/// `sequence` is required, whether supplied by the source or allocated by its
+/// framework.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceEventPayload {
     pub source_id: String,
     pub event: SourceEvent,
     /// Event timestamp in microseconds since the Unix epoch.
     pub timestamp_us: i64,
-    /// Monotonic sequence number; `None` for volatile sources.
-    pub sequence: Option<u64>,
+    /// Source-local monotonic sequence number (always present).
+    pub sequence: u64,
     /// Opaque, source-defined replication position bytes.
     pub source_position: Option<Vec<u8>>,
 }
@@ -123,25 +125,24 @@ pub struct BootstrapEventPayload {
     pub change: SourceChange,
     /// Event timestamp in microseconds since the Unix epoch.
     pub timestamp_us: i64,
-    /// Monotonic sequence number; always present for bootstrap events
-    /// (unlike `SourceEventPayload::sequence`, which is `None` for volatile sources).
+    /// Monotonic sequence number; always present for bootstrap events.
     pub sequence: u64,
 }
 
 impl SourceEventPayload {
     /// Build a payload from a `SourceEventWrapper` (producing side).
-    pub fn from_wrapper(wrapper: &SourceEventWrapper) -> Self {
-        let timestamp_us = wrapper
+    pub fn from_wrapper(event: &SourceEventWrapper) -> Self {
+        let timestamp_us = event
             .timestamp
             .timestamp_nanos_opt()
             .map(|n| n / 1000)
             .unwrap_or(0);
         Self {
-            source_id: wrapper.source_id.clone(),
-            event: wrapper.event.clone(),
+            source_id: event.source_id.clone(),
+            event: event.event.clone(),
             timestamp_us,
-            sequence: wrapper.sequence,
-            source_position: wrapper.source_position.as_ref().map(|b| b.to_vec()),
+            sequence: event.sequence,
+            source_position: event.source_position.as_ref().map(|b| b.to_vec()),
         }
     }
 
@@ -152,14 +153,14 @@ impl SourceEventPayload {
             // timestamp — never `Utc::now()`, which would be non-deterministic
             // and could silently mask a corrupt payload.
             .unwrap_or(DateTime::UNIX_EPOCH);
-        SourceEventWrapper {
-            source_id: self.source_id,
-            event: self.event,
+        SourceEventWrapper::from_ffi_parts(
+            self.source_id,
+            self.event,
             timestamp,
-            profiling: None,
-            sequence: self.sequence,
-            source_position: self.source_position.map(Bytes::from),
-        }
+            None,
+            self.sequence,
+            self.source_position.map(Bytes::from),
+        )
     }
 }
 
@@ -350,16 +351,16 @@ mod tests {
 
     #[test]
     fn source_event_payload_roundtrips_via_named_encoding() {
-        let wrapper = SourceEventWrapper {
-            source_id: "src-1".to_string(),
-            event: SourceEvent::Change(SourceChange::Insert {
+        let wrapper = SourceEventWrapper::from_ffi_parts(
+            "src-1".to_string(),
+            SourceEvent::Change(SourceChange::Insert {
                 element: sample_node(),
             }),
-            timestamp: Utc::now(),
-            profiling: None,
-            sequence: Some(42),
-            source_position: Some(Bytes::from_static(b"binlog:000003:1766")),
-        };
+            Utc::now(),
+            None,
+            42,
+            Some(Bytes::from_static(b"binlog:000003:1766")),
+        );
 
         let payload = SourceEventPayload::from_wrapper(&wrapper);
         let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
@@ -445,16 +446,16 @@ mod tests {
     }
 
     fn encoded_source_event() -> Vec<u8> {
-        let wrapper = SourceEventWrapper {
-            source_id: "src-1".to_string(),
-            event: SourceEvent::Change(SourceChange::Insert {
+        let wrapper = SourceEventWrapper::from_ffi_parts(
+            "src-1".to_string(),
+            SourceEvent::Change(SourceChange::Insert {
                 element: sample_node(),
             }),
-            timestamp: Utc::now(),
-            profiling: None,
-            sequence: Some(1),
-            source_position: None,
-        };
+            Utc::now(),
+            None,
+            1,
+            None,
+        );
         let payload = SourceEventPayload::from_wrapper(&wrapper);
         rmp_serde::to_vec_named(&payload).unwrap()
     }

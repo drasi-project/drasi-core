@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::events::Timestamped;
+use super::events::{Sequenced, Timestamped};
 use log::{debug, trace};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -21,39 +21,58 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
-/// Wrapper for priority queue events with timestamp-based ordering
+/// Supplies the ordering key for a buffered queue entry.
+pub trait QueueOrder {
+    type Key: Ord;
+
+    fn order_key(&self) -> Self::Key;
+}
+
+impl<T: Timestamped + Sequenced> QueueOrder for T {
+    type Key = (chrono::DateTime<chrono::Utc>, u64);
+
+    fn order_key(&self) -> Self::Key {
+        (self.timestamp(), self.sequence())
+    }
+}
+
+/// Shared event ordered by its entry-specific key.
 #[derive(Clone)]
 struct PriorityQueueEvent<T>
 where
-    T: Timestamped + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     event: Arc<T>,
 }
 
 impl<T> PriorityQueueEvent<T>
 where
-    T: Timestamped + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn new(event: Arc<T>) -> Self {
         Self { event }
+    }
+
+    fn order_key(&self) -> T::Key {
+        self.event.order_key()
     }
 }
 
 // Implement ordering for priority queue (oldest events first - min-heap)
 impl<T> PartialEq for PriorityQueueEvent<T>
 where
-    T: Timestamped + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.event.timestamp() == other.event.timestamp()
+        self.order_key() == other.order_key()
     }
 }
 
-impl<T> Eq for PriorityQueueEvent<T> where T: Timestamped + Clone + Send + Sync + 'static {}
+impl<T> Eq for PriorityQueueEvent<T> where T: QueueOrder + Clone + Send + Sync + 'static {}
 
 impl<T> PartialOrd for PriorityQueueEvent<T>
 where
-    T: Timestamped + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -62,11 +81,11 @@ where
 
 impl<T> Ord for PriorityQueueEvent<T>
 where
-    T: Timestamped + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior (oldest first)
-        other.event.timestamp().cmp(&self.event.timestamp())
+        // Reverse ordering for min-heap behavior: the smallest key dequeues first.
+        other.order_key().cmp(&self.order_key())
     }
 }
 
@@ -154,9 +173,9 @@ impl Default for PriorityQueueMetrics {
 /// ```
 pub struct PriorityQueue<T>
 where
-    T: Timestamped + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
-    /// Internal heap storing events (min-heap by timestamp)
+    /// Internal heap storing events ordered by their entry-specific keys.
     heap: Arc<Mutex<BinaryHeap<PriorityQueueEvent<T>>>>,
     /// Notification mechanism for waiting on new events
     notify: Arc<Notify>,
@@ -168,7 +187,7 @@ where
 
 impl<T> PriorityQueue<T>
 where
-    T: Timestamped + Clone + Send + Sync + Debug + 'static,
+    T: QueueOrder + Clone + Send + Sync + Debug + 'static,
 {
     /// Create a new priority queue with the specified maximum capacity
     pub fn new(max_capacity: usize) -> Self {
@@ -181,6 +200,7 @@ where
     }
 
     /// Enqueue an event into the priority queue
+    ///
     /// Returns true if enqueued, false if queue is at capacity
     pub async fn enqueue(&self, event: Arc<T>) -> bool {
         let mut heap = self.heap.lock().await;
@@ -426,7 +446,7 @@ where
 
 impl<T> Clone for PriorityQueue<T>
 where
-    T: Timestamped + Clone + Send + Sync + 'static,
+    T: QueueOrder + Clone + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -447,6 +467,7 @@ mod tests {
     struct TestEvent {
         id: String,
         timestamp: chrono::DateTime<Utc>,
+        sequence: u64,
     }
 
     impl Timestamped for TestEvent {
@@ -455,10 +476,29 @@ mod tests {
         }
     }
 
+    impl Sequenced for TestEvent {
+        fn sequence(&self) -> u64 {
+            self.sequence
+        }
+    }
+
     fn create_test_event(id: &str, timestamp: chrono::DateTime<Utc>) -> Arc<TestEvent> {
         Arc::new(TestEvent {
             id: id.to_string(),
             timestamp,
+            sequence: 0,
+        })
+    }
+
+    fn create_test_event_seq(
+        id: &str,
+        timestamp: chrono::DateTime<Utc>,
+        sequence: u64,
+    ) -> Arc<TestEvent> {
+        Arc::new(TestEvent {
+            id: id.to_string(),
+            timestamp,
+            sequence,
         })
     }
 
@@ -486,6 +526,35 @@ mod tests {
 
         let dequeued3 = pq.try_dequeue().await.unwrap();
         assert_eq!(dequeued3.id, "event3"); // Newest
+    }
+
+    // Same-timestamp events dequeue in sequence order.
+    #[tokio::test]
+    async fn test_same_timestamp_same_source_ordered_by_sequence() {
+        let pq = PriorityQueue::new(100);
+        let now = Utc::now();
+
+        // Enqueue out of sequence order.
+        pq.enqueue(create_test_event_seq("seq7", now, 7)).await;
+        pq.enqueue(create_test_event_seq("seq5", now, 5)).await;
+        pq.enqueue(create_test_event_seq("seq6", now, 6)).await;
+
+        assert_eq!(pq.try_dequeue().await.unwrap().id, "seq5");
+        assert_eq!(pq.try_dequeue().await.unwrap().id, "seq6");
+        assert_eq!(pq.try_dequeue().await.unwrap().id, "seq7");
+    }
+
+    #[tokio::test]
+    async fn test_timestamp_precedes_sequence() {
+        let pq = PriorityQueue::new(100);
+        let now = Utc::now();
+        let later = now + chrono::Duration::seconds(1);
+
+        pq.enqueue(create_test_event_seq("late", later, 0)).await;
+        pq.enqueue(create_test_event_seq("early", now, 5)).await;
+
+        assert_eq!(pq.try_dequeue().await.unwrap().id, "early");
+        assert_eq!(pq.try_dequeue().await.unwrap().id, "late");
     }
 
     #[tokio::test]

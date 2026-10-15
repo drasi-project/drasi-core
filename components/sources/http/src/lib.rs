@@ -318,6 +318,8 @@ struct HttpAppState {
     webhook_config: Option<Arc<WebhookState>>,
     /// WAL provider for durable persistence (if durability is enabled)
     wal: Option<Arc<dyn WalProvider>>,
+    /// Serializes WAL append and enqueue across standard and webhook requests.
+    enqueue_order: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// State for webhook mode processing
@@ -599,6 +601,7 @@ impl HttpSource {
         for (idx, event) in events.iter().enumerate() {
             match convert_http_to_source_change(event, source_id) {
                 Ok(source_change) => {
+                    let _enqueue_guard = state.enqueue_order.lock().await;
                     // WAL append before ACK (if durability enabled)
                     let sequence = if let Some(ref wal) = state.wal {
                         match wal.append(&state.source_id, &source_change).await {
@@ -864,6 +867,7 @@ impl HttpSource {
                 .process_mapping(mapping, &context, source_id)
             {
                 Ok(source_change) => {
+                    let _enqueue_guard = state.enqueue_order.lock().await;
                     // WAL append before ACK (if durability enabled)
                     let sequence = if let Some(ref wal) = state.wal {
                         match wal.append(&state.source_id, &source_change).await {
@@ -992,11 +996,11 @@ impl HttpSource {
                     SourceEvent::Change(event.change),
                     event.timestamp,
                     profiling,
+                    event.sequence.unwrap_or_else(|| base.next_sequence()),
                 );
 
                 // Carry WAL-assigned sequence through to the wrapper
                 if let Some(seq) = event.sequence {
-                    wrapper.sequence = Some(seq);
                     wrapper.source_position = Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                 }
 
@@ -1192,6 +1196,7 @@ impl Source for HttpSource {
             batch_tx,
             webhook_config: webhook_state,
             wal: wal_ref.clone(),
+            enqueue_order: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         // Build router based on mode

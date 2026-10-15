@@ -28,6 +28,9 @@ pub use source::{KubernetesSource, KubernetesSourceBuilder};
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod lifecycle_tests;
+
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "kubernetes-source",

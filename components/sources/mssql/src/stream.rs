@@ -445,6 +445,7 @@ async fn poll_cdc_changes(
                 drasi_lib::channels::SourceEvent::Change(change),
                 chrono::Utc::now(),
                 profiling,
+                base.next_sequence(),
             );
             wrapper.source_position = Some(bytes::Bytes::from(row_lsn.to_bytes()));
 

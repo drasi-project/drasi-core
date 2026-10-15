@@ -28,6 +28,7 @@ use drasi_core::{
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
     interface::{
         CheckpointStore, IndexError, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl,
+        SessionGuard,
     },
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
@@ -39,7 +40,9 @@ use drasi_query_cypher::CypherParser;
 use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
-use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
+use crate::component_graph::{
+    is_valid_transition, ComponentGraph, ComponentKind, ComponentUpdateSender,
+};
 use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
@@ -52,6 +55,7 @@ use crate::queries::output_state::{
     next_output_generation, reconcile_durable_output, DurableOutputInconsistency, FetchError,
     OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
 };
+use crate::queries::priority_queue::RankedSourceEvent;
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
@@ -137,9 +141,231 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
     }
 }
 
+/// Compute per-source priority-queue ranks for same-timestamp tie-breaking.
+///
+/// Ranks follow the query's declared `sources` order. Among buffered events at
+/// the same timestamp, all events from an earlier source precede those from a
+/// later source; sequence orders events within each source. This is a merge
+/// policy, not arrival ordering or coordination with sources yet to deliver.
+pub(super) fn compute_source_ranks(source_count: usize) -> Vec<u32> {
+    (0..source_count).map(|index| index as u32).collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::convert_variable_value_to_json;
+    use super::*;
+    use drasi_core::in_memory_index::{
+        in_memory_live_results_writer::InMemoryLiveResultsWriter,
+        in_memory_outbox_writer::InMemoryOutboxWriter,
+    };
+    use serde_json::json;
+
+    const SIGNATURE: u64 = 13_660_005_145_781_501_189;
+
+    fn test_output_stores() -> DurableOutputStores {
+        DurableOutputStores {
+            checkpoint_store: Arc::new(InMemoryCheckpointStore::new()),
+            outbox_writer: Some(Arc::new(InMemoryOutboxWriter::new())),
+            live_results_writer: Some(Arc::new(InMemoryLiveResultsWriter::new())),
+        }
+    }
+
+    fn update_diff(grouping_keys: Option<Vec<String>>) -> ResultDiff {
+        ResultDiff::Update {
+            data: json!({"id": "node", "value": 2}),
+            before: json!({"id": "node", "value": 1}),
+            after: json!({"id": "node", "value": 2}),
+            grouping_keys,
+            row_signature: SIGNATURE,
+        }
+    }
+
+    async fn stage_test_output(
+        diffs: &[ResultDiff],
+        state: &RwLock<QueryOutputState>,
+        stores: &DurableOutputStores,
+    ) -> QueryResult {
+        let result = stage_durable_query_output(
+            diffs,
+            "source",
+            "query",
+            state,
+            &stores.outbox_writer,
+            &stores.live_results_writer,
+            &Some(stores.checkpoint_store.clone()),
+            crate::profiling::ProfilingMetadata::with_source_timestamp(123),
+        )
+        .await
+        .expect("stage production output")
+        .expect("nonempty durable output");
+        state
+            .write()
+            .await
+            .apply_committed_sequence(result.sequence, diffs, result.clone());
+        result
+    }
+
+    #[rstest::rstest]
+    #[case::absent(None)]
+    #[case::present(Some(vec!["id".to_string()]))]
+    #[case::empty(Some(Vec::new()))]
+    #[tokio::test]
+    async fn persisted_update_grouping_keys_round_trip(#[case] grouping_keys: Option<Vec<String>>) {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let added = stage_test_output(
+            &[ResultDiff::Add {
+                data: json!({"id": "node", "value": 1}),
+                row_signature: SIGNATURE,
+            }],
+            &state,
+            &stores,
+        )
+        .await;
+        let updated = stage_test_output(&[update_diff(grouping_keys)], &state, &stores).await;
+
+        let (rows, entries, sequence, generation) = load_durable_output("query", &stores, 10)
+            .await
+            .expect("production output must hydrate");
+        assert_eq!((sequence, generation), (2, 0));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[&SIGNATURE], json!({"id": "node", "value": 2}));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        for (restored, original) in entries.iter().zip([added, updated]) {
+            assert_eq!(
+                serde_json::to_value(restored.as_ref()).unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_other_result_variants_round_trip() {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let result = stage_test_output(
+            &[
+                ResultDiff::Aggregation {
+                    before: None,
+                    after: json!({"count": 1}),
+                    row_signature: SIGNATURE,
+                },
+                ResultDiff::Aggregation {
+                    before: Some(json!({"count": 1})),
+                    after: json!({"count": 2}),
+                    row_signature: SIGNATURE,
+                },
+                ResultDiff::Delete {
+                    data: json!({"count": 2}),
+                    row_signature: SIGNATURE,
+                },
+                ResultDiff::Noop,
+            ],
+            &state,
+            &stores,
+        )
+        .await;
+        let (rows, entries, sequence, _) = load_durable_output("query", &stores, 10).await.unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(sequence, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(entries[0].as_ref()).unwrap(),
+            serde_json::to_value(result).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_valid_compact_records_and_new_named_updates_remain_readable() {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let writer = stores.outbox_writer.as_ref().unwrap();
+        let mut expected = Vec::new();
+        for diff in [
+            ResultDiff::Add {
+                data: json!({"id": "node", "value": 1}),
+                row_signature: SIGNATURE,
+            },
+            update_diff(Some(vec!["id".to_string()])),
+            update_diff(Some(Vec::new())),
+        ] {
+            let result = stage_test_output(&[diff], &state, &stores).await;
+            // Replace the payload with the pre-fix writer's compact encoding.
+            writer
+                .append(
+                    "query",
+                    result.sequence,
+                    &rmp_serde::to_vec(&result).unwrap(),
+                )
+                .await
+                .unwrap();
+            expected.push(result);
+        }
+        let (rows, entries, sequence, generation) =
+            load_durable_output("query", &stores, 10).await.unwrap();
+        assert_eq!(sequence, 3);
+        state
+            .write()
+            .await
+            .hydrate(rows, entries, sequence, generation);
+        expected.push(stage_test_output(&[update_diff(None)], &state, &stores).await);
+
+        // Named records also support omitting QueryResult's optional profiling field.
+        let mut unprofiled = stage_test_output(&[ResultDiff::Noop], &state, &stores).await;
+        unprofiled.profiling = None;
+        writer
+            .append(
+                "query",
+                unprofiled.sequence,
+                &rmp_serde::to_vec_named(&unprofiled).unwrap(),
+            )
+            .await
+            .unwrap();
+        expected.push(unprofiled);
+
+        let (_, entries, sequence, _) = load_durable_output("query", &stores, 10).await.unwrap();
+        assert_eq!(sequence, 5);
+        assert_eq!(entries.len(), expected.len());
+        for (restored, original) in entries.iter().zip(expected) {
+            assert_eq!(
+                serde_json::to_value(restored.as_ref()).unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_malformed_compact_update_fails_without_discarding_records() {
+        let stores = test_output_stores();
+        let state = RwLock::new(QueryOutputState::new(10));
+        let result = stage_test_output(&[update_diff(None)], &state, &stores).await;
+        let bytes = rmp_serde::to_vec(&result).unwrap();
+        let writer = stores.outbox_writer.as_ref().unwrap();
+        writer.append("query", 1, &bytes).await.unwrap();
+
+        let error = load_durable_output("query", &stores, 10)
+            .await
+            .expect_err("the writer fix does not repair malformed legacy records");
+        match error {
+            DurableOutputInconsistency::CorruptOutbox { sequence, message } => {
+                assert_eq!(sequence, 1);
+                assert!(message.contains("expected a sequence"), "{message}");
+                assert!(message.contains(&SIGNATURE.to_string()), "{message}");
+            }
+            other => panic!("expected a visible outbox decode failure, got {other}"),
+        }
+        assert_eq!(
+            writer.read_from("query", 0).await.unwrap(),
+            vec![(1, bytes)]
+        );
+    }
+
     use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
     use drasi_core::evaluation::variable_value::{
         duration::Duration as VarDuration, zoned_datetime::ZonedDateTime as VarZonedDateTime,
@@ -200,12 +426,62 @@ mod tests {
             serde_json::Value::String(duration.to_string())
         );
     }
+
+    use super::compute_source_ranks;
+
+    #[test]
+    fn ranks_follow_declared_order() {
+        assert_eq!(compute_source_ranks(3), vec![0, 1, 2]);
+        assert!(compute_source_ranks(0).is_empty());
+    }
+
+    #[test]
+    fn single_source_is_rank_zero() {
+        assert_eq!(compute_source_ranks(1), vec![0]);
+    }
+
+    #[rstest::rstest]
+    #[case::added(ComponentStatus::Added)]
+    #[case::reconfiguring(ComponentStatus::Reconfiguring)]
+    #[tokio::test]
+    async fn stop_rejects_invalid_local_status(#[case] status: ComponentStatus) -> Result<()> {
+        let core = crate::DrasiLib::builder()
+            .with_query(
+                crate::Query::cypher("invalid-stop")
+                    .query("MATCH (n) RETURN n")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await?;
+        let query = core
+            .query_manager()
+            .get_query_instance("invalid-stop")
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let query = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        query.base.set_status(status, None).await;
+
+        let error = query.stop().await.unwrap_err();
+        assert!(error.to_string().contains("Cannot stop query"));
+        assert!(error.to_string().contains(&format!("{status:?}")));
+        assert_eq!(query.status().await, status);
+        assert_eq!(query.subscription_count().await, 0);
+        Ok(())
+    }
 }
 
 #[async_trait]
 pub trait Query: Send + Sync {
     /// Start the query - subscribes to sources and begins processing events
     async fn start(&self) -> Result<()>;
+    /// Stop the query and release its active subscriptions and processing tasks.
+    ///
+    /// Failed starts and processing errors can leave resources behind, so this
+    /// must also clean up queries in `Error`. Calling this directly on an already
+    /// stopped query is a no-op. In contrast, [`QueryManager::stop_query`] and
+    /// [`crate::DrasiLib::stop_query`] reject an already stopped query through the
+    /// component graph's command validation.
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
@@ -216,8 +492,11 @@ pub trait Query: Send + Sync {
         0
     }
 
-    /// Subscribe to query results for reactions
-    /// Returns a broadcast receiver for Arc-wrapped QueryResults
+    /// Subscribe to query results for reactions.
+    ///
+    /// Implementations that hydrate durable output must wait until the query is
+    /// Running so the returned `as_of_sequence` is the persisted head, not 0.
+    /// Head sample and receiver attach must be atomic with result publication.
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
 
     /// Fetch a snapshot of the live result set.
@@ -251,6 +530,24 @@ pub trait Query: Send + Sync {
     /// Returns `None` for query implementations that don't support metrics.
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         None
+    }
+
+    /// Whether a durable reaction can safely resume from this query after a crash.
+    ///
+    /// Returns `true` when the query's outbox and snapshot do not survive process
+    /// restart. A durable reaction (`Reaction::is_durable() == true`) must not
+    /// subscribe to a volatile query: its checkpoint would be unrecoverable.
+    ///
+    /// `DrasiQuery` derives this from the query's storage backend (the same
+    /// backend persists the index, outbox, and snapshot). Custom `Query`
+    /// implementations that persist outbox/snapshot across restarts **must**
+    /// override this to return `false`.
+    ///
+    /// Default is `true` (fail-safe), matching other defaulted `Query` capability
+    /// methods: an undeclared implementation is treated as volatile rather than
+    /// silently pairing a durable reaction with a non-durable query.
+    fn is_volatile(&self) -> bool {
+        true
     }
 
     /// Release the persistent index-backend handles this query retains, **without**
@@ -398,7 +695,13 @@ async fn stage_durable_query_output(
         return Ok(None);
     }
 
-    let next_seq = output_state.read().await.as_of_sequence().saturating_add(1);
+    let (next_seq, outbox_capacity) = {
+        let state = output_state.read().await;
+        (
+            state.as_of_sequence().saturating_add(1),
+            state.outbox_capacity(),
+        )
+    };
     let query_result = QueryResult::with_profiling(
         query_id.to_string(),
         next_seq,
@@ -424,12 +727,18 @@ async fn stage_durable_query_output(
     );
 
     if let Some(writer) = outbox_writer {
-        let data = rmp_serde::to_vec(&query_result).map_err(|e| {
+        // Named fields prevent omitted optional fields from shifting subsequent values.
+        let data = rmp_serde::to_vec_named(&query_result).map_err(|e| {
             output_persist_error(format!(
                 "Query '{query_id}' failed to serialize result seq={next_seq} for outbox: {e}"
             ))
         })?;
-        writer.append(query_id, next_seq, &data).await?;
+        let retain_from = next_seq
+            .saturating_sub(outbox_capacity as u64)
+            .saturating_add(1);
+        writer
+            .append_and_trim(query_id, next_seq, &data, retain_from)
+            .await?;
     }
 
     if let Some(writer) = live_results_writer {
@@ -520,8 +829,8 @@ fn overlay_post_commit_profiling(
 
 /// Apply committed diffs to in-memory output state and dispatch to reactions.
 ///
-/// Durable output must already have been staged and committed. This path never
-/// writes durable state except a best-effort outbox trim after success.
+/// Durable output must already have been staged and committed. This path does
+/// not write durable state; outbox eviction is staged with the append.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
@@ -529,8 +838,6 @@ async fn dispatch_query_results(
     query_id: &str,
     output_state: &RwLock<QueryOutputState>,
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
-    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
-    outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
     staged_result: Option<QueryResult>,
@@ -588,23 +895,20 @@ async fn dispatch_query_results(
         let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
         output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
 
+        debug!(
+            "Query '{query_id}' sending {} results to reactions (seq={})",
+            result.results.len(),
+            result.sequence
+        );
+
         result
     };
 
-    if let Some(writer) = outbox_writer {
-        if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
-            warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
-        }
-    }
-
-    debug!(
-        "Query '{query_id}' sending {} results to reactions (seq={})",
-        arc_result.results.len(),
-        arc_result.sequence
-    );
-
-    let dispatchers = dispatchers.read().await;
-    for dispatcher in dispatchers.iter() {
+    // Publish after releasing output_state so a full Channel backpressures
+    // the query instead of deadlocking snapshot/outbox fetches or dropping
+    // the tail. Subscribe still samples the head and attaches under that lock.
+    let dispatcher_list = dispatchers.read().await;
+    for dispatcher in dispatcher_list.iter() {
         if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
             debug!("Failed to dispatch result for query '{query_id}': {e}");
         }
@@ -1628,16 +1932,37 @@ impl Query for DrasiQuery {
                                 .await;
                             return Err(anyhow::anyhow!(msg));
                         }
-                    } else if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
-                        let msg = format!(
-                            "Query '{}' failed to write config hash: {e}",
-                            self.base.config.id
-                        );
-                        error!("{msg}");
-                        self.base
-                            .set_status(ComponentStatus::Error, Some(msg.clone()))
-                            .await;
-                        return Err(anyhow::anyhow!(msg));
+                    } else {
+                        if let Err(ie) = clear_persistent_indexes(
+                            &self.base.config.id,
+                            &element_index,
+                            &archive_index,
+                            &result_index,
+                            &future_queue,
+                        )
+                        .await
+                        {
+                            let msg = format!(
+                                "Query '{}' failed to clear persistent indexes on first run: {ie}",
+                                self.base.config.id
+                            );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
+                        }
+                        if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
+                            let msg = format!(
+                                "Query '{}' failed to write config hash: {e}",
+                                self.base.config.id
+                            );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
+                        }
                     }
                     false
                 }
@@ -1969,6 +2294,12 @@ impl Query for DrasiQuery {
             }
         }
 
+        // Compute per-source priority-queue ranks for same-timestamp
+        // tie-breaking. See [`compute_source_ranks`]. `sources_to_subscribe` is
+        // built in `config.sources` order, so index `i` here maps to
+        // `config.sources[i]` and thus to `source_ranks[i]`.
+        let source_ranks = compute_source_ranks(self.base.config.sources.len());
+
         // Compatibility validation: persistent queries must not use volatile sources.
         // A volatile source (supports_replay() == false) cannot guarantee event replay
         // after a restart, so resuming from checkpoints could produce incorrect results
@@ -2031,7 +2362,10 @@ impl Query for DrasiQuery {
                 checkpoint_sequences_per_source.clear();
             }
 
-            for (source_id, source, settings) in &sources_to_subscribe {
+            for (source_index, (source_id, source, settings)) in
+                sources_to_subscribe.iter().enumerate()
+            {
+                let source_rank = source_ranks[source_index];
                 let subscription_response = match source.subscribe(settings.clone()).await {
                     Ok(response) => response,
                     Err(e) => {
@@ -2292,6 +2626,10 @@ impl Query for DrasiQuery {
                 let query_id = self.base.config.id.clone();
                 let source_id_clone = source_id.clone();
                 let instance_id = self.instance_id.clone();
+                // Constant rank captured per forwarder; stamped onto each event
+                // at enqueue time so the priority queue can break cross-source
+                // ties deterministically.
+                let forwarder_source_rank = source_rank;
 
                 // Get source dispatch mode to determine enqueue strategy
                 let dispatch_mode = source.dispatch_mode();
@@ -2313,15 +2651,24 @@ impl Query for DrasiQuery {
                         loop {
                             match receiver.recv().await {
                                 Ok(arc_event) => {
+                                    let entry = Arc::new(RankedSourceEvent::new(
+                                        arc_event,
+                                        forwarder_source_rank,
+                                    ));
                                     // Use appropriate enqueue method based on dispatch mode
                                     if use_blocking_enqueue {
                                         // Channel mode: Use blocking enqueue to prevent message loss
                                         // This creates backpressure when the priority queue is full
-                                        priority_queue.enqueue_wait(arc_event).await;
+                                        priority_queue
+                                            .enqueue_wait(entry)
+                                            .await;
                                     } else {
                                         // Broadcast mode: Use non-blocking enqueue to prevent deadlock
                                         // Messages may be dropped when priority queue is full
-                                        if !priority_queue.enqueue(arc_event).await {
+                                        if !priority_queue
+                                            .enqueue(entry)
+                                            .await
+                                        {
                                             warn!(
                                                 "Query '{query_id}' priority queue at capacity, dropping event from source '{source_id_clone}' (broadcast mode)"
                                             );
@@ -2768,7 +3115,14 @@ impl Query for DrasiQuery {
             let fq_forwarder = tokio::spawn(async move {
                 let mut receiver = fq_receiver;
                 while let Ok(event) = receiver.recv().await {
-                    fq_priority_queue.enqueue_wait(event).await;
+                    // The FutureQueueSource is a synthetic per-query source not
+                    // present in `config.sources`. Rank it after every real
+                    // source (u32::MAX) so that, on a timestamp tie, its
+                    // re-evaluation signals order deterministically last. Its
+                    // own monotonic sequence still breaks ties among its events.
+                    fq_priority_queue
+                        .enqueue_wait(Arc::new(RankedSourceEvent::new(event, u32::MAX)))
+                        .await;
                 }
             });
             self.subscription_tasks.write().await.push(fq_forwarder);
@@ -2790,7 +3144,6 @@ impl Query for DrasiQuery {
         let position_handles_for_processor = position_handles;
         let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
         let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
-        let outbox_capacity_for_processor = self.output_state.read().await.outbox_capacity();
         let output_metrics_for_processor = self.output_metrics.clone();
         let source_ids_for_processor: Vec<String> = self
             .base
@@ -2890,6 +3243,9 @@ impl Query for DrasiQuery {
 
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
+                            let arc_event = Arc::try_unwrap(arc_event)
+                                .unwrap_or_else(|entry| (*entry).clone())
+                                .into_event();
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
                             let parts =
                                 match SourceEventWrapper::try_unwrap_arc(arc_event) {
@@ -2912,16 +3268,6 @@ impl Query for DrasiQuery {
                             let source_position = parts.source_position;
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
-
-                            // Dedup: skip events already processed for this source
-                            if dedup.should_skip(&source_id, sequence) {
-                                debug!(
-                                    "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
-                                    seq = sequence.unwrap_or(0),
-                                    cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
-                                );
-                                continue;
-                            }
 
                             match event {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
@@ -2965,8 +3311,6 @@ impl Query for DrasiQuery {
                                                         &query_id,
                                                         &output_state,
                                                         &base_dispatchers,
-                                                        &outbox_writer_for_processor,
-                                                        outbox_capacity_for_processor,
                                                         profiling,
                                                         &output_metrics_for_processor,
                                                         staged_seq.take(),
@@ -2990,6 +3334,15 @@ impl Query for DrasiQuery {
                                     continue;
                                 }
                                 SourceEvent::Change(source_change) => {
+                                    if dedup.should_skip(&source_id, sequence) {
+                                        debug!(
+                                            "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
+                                            seq = sequence,
+                                            cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
+                                        );
+                                        continue;
+                                    }
+
                                     let mut profiling =
                                         profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
                                     profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
@@ -3013,18 +3366,16 @@ impl Query for DrasiQuery {
                                     let hook = move |results: &[QueryPartEvaluationContext]| {
                                         let diffs = evaluation_contexts_to_diffs(results);
                                         async move {
-                                            if let Some(seq) = sequence {
-                                                // Enforce position size limit at checkpoint time:
-                                                // oversized positions are skipped to preserve the
-                                                // last known good position in the store.
-                                                let pos_ref = match &cp_position {
-                                                    Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
-                                                    _ => None,
-                                                };
-                                                cp_store
-                                                    .stage_checkpoint(&cp_source_id, seq, pos_ref)
-                                                    .await?;
-                                            }
+                                            // Enforce position size limit at checkpoint time:
+                                            // oversized positions are skipped to preserve the
+                                            // last known good position in the store.
+                                            let pos_ref = match &cp_position {
+                                                Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
+                                                _ => None,
+                                            };
+                                            cp_store
+                                                .stage_checkpoint(&cp_source_id, sequence, pos_ref)
+                                                .await?;
                                             let staged = stage_durable_query_output(
                                                 &diffs,
                                                 &source_id_for_stage,
@@ -3048,12 +3399,10 @@ impl Query for DrasiQuery {
                                             profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
 
                                             // Advance dedup and notify source on successful commit
-                                            if let Some(seq) = sequence {
-                                                dedup.advance(&source_id, seq);
+                                            dedup.advance(&source_id, sequence);
 
-                                                if let Some(handle) = position_handles_for_processor.get(&source_id) {
-                                                    handle.store(seq, std::sync::atomic::Ordering::Release);
-                                                }
+                                            if let Some(handle) = position_handles_for_processor.get(&source_id) {
+                                                handle.store(sequence, std::sync::atomic::Ordering::Release);
                                             }
 
                                             if !results.is_empty() {
@@ -3064,8 +3413,6 @@ impl Query for DrasiQuery {
                                                     &query_id,
                                                     &output_state,
                                                     &base_dispatchers,
-                                                    &outbox_writer_for_processor,
-                                                    outbox_capacity_for_processor,
                                                     profiling,
                                                     &output_metrics_for_processor,
                                                     staged_seq.take(),
@@ -3108,21 +3455,22 @@ impl Query for DrasiQuery {
     }
 
     async fn stop(&self) -> Result<()> {
+        let status = self.base.get_status().await;
+        if status == ComponentStatus::Stopped {
+            return Ok(());
+        }
+        // Like the graph, allow same-state updates; otherwise use its transition rules.
+        anyhow::ensure!(
+            status == ComponentStatus::Stopping
+                || is_valid_transition(&ComponentKind::Query, &status, &ComponentStatus::Stopping),
+            "Cannot stop query '{}' while it is {status:?}",
+            self.base.config.id
+        );
+
         log_component_stop("Query", &self.base.config.id);
 
-        // Set Stopping on the local status handle. The manager has already validated
-        // and applied the Stopping transition on the graph via validate_and_transition().
-        // This local update is needed because the event processing loop checks the
-        // handle's local status to decide when to exit.
-        //
-        // INVARIANT: The graph must already be in Stopping state before this point.
-        debug_assert!(
-            matches!(
-                self.base.status_handle().get_status().await,
-                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Stopping
-            ),
-            "DrasiQuery::stop() called but local handle is not in expected pre-stop state"
-        );
+        // Error is not a quiescent state: failed queries need the same resource
+        // cleanup as running queries before they can report Stopped.
         self.base
             .set_status(
                 ComponentStatus::Stopping,
@@ -3207,8 +3555,23 @@ impl Query for DrasiQuery {
             reaction_id, self.base.config.id
         );
 
+        // Wait until hydrate/bootstrap have finished. Sampling sequence 0 from
+        // an uninitialized reconstructed query would persist checkpoint 0 and
+        // replay retained history on the next restart.
+        self.wait_until_running().await.map_err(|e| {
+            anyhow::anyhow!(
+                "Query '{}' is not ready for subscriptions: {e}",
+                self.base.config.id
+            )
+        })?;
+
+        // Hold exclusive output_state across head sample and receiver attach
+        // so a concurrent dispatch cannot assign-and-publish a sequence in
+        // the gap (which Strict recovery would then treat as a hole).
+        let state = self.output_state.write().await;
+        let as_of_sequence = state.as_of_sequence();
         self.base
-            .subscribe(&reaction_id)
+            .subscribe(&reaction_id, as_of_sequence)
             .await
             .context("Failed to subscribe to query")
     }
@@ -3255,6 +3618,11 @@ impl Query for DrasiQuery {
 
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         Some(self.output_metrics.clone())
+    }
+
+    fn is_volatile(&self) -> bool {
+        self.index_factory
+            .is_volatile_for_query(self.base.config.storage_backend.as_ref())
     }
 
     async fn release_persistent_handles(&self) {
@@ -3439,7 +3807,11 @@ impl QueryManager {
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
     }
 
-    /// Stop a running query by ID, unsubscribing it from sources and halting event processing.
+    /// Stop a running, starting, or failed query by ID, releasing its active
+    /// subscriptions and processing tasks.
+    ///
+    /// Unlike a direct [`Query::stop`] call, this managed command rejects an
+    /// already stopped query through the component graph's transition validation.
     ///
     /// # Errors
     /// Returns an error if the query is not found or the stop transition fails.
@@ -3511,7 +3883,7 @@ impl QueryManager {
     /// Update a query by replacing it with a new configuration.
     ///
     /// Flow: validate exists → validate status → set Reconfiguring via graph →
-    /// stop if running/starting → wait for stopped → provision new →
+    /// stop if running/starting/failed → wait for stopped → provision new →
     /// replace runtime (if still exists) → restart if was running.
     /// Graph node, edges, and event history are preserved.
     pub async fn update_query(&self, id: String, new_config: QueryConfig) -> Result<()> {
@@ -3530,13 +3902,22 @@ impl QueryManager {
                 ));
             }
 
+            // `reconfigure_component` stops the old runtime first. After that
+            // stop, drop its persistent index handles (e.g. RocksDB) before
+            // `provision_query` re-opens the same path. `stop()` keeps those
+            // handles so in-process resume can hydrate; reconfigure must
+            // release them or the new start fails with a process-exclusive lock.
+            let old_query_for_release = old_query.clone();
             crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Query>, _, _, _>(
                 &self.graph,
                 &id,
                 "query",
                 &old_query,
                 || async {},
-                || self.provision_query(new_config),
+                || async {
+                    old_query_for_release.release_persistent_handles().await;
+                    self.provision_query(new_config).await
+                },
                 || self.start_query(id.clone()),
             )
             .await
@@ -3576,8 +3957,11 @@ impl QueryManager {
         )
         .await?;
 
-        // After teardown: clear persistent indexes + checkpoints so a future
-        // query with the same ID starts fresh. Only needed for persistent backends.
+        // After teardown: clear persistent indexes, checkpoints, outbox, live
+        // results, and result sequence so a future query with the same ID starts
+        // at sequence 0. Only needed for persistent backends. `stop_query` does
+        // not take this path because in-process resume/hydration must keep the
+        // prior output (sequences continue at N+1).
         // Resolve the effective backend the same way as start-up so that queries
         // relying on the instance-wide default backend are also cleaned up.
         if let Some(config) = query_config {
@@ -3587,63 +3971,90 @@ impl QueryManager {
                 .or_else(|| self.index_factory.default_backend())
             {
                 if !self.index_factory.is_volatile(backend_ref) {
-                    info!("Query '{id}' removed — clearing persistent indexes and checkpoints");
-                    match self.index_factory.build(backend_ref, &id).await {
-                        Ok(created) => {
-                            // Wrap clearing in a session for transactional backends
-                            if let Err(e) = created.set.session_control.begin().await {
-                                warn!(
-                                    "Query '{id}' failed to begin session for removal cleanup: {e}"
-                                );
-                            } else {
-                                if let Some(checkpoint_store) = created.checkpoint_store.clone() {
-                                    let stores = DurableOutputStores {
-                                        checkpoint_store,
-                                        outbox_writer: created.outbox_writer.clone(),
-                                        live_results_writer: created.live_results_writer.clone(),
-                                    };
-                                    if let Err(e) = wipe_durable_output(&id, &stores, 0).await {
-                                        warn!(
-                                            "Query '{id}' failed to clear durable output on removal: {e}"
-                                        );
-                                    }
-                                }
-
-                                if let Err(e) = clear_persistent_indexes(
-                                    &id,
-                                    &Some(created.set.element_index),
-                                    &Some(created.set.archive_index),
-                                    &Some(created.set.result_index),
-                                    &Some(created.set.future_queue),
+                    info!(
+                        "Query '{id}' removed — clearing persistent indexes, checkpoints, and output"
+                    );
+                    let created = self
+                        .index_factory
+                        .build(backend_ref, &id)
+                        .await
+                        .with_context(|| {
+                            format!("Query '{id}' failed to build indexes for cleanup on removal")
+                        })?;
+                    let session = SessionGuard::begin(created.set.session_control.clone())
+                        .await
+                        .with_context(|| {
+                            format!("Query '{id}' failed to begin session for removal cleanup")
+                        })?;
+                    // Mark reset-in-progress before touching indexes. A mid-clear
+                    // failure (e.g. archive after element) is not rolled back by
+                    // RocksDB session abort; the next start must finish the wipe
+                    // instead of resuming old checkpoints against a half-empty graph.
+                    if let Some(checkpoint_store) = &created.checkpoint_store {
+                        let current_hash = super::compute_config_hash(&config);
+                        checkpoint_store
+                            .write_config_hash(output_reset_in_progress_hash(current_hash))
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "Query '{id}' failed to persist removal reset-in-progress marker"
                                 )
-                                .await
-                                {
-                                    warn!(
-                                        "Query '{id}' failed to clear persistent indexes on removal: {e}"
-                                    );
-                                }
+                            })?;
+                    }
+                    clear_persistent_indexes(
+                        &id,
+                        &Some(created.set.element_index),
+                        &Some(created.set.archive_index),
+                        &Some(created.set.result_index),
+                        &Some(created.set.future_queue),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("Query '{id}' failed to clear persistent indexes on removal")
+                    })?;
 
-                                if let Some(checkpoint_store) = created.checkpoint_store {
-                                    if let Err(e) = checkpoint_store.clear_checkpoints().await {
-                                        warn!(
-                                            "Query '{id}' failed to clear checkpoints on removal: {e}"
-                                        );
-                                    }
-                                }
-
-                                if let Err(e) = created.set.session_control.commit().await {
-                                    warn!(
-                                        "Query '{id}' failed to commit removal cleanup session: {e}"
-                                    );
-                                }
-                            }
+                    if let Some(checkpoint_store) = created.checkpoint_store {
+                        checkpoint_store
+                            .clear_checkpoints()
+                            .await
+                            .with_context(|| {
+                                format!("Query '{id}' failed to clear checkpoints on removal")
+                            })?;
+                        let stores = DurableOutputStores {
+                            checkpoint_store: checkpoint_store.clone(),
+                            outbox_writer: created.outbox_writer.clone(),
+                            live_results_writer: created.live_results_writer.clone(),
+                        };
+                        let generation = stores
+                            .checkpoint_store
+                            .read_output_generation(&id)
+                            .await
+                            .with_context(|| {
+                                format!("Query '{id}' failed to read output generation on removal")
+                            })?
+                            .unwrap_or(0)
+                            .saturating_add(1);
+                        wipe_durable_output(&id, &stores, generation)
+                            .await
+                            .with_context(|| {
+                                format!("Query '{id}' failed to wipe durable output on removal")
+                            })?;
+                    } else {
+                        if let Some(writer) = &created.outbox_writer {
+                            writer.clear(&id).await.with_context(|| {
+                                format!("Query '{id}' failed to clear outbox on removal")
+                            })?;
                         }
-                        Err(e) => {
-                            warn!(
-                                "Query '{id}' failed to build indexes for cleanup on removal: {e}"
-                            );
+                        if let Some(writer) = &created.live_results_writer {
+                            writer.clear(&id).await.with_context(|| {
+                                format!("Query '{id}' failed to clear live results on removal")
+                            })?;
                         }
                     }
+
+                    session.commit().await.with_context(|| {
+                        format!("Query '{id}' failed to commit removal cleanup session")
+                    })?;
                 }
             }
         }
@@ -3767,7 +4178,7 @@ impl QueryManager {
         .await
     }
 
-    /// Stop all currently running or starting queries.
+    /// Stop all running, starting, or failed queries.
     ///
     /// # Errors
     /// Returns an error listing any queries that failed to stop.
@@ -3788,12 +4199,7 @@ impl QueryManager {
                 let graph = self.graph.read().await;
                 graph
                     .get_component(&id)
-                    .map(|n| {
-                        matches!(
-                            n.status,
-                            ComponentStatus::Running | ComponentStatus::Starting
-                        )
-                    })
+                    .map(|n| is_valid_transition(&n.kind, &n.status, &ComponentStatus::Stopping))
                     .unwrap_or(false)
             };
 

@@ -1043,8 +1043,13 @@ async fn dispatch_changes(
         let event = SourceEvent::Change(change);
         let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-        let wrapper =
-            SourceEventWrapper::with_profiling(source_id.to_string(), event, Utc::now(), profiling);
+        let wrapper = SourceEventWrapper::with_profiling(
+            source_id.to_string(),
+            event,
+            Utc::now(),
+            profiling,
+            base.next_sequence(),
+        );
         base.dispatch_event(wrapper).await?;
     }
     Ok(())
@@ -1305,11 +1310,7 @@ mod tests {
                 .await
                 .expect("timed out waiting for event")
                 .expect("event stream closed unexpectedly");
-            sequences.push(
-                event
-                    .sequence
-                    .expect("dispatched change must carry a framework sequence"),
-            );
+            sequences.push(event.sequence);
         }
 
         assert_eq!(

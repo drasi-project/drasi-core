@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-mssql"
-version = "0.2.13"
+version = "0.2.15"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Microsoft SQL Server bootstrap plugin for Drasi"
@@ -44,6 +44,7 @@ log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
+tokio-stream = "0.1"
 bytes = "1"
 
 
@@ -53,7 +54,7 @@ dynamic-plugin = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure
-# Transport). Vendor it there so the glibc-pinned cargo-zigbuild -gnu plugins
+# Transport). Vendor it there so the glibc-pinned manylinux -gnu plugins
 # build without host OpenSSL headers; scoping it off Windows/macOS avoids
 # unnecessary and toolchain-sensitive OpenSSL-from-source builds.
 openssl = { version = "0.10", features = ["vendored"] }

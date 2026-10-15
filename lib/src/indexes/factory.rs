@@ -175,6 +175,16 @@ impl IndexFactory {
         self.default_backend.as_ref()
     }
 
+    /// Whether a query using `query_backend` (or the factory default) is volatile.
+    ///
+    /// `None` with no default backend is treated as volatile (native in-memory).
+    pub fn is_volatile_for_query(&self, query_backend: Option<&StorageBackendRef>) -> bool {
+        match query_backend.or_else(|| self.default_backend()) {
+            Some(backend_ref) => self.is_volatile(backend_ref),
+            None => true,
+        }
+    }
+
     /// Build a CreatedIndexes for a query using the specified storage backend
     ///
     /// # Arguments
@@ -522,6 +532,21 @@ mod tests {
         let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
         assert!(!factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_is_volatile_for_query_none_is_volatile() {
+        let factory = IndexFactory::new(vec![], HashMap::new());
+        assert!(factory.is_volatile_for_query(None));
+
+        let persistent = StorageBackendRef::Named("rocks".to_string());
+        let factory = IndexFactory::new_with_default(
+            vec![],
+            providers_with("rocks", false),
+            Some(persistent.clone()),
+        );
+        assert!(!factory.is_volatile_for_query(None));
+        assert!(!factory.is_volatile_for_query(Some(&persistent)));
     }
 
     #[test]

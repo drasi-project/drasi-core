@@ -63,7 +63,8 @@ impl Open511ApiClient {
         Ok(events)
     }
 
-    async fn fetch_events_page(
+    /// Fetch a single page of events.
+    pub async fn fetch_events_page(
         &self,
         offset: usize,
         limit: usize,

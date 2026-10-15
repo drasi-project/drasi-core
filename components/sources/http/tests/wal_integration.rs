@@ -28,6 +28,10 @@ use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
 use drasi_lib::Source;
+use drasi_source_http::config::{
+    ElementTemplate, ElementType, ErrorBehavior, HttpMethod, OperationType, WebhookConfig,
+    WebhookMapping, WebhookRoute,
+};
 use drasi_source_http::HttpSourceBuilder;
 use drasi_wal_redb::RedbWalProvider;
 use reqwest::Client;
@@ -161,6 +165,153 @@ async fn post_event_status(
     resp.status().as_u16()
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_http_requests_preserve_wal_order() {
+    for webhook in [false, true] {
+        for durable in [false, true] {
+            let source_id = "http-concurrent";
+            let port = reserve_port();
+            let mut builder = HttpSourceBuilder::new(source_id)
+                .with_host("127.0.0.1")
+                .with_port(port);
+            if durable {
+                builder = builder.with_durability(durability_config(
+                    true,
+                    10_000,
+                    CapacityPolicy::RejectIncoming,
+                ));
+            }
+            if webhook {
+                builder = builder.with_webhooks(WebhookConfig {
+                    error_behavior: ErrorBehavior::Reject,
+                    cors: None,
+                    routes: vec![WebhookRoute {
+                        path: "/events".to_string(),
+                        methods: vec![HttpMethod::Post],
+                        auth: None,
+                        error_behavior: None,
+                        mappings: (0..2)
+                            .map(|index| WebhookMapping {
+                                when: None,
+                                operation: Some(OperationType::Insert),
+                                operation_from: None,
+                                operation_map: None,
+                                element_type: ElementType::Node,
+                                effective_from: None,
+                                template: ElementTemplate {
+                                    id: format!("{index}-{{{{payload.id}}}}"),
+                                    labels: vec!["Person".to_string()],
+                                    properties: Some(serde_json::json!({"name": "{{payload.id}}"})),
+                                    from: None,
+                                    to: None,
+                                },
+                            })
+                            .collect(),
+                    }],
+                });
+            }
+            let source = builder.build().unwrap();
+            let directory = TempDir::new().unwrap();
+            let wal = Arc::new(RedbWalProvider::new(directory.path()));
+            init_source_with_wal(&source, wal.clone(), source_id).await;
+            source.start().await.unwrap();
+            let mut receiver = subscribe_fresh(&source, source_id).await;
+            let client = Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut retry = tokio::time::interval(Duration::from_millis(20));
+                loop {
+                    retry.tick().await;
+                    if client
+                        .get(format!("http://127.0.0.1:{port}/health"))
+                        .send()
+                        .await
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+            let barrier = Arc::new(tokio::sync::Barrier::new(8));
+            let mut producers = tokio::task::JoinSet::new();
+            for producer in 0..8 {
+                let client = client.clone();
+                let barrier = barrier.clone();
+                producers.spawn(async move {
+                    for index in 0..10 {
+                        let id = format!("{producer}-{index}");
+                        let (path, body) = if webhook {
+                            ("/events".to_string(), serde_json::json!({"id": id}))
+                        } else {
+                            let event = |suffix: &str| serde_json::json!({
+                                "operation": "insert",
+                                "element": {
+                                    "type": "node",
+                                    "id": format!("{id}-{suffix}"),
+                                    "labels": ["Person"],
+                                    "properties": {"name": id},
+                                }
+                            });
+                            if producer % 2 == 0 {
+                                (format!("/sources/{source_id}/events"), event("single"))
+                            } else {
+                                (format!("/sources/{source_id}/events/batch"),
+                                 serde_json::json!({"events": [event("first"), event("second")]}))
+                            }
+                        };
+                        barrier.wait().await;
+                        let response = client.post(format!("http://127.0.0.1:{port}{path}"))
+                            .json(&body).send().await.unwrap();
+                        assert!(response.status().is_success());
+                    }
+                });
+            }
+            while let Some(result) = producers.join_next().await {
+                result.unwrap();
+            }
+            let total = if webhook { 160 } else { 120 };
+            let records = if durable {
+                let records = wal.read_from(source_id, 1).await.unwrap();
+                assert_eq!(records.len(), total);
+                Some(records)
+            } else {
+                None
+            };
+            for index in 0..total {
+                let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    event.sequence,
+                    index as u64 + 1,
+                    "webhook={webhook}, durable={durable}"
+                );
+                if let Some(records) = &records {
+                    let (sequence, change) = &records[index];
+                    assert_eq!(event.sequence, *sequence);
+                    assert_eq!(
+                        event.event,
+                        drasi_lib::channels::SourceEvent::Change(change.clone())
+                    );
+                    assert_eq!(
+                        event.source_position.as_deref(),
+                        Some(sequence.to_be_bytes().as_slice())
+                    );
+                } else {
+                    assert!(event.source_position.is_none());
+                }
+            }
+            source.stop().await.unwrap();
+        }
+    }
+}
+
 // ============================================================
 // HTTP Source WAL Tests
 // ============================================================
@@ -222,7 +373,7 @@ async fn test_http_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event.sequence.unwrap(), 1);
+    assert_eq!(event.sequence, 1);
     assert!(event.source_position.is_some());
 
     let count = wal.event_count("http-persist").await.unwrap();
@@ -355,13 +506,13 @@ async fn test_http_crash_recovery_and_replay() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event4.sequence.unwrap(), 4);
+        assert_eq!(event4.sequence, 4);
 
         let event5 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event5.sequence.unwrap(), 5);
+        assert_eq!(event5.sequence, 5);
 
         // New event should be seq 6
         let client = Client::new();
@@ -370,7 +521,7 @@ async fn test_http_crash_recovery_and_replay() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event6.sequence.unwrap(), 6);
+        assert_eq!(event6.sequence, 6);
 
         source.stop().await.unwrap();
     }
@@ -463,8 +614,7 @@ async fn test_http_sequence_stamped_without_durability() {
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
         assert_eq!(
-            event.sequence,
-            Some(expected_seq),
+            event.sequence, expected_seq,
             "event {expected_seq} should carry a framework sequence with durability off"
         );
     }

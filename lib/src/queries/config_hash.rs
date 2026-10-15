@@ -19,6 +19,9 @@
 //! mismatch triggers an automatic wipe + re-bootstrap
 //! (see design doc 02 §3 — Reading Checkpoints on Startup).
 //!
+//! Source ordering ranks are part of the identity. Hashes written before ranks
+//! were included will mismatch once, triggering a full re-bootstrap on upgrade.
+//!
 //! We use `fnv` rather than `std::hash::DefaultHasher` because `DefaultHasher`
 //! is explicitly documented as unstable across Rust versions — upgrading the
 //! toolchain would silently invalidate every persistent query's config hash,
@@ -41,7 +44,8 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///   - `query` text
 ///   - `query_language`
 ///   - `middleware` (order preserved — pipeline order matters)
-///   - `sources` (sorted by `source_id`; within each source, `nodes` and
+///   - `sources` (including declared list position, sorted by `source_id`;
+///     within each source, `nodes` and
 ///     `relations` are sorted + deduped because they are consumed as `HashSet`s
 ///     downstream in `SubscriptionSettingsBuilder`)
 ///   - `joins` (sorted by `id`; within each join, `keys` are sorted because
@@ -68,6 +72,7 @@ struct QueryIdentity<'a> {
 #[derive(Serialize)]
 struct SourceIdentity<'a> {
     source_id: &'a str,
+    source_rank: u32,
     nodes: Vec<&'a String>,
     relations: Vec<&'a String>,
     pipeline: &'a [String],
@@ -83,7 +88,7 @@ struct JoinIdentity<'a> {
     keys: Vec<&'a QueryJoinKeyConfig>,
 }
 
-fn canonicalize_source(source: &SourceSubscriptionConfig) -> SourceIdentity<'_> {
+fn canonicalize_source(source: &SourceSubscriptionConfig, source_rank: u32) -> SourceIdentity<'_> {
     let mut nodes: Vec<&String> = source.nodes.iter().collect();
     nodes.sort();
     nodes.dedup();
@@ -94,6 +99,7 @@ fn canonicalize_source(source: &SourceSubscriptionConfig) -> SourceIdentity<'_> 
 
     SourceIdentity {
         source_id: &source.source_id,
+        source_rank,
         nodes,
         relations,
         pipeline: &source.pipeline,
@@ -110,10 +116,17 @@ fn canonicalize_join(join: &QueryJoinConfig) -> JoinIdentity<'_> {
 /// Compute a deterministic hash of the identity-defining portion of a query config.
 ///
 /// The hash is stable across processes, platforms, and Rust toolchain versions,
-/// and it is invariant under cosmetic reordering of `sources`, `joins`, a
-/// source's `nodes` / `relations`, and a join's `keys`.
+/// and it is invariant under cosmetic reordering of `joins`, a source's
+/// `nodes` / `relations`, and a join's `keys`. Reordering `sources` changes
+/// the hash because their declared order determines same-timestamp tie-breaking.
 pub fn compute_config_hash(config: &QueryConfig) -> u64 {
-    let mut sources: Vec<SourceIdentity> = config.sources.iter().map(canonicalize_source).collect();
+    let ranks = super::manager::compute_source_ranks(config.sources.len());
+    let mut sources: Vec<SourceIdentity> = config
+        .sources
+        .iter()
+        .zip(ranks)
+        .map(|(source, rank)| canonicalize_source(source, rank))
+        .collect();
     sources.sort_by(|a, b| a.source_id.cmp(b.source_id));
 
     let joins = config.joins.as_ref().map(|j| {
@@ -348,7 +361,7 @@ mod tests {
     // ----------------------------------------------------------------
 
     #[test]
-    fn source_reorder_same_hash() {
+    fn source_reorder_different_hash() {
         let mut a = base();
         a.sources = vec![
             SourceSubscriptionConfig {
@@ -381,7 +394,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
+        assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
     }
 
     #[test]

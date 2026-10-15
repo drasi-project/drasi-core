@@ -14,3 +14,4 @@ oci-client = "0.16"
 oci-spec = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 bytes = "1"
+drasi-ffi-primitives = { path = "../components/ffi-primitives" }

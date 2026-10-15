@@ -325,13 +325,11 @@ make publish-all PRE_RELEASE=dev.1
 
 ### CI Workflow
 
-The `.github/workflows/publish-plugins.yml` workflow automates publishing across all 7 architectures. It uses a build matrix:
+The [Release-plz workflow](.github/workflows/release-plz.yml) publishes crates to crates.io, then calls [publish-plugins.yml](.github/workflows/publish-plugins.yml) to build and publish signed OCI plugins across its configured architecture matrix. The plugin workflow can also be triggered manually via `workflow_dispatch` in the GitHub Actions UI.
 
-- Linux targets (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) build on `ubuntu-latest` via `cross`
-- macOS targets (`x86_64-apple-darwin`, `aarch64-apple-darwin`) build on `macos-latest` via `cargo`
-- Windows target (`x86_64-pc-windows-gnu`) builds on `ubuntu-latest` via `cross`
+Before publishing, read-only package metadata checks verify that `drasi-plugin-directory` exists and is public. After all builds and pushes succeed, every plugin package is checked for public visibility. GitHub does not support changing package visibility through the REST endpoint used to read metadata: a package administrator must select **Public** in each package's GitHub **Package settings** → **Change visibility**, including for new packages after their first push, then rerun verification.
 
-After all builds succeed, a visibility step sets all packages (including `drasi-plugin-directory`) to public on GHCR. Trigger the workflow via `workflow_dispatch` in the GitHub Actions UI.
+The compatibility-named `PACKAGES_ADMIN_TOKEN` secret only needs a classic PAT with `read:packages` and appropriate organization access/SSO for these checks; a successful check does not establish admin access. See [workflow setup and release recovery](.github/workflows/readme.md#recovering-from-failed-releases) for details. Nightly publishing intentionally skips visibility checks and signing; a passing nightly is not a complete signed-release check.
 
 ### Makefile Reference
 

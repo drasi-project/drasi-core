@@ -62,6 +62,28 @@ impl Hash for Float {
 }
 
 impl Float {
+    /// Convert an integral float without rounding or saturating at an integer boundary.
+    pub(super) fn as_integer_exact(&self) -> Option<Integer> {
+        let value = self.value;
+        if value.fract() != 0.0 {
+            return None;
+        }
+        // u64::MAX rounds to 2^64 in f64, so the upper bound must be exclusive.
+        if value >= 0.0 && value < u64::MAX as f64 {
+            Some(Integer::from(value as u64))
+        } else if value < 0.0 && value >= i64::MIN as f64 {
+            Some(Integer::from(value as i64))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn eq_for_groupby(&self, other: &Self) -> bool {
+        // Keep constructed non-finite values reflexive without changing query
+        // comparison: NaNs share identity only when their bit patterns match.
+        self == other || self.value.to_bits() == other.value.to_bits()
+    }
+
     #[inline]
     pub fn is_f64(&self) -> bool {
         self.value.is_finite()

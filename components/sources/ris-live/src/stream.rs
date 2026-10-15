@@ -253,6 +253,7 @@ async fn dispatch_change(
         SourceEvent::Change(change),
         chrono::Utc::now(),
         profiling,
+        base.next_sequence(),
     );
 
     base.dispatch_event(wrapper).await
@@ -410,11 +411,7 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
         {
             if matches!(event.event, ChannelSourceEvent::Change(_)) {
-                sequences.push(
-                    event
-                        .sequence
-                        .expect("dispatched change must carry a framework sequence"),
-                );
+                sequences.push(event.sequence);
             }
         }
 

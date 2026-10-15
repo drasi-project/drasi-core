@@ -189,8 +189,7 @@ async fn test_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert!(event.sequence.is_some());
-    assert_eq!(event.sequence.unwrap(), 1);
+    assert_eq!(event.sequence, 1);
     assert!(event.source_position.is_some());
 
     // Verify WAL has the event
@@ -207,7 +206,7 @@ async fn test_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event2.sequence.unwrap(), 2);
+    assert_eq!(event2.sequence, 2);
 
     let count = wal.event_count("persist-src").await.unwrap();
     assert_eq!(count, 2);
@@ -364,7 +363,7 @@ async fn test_crash_recovery_resumes_sequence() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.sequence.unwrap(), 6);
+        assert_eq!(event.sequence, 6);
 
         source.stop().await.unwrap();
     }
@@ -408,8 +407,7 @@ async fn test_replay_via_subscribe() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            event.sequence.unwrap(),
-            expected_seq,
+            event.sequence, expected_seq,
             "Expected replay seq {expected_seq}"
         );
     }
@@ -425,19 +423,18 @@ async fn test_replay_via_subscribe() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event1.sequence.unwrap(), 6);
+    assert_eq!(event1.sequence, 6);
 
     let event2 = tokio::time::timeout(Duration::from_secs(2), rx2.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event2.sequence.unwrap(), 6);
+    assert_eq!(event2.sequence, 6);
 
     source.stop().await.unwrap();
 }
 
-#[tokio::test]
-#[ignore]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_writes_monotonic_sequences() {
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
@@ -456,17 +453,25 @@ async fn test_concurrent_writes_monotonic_sequences() {
     let total_events: usize = 100;
     let tasks_count = 4;
     let events_per_task = total_events / tasks_count;
+    let barrier = Arc::new(tokio::sync::Barrier::new(tasks_count));
 
     let mut tasks = vec![];
     for task_id in 0..tasks_count {
-        let h = handle.clone();
+        let handle = if task_id % 2 == 0 {
+            handle.clone()
+        } else {
+            source.get_handle()
+        };
+        let barrier = barrier.clone();
         tasks.push(tokio::spawn(async move {
             for i in 0..events_per_task {
                 let props = PropertyMapBuilder::new()
                     .with_integer("task", task_id as i64)
                     .with_integer("i", i as i64)
                     .build();
-                h.send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
+                barrier.wait().await;
+                handle
+                    .send_node_insert(format!("t{task_id}-n{i}"), vec!["T"], props)
                     .await
                     .unwrap();
             }
@@ -477,23 +482,28 @@ async fn test_concurrent_writes_monotonic_sequences() {
         t.await.unwrap();
     }
 
-    // Collect all received events
-    let mut sequences = vec![];
-    for _ in 0..total_events {
+    let records = wal.read_from("conc-src", 1).await.unwrap();
+    assert_eq!(records.len(), total_events);
+    for (index, (wal_sequence, change)) in records.into_iter().enumerate() {
         let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
             .unwrap();
-        sequences.push(event.sequence.unwrap());
+        assert_eq!(
+            event.sequence,
+            index as u64 + 1,
+            "delivery must follow WAL order"
+        );
+        assert_eq!(event.sequence, wal_sequence);
+        assert_eq!(
+            event.event,
+            drasi_lib::channels::SourceEvent::Change(change)
+        );
+        assert_eq!(
+            event.source_position.as_deref(),
+            Some(wal_sequence.to_be_bytes().as_slice())
+        );
     }
-
-    // Verify all sequences are unique and cover 1..=total_events
-    sequences.sort();
-    let expected: Vec<u64> = (1..=total_events as u64).collect();
-    assert_eq!(
-        sequences, expected,
-        "Sequences should be 1..={total_events} with no gaps"
-    );
 
     let count = wal.event_count("conc-src").await.unwrap();
     assert_eq!(count, total_events as u64);
@@ -559,7 +569,7 @@ async fn test_resume_from_position_end_to_end() {
             .await
             .expect("timed out waiting for event")
             .unwrap();
-        let seq = event.sequence.expect("event should have WAL sequence");
+        let seq = event.sequence;
         // Simulate query confirming progress by advancing position handle
         position_handle.store(seq, std::sync::atomic::Ordering::Release);
         last_confirmed_seq = seq;
@@ -617,7 +627,7 @@ async fn test_resume_from_position_end_to_end() {
             .await
             .expect("timed out waiting for replay event")
             .unwrap();
-        replayed_seqs.push(event.sequence.expect("replay event should have sequence"));
+        replayed_seqs.push(event.sequence);
     }
     assert_eq!(
         replayed_seqs,
@@ -637,10 +647,7 @@ async fn test_resume_from_position_end_to_end() {
         .expect("timed out waiting for live event")
         .unwrap();
     assert_eq!(
-        live_event
-            .sequence
-            .expect("live event should have sequence"),
-        9,
+        live_event.sequence, 9,
         "Live event after restart should continue sequence"
     );
 
@@ -698,8 +705,7 @@ async fn test_sequence_stamped_without_durability() {
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
         assert_eq!(
-            event.sequence,
-            Some(expected_seq),
+            event.sequence, expected_seq,
             "event {expected_seq} should carry a framework sequence with durability off"
         );
     }
