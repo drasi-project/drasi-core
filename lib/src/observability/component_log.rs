@@ -62,6 +62,100 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 
 use crate::channels::ComponentType;
+use crate::computation::v1::{ComponentRole, ComponentSemanticKind};
+
+/// Component categories in logs, including native processing roles.
+///
+/// Lifecycle events keep their separate [`ComponentType`] contract. The first
+/// five variants retain the existing log categories' serialized identities.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename = "ComponentType")]
+pub enum ComponentLogType {
+    Source,
+    Query,
+    Reaction,
+    BootstrapProvider,
+    IdentityProvider,
+    Transformer,
+    Sink,
+    Service,
+}
+
+impl ComponentLogType {
+    /// Canonical spelling used by tracing spans and scoped log keys.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Query => "query",
+            Self::Reaction => "reaction",
+            Self::BootstrapProvider => "bootstrap_provider",
+            Self::IdentityProvider => "identity_provider",
+            Self::Transformer => "transformer",
+            Self::Sink => "sink",
+            Self::Service => "service",
+        }
+    }
+
+    /// Parse a span or log-key category; unknown categories are not component logs.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "source" => Some(Self::Source),
+            "query" => Some(Self::Query),
+            "reaction" => Some(Self::Reaction),
+            "bootstrap_provider" => Some(Self::BootstrapProvider),
+            "identity_provider" => Some(Self::IdentityProvider),
+            "transformer" => Some(Self::Transformer),
+            "sink" => Some(Self::Sink),
+            "service" => Some(Self::Service),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn for_component(
+        role: ComponentRole,
+        semantic_kind: Option<ComponentSemanticKind>,
+    ) -> Self {
+        // Ordinary API adapters execute as services but keep their public category.
+        match (role, semantic_kind) {
+            (ComponentRole::Service, Some(ComponentSemanticKind::Source)) => Self::Source,
+            (ComponentRole::Service, Some(ComponentSemanticKind::Query)) => Self::Query,
+            (ComponentRole::Service, Some(ComponentSemanticKind::Reaction)) => Self::Reaction,
+            _ => role.into(),
+        }
+    }
+
+    pub(crate) fn legacy_category(&self) -> Self {
+        match self {
+            Self::Transformer | Self::Service => Self::Query,
+            Self::Sink => Self::Reaction,
+            _ => self.clone(),
+        }
+    }
+}
+
+impl From<ComponentType> for ComponentLogType {
+    fn from(value: ComponentType) -> Self {
+        match value {
+            ComponentType::Source => Self::Source,
+            ComponentType::Query => Self::Query,
+            ComponentType::Reaction => Self::Reaction,
+            ComponentType::BootstrapProvider => Self::BootstrapProvider,
+            ComponentType::IdentityProvider => Self::IdentityProvider,
+        }
+    }
+}
+
+impl From<ComponentRole> for ComponentLogType {
+    fn from(value: ComponentRole) -> Self {
+        match value {
+            ComponentRole::Source => Self::Source,
+            ComponentRole::Transformer => Self::Transformer,
+            ComponentRole::Query => Self::Query,
+            ComponentRole::Sink => Self::Sink,
+            ComponentRole::Service => Self::Service,
+        }
+    }
+}
 
 /// Default maximum number of log messages to retain per component.
 pub const DEFAULT_MAX_LOGS_PER_COMPONENT: usize = 100;
@@ -74,8 +168,8 @@ pub const DEFAULT_MAX_LOGS_PER_COMPONENT: usize = 100;
 pub struct ComponentLogKey {
     /// The DrasiLib instance ID (or empty string for legacy/default behavior)
     pub instance_id: String,
-    /// The type of component (Source, Query, Reaction)
-    pub component_type: ComponentType,
+    /// The component's log category, including its native processing role.
+    pub component_type: ComponentLogType,
     /// The component's ID within its DrasiLib instance
     pub component_id: String,
 }
@@ -84,12 +178,12 @@ impl ComponentLogKey {
     /// Create a new composite key.
     pub fn new(
         instance_id: impl Into<String>,
-        component_type: ComponentType,
+        component_type: impl Into<ComponentLogType>,
         component_id: impl Into<String>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            component_type,
+            component_type: component_type.into(),
             component_id: component_id.into(),
         }
     }
@@ -101,12 +195,7 @@ impl ComponentLogKey {
         match parts.len() {
             1 => None, // Legacy single-part key, can't reconstruct
             3 => {
-                let component_type = match parts[1].to_lowercase().as_str() {
-                    "source" => ComponentType::Source,
-                    "query" => ComponentType::Query,
-                    "reaction" => ComponentType::Reaction,
-                    _ => return None,
-                };
+                let component_type = ComponentLogType::parse(parts[1])?;
                 Some(Self {
                     instance_id: parts[0].to_string(),
                     component_type,
@@ -119,13 +208,7 @@ impl ComponentLogKey {
 
     /// Convert to string key for HashMap storage.
     pub fn to_string_key(&self) -> String {
-        let type_str = match self.component_type {
-            ComponentType::Source => "source",
-            ComponentType::Query => "query",
-            ComponentType::Reaction => "reaction",
-            ComponentType::BootstrapProvider => "bootstrap_provider",
-            ComponentType::IdentityProvider => "identity_provider",
-        };
+        let type_str = self.component_type.as_str();
         format!("{}:{}:{}", self.instance_id, type_str, self.component_id)
     }
 }
@@ -185,8 +268,8 @@ pub struct LogMessage {
     pub instance_id: String,
     /// ID of the component that emitted the log
     pub component_id: String,
-    /// Type of the component (Source, Query, Reaction)
-    pub component_type: ComponentType,
+    /// The component's log category, including its native processing role.
+    pub component_type: ComponentLogType,
 }
 
 impl LogMessage {
@@ -195,7 +278,7 @@ impl LogMessage {
         level: LogLevel,
         message: impl Into<String>,
         component_id: impl Into<String>,
-        component_type: ComponentType,
+        component_type: impl Into<ComponentLogType>,
     ) -> Self {
         Self::with_instance(level, message, "", component_id, component_type)
     }
@@ -206,7 +289,7 @@ impl LogMessage {
         message: impl Into<String>,
         instance_id: impl Into<String>,
         component_id: impl Into<String>,
-        component_type: ComponentType,
+        component_type: impl Into<ComponentLogType>,
     ) -> Self {
         Self {
             timestamp: Utc::now(),
@@ -214,7 +297,7 @@ impl LogMessage {
             message: message.into(),
             instance_id: instance_id.into(),
             component_id: component_id.into(),
-            component_type,
+            component_type: component_type.into(),
         }
     }
 
@@ -544,8 +627,8 @@ mod tests {
 
         assert_eq!(source_history.len(), 1);
         assert_eq!(query_history.len(), 1);
-        assert_eq!(source_history[0].component_type, ComponentType::Source);
-        assert_eq!(query_history[0].component_type, ComponentType::Query);
+        assert_eq!(source_history[0].component_type, ComponentLogType::Source);
+        assert_eq!(query_history[0].component_type, ComponentLogType::Query);
     }
 
     #[tokio::test]
@@ -590,8 +673,172 @@ mod tests {
         let key = ComponentLogKey::new("my-instance", ComponentType::Source, "my-source");
         assert_eq!(key.to_string_key(), "my-instance:source:my-source");
         assert_eq!(key.instance_id, "my-instance");
-        assert_eq!(key.component_type, ComponentType::Source);
+        assert_eq!(key.component_type, ComponentLogType::Source);
         assert_eq!(key.component_id, "my-source");
+    }
+
+    #[test]
+    fn all_log_categories_round_trip_through_scoped_keys() {
+        for category in [
+            ComponentLogType::Source,
+            ComponentLogType::Query,
+            ComponentLogType::Reaction,
+            ComponentLogType::BootstrapProvider,
+            ComponentLogType::IdentityProvider,
+            ComponentLogType::Transformer,
+            ComponentLogType::Sink,
+            ComponentLogType::Service,
+        ] {
+            let key = ComponentLogKey::new("instance", category.clone(), "component");
+            assert_eq!(
+                ComponentLogKey::from_str_key(&key.to_string_key()),
+                Some(key)
+            );
+            assert_eq!(
+                ComponentLogType::parse(&category.as_str().to_ascii_uppercase()),
+                Some(category)
+            );
+        }
+        assert!(ComponentLogKey::from_str_key("instance:unknown:component").is_none());
+        assert!(ComponentLogKey::from_str_key("component").is_none());
+    }
+
+    #[test]
+    fn native_roles_and_ordinary_service_adapters_have_distinct_log_categories() {
+        for role in [
+            ComponentRole::Source,
+            ComponentRole::Transformer,
+            ComponentRole::Query,
+            ComponentRole::Sink,
+            ComponentRole::Service,
+        ] {
+            assert_eq!(
+                ComponentLogType::for_component(role, None),
+                ComponentLogType::from(role)
+            );
+        }
+        for (kind, expected) in [
+            (ComponentSemanticKind::Source, ComponentLogType::Source),
+            (ComponentSemanticKind::Query, ComponentLogType::Query),
+            (ComponentSemanticKind::Reaction, ComponentLogType::Reaction),
+        ] {
+            assert_eq!(
+                ComponentLogType::for_component(ComponentRole::Service, Some(kind)),
+                expected
+            );
+        }
+        assert_eq!(
+            ComponentLogType::for_component(
+                ComponentRole::Sink,
+                Some(ComponentSemanticKind::Reaction)
+            ),
+            ComponentLogType::Sink
+        );
+        assert_eq!(
+            ComponentLogType::for_component(
+                ComponentRole::Transformer,
+                Some(ComponentSemanticKind::Query)
+            ),
+            ComponentLogType::Transformer
+        );
+    }
+
+    #[test]
+    fn legacy_log_serialization_is_unchanged() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename = "LogMessage")]
+        struct LegacyLogMessage {
+            timestamp: DateTime<Utc>,
+            level: LogLevel,
+            message: String,
+            instance_id: String,
+            component_id: String,
+            component_type: ComponentType,
+        }
+
+        for category in [
+            ComponentType::Source,
+            ComponentType::Query,
+            ComponentType::Reaction,
+            ComponentType::BootstrapProvider,
+            ComponentType::IdentityProvider,
+        ] {
+            let message = LogMessage::with_instance(
+                LogLevel::Info,
+                "retained message",
+                "instance",
+                "component",
+                category.clone(),
+            );
+            let legacy = LegacyLogMessage {
+                timestamp: message.timestamp,
+                level: message.level,
+                message: message.message.clone(),
+                instance_id: message.instance_id.clone(),
+                component_id: message.component_id.clone(),
+                component_type: category,
+            };
+            assert_eq!(
+                serde_json::to_vec(&message).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(
+                rmp_serde::to_vec(&message).unwrap(),
+                rmp_serde::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(
+                rmp_serde::to_vec_named(&message).unwrap(),
+                rmp_serde::to_vec_named(&legacy).unwrap()
+            );
+            assert_eq!(
+                bincode::serialize(&message).unwrap(),
+                bincode::serialize(&legacy).unwrap()
+            );
+            let decoded: LegacyLogMessage =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&message).unwrap()).unwrap();
+            assert_eq!(decoded.component_type, legacy.component_type);
+            let decoded: LogMessage =
+                rmp_serde::from_slice(&rmp_serde::to_vec(&legacy).unwrap()).unwrap();
+            assert_eq!(decoded.component_type, message.component_type);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_roles_keep_separate_history_live_streams_and_cleanup() {
+        let registry = ComponentLogRegistry::new();
+        for role in [
+            ComponentRole::Source,
+            ComponentRole::Transformer,
+            ComponentRole::Query,
+            ComponentRole::Sink,
+            ComponentRole::Service,
+        ] {
+            let key = ComponentLogKey::new("instance", role, "same-id");
+            let (history, mut live) = registry.subscribe_by_key(&key).await;
+            assert!(history.is_empty());
+            assert!(registry.try_log(LogMessage::with_instance(
+                LogLevel::Info,
+                key.component_type.as_str(),
+                "instance",
+                "same-id",
+                role,
+            )));
+            let message = live.try_recv().unwrap();
+            assert_eq!(message.component_type, ComponentLogType::from(role));
+            assert_eq!(registry.get_history_by_key(&key).await.len(), 1);
+        }
+        let transformer = ComponentLogKey::new("instance", ComponentRole::Transformer, "same-id");
+        registry.remove_component_by_key(&transformer).await;
+        assert_eq!(registry.log_count_by_key(&transformer).await, 0);
+        for role in [
+            ComponentRole::Source,
+            ComponentRole::Query,
+            ComponentRole::Sink,
+            ComponentRole::Service,
+        ] {
+            let key = ComponentLogKey::new("instance", role, "same-id");
+            assert_eq!(registry.log_count_by_key(&key).await, 1);
+        }
     }
 
     #[test]

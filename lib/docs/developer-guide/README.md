@@ -3040,6 +3040,20 @@ ID logged only as an arbitrary message field does not establish span identity.
 
 Use `subscribe_source_logs`, query/reaction equivalents or
 `subscribe_computation_logs` for recent history plus a live receiver.
+Native logs use their actual `Source`, `Transformer`, `Query`, `Sink` or
+`Service` role. `LogMessage.component_type` and `ComponentLogKey.component_type`
+use `ComponentLogType`, separate from the unchanged lifecycle-event
+`ComponentType`. Ordinary Source/Query/Reaction service adapters keep their
+existing labels, and existing log categories retain their serialized form.
+
+Pass `ComponentRole` or `ComponentLogType` to `subscribe_computation_logs`.
+Existing `ComponentType` constructor and subscription arguments remain accepted;
+the former Query category for transformers/services and Reaction category for
+sinks select the correct native stream, not a duplicate history. Returned
+messages always carry the actual log category. Unrelated categories are errors.
+Code constructing log fields directly or matching their type should use
+`ComponentLogType` (or convert an existing `ComponentType` with `.into()`).
+
 Handle broadcast lag explicitly rather than treating it as normal stream end.
 The global log worker uses a bounded channel and can drop entries when full;
 component logs are diagnostics, not a durable audit ledger.

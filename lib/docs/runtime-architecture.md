@@ -314,7 +314,7 @@ The fingerprint covers parsed Rust sources and all four scoped crate manifests.
 
 ## Alphabetical type inventory
 
-Generated from **364 source files**; **1186 named types**. Source fingerprint: `fnv1a64:30ae9a664bb535f0`.
+Generated from **364 source files**; **1187 named types**. Source fingerprint: `fnv1a64:f22c3405422fcf00`.
 
 Names below are definition-site paths, not duplicate public re-export paths. Block-local declarations use an explicit `<local@line>` lexical identifier because Rust provides no importable path for them. Traits and aliases are included, but are not extra runtime objects.
 
@@ -871,9 +871,9 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::runtime::component::RuntimeInstance` — struct; [source](../../lib/src/computation/runtime/component.rs#L49).
 - `drasi_lib::computation::runtime::component::Service` — struct; [source](../../lib/src/computation/runtime/component.rs#L126).
 - `drasi_lib::computation::runtime::events::Events` — struct; [source](../../lib/src/computation/runtime/events.rs#L22).
-- `drasi_lib::computation::runtime::native_query::NativeQuery` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L649).
+- `drasi_lib::computation::runtime::native_query::NativeQuery` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L640).
 - `drasi_lib::computation::runtime::native_query::NativeQueryUpdate` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L169).
-- `drasi_lib::computation::runtime::native_query::NativeReceiver` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L723).
+- `drasi_lib::computation::runtime::native_query::NativeReceiver` — struct; [source](../../lib/src/computation/runtime/native_query.rs#L714).
 - `drasi_lib::computation::runtime::query::LegacyReceiver` — struct; [source](../../lib/src/computation/runtime/query.rs#L759).
 - `drasi_lib::computation::runtime::query::ParentBinding` — struct; [source](../../lib/src/computation/runtime/query.rs#L85).
 - `drasi_lib::computation::runtime::query::QueryExecution` — struct; [source](../../lib/src/computation/runtime/query.rs#L126).
@@ -1428,17 +1428,18 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::metrics::reaction_metrics::ReactionMetrics` — struct; [source](../../lib/src/metrics/reaction_metrics.rs#L27).
 - `drasi_lib::metrics::reaction_metrics::ReactionMetricsSnapshot` — struct; [source](../../lib/src/metrics/reaction_metrics.rs#L126).
 - `drasi_lib::metrics::reaction_metrics::RecoveryPolicyKind` — enum; [source](../../lib/src/metrics/reaction_metrics.rs#L19).
-- `drasi_lib::observability::component_log::ComponentLogChannel` — struct; [source](../../lib/src/observability/component_log.rs#L231).
-- `drasi_lib::observability::component_log::ComponentLogKey` — struct; [source](../../lib/src/observability/component_log.rs#L69).
-- `drasi_lib::observability::component_log::ComponentLogRegistry` — struct; [source](../../lib/src/observability/component_log.rs#L271).
-- `drasi_lib::observability::component_log::LogLevel` — enum; [source](../../lib/src/observability/component_log.rs#L142).
-- `drasi_lib::observability::component_log::LogMessage` — struct; [source](../../lib/src/observability/component_log.rs#L172).
+- `drasi_lib::observability::component_log::ComponentLogChannel` — struct; [source](../../lib/src/observability/component_log.rs#L314).
+- `drasi_lib::observability::component_log::ComponentLogKey` — struct; [source](../../lib/src/observability/component_log.rs#L163).
+- `drasi_lib::observability::component_log::ComponentLogRegistry` — struct; [source](../../lib/src/observability/component_log.rs#L354).
+- `drasi_lib::observability::component_log::ComponentLogType` — enum; [source](../../lib/src/observability/component_log.rs#L67).
+- `drasi_lib::observability::component_log::LogLevel` — enum; [source](../../lib/src/observability/component_log.rs#L225).
+- `drasi_lib::observability::component_log::LogMessage` — struct; [source](../../lib/src/observability/component_log.rs#L255).
 - `drasi_lib::observability::event_history::ComponentEventChannel` — struct; [source](../../lib/src/observability/event_history.rs#L34).
 - `drasi_lib::observability::event_history::ComponentEventHistory` — struct; [source](../../lib/src/observability/event_history.rs#L82).
-- `drasi_lib::observability::tracing_layer::ComponentInfo` — struct; [source](../../lib/src/observability/tracing_layer.rs#L332).
-- `drasi_lib::observability::tracing_layer::ComponentInfoVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L352).
-- `drasi_lib::observability::tracing_layer::ComponentLogLayer` — struct; [source](../../lib/src/observability/tracing_layer.rs#L253).
-- `drasi_lib::observability::tracing_layer::MessageVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L411).
+- `drasi_lib::observability::tracing_layer::ComponentInfo` — struct; [source](../../lib/src/observability/tracing_layer.rs#L331).
+- `drasi_lib::observability::tracing_layer::ComponentInfoVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L351).
+- `drasi_lib::observability::tracing_layer::ComponentLogLayer` — struct; [source](../../lib/src/observability/tracing_layer.rs#L252).
+- `drasi_lib::observability::tracing_layer::MessageVisitor` — struct; [source](../../lib/src/observability/tracing_layer.rs#L405).
 - `drasi_lib::queries::config_hash::JoinIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L86).
 - `drasi_lib::queries::config_hash::QueryIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L46).
 - `drasi_lib::queries::config_hash::SourceIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L72).
@@ -1712,14 +1713,14 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation` | 7 | 0 |
 | `drasi_lib::computation::components` | 204 | 2 |
 | `drasi_lib::computation::instance` | 747 | 13 |
-| `drasi_lib::computation::instance_ops` | 388 | 1 |
+| `drasi_lib::computation::instance_ops` | 395 | 1 |
 | `drasi_lib::computation::internal` | 1 | 0 |
 | `drasi_lib::computation::internal::query_state` | 213 | 4 |
 | `drasi_lib::computation::runtime` | 1913 | 7 |
 | `drasi_lib::computation::runtime::component` | 345 | 4 |
 | `drasi_lib::computation::runtime::events` | 153 | 1 |
-| `drasi_lib::computation::runtime::inspection` | 737 | 0 |
-| `drasi_lib::computation::runtime::native_query` | 873 | 3 |
+| `drasi_lib::computation::runtime::inspection` | 747 | 0 |
+| `drasi_lib::computation::runtime::native_query` | 864 | 3 |
 | `drasi_lib::computation::runtime::query` | 872 | 6 |
 | `drasi_lib::computation::runtime::reaction` | 255 | 1 |
 | `drasi_lib::computation::runtime::snapshot` | 214 | 1 |
@@ -1743,7 +1744,7 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::computation::v1::graph` | 2479 | 21 |
 | `drasi_lib::computation::v1::graph::addition` | 893 | 4 |
 | `drasi_lib::computation::v1::graph::configuration` | 61 | 2 |
-| `drasi_lib::computation::v1::graph::controller` | 5334 | 23 |
+| `drasi_lib::computation::v1::graph::controller` | 5330 | 23 |
 | `drasi_lib::computation::v1::graph::controller::reconcile` | 3532 | 5 |
 | `drasi_lib::computation::v1::graph::execution` | 373 | 6 |
 | `drasi_lib::computation::v1::graph::recovery` | 498 | 1 |
@@ -1835,10 +1836,10 @@ The interactive companion colors these same **exclusive** namespace totals. Chil
 | `drasi_lib::metrics::query_metrics` | 96 | 2 |
 | `drasi_lib::metrics::reaction_metrics` | 96 | 3 |
 | `drasi_lib::observability` | 8 | 0 |
-| `drasi_lib::observability::component_log` | 236 | 5 |
+| `drasi_lib::observability::component_log` | 305 | 6 |
 | `drasi_lib::observability::event_history` | 138 | 2 |
 | `drasi_lib::observability::logging` | 10 | 0 |
-| `drasi_lib::observability::tracing_layer` | 256 | 4 |
+| `drasi_lib::observability::tracing_layer` | 250 | 4 |
 | `drasi_lib::profiling` | 1 | 0 |
 | `drasi_lib::queries` | 25 | 0 |
 | `drasi_lib::queries::base` | 2 | 0 |

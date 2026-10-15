@@ -16,7 +16,7 @@ use super::*;
 use crate::{
     channels::{ComponentEvent, ComponentType},
     config::{QueryRuntime, ReactionRuntime, SourceRuntime},
-    observability::{ComponentLogKey, LogMessage},
+    observability::{ComponentLogKey, ComponentLogType, LogMessage},
 };
 
 pub(super) fn status(record: &Record, observed: &ObservedComponent) -> ComponentStatus {
@@ -560,6 +560,24 @@ impl Runtime {
         self.native_query_configuration_at(&publication, id)
     }
 
+    pub(crate) fn component_log_key(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        id: &str,
+    ) -> anyhow::Result<ComponentLogKey> {
+        let node = publication
+            .desired
+            .nodes
+            .iter()
+            .find(|node| node.descriptor.id().as_str() == id)
+            .ok_or_else(|| crate::error::ComponentNotFoundError::new("component", id))?;
+        Ok(ComponentLogKey::new(
+            &self.config.id,
+            ComponentLogType::for_component(node.role, node.descriptor.semantic_kind()),
+            id,
+        ))
+    }
+
     pub(crate) async fn subscribe_logs(
         &self,
         id: &str,
@@ -578,16 +596,9 @@ impl Runtime {
             },
         )
         .await?;
-        let component_type = match kind {
-            "source" => ComponentType::Source,
-            "query" => ComponentType::Query,
-            "reaction" => ComponentType::Reaction,
-            _ => anyhow::bail!("unsupported component log kind {kind}"),
-        };
-        Ok(self
-            .logs
-            .subscribe_by_key(&ComponentLogKey::new(&self.config.id, component_type, id))
-            .await)
+        let publication = self.control()?.registry_snapshot();
+        let key = self.component_log_key(&publication, id)?;
+        Ok(self.logs.subscribe_by_key(&key).await)
     }
 
     pub(crate) async fn subscribe_events(

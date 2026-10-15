@@ -3010,12 +3010,8 @@ impl Operations {
         let span = tracing::info_span!("computation_component",
             instance_id = %graph.execution_scope,
             component_id = %node.descriptor.id(),
-            component_type = match node.role {
-                ComponentRole::Source => "source",
-                ComponentRole::Transformer | ComponentRole::Query => "query",
-                ComponentRole::Sink => "reaction",
-                ComponentRole::Service => "query",
-            },
+            component_type = crate::observability::ComponentLogType::for_component(
+                node.role, node.descriptor.semantic_kind()).as_str(),
             generation = generation.0);
         update(graph, |state| {
             let observed = state.components.get_mut(&slot.id).expect("component");

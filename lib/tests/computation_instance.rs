@@ -260,6 +260,170 @@ async fn managed_driver_runs_and_restarts_on_multiple_threads() {
         .expect("deadlock");
 }
 
+struct RoleLogger(ComponentDescriptor);
+
+#[async_trait]
+impl ComputationComponent for RoleLogger {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    async fn start(&mut self) -> anyhow::Result<()> {
+        tracing::info!("native role started");
+        Ok(())
+    }
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSource for RoleLogger {
+    async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        std::future::pending().await
+    }
+}
+
+#[async_trait]
+impl Transformer for RoleLogger {
+    async fn transform(&mut self, _input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl EnvelopeSink for RoleLogger {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ComputationService for RoleLogger {
+    async fn run(&mut self) -> anyhow::Result<()> {
+        std::future::pending().await
+    }
+}
+
+async fn native_role_logs(instance_id: &str) {
+    use drasi_lib::observability::{
+        get_or_init_global_registry, ComponentLogKey, ComponentLogType,
+    };
+    use drasi_lib::ComponentType;
+
+    let batch = ComponentBatch::builder()
+        .source(Box::new(RoleLogger(descriptor("source", &[], &["out"]))))
+        .transformer(Box::new(RoleLogger(descriptor(
+            "transformer",
+            &["in"],
+            &["out"],
+        ))))
+        .query(Box::new(RoleLogger(descriptor("query", &["in"], &["out"]))))
+        .sink(Box::new(RoleLogger(
+            descriptor("sink", &["in"], &[]).with_semantic_kind(ComponentSemanticKind::Reaction),
+        )))
+        .service(Box::new(RoleLogger(descriptor("service", &[], &[]))))
+        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(endpoint("transformer", "out"), stream("transformer"))
+        .bind_stream(endpoint("query", "out"), stream("query"))
+        .connect(
+            edge("source", "transformer"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("transformer", "query"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .connect(
+            edge("query", "sink"),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let core = DrasiLib::builder()
+        .with_id(instance_id)
+        .with_components(batch)
+        .build()
+        .await
+        .unwrap();
+    let roles = [
+        ("source", ComponentRole::Source),
+        ("transformer", ComponentRole::Transformer),
+        ("query", ComponentRole::Query),
+        ("sink", ComponentRole::Sink),
+        ("service", ComponentRole::Service),
+    ];
+    let mut receivers = Vec::new();
+    for (id, role) in roles {
+        let (_, receiver) = core.subscribe_computation_logs(role, id).await.unwrap();
+        receivers.push((id, role, receiver));
+    }
+    for (id, role, former_category) in [
+        (
+            "transformer",
+            ComponentRole::Transformer,
+            ComponentType::Query,
+        ),
+        ("sink", ComponentRole::Sink, ComponentType::Reaction),
+        ("service", ComponentRole::Service, ComponentType::Query),
+    ] {
+        let (_, receiver) = core
+            .subscribe_computation_logs(former_category, id)
+            .await
+            .unwrap();
+        receivers.push((id, role, receiver));
+    }
+    let (_, reaction_api) = core.subscribe_reaction_logs("sink").await.unwrap();
+    receivers.push(("sink", ComponentRole::Sink, reaction_api));
+    assert!(core
+        .subscribe_computation_logs(ComponentRole::Source, "service")
+        .await
+        .is_err());
+    core.start().await.unwrap();
+    for (id, role, mut receiver) in receivers {
+        let message = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("native role log was dropped")
+            .unwrap();
+        assert_eq!(message.instance_id, instance_id);
+        assert_eq!(message.component_id, id);
+        assert_eq!(message.component_type, ComponentLogType::from(role));
+        assert_eq!(message.message, "native role started");
+    }
+    for (id, role) in roles {
+        let (history, _) = core.subscribe_computation_logs(role, id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].component_type, ComponentLogType::from(role));
+    }
+    core.remove_reaction("sink", false).await.unwrap();
+    let key = ComponentLogKey::new(instance_id, ComponentRole::Sink, "sink");
+    assert_eq!(
+        get_or_init_global_registry().log_count_by_key(&key).await,
+        0,
+        "native removal must clear the actual role's log history"
+    );
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_roles_preserve_log_history_and_streams_on_current_thread() {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        native_role_logs("role-logs-current"),
+    )
+    .await
+    .expect("native log qualification stalled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_roles_preserve_log_history_and_streams_on_multiple_threads() {
+    tokio::time::timeout(Duration::from_secs(15), native_role_logs("role-logs-multi"))
+        .await
+        .expect("native log qualification stalled");
+}
+
 #[tokio::test]
 async fn instance_stop_preserves_typed_member_failure_and_allows_cleanup_retry() {
     let calls = Arc::new(Calls::default());

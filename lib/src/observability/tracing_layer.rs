@@ -58,8 +58,7 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-use super::component_log::{ComponentLogRegistry, LogLevel, LogMessage};
-use crate::channels::ComponentType;
+use super::component_log::{ComponentLogRegistry, ComponentLogType, LogLevel, LogMessage};
 
 use std::sync::OnceLock;
 
@@ -334,7 +333,7 @@ where
 struct ComponentInfo {
     instance_id: String,
     component_id: String,
-    component_type: ComponentType,
+    component_type: ComponentLogType,
 }
 
 /// Extract component info from a span's cached extensions.
@@ -398,14 +397,9 @@ impl ComponentInfoVisitor {
     }
 }
 
-/// Parse a component type string into a ComponentType enum.
-fn parse_component_type(s: &str) -> Option<ComponentType> {
-    match s.to_lowercase().as_str() {
-        "source" => Some(ComponentType::Source),
-        "query" => Some(ComponentType::Query),
-        "reaction" => Some(ComponentType::Reaction),
-        _ => None,
-    }
+/// Parse a log category without changing the lifecycle-event type contract.
+fn parse_component_type(s: &str) -> Option<ComponentLogType> {
+    ComponentLogType::parse(s)
 }
 
 /// Visitor for extracting the message from an event.
@@ -465,13 +459,31 @@ mod tests {
 
     #[test]
     fn test_parse_component_type() {
-        assert_eq!(parse_component_type("source"), Some(ComponentType::Source));
-        assert_eq!(parse_component_type("Source"), Some(ComponentType::Source));
-        assert_eq!(parse_component_type("SOURCE"), Some(ComponentType::Source));
-        assert_eq!(parse_component_type("query"), Some(ComponentType::Query));
+        assert_eq!(
+            parse_component_type("source"),
+            Some(ComponentLogType::Source)
+        );
+        assert_eq!(
+            parse_component_type("Source"),
+            Some(ComponentLogType::Source)
+        );
+        assert_eq!(
+            parse_component_type("SOURCE"),
+            Some(ComponentLogType::Source)
+        );
+        assert_eq!(parse_component_type("query"), Some(ComponentLogType::Query));
         assert_eq!(
             parse_component_type("reaction"),
-            Some(ComponentType::Reaction)
+            Some(ComponentLogType::Reaction)
+        );
+        assert_eq!(
+            parse_component_type("transformer"),
+            Some(ComponentLogType::Transformer)
+        );
+        assert_eq!(parse_component_type("SINK"), Some(ComponentLogType::Sink));
+        assert_eq!(
+            parse_component_type("Service"),
+            Some(ComponentLogType::Service)
         );
         assert_eq!(parse_component_type("unknown"), None);
     }

@@ -161,7 +161,7 @@ pub use channels::SubscriptionResponse;
 pub use channels::DispatchMode;
 
 /// Log level and log message types for component log streaming
-pub use observability::{LogLevel, LogMessage};
+pub use observability::{ComponentLogType, LogLevel, LogMessage};
 
 /// Tracing initialization function - call to set up component log routing
 pub use observability::get_or_init_global_registry;

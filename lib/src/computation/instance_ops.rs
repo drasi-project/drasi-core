@@ -348,10 +348,15 @@ impl DrasiLib {
         Ok(self.computation_control()?.inspector())
     }
     /// Read and subscribe to the instance's component log registry.
-    /// Native transformers use Query and sinks use Reaction as log categories.
+    ///
+    /// Pass a native [`super::v1::ComponentRole`] or an explicit
+    /// [`crate::observability::ComponentLogType`]. Older `ComponentType` arguments
+    /// remain accepted, including Query for transformers/services and Reaction
+    /// for sinks, but returned messages report the actual native role.
+    /// A category unrelated to the component is rejected.
     pub async fn subscribe_computation_logs(
         &self,
-        component_type: crate::channels::ComponentType,
+        component_type: impl Into<crate::observability::ComponentLogType>,
         component_id: &str,
     ) -> Result<(
         Vec<crate::observability::LogMessage>,
@@ -360,11 +365,18 @@ impl DrasiLib {
         self.computation_component(component_id)?;
         super::v1::ComponentId::try_new(component_id)
             .map_err(|error| DrasiError::invalid_config(error.to_string()).with_cause(error))?;
-        let key = crate::observability::ComponentLogKey::new(
-            self.config.id.clone(),
-            component_type,
-            component_id,
-        );
+        let publication = self.computation_control()?.registry_snapshot();
+        let key = self
+            .computation_runtime
+            .component_log_key(&publication, component_id)?;
+        let requested = component_type.into();
+        if requested != key.component_type && requested != key.component_type.legacy_category() {
+            return Err(DrasiError::invalid_config(format!(
+                "component '{component_id}' logs use '{}', not '{}'",
+                key.component_type.as_str(),
+                requested.as_str()
+            )));
+        }
         Ok(self.log_registry.subscribe_by_key(&key).await)
     }
     pub async fn computation_info(&self) -> Result<ComputationInfo> {

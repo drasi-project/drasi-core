@@ -202,6 +202,7 @@ impl Runtime {
             _ => anyhow::bail!("unsupported component kind {kind}"),
         };
         let observation = self.component_observation_at(&publication, id, kind)?;
+        let log_key = self.component_log_key(&publication, id)?;
         let query = ComponentId::try_new(id)?;
         let members = if kind == "query" {
             query_members(&publication, &query)
@@ -299,17 +300,7 @@ impl Runtime {
             report.committed && report.summary == OperationSummary::Completed,
             "{kind} removal is incomplete: {report:?}"
         );
-        self.logs
-            .remove_component_by_key(&crate::observability::ComponentLogKey::new(
-                self.config.id.clone(),
-                match kind {
-                    "source" => crate::channels::ComponentType::Source,
-                    "query" => crate::channels::ComponentType::Query,
-                    _ => crate::channels::ComponentType::Reaction,
-                },
-                id,
-            ))
-            .await;
+        self.logs.remove_component_by_key(&log_key).await;
         self.notify();
         Ok(())
     }
