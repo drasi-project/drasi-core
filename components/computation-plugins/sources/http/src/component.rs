@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::{
-    config::SourceConfig,
-    ingress::{Ingress, SourceRuntime},
+    config::HttpSourceConfig,
+    ingress::{Ingress as SharedIngress, SourceRuntime},
     wire::{self, HttpSourceChange},
 };
 use anyhow::Result;
@@ -24,38 +24,69 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-pub(crate) struct HttpSource(SourceRuntime);
+pub(crate) struct HttpSource {
+    runtime: SourceRuntime,
+    config: HttpSourceConfig,
+}
 impl HttpSource {
     pub fn new(
         descriptor: ComponentDescriptor,
-        config: SourceConfig,
+        config: HttpSourceConfig,
         scope: Option<&Scope>,
         admission: Option<NativeAdmission>,
     ) -> Result<Self> {
-        Ok(Self(SourceRuntime::new(
-            descriptor, config, scope, admission,
-        )?))
+        Ok(Self {
+            runtime: SourceRuntime::new(descriptor, config.ingress(), scope, admission)?,
+            config,
+        })
     }
 }
 #[async_trait]
 impl ComputationComponent for HttpSource {
     fn descriptor(&self) -> &ComponentDescriptor {
-        &self.0.descriptor
+        &self.runtime.descriptor
     }
     fn configuration(&self) -> Result<serde_json::Value> {
-        self.0.configuration()
+        Ok(serde_json::to_value(&self.config)?)
     }
     async fn start(&mut self) -> Result<()> {
-        self.0.start(serve).await
+        let max_batch_events = self
+            .config
+            .max_batch_events
+            .expect("validated HTTP batch limit");
+        self.runtime
+            .start(move |listener, ingress| {
+                serve(
+                    listener,
+                    Arc::new(Ingress {
+                        shared: ingress,
+                        max_batch_events,
+                    }),
+                )
+            })
+            .await
     }
     async fn stop(&mut self) -> Result<()> {
-        self.0.stop().await
+        self.runtime.stop().await
     }
 }
 #[async_trait]
 impl EnvelopeSource for HttpSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
-        self.0.next().await
+        self.runtime.next().await
+    }
+}
+
+pub(crate) struct Ingress {
+    shared: Arc<SharedIngress>,
+    pub max_batch_events: usize,
+}
+
+impl std::ops::Deref for Ingress {
+    type Target = SharedIngress;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared
     }
 }
 
@@ -98,9 +129,7 @@ async fn batch(
     Path(source): Path<String>,
     Json(batch): Json<Batch>,
 ) -> Response {
-    if batch.events.is_empty()
-        || batch.events.len() > ingress.config.max_batch_events.expect("HTTP config")
-    {
+    if batch.events.is_empty() || batch.events.len() > ingress.max_batch_events {
         return failure(
             StatusCode::BAD_REQUEST,
             "batch count exceeds configured maxBatchEvents or is empty",

@@ -1,5 +1,8 @@
 # Native gRPC sink
 
+`GrpcSinkConfig`, `OutputFormat` and their validation live in this crate's
+`config` module. The component also owns its `proto_item` output conversion.
+
 `drasi-computation-sink-grpc` provides only `drasi.network/grpc-sink`
 (implementation `"1"`, configuration `1`).
 

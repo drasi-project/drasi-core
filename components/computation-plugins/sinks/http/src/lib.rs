@@ -2,9 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 mod component;
+pub mod config;
 pub mod delivery;
 
-use drasi_computation_network_common::{config, wire};
+use drasi_computation_network_common::wire;
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
     CreatedComponent, Factory, FactoryMetadata, PluginDefinition,

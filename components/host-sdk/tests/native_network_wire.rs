@@ -4,10 +4,13 @@
 use anyhow::{Context, Result};
 use chrono::TimeZone;
 use drasi_computation_network_common::{
-    config::{GrpcSinkConfig, HttpSinkConfig, OutputFormat, SourceConfig},
     proto::{reaction, source},
     wire,
 };
+use drasi_computation_sink_grpc::{proto_item, GrpcSinkConfig, OutputFormat};
+use drasi_computation_sink_http::HttpSinkConfig;
+use drasi_computation_source_grpc::GrpcSourceConfig;
+use drasi_computation_source_http::HttpSourceConfig;
 use drasi_core::{
     evaluation::{context::QueryPartEvaluationContext, variable_value::VariableValue},
     models::{Element, ElementValue, SourceChange},
@@ -228,7 +231,7 @@ fn query_output_matches_legacy_http_dtos_and_grpc_canonical_fields() -> Result<(
     assert!(actual[3].get("before").is_none());
     assert_eq!(actual[4]["before"], json!({"value":2}));
     for notification in &notifications {
-        let item = wire::proto_item(notification, OutputFormat::CanonicalJson)?;
+        let item = proto_item(notification, OutputFormat::CanonicalJson)?;
         assert_eq!(item.sequence, 42);
         assert_eq!(item.row_signature, notification.row_signature);
         assert_eq!(
@@ -256,13 +259,13 @@ fn query_output_matches_legacy_http_dtos_and_grpc_canonical_fields() -> Result<(
                 &expected_payload
             ))
         );
-        assert!(wire::proto_item(notification, OutputFormat::Proto)?
+        assert!(proto_item(notification, OutputFormat::Proto)?
             .payload
             .is_none());
     }
 
     assert_eq!(
-        wire::proto_item(&notifications[2], OutputFormat::Proto)?.item_type,
+        proto_item(&notifications[2], OutputFormat::Proto)?.item_type,
         reaction::QueryResultItemType::Delete as i32
     );
     assert!(wire::notifications(&input, "wrong", &StreamId::try_new("q/out")?).is_err());
@@ -305,11 +308,11 @@ fn native_sse_preserves_the_browser_protocol_and_query_identity() -> Result<()> 
 #[test]
 fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<()> {
     assert_eq!(
-        SourceConfig::parse(json!({"stream":"facilities-db/out"}), false)?.port,
+        HttpSourceConfig::from_value(json!({"stream":"facilities-db/out"}))?.port,
         9000
     );
     assert_eq!(
-        SourceConfig::parse(json!({"stream":"facilities-db/out"}), true)?.port,
+        GrpcSourceConfig::from_value(json!({"stream":"facilities-db/out"}))?.port,
         50051
     );
     for config in [
@@ -318,7 +321,7 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
         json!({"stream":"s","durability":{}}),
         json!({"stream":"s","timeoutMs":0}),
     ] {
-        assert!(SourceConfig::parse(config, false).is_err());
+        assert!(HttpSourceConfig::from_value(config).is_err());
     }
     let http =
         HttpSinkConfig::parse(json!({"queryId":"q","url":"http://localhost:9001/reaction"}))?;

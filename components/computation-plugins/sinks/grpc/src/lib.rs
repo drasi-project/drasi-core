@@ -2,8 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 mod component;
+pub mod config;
+mod wire;
 
-use drasi_computation_network_common::{config, wire};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
     CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
@@ -16,6 +17,7 @@ use std::sync::Arc;
 
 pub use config::{FailurePolicy, GrpcSinkConfig, OutputFormat};
 pub use drasi_computation_network_common::proto;
+pub use wire::proto_item;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const GRPC_SINK: &str = "drasi.network/grpc-sink";

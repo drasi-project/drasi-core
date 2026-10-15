@@ -12,7 +12,7 @@ ingress = []
 http-source = ["ingress", "dep:drasi-http-common"]
 grpc-source = ["ingress", "dep:drasi-grpc-common", "drasi-grpc-common/source", "dep:prost-types"]
 http-sink = ["dep:reqwest"]
-grpc-sink = ["dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:prost-types", "dep:reqwest", "dep:tonic"]
+grpc-sink = ["dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:reqwest"]
 
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
@@ -29,7 +29,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tonic = { version = "0.14", optional = true }
 
 [lints]
 workspace = true

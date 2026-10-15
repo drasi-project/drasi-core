@@ -21,9 +21,14 @@ kind = "sink-grpc"
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-network-common = { workspace = true, features = ["grpc-sink"] }
+drasi-grpc-common = { workspace = true, features = ["reaction"] }
 drasi-lib = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
+chrono = "0.4"
+prost-types = "0.14"
+reqwest = { version = "0.12", default-features = false }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["time"] }
 tonic = "0.14"

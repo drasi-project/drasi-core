@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::{
-    config::SourceConfig,
+    config::GrpcSourceConfig,
     ingress::{Ingress, SourceRuntime},
     proto::source,
     wire,
@@ -18,38 +18,42 @@ use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tonic::{Request, Response, Status};
 
-pub(crate) struct GrpcSource(SourceRuntime);
+pub(crate) struct GrpcSource {
+    runtime: SourceRuntime,
+    config: GrpcSourceConfig,
+}
 impl GrpcSource {
     pub fn new(
         descriptor: ComponentDescriptor,
-        config: SourceConfig,
+        config: GrpcSourceConfig,
         scope: Option<&Scope>,
         admission: Option<NativeAdmission>,
     ) -> Result<Self> {
-        Ok(Self(SourceRuntime::new(
-            descriptor, config, scope, admission,
-        )?))
+        Ok(Self {
+            runtime: SourceRuntime::new(descriptor, config.ingress(), scope, admission)?,
+            config,
+        })
     }
 }
 #[async_trait]
 impl ComputationComponent for GrpcSource {
     fn descriptor(&self) -> &ComponentDescriptor {
-        &self.0.descriptor
+        &self.runtime.descriptor
     }
     fn configuration(&self) -> Result<serde_json::Value> {
-        self.0.configuration()
+        Ok(serde_json::to_value(&self.config)?)
     }
     async fn start(&mut self) -> Result<()> {
-        self.0.start(serve).await
+        self.runtime.start(serve).await
     }
     async fn stop(&mut self) -> Result<()> {
-        self.0.stop().await
+        self.runtime.stop().await
     }
 }
 #[async_trait]
 impl EnvelopeSource for GrpcSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
-        self.0.next().await
+        self.runtime.next().await
     }
 }
 

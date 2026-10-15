@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::{
+    component::Ingress,
     durable::invalid,
-    ingress::Ingress,
     wire::{self, HttpSourceChange},
 };
 use axum::{
@@ -195,8 +195,7 @@ async fn submit(
 ) -> Response {
     let result = async {
         check(ingress, source)?;
-        if events.is_empty() || events.len() > ingress.config.max_batch_events.expect("HTTP config")
-        {
+        if events.is_empty() || events.len() > ingress.max_batch_events {
             return Err(invalid("batch is empty or exceeds maxBatchEvents"));
         }
         let changes = events

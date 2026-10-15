@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use crate::config::SourceConfig;
+use crate::config::IngressConfig;
 use anyhow::{Context, Result};
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use drasi_core::models::SourceChange;
@@ -25,7 +25,7 @@ pub struct AdmissionError {
     pub error: anyhow::Error,
 }
 pub struct Ingress {
-    pub config: SourceConfig,
+    pub config: IngressConfig,
     pub cancel: CancellationToken,
     sender: Option<mpsc::Sender<OutputEnvelope>>,
     mode: AdmissionMode,
@@ -136,17 +136,18 @@ impl Drop for Running {
 
 pub struct SourceRuntime {
     pub descriptor: ComponentDescriptor,
-    pub config: SourceConfig,
+    pub config: IngressConfig,
     mode: AdmissionMode,
     running: Option<Running>,
 }
 impl SourceRuntime {
     pub fn new(
         descriptor: ComponentDescriptor,
-        config: SourceConfig,
+        config: IngressConfig,
         scope: Option<&Scope>,
         admission: Option<NativeAdmission>,
     ) -> Result<Self> {
+        config.validate()?;
         let mode = match admission {
             Some(service) => {
                 anyhow::ensure!(
@@ -310,9 +311,6 @@ impl SourceRuntime {
         self.running = None;
         Ok(())
     }
-    pub fn configuration(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(&self.config)?)
-    }
 }
 
 #[cfg(test)]
@@ -324,10 +322,15 @@ mod tests {
     fn runtime() -> Result<SourceRuntime> {
         SourceRuntime::new(
             ComponentDescriptor::try_new(ComponentId::try_new("test")?, vec![])?,
-            SourceConfig::parse(
-                serde_json::json!({"stream":"test","host":"127.0.0.1","port":0}),
-                false,
-            )?,
+            IngressConfig {
+                stream: drasi_lib::computation::v1::StreamId::try_new("test")?,
+                source_id: "facilities-db".into(),
+                host: "127.0.0.1".into(),
+                port: 0,
+                timeout_ms: 60_000,
+                ingress_capacity: 1024,
+                max_message_bytes: 2 * 1024 * 1024,
+            },
             None,
             None,
         )

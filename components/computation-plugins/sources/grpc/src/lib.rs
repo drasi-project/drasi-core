@@ -2,9 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 mod component;
+pub mod config;
 mod durable_grpc;
 
-use drasi_computation_network_common::{config, durable, ingress, wire};
+use drasi_computation_network_common::{durable, ingress, wire};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
     CreatedComponent, Factory, FactoryMetadata, NativeAdmission, PluginDefinition,
@@ -15,7 +16,9 @@ use drasi_lib::computation::v1::{
 };
 use std::sync::Arc;
 
-pub use config::SourceConfig;
+pub use config::GrpcSourceConfig;
+/// Compatibility name for this component's gRPC configuration.
+pub type SourceConfig = GrpcSourceConfig;
 pub mod proto {
     pub use drasi_grpc_common::source;
     pub mod admission {
@@ -88,7 +91,7 @@ impl Factory for GrpcSourceFactory {
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Source(Box::new(component::GrpcSource::new(
             self.metadata().descriptor(request.id.clone())?,
-            SourceConfig::parse(request.configuration.clone(), true)?,
+            GrpcSourceConfig::from_value(request.configuration.clone())?,
             request.scope.as_ref(),
             admission,
         )?))

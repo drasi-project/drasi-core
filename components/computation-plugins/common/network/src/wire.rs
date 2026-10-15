@@ -6,8 +6,6 @@
 
 #[cfg(feature = "grpc-source")]
 use crate::proto::source;
-#[cfg(feature = "grpc-sink")]
-use crate::{config::OutputFormat, proto::reaction};
 #[cfg(any(feature = "http-source", feature = "grpc-source"))]
 use anyhow::Context;
 use anyhow::{ensure, Result};
@@ -371,46 +369,4 @@ pub fn notifications(
         });
     }
     Ok(output)
-}
-
-#[cfg(feature = "grpc-sink")]
-pub fn proto_item(
-    notification: &Notification,
-    format: OutputFormat,
-) -> Result<reaction::QueryResultItem> {
-    use drasi_grpc_common::convert_json_to_proto_struct;
-    let timestamp = chrono::DateTime::parse_from_rfc3339(&notification.timestamp)?;
-    let payload = if matches!(format, OutputFormat::CanonicalJson) {
-        let mut canonical = serde_json::to_value(notification)?;
-        canonical["rowSignature"] = Value::from(notification.row_signature);
-        Some(convert_json_to_proto_struct(&canonical))
-    } else {
-        None
-    };
-    Ok(reaction::QueryResultItem {
-        item_type: match notification.operation {
-            Operation::Add => reaction::QueryResultItemType::Add,
-            Operation::Update => reaction::QueryResultItemType::Update,
-            Operation::Delete => reaction::QueryResultItemType::Delete,
-        } as i32,
-        row_signature: notification.row_signature,
-        before: notification
-            .before
-            .as_ref()
-            .map(convert_json_to_proto_struct),
-        after: notification
-            .after
-            .as_ref()
-            .map(convert_json_to_proto_struct),
-        sequence: notification.sequence_id,
-        timestamp: Some(prost_types::Timestamp {
-            seconds: timestamp.timestamp(),
-            nanos: timestamp.timestamp_subsec_nanos() as i32,
-        }),
-        metadata: notification
-            .metadata
-            .as_ref()
-            .map(convert_json_to_proto_struct),
-        payload,
-    })
 }

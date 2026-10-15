@@ -3,6 +3,10 @@
 `drasi-computation-source-grpc` provides only `drasi.network/grpc-source`
 (implementation `"1"`, configuration `1`).
 
+`GrpcSourceConfig` and its validation live in this crate's `config` module.
+Use `GrpcSourceConfig::from_value` for JSON settings; `SourceConfig` remains an
+import-compatible name.
+
 ```sh
 cargo build -p drasi-computation-source-grpc --features dynamic-plugin
 ```

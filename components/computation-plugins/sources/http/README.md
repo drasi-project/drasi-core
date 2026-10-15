@@ -3,6 +3,10 @@
 `drasi-computation-source-http` provides only `drasi.network/http-source`
 (implementation `"1"`, configuration `1`).
 
+`HttpSourceConfig` and its validation live in this crate's `config` module.
+Use `HttpSourceConfig::from_value` for JSON settings; `SourceConfig` remains an
+import-compatible name.
+
 ```sh
 cargo build -p drasi-computation-source-http --features dynamic-plugin
 ```

@@ -2,9 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 mod component;
+pub mod config;
 mod durable_http;
 
-use drasi_computation_network_common::{config, durable, ingress, wire};
+use drasi_computation_network_common::{durable, ingress, wire};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
     CreatedComponent, Factory, FactoryMetadata, NativeAdmission, PluginDefinition,
@@ -15,7 +16,9 @@ use drasi_lib::computation::v1::{
 };
 use std::sync::Arc;
 
-pub use config::SourceConfig;
+pub use config::HttpSourceConfig;
+/// Compatibility name for this component's HTTP configuration.
+pub type SourceConfig = HttpSourceConfig;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const HTTP_SOURCE: &str = "drasi.network/http-source";
@@ -83,7 +86,7 @@ impl Factory for HttpSourceFactory {
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Source(Box::new(component::HttpSource::new(
             self.metadata().descriptor(request.id.clone())?,
-            SourceConfig::parse(request.configuration.clone(), false)?,
+            HttpSourceConfig::from_value(request.configuration.clone())?,
             request.scope.as_ref(),
             admission,
         )?))

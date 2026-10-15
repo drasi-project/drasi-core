@@ -56,6 +56,9 @@ workspace = true
 [dev-dependencies]
 drasi-computation-network-common = { workspace = true, features = ["http-source", "grpc-source", "http-sink", "grpc-sink"] }
 drasi-computation-source-grpc = { workspace = true }
+drasi-computation-source-http = { workspace = true }
+drasi-computation-sink-http = { workspace = true }
+drasi-computation-sink-grpc = { workspace = true }
 drasi-computation-sink-sse = { workspace = true }
 drasi-source-http = { path = "../sources/http" }
 drasi-source-grpc = { path = "../sources/grpc" }

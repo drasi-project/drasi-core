@@ -1,5 +1,9 @@
 # Native HTTP sink
 
+`HttpSinkConfig` and its defaults, URL/header checks and parsing live in this
+crate's `config` module. Shared network code supplies only common validation
+and delivery-policy helpers.
+
 `drasi-computation-sink-http` provides only `drasi.network/http-sink`
 (implementation `"1"`, configuration `1`).
 
