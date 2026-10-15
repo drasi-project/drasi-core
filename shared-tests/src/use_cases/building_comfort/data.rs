@@ -103,3 +103,85 @@ pub fn get_bootstrap_data() -> Vec<SourceChange> {
 
     result
 }
+
+fn tutorial_node(
+    id: &str,
+    label: &str,
+    properties: serde_json::Value,
+    effective_from: u64,
+) -> Element {
+    Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("facilities", id),
+            labels: Arc::new([Arc::from(label)]),
+            effective_from,
+        },
+        properties: ElementPropertyMap::from(properties),
+    }
+}
+
+pub fn insert_tutorial_node(
+    id: &str,
+    label: &str,
+    properties: serde_json::Value,
+    effective_from: u64,
+) -> SourceChange {
+    SourceChange::Insert {
+        element: tutorial_node(id, label, properties, effective_from),
+    }
+}
+
+pub fn update_tutorial_node(id: &str, label: &str, properties: serde_json::Value) -> SourceChange {
+    SourceChange::Update {
+        element: tutorial_node(id, label, properties, 2000),
+    }
+}
+
+pub fn delete_tutorial_node(id: &str) -> SourceChange {
+    SourceChange::Delete {
+        metadata: ElementMetadata {
+            reference: ElementReference::new("facilities", id),
+            labels: Arc::new([]),
+            effective_from: 3000,
+        },
+    }
+}
+
+pub fn tutorial_room_properties(floor: usize, room: usize, broken: bool) -> serde_json::Value {
+    let (temperature, humidity, co2) = if broken { (40, 20, 700) } else { (70, 40, 10) };
+    json!({
+        "id": format!("room_01_{floor:02}_{room:02}"),
+        "name": format!("Room {room:02}"),
+        "floor_id": format!("floor_01_{floor:02}"),
+        "temperature": temperature, "humidity": humidity, "co2": co2,
+    })
+}
+
+pub fn get_tutorial_bootstrap_data(floors: usize, rooms_per_floor: usize) -> Vec<SourceChange> {
+    let mut changes = vec![insert_tutorial_node(
+        "building_01",
+        "Building",
+        json!({"id": "building_01", "name": "Building 01"}),
+        1000,
+    )];
+    for floor in 1..=floors {
+        changes.push(insert_tutorial_node(
+            &format!("floor_01_{floor:02}"),
+            "Floor",
+            json!({
+                "id": format!("floor_01_{floor:02}"),
+                "name": format!("Floor {floor:02}"), "building_id": "building_01"
+            }),
+            1000,
+        ));
+        for room in 1..=rooms_per_floor {
+            changes.push(insert_tutorial_node(
+                &format!("room_01_{floor:02}_{room:02}"),
+                "Room",
+                tutorial_room_properties(floor, room, false),
+                1000,
+            ));
+        }
+    }
+    changes
+}

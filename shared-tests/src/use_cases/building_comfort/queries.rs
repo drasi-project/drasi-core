@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_core::models::{QueryJoin, QueryJoinKey};
+
+// Comfort starts at 50, with baselines of 72 F and 42% humidity.
+// CO2 above 500 ppm adds one point per 25 ppm; alerting is below 40 or above 50.
+
 pub fn room_comfort_level_calc_query() -> &'static str {
     "
   MATCH
@@ -150,4 +155,45 @@ pub fn ui_query() -> &'static str {
     r.co2 AS CO2,
     RoomComfortLevel AS ComfortLevel
     "
+}
+
+// Preserve the tutorial's synthetic joins, r.temperature, whole-element grouping,
+// and property projections; the PART_OF/elementId scenarios above test other shapes.
+pub const TUTORIAL_FLOOR_ALERT: &str = "
+MATCH (r:Room)-[:PART_OF_FLOOR]->(f:Floor)
+WITH f, floor(50+(r.temperature-72)+(r.humidity-42)+CASE WHEN r.co2>500 THEN (r.co2-500)/25 ELSE 0 END) AS RoomComfortLevel
+WITH f, avg(RoomComfortLevel) AS ComfortLevel
+WHERE ComfortLevel<40 OR ComfortLevel>50
+RETURN f.id AS FloorId,f.name AS FloorName,ComfortLevel";
+
+pub const TUTORIAL_BUILDING_ALERT: &str = "
+MATCH (r:Room)-[:PART_OF_FLOOR]->(f:Floor)-[:PART_OF_BUILDING]->(b:Building)
+WITH f,b,floor(50+(r.temperature-72)+(r.humidity-42)+CASE WHEN r.co2>500 THEN (r.co2-500)/25 ELSE 0 END) AS RoomComfortLevel
+WITH f,b,avg(RoomComfortLevel) AS FloorComfortLevel
+WITH b,avg(FloorComfortLevel) AS ComfortLevel
+WHERE ComfortLevel<40 OR ComfortLevel>50
+RETURN b.id AS BuildingId,b.name AS BuildingName,ComfortLevel";
+
+pub fn tutorial_joins() -> Vec<QueryJoin> {
+    [
+        ("PART_OF_FLOOR", "Room", "floor_id", "Floor", "id"),
+        ("PART_OF_BUILDING", "Floor", "building_id", "Building", "id"),
+    ]
+    .into_iter()
+    .map(
+        |(id, from_label, from_property, to_label, to_property)| QueryJoin {
+            id: id.into(),
+            keys: vec![
+                QueryJoinKey {
+                    label: from_label.into(),
+                    property: from_property.into(),
+                },
+                QueryJoinKey {
+                    label: to_label.into(),
+                    property: to_property.into(),
+                },
+            ],
+        },
+    )
+    .collect()
 }

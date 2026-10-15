@@ -906,8 +906,8 @@ fn delete_source_join(
     let pj_key = encode_partial_join_key(&pj_prefix, old_element);
 
     let did_remove = match txn.get_cf(&partial_cf, &pj_key) {
-        Ok(Some(_)) => false,
-        Ok(None) => {
+        Ok(None) => false,
+        Ok(Some(_)) => {
             if let Err(err) = txn.delete_cf(&partial_cf, &pj_key) {
                 return Err(IndexError::other(err));
             }
