@@ -32,7 +32,7 @@
 //! # Protocol Buffer Format
 //!
 //! Events are submitted using the `SourceChange` protobuf message. See the
-//! `proto/drasi/v1/source.proto` file for the full schema.
+//! `components/grpc-common/proto/source/drasi/v1/source.proto` for the full schema.
 //!
 //! ## Insert/Update
 //!
@@ -128,7 +128,7 @@ use tracing::Instrument;
 // Allow unwrap in generated proto code - tonic generates code with unwrap() for HTTP response building
 #[allow(clippy::unwrap_used)]
 pub mod proto {
-    tonic::include_proto!("drasi.v1");
+    pub use drasi_grpc_common::source::*;
 }
 
 use proto::{

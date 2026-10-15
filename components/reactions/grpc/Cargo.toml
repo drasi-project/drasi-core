@@ -37,6 +37,7 @@ crate-type = ["lib", "cdylib"]
 # drasi-core. Switch to published crates before treating this as the standalone
 # plugin dependency model.
 drasi-lib.workspace = true
+drasi-grpc-common = { workspace = true, features = ["reaction"] }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -66,9 +67,6 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # plugin guidance. It is kept for in-repo integration tests until those tests can
 # use matching published crates or avoid direct drasi-core type dependencies.
 drasi-core.workspace = true
-
-[build-dependencies]
-tonic-prost-build = "0.14"
 
 
 [features]

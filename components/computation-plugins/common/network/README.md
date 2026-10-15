@@ -9,6 +9,10 @@ The default feature set has no HTTP/gRPC component or protocol dependencies.
 transport helpers. Each component selects its own requirements; an SSE-only
 build does not enable any of these features.
 
+HTTP message types and conversion come from `drasi-http-common`; gRPC protocol
+types and value conversion come from `drasi-grpc-common`. None of these helpers
+depends on an ordinary source or reaction implementation.
+
 Applications should depend on the [individual component crate](../../README.md),
 not assemble a component from shared modules. See the
 [network protocol guide](../../NETWORK.md) for admission and delivery contracts.

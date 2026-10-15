@@ -14,15 +14,10 @@
 
 //! Protocol buffer definitions for gRPC reactions.
 //!
-//! This module includes the generated protobuf code from the drasi.v1 package.
+//! Compatibility imports for the shared reaction protocol.
 
 /// Generated protobuf code for drasi.v1
-// Allow unwrap in generated proto code — tonic generates server code with
-// unwrap() for HTTP response building.
-#[allow(clippy::unwrap_used)]
-pub mod drasi_v1 {
-    tonic::include_proto!("drasi.v1");
-}
+pub use drasi_grpc_common::reaction as drasi_v1;
 
 // Re-export commonly used types for convenience
 pub use drasi_v1::{

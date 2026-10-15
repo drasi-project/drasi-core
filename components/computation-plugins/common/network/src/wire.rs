@@ -17,14 +17,14 @@ use drasi_core::models::SourceChange;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
 };
+#[cfg(feature = "http-source")]
+pub use drasi_http_common::{HttpElement, HttpSourceChange};
 #[cfg(any(feature = "http-source", feature = "grpc-source"))]
 use drasi_lib::computation::v1::ComponentId;
 use drasi_lib::computation::v1::{
     ChangeOperation, InputEnvelope, QueryChangeCodec, QueryRowKind, Record, RecordImage, StreamId,
     UpdateSemantics,
 };
-#[cfg(feature = "http-source")]
-pub use drasi_source_http::{HttpElement, HttpSourceChange};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(feature = "grpc-source")]
@@ -97,7 +97,7 @@ pub fn http_change(mut change: HttpSourceChange, source_id: &str) -> Result<Sour
     }
     // Reuse the existing published DTO converter, including the deliberately
     // different HTTP nested-value and nanoseconds-to-milliseconds semantics.
-    drasi_source_http::convert_http_to_source_change(&change, source_id)
+    drasi_http_common::convert_http_to_source_change(&change, source_id)
 }
 
 #[cfg(feature = "grpc-source")]
@@ -378,7 +378,7 @@ pub fn proto_item(
     notification: &Notification,
     format: OutputFormat,
 ) -> Result<reaction::QueryResultItem> {
-    use drasi_reaction_grpc::helpers::convert_json_to_proto_struct;
+    use drasi_grpc_common::convert_json_to_proto_struct;
     let timestamp = chrono::DateTime::parse_from_rfc3339(&notification.timestamp)?;
     let payload = if matches!(format, OutputFormat::CanonicalJson) {
         let mut canonical = serde_json::to_value(notification)?;

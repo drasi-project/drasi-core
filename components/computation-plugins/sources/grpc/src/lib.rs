@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 pub use config::SourceConfig;
 pub mod proto {
-    pub use drasi_computation_network_common::proto::source;
+    pub use drasi_grpc_common::source;
     pub mod admission {
         tonic::include_proto!("drasi.admission.v1");
     }

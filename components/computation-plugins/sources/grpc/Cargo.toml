@@ -20,6 +20,7 @@ kind = "source-grpc"
 
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
+drasi-grpc-common = { workspace = true, features = ["source"] }
 drasi-computation-network-common = { workspace = true, features = ["grpc-source"] }
 drasi-lib = { workspace = true }
 anyhow = "1"
@@ -34,6 +35,7 @@ tonic = "0.14"
 tonic-prost = "0.14"
 
 [build-dependencies]
+drasi-grpc-common = { workspace = true }
 tonic-prost-build = "0.14"
 
 [lints]

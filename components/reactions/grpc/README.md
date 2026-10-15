@@ -4,9 +4,14 @@
 runtime ([`drasi-lib`](../../../lib)). It streams the result changes produced by Drasi
 continuous queries to a downstream gRPC service via the
 `drasi.v1.ReactionService.ProcessResults` RPC defined in
-[`proto/drasi/v1/reaction.proto`](proto/drasi/v1/reaction.proto). The proto file is
+[`reaction.proto`](../../grpc-common/proto/reaction/drasi/v1/reaction.proto). The proto file is
 intentionally narrow — it carries only the reaction's wire contract; no source,
 bootstrap, streaming, or subscription types.
+
+The message definitions and JSON/protobuf conversions are maintained in
+`drasi-grpc-common`. Existing `drasi_reaction_grpc::proto` and `helpers` imports
+remain available as re-exports; native components share the protocol without
+depending on this reaction implementation.
 
 **When to use it.** Reach for this reaction when a downstream consumer should
 receive Drasi continuous-query changes over gRPC — for example to drive a

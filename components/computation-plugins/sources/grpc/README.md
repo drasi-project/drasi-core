@@ -12,8 +12,10 @@ Configuration requires `stream`. Defaults are `sourceId="facilities-db"`,
 `maxMessageBytes=4194304`, `adaptiveEnabled=false`. `maxBatchEvents` is not accepted.
 Its `out` port emits `GraphChangeCodec` envelopes; construction binds no socket.
 
-This crate packages its durable [admission protocol](proto/admission.proto) and
-protobuf build inputs. Building it requires `protoc`. Ordinary acceptance is
+This crate owns the durable [admission protocol](proto/admission.proto).
+Its build script imports source messages from `drasi-grpc-common`, without a
+duplicate `common.proto` or dependency on an ordinary source implementation.
+Building this component requires `protoc`. Ordinary acceptance is
 volatile; durable acceptance requires an actual host admission channel and the
 separate session/sequence protocol. See
 [source configuration](../../NETWORK.md#source-configuration) and

@@ -11,6 +11,8 @@ members = [
   "lib",
 
   # Shared component libraries
+  "components/http-common",
+  "components/grpc-common",
   "components/mssql-common",
   "components/mysql-common",
   "components/kubernetes-common",
@@ -195,6 +197,8 @@ drasi-computation-sink-grpc = { version = "0.11.3", path = "components/computati
 drasi-computation-sink-http = { version = "0.11.3", path = "components/computation-plugins/sinks/http" }
 drasi-computation-sink-sse = { version = "0.11.3", path = "components/computation-plugins/sinks/sse" }
 drasi-host-sdk = { version = "0.11.3", path = "components/host-sdk" }
+drasi-http-common = { version = "0.11.3", path = "components/http-common" }
+drasi-grpc-common = { version = "0.11.3", path = "components/grpc-common" }
 
 # Common dependencies
 im = "15"

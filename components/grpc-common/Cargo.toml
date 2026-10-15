@@ -1,0 +1,26 @@
+[package]
+name = "drasi-grpc-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared source and reaction gRPC protocols and value conversion"
+readme = "README.md"
+
+[features]
+default = []
+source = ["dep:prost", "dep:tonic", "dep:tonic-prost", "dep:tonic-prost-build"]
+reaction = ["dep:prost", "dep:tonic", "dep:tonic-prost", "dep:tonic-prost-build"]
+
+[dependencies]
+prost = { version = "0.14", optional = true }
+prost-types = "0.14"
+serde_json = "1"
+tonic = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14", optional = true }
+
+[lints]
+workspace = true

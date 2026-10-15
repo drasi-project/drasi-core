@@ -9,18 +9,17 @@ readme = "README.md"
 [features]
 default = []
 ingress = []
-http-source = ["ingress", "dep:drasi-source-http"]
-grpc-source = ["ingress", "dep:drasi-source-grpc", "dep:prost-types"]
+http-source = ["ingress", "dep:drasi-http-common"]
+grpc-source = ["ingress", "dep:drasi-grpc-common", "drasi-grpc-common/source", "dep:prost-types"]
 http-sink = ["dep:reqwest"]
-grpc-sink = ["dep:drasi-reaction-grpc", "dep:prost-types", "dep:reqwest", "dep:tonic"]
+grpc-sink = ["dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:prost-types", "dep:reqwest", "dep:tonic"]
 
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-core = { workspace = true }
 drasi-lib = { workspace = true }
-drasi-source-http = { version = "0.2.12", path = "../../../sources/http", optional = true }
-drasi-source-grpc = { version = "0.2.11", path = "../../../sources/grpc", optional = true }
-drasi-reaction-grpc = { workspace = true, optional = true }
+drasi-http-common = { workspace = true, optional = true }
+drasi-grpc-common = { workspace = true, optional = true }
 anyhow = "1"
 chrono = "0.4"
 futures-util = "0.3"

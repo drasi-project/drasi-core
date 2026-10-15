@@ -242,7 +242,7 @@ Registration is idempotent while that producer name is active. Retirement
 invalidates the old session and a new registration obtains a new epoch.
 
 gRPC adds the separate `drasi.admission.v1.AdmissionService` defined in
-[`admission.proto`](sources/grpc/proto/admission.proto), reusing the existing event DTO.
+[`admission.proto`](sources/grpc/proto/admission.proto), reusing the shared source event DTO.
 The imported `common.proto` declaration is packaged locally for standalone crate
 builds; workspace builds reject any difference from the shared source protocol.
 It exposes registration, status, retirement, receipt lookup, unary `Admit`, and

@@ -10,7 +10,7 @@ pub mod wire;
 
 pub mod proto {
     #[cfg(feature = "grpc-sink")]
-    pub use drasi_reaction_grpc::proto::drasi_v1 as reaction;
+    pub use drasi_grpc_common::reaction;
     #[cfg(feature = "grpc-source")]
-    pub use drasi_source_grpc::proto as source;
+    pub use drasi_grpc_common::source;
 }

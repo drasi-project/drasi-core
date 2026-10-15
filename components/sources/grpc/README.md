@@ -133,7 +133,10 @@ drasi.start_source("events-grpc").await?;
 
 ## Input Schema
 
-The gRPC Source accepts events in Protocol Buffer format as defined in `proto/drasi/v1/source.proto` and `proto/drasi/v1/common.proto`.
+The gRPC Source accepts events in Protocol Buffer format as defined by the shared
+[`source.proto`](../../grpc-common/proto/source/drasi/v1/source.proto) and
+[`common.proto`](../../grpc-common/proto/source/drasi/v1/common.proto).
+`drasi_source_grpc::proto` remains a public re-export of those generated types.
 
 ### Core Message Types
 
@@ -786,6 +789,11 @@ drasi.stop_source("events").await?;
 
 ## Generating Client Code
 
+The protocol files live in `components/grpc-common`, shared with the native
+components. Run the commands below from that directory, with a `generated/`
+output directory. Source and reaction protocols have separate include roots
+because their historical `drasi.v1.QueryResult` definitions differ.
+
 ### Python
 
 ```bash
@@ -794,11 +802,11 @@ pip install grpcio-tools
 
 # Generate code
 python -m grpc_tools.protoc \
-    -I./proto \
+    -I./proto/source \
     --python_out=./generated \
     --grpc_python_out=./generated \
-    proto/drasi/v1/source.proto \
-    proto/drasi/v1/common.proto
+    proto/source/drasi/v1/source.proto \
+    proto/source/drasi/v1/common.proto
 ```
 
 ### Go
@@ -814,29 +822,23 @@ protoc \
     --go-grpc_out=./generated \
     --go_opt=paths=source_relative \
     --go-grpc_opt=paths=source_relative \
-    -I ./proto \
-    proto/drasi/v1/source.proto \
-    proto/drasi/v1/common.proto
+    -I ./proto/source \
+    proto/source/drasi/v1/source.proto \
+    proto/source/drasi/v1/common.proto
 ```
 
 ### Rust
 
-Add to your `build.rs`:
+Rust clients can use the generated shared bindings directly, without their own
+protobuf build script:
+
+```toml
+[dependencies]
+drasi-grpc-common = { path = "../drasi-core/components/grpc-common", features = ["source"] }
+```
 
 ```rust
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::configure()
-        .build_server(false)
-        .build_client(true)
-        .compile(
-            &[
-                "proto/drasi/v1/source.proto",
-                "proto/drasi/v1/common.proto",
-            ],
-            &["proto"],
-        )?;
-    Ok(())
-}
+use drasi_grpc_common::source::source_service_client::SourceServiceClient;
 ```
 
 ### JavaScript/TypeScript
@@ -850,9 +852,9 @@ grpc_tools_node_protoc \
     --js_out=import_style=commonjs,binary:./generated \
     --grpc_out=grpc_js:./generated \
     --plugin=protoc-gen-grpc=`which grpc_tools_node_protoc_plugin` \
-    -I ./proto \
-    proto/drasi/v1/source.proto \
-    proto/drasi/v1/common.proto
+    -I ./proto/source \
+    proto/source/drasi/v1/source.proto \
+    proto/source/drasi/v1/common.proto
 ```
 
 ## Performance Guidelines
