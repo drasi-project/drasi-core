@@ -5,7 +5,7 @@
 # RUSTFLAGS just ensures warnings are errors.
 RUSTFLAGS := -Dwarnings
 
-.PHONY: clippy clippy-fix help build-test-plugins test-host-sdk \
+.PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
        build-native-plugins build-native-standard-plugins build-native-network-plugins test-native-network \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
@@ -22,6 +22,7 @@ help:
 	@echo "  build-native-standard-plugins - Build counter, middleware, capture and arithmetic plugins"
 	@echo "  build-native-network-plugins - Build the five independent native network plugins"
 	@echo "  test-native-network       - Build native network plugins and run wire/loopback tests"
+	@echo "  check-native-dependencies - Reject runtime/query-engine dependencies in native plugin builds"
 	@echo "  build-plugins             - Build all dynamic plugins (debug)"
 	@echo "  build-plugins-release     - Build all dynamic plugins (release)"
 	@echo "  list-plugins              - List all discovered dynamic plugin crates"
@@ -94,7 +95,10 @@ test-host-sdk: build-test-plugins
 	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
-build-native-plugins: build-native-standard-plugins build-native-network-plugins
+build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins
+
+check-native-dependencies:
+	python3 ci/check_native_dependencies.py
 
 build-native-standard-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_STANDARD_PACKAGES),-p $(package)) --features dynamic-plugin

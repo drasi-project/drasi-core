@@ -106,11 +106,19 @@ struct Report {
     warnings: Vec<String>,
 }
 
+const SCOPED_CRATES: &[(&str, &str)] = &[
+    ("drasi_lib", "lib"),
+    ("drasi_core", "core"),
+    ("drasi_core_types", "core-types"),
+    (
+        "drasi_computation_contracts",
+        "components/computation-contracts",
+    ),
+];
+
 fn scoped(module: &str) -> bool {
-    module == "drasi_lib"
-        || module.starts_with("drasi_lib::")
-        || module == "drasi_core"
-        || module.starts_with("drasi_core::")
+    let root = module.split("::").next().unwrap_or(module);
+    SCOPED_CRATES.iter().any(|(name, _)| *name == root)
 }
 
 // Feature/platform cfgs remain visible as a conditional union. Only expressions
@@ -431,9 +439,9 @@ impl Model {
                         reject_type_tokens(template)?;
                         continue;
                     }
-                    if macro_name == "lazy_static" {
-                        // Static declarations are values; lazy_static's synthetic
-                        // marker structs are macro implementation details, not source types.
+                    if matches!(macro_name.as_str(), "lazy_static" | "thread_local") {
+                        // These declare static values, not nominal source types.
+                        // Reject nested type declarations instead of hiding them.
                         reject_type_tokens(value.mac.tokens.clone())?;
                         continue;
                     }
@@ -629,7 +637,7 @@ impl Model {
                 module.rsplit_once("::").map_or(root, |v| v.0).to_owned(),
                 parts[1..].join("::"),
             )),
-            "drasi_core" | "drasi_lib" if parts.len() > 1 => {
+            name if scoped(name) && parts.len() > 1 => {
                 Some((parts[0].into(), parts[1..].join("::")))
             }
             _ => None,
@@ -1340,10 +1348,13 @@ fn build(root: &Path) -> Result<Report> {
     let packages = metadata["packages"]
         .as_array()
         .ok_or("cargo metadata has no packages")?;
-    for package in packages
-        .iter()
-        .filter(|p| matches!(p["name"].as_str(), Some("drasi-lib" | "drasi-core")))
-    {
+    for package in packages.iter().filter(|p| {
+        p["name"].as_str().is_some_and(|name| {
+            SCOPED_CRATES
+                .iter()
+                .any(|(crate_name, _)| crate_name.replace('_', "-") == name)
+        })
+    }) {
         for dependency in package["dependencies"]
             .as_array()
             .ok_or("package has no dependencies")?
@@ -1357,13 +1368,18 @@ fn build(root: &Path) -> Result<Report> {
             }
         }
     }
-    for manifest in ["lib/Cargo.toml", "core/Cargo.toml"] {
+    for (crate_name, directory) in SCOPED_CRATES {
+        let manifest = format!("{directory}/Cargo.toml");
         model
             .resolution_sources
-            .insert(manifest.into(), fs::read_to_string(root.join(manifest))?);
+            .insert(manifest.clone(), fs::read_to_string(root.join(&manifest))?);
+        model.read_file(
+            root,
+            &root.join(format!("{directory}/src/lib.rs")),
+            crate_name,
+            "",
+        )?;
     }
-    model.read_file(root, &root.join("lib/src/lib.rs"), "drasi_lib", "")?;
-    model.read_file(root, &root.join("core/src/lib.rs"), "drasi_core", "")?;
     let mut types = Vec::new();
     let mut edges = Vec::new();
     let mut warnings = BTreeSet::new();
@@ -1671,6 +1687,18 @@ mod tests {
         let result = expand_identifier_macro(template, &syn::parse_quote!(NodeId)).unwrap();
         let file: syn::File = syn::parse2(result).unwrap();
         assert!(matches!(&file.items[0], Item::Struct(item) if item.ident == "NodeId"));
+    }
+
+    #[test]
+    fn static_macros_cannot_hide_new_type_declarations() {
+        assert!(reject_type_tokens(quote::quote! {
+            static COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        })
+        .is_ok());
+        assert!(reject_type_tokens(quote::quote! {
+            static COUNT: usize = { struct Hidden; 0 };
+        })
+        .is_err());
     }
 
     fn fixture(source: &str) -> Model {

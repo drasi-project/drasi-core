@@ -19,7 +19,7 @@
 //! byte length. Maps use their `BTreeMap` key order and lists retain input order.
 
 use chrono::{Datelike, Timelike};
-use drasi_core::{
+use drasi_core_types::{
     evaluation::{
         context::QueryVariables,
         variable_value::{ListRange, RangeBound, VariableValue},
@@ -613,7 +613,7 @@ impl CanonicalEncoder {
 }
 
 pub(super) fn query_float_bits(
-    value: &drasi_core::evaluation::variable_value::float::Float,
+    value: &drasi_core_types::evaluation::variable_value::float::Float,
 ) -> Result<u64, CanonicalEncodingError> {
     // Float's explicit Hash implementation is its only lossless public projection:
     // it emits one u64 containing raw bits, except that equal signed zeros normalize.

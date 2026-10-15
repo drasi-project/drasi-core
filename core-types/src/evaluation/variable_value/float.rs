@@ -86,14 +86,14 @@ impl Float {
         self.value.is_finite()
     }
 
-    pub(crate) fn as_f64(&self) -> Option<f64> {
+    pub fn as_f64(&self) -> Option<f64> {
         match self.value {
             n if n.is_finite() => Some(n),
             _ => None,
         }
     }
 
-    pub(crate) fn as_f32(&self) -> Option<f32> {
+    pub fn as_f32(&self) -> Option<f32> {
         match self.value {
             n if n.is_finite() => Some(n as f32),
             _ => None,
@@ -110,7 +110,7 @@ impl Float {
     }
 
     #[inline]
-    pub(crate) fn from_f32(f: f32) -> Option<Float> {
+    pub fn from_f32(f: f32) -> Option<Float> {
         if f.is_finite() {
             Some(Float { value: f as f64 })
         } else {

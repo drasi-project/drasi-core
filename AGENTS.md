@@ -5,6 +5,8 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 
 ## Layout
 - core/ - the query engine; query-ast, query-cypher, query-gql parse to a shared AST; functions-cypher/functions-gql bind language-specific function names
+- core-types/ - shared graph/result values and provider descriptions, without an evaluator or query parser
+- components/computation-contracts/ - shared native envelopes, codecs and service data; graph/storage ownership stays in lib/
 - lib/ - drasi-lib, the embedded runtime (sources -> continuous queries -> reactions, in-process)
 - components/ - ~80 crates: plugins (sources, bootstrappers, reactions, indexes) plus SDKs, shared *-common libs, and the FFI backbone
 - shared-tests/ - cross-crate conformance suite; middleware/ - change-stream transforms; examples/ - runnable demos
@@ -14,6 +16,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 ## Done means (the main CI gates)
 - `cargo fmt -- --check` passes
 - `make clippy` passes - do NOT use `cargo clippy --all-features` (the bundled-jq feature has a flaky source build); warnings are errors
+- `make check-native-dependencies` passes - independently built native plugins and their SDK must not pull in the query runtime/evaluator, query parsers or legacy SDK
 - CI builds `make build-native-network-plugins build-test-plugins`, tests the remaining workspace packages, and runs `lib/tests/run-runtime-parity.sh` for the library, no-default, recovery/middleware, integration, Host SDK and selected backend profiles. `make test-host-sdk` remains the focused SDK command. A running Docker daemon is required (testcontainers).
 - Commits are signed off: `git commit -s` (DCO)
 - CI additionally gates PRs on: a typos check, cargo-audit, cargo-deny, FFI layout tests, and coverage

@@ -15,6 +15,46 @@ use drasi_computation_plugin_sdk::{
 use drasi_lib::computation::v1::*;
 use std::{collections::BTreeMap, sync::Arc};
 
+pub(crate) fn runtime_configuration_schema(
+    schema: &drasi_computation_plugin_sdk::ConfigSchema,
+) -> ConfigurationSchema {
+    use drasi_computation_plugin_sdk::ConfigType;
+    ConfigurationSchema {
+        fields: schema
+            .fields
+            .iter()
+            .map(|(name, field)| {
+                (
+                    Arc::from(name.as_str()),
+                    ConfigurationField {
+                        value_type: match field.value_type {
+                            ConfigType::Boolean => ConfigurationType::Boolean,
+                            ConfigType::Integer => ConfigurationType::Integer,
+                            ConfigType::String => ConfigurationType::String,
+                            ConfigType::Object => ConfigurationType::Object,
+                            ConfigType::Array => ConfigurationType::Array,
+                            ConfigType::Json => ConfigurationType::Json,
+                        },
+                        required: field.required,
+                        secret: field.secret,
+                    },
+                )
+            })
+            .collect(),
+        allow_additional: schema.allow_additional,
+    }
+}
+
+fn runtime_descriptor(metadata: &FactoryMetadata) -> FactoryDescriptor {
+    FactoryDescriptor {
+        implementation: metadata.implementation.clone(),
+        role: metadata.role,
+        configuration_version: metadata.configuration_version,
+        configuration: runtime_configuration_schema(&metadata.configuration),
+        dependencies: BTreeMap::new(),
+    }
+}
+
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 pub(super) mod recovery_tests;
@@ -51,7 +91,7 @@ impl NativeFactory {
             !raw.state.is_null() && table.create.is_some() && table.release.is_some(),
             "incomplete native factory table"
         );
-        let mut descriptor = metadata.factory_descriptor();
+        let mut descriptor = runtime_descriptor(&metadata);
         if admission.is_some() {
             let mut requirement =
                 ResourceRequirement::exactly_one::<QosChannel>(ResourceRole::StateStore);

@@ -24,12 +24,7 @@ use crate::computation::v1::{
     ChangeEnvelope, ChangeOperation, QueryRecoveryIdentity, Record, RecordId,
 };
 
-#[derive(Clone)]
-pub struct QuerySnapshot {
-    pub as_of_sequence: u64,
-    pub generation: u64,
-    pub rows: im::HashMap<RecordId, Record>,
-}
+pub use drasi_computation_contracts::QuerySnapshot;
 
 /// One coherent recovery observation. Rows share the immutable snapshot tree;
 /// retained envelopes are copied only when a caller requests a replay suffix.

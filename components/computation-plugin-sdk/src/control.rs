@@ -7,7 +7,7 @@ use crate::{
     wire,
 };
 use async_trait::async_trait;
-use drasi_lib::computation::v1::ComponentId;
+use drasi_computation_contracts::ComponentId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 

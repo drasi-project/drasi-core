@@ -14,13 +14,13 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use drasi_core::interface::StorageDurability;
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     decode_bounded_messagepack, encode_bounded_messagepack, BinaryEnvelopeCodec,
     BootstrapPreparation, BootstrapState, BootstrapWatermark, ComponentId,
-    ComputationBootstrapProvider, ComputationBootstrapSnapshot, ImplementationIdentity,
-    PluginIdentity, SourceProgressReader, StreamId,
+    ComputationBootstrapSnapshot, ImplementationIdentity, PluginIdentity, SourceProgressView,
+    StreamId,
 };
+use drasi_core_types::interface::StorageDurability;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -75,6 +75,51 @@ impl BootstrapFactoryMetadata {
     }
 }
 
+/// Plugin-side snapshot provider. Host-owned retirement, query and storage
+/// objects are not part of this interface.
+#[async_trait]
+pub trait NativeBootstrapProvider: Send + Sync {
+    fn validate_query_scope(
+        &self,
+        _instance_id: &str,
+        _graph_id: &str,
+        _component_id: &ComponentId,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn recovery_reader(&self) -> Option<drasi_computation_contracts::SourceProgressView> {
+        None
+    }
+    async fn stop(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
+        Ok(BootstrapPreparation::Ready)
+    }
+    async fn prepare_with_state(
+        &self,
+        _state: &dyn BootstrapState,
+    ) -> anyhow::Result<BootstrapPreparation> {
+        self.prepare().await
+    }
+    fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot>;
+    async fn snapshot_with_state(
+        &self,
+        _state: &dyn BootstrapState,
+    ) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        self.snapshot().await
+    }
+    async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
+        Ok(Vec::new())
+    }
+    fn completion_state(&self) -> anyhow::Result<Option<Bytes>> {
+        Ok(None)
+    }
+}
+
 pub trait BootstrapFactory: Send + Sync + 'static {
     fn metadata(&self) -> BootstrapFactoryMetadata;
     /// Configuration only. A progress binding, when declared, is the actual
@@ -83,7 +128,7 @@ pub trait BootstrapFactory: Send + Sync + 'static {
         &self,
         request: &CreateRequest,
         progress: Option<NativeSourceProgress>,
-    ) -> anyhow::Result<Arc<dyn ComputationBootstrapProvider>>;
+    ) -> anyhow::Result<Arc<dyn NativeBootstrapProvider>>;
 }
 
 pub fn encode<T: Serialize>(value: &T) -> anyhow::Result<Vec<u8>> {
@@ -226,14 +271,14 @@ impl BootstrapState for RemoteState {
 }
 
 type SnapshotStream =
-    Pin<Box<dyn Stream<Item = anyhow::Result<drasi_lib::computation::v1::ChangeEnvelope>> + Send>>;
+    Pin<Box<dyn Stream<Item = anyhow::Result<drasi_computation_contracts::ChangeEnvelope>> + Send>>;
 struct SnapshotSlot {
     generation: u64,
     stream: Option<SnapshotStream>,
     waker: Option<std::task::Waker>,
 }
 struct Instance {
-    provider: Arc<dyn ComputationBootstrapProvider>,
+    provider: Arc<dyn NativeBootstrapProvider>,
     codec: Arc<BinaryEnvelopeCodec>,
     stream: Mutex<SnapshotSlot>,
     busy: AtomicBool,
@@ -243,7 +288,7 @@ struct Instance {
     ended: AtomicBool,
     damaged: AtomicBool,
     pending: AtomicBool,
-    reader: Option<SourceProgressReader>,
+    reader: Option<SourceProgressView>,
 }
 impl Instance {
     fn validate_reader(&self) -> anyhow::Result<()> {
@@ -445,9 +490,9 @@ impl Drop for OperationGuard {
 }
 
 pub(crate) fn export_provider(
-    provider: Arc<dyn ComputationBootstrapProvider>,
+    provider: Arc<dyn NativeBootstrapProvider>,
     codec: Arc<BinaryEnvelopeCodec>,
-    reader: Option<SourceProgressReader>,
+    reader: Option<SourceProgressView>,
 ) -> BootstrapHandle {
     BootstrapHandle {
         state: Box::into_raw(Box::new(Arc::new(Instance {

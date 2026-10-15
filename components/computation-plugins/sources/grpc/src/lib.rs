@@ -5,14 +5,14 @@ mod component;
 pub mod config;
 mod durable_grpc;
 
+use drasi_computation_contracts::{
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
+    PortDirection, PortId,
+};
 use drasi_computation_network_common::{durable, ingress, wire};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
     FactoryMetadata, NativeAdmission, PluginDefinition,
-};
-use drasi_lib::computation::v1::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
-    PortDirection, PortId,
 };
 use std::sync::Arc;
 

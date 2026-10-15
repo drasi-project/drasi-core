@@ -97,6 +97,10 @@ jobs:
           cargo build --lib -p drasi-computation-source-counter -p drasi-computation-transformer-middleware -p drasi-computation-sink-capture -p drasi-computation-transformer-arithmetic --features dynamic-plugin
           cargo build --lib -p drasi-computation-source-http -p drasi-computation-source-grpc -p drasi-computation-sink-http -p drasi-computation-sink-grpc -p drasi-computation-sink-sse --features dynamic-plugin
 
+      - name: Check native dependency isolation
+        shell: bash
+        run: python ci/check_native_dependencies.py
+
       - name: Copy plugins to test directory
         shell: bash
         run: |

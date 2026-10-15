@@ -19,12 +19,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "engine-adapter")]
 use async_trait::async_trait;
-use drasi_core::{
-    interface::{
-        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
-        SourceMiddlewareFactory,
-    },
+#[cfg(feature = "engine-adapter")]
+use drasi_core::interface::{ElementIndex, SourceMiddleware, SourceMiddlewareFactory};
+use drasi_core_types::{
+    interface::{MiddlewareError, MiddlewareSetupError},
     models::{Element, ElementPropertyMap, ElementReference, SourceChange, SourceMiddlewareConfig},
 };
 use jsonpath_rust::{path::config::JsonPathConfig, JsonPathInst};
@@ -122,12 +122,10 @@ pub struct Map {
     mappings: HashMap<String, SourceMappedOperations>,
 }
 
-#[async_trait]
-impl SourceMiddleware for Map {
-    async fn process(
+impl Map {
+    pub async fn apply(
         &self,
         source_change: SourceChange,
-        _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         let metadata = match &source_change {
             SourceChange::Insert { element } => element.get_metadata(),
@@ -311,15 +309,11 @@ impl MapFactory {
     }
 }
 
-impl SourceMiddlewareFactory for MapFactory {
-    fn name(&self) -> String {
-        "map".to_string()
+impl MapFactory {
+    pub fn name(&self) -> String {
+        "map".to_owned()
     }
-
-    fn create(
-        &self,
-        config: &SourceMiddlewareConfig,
-    ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+    pub fn build(&self, config: &SourceMiddlewareConfig) -> Result<Map, MiddlewareSetupError> {
         let cfg = Value::Object(config.config.clone());
         let mappings = match serde_json::from_value(cfg) {
             Ok(mappings) => mappings,
@@ -336,6 +330,32 @@ impl SourceMiddlewareFactory for MapFactory {
             mappings
         );
 
-        Ok(Arc::new(Map { mappings }))
+        Ok(Map { mappings })
+    }
+}
+
+#[cfg(feature = "engine-adapter")]
+#[async_trait]
+impl SourceMiddleware for Map {
+    async fn process(
+        &self,
+        change: SourceChange,
+        _index: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        self.apply(change).await
+    }
+}
+
+#[cfg(feature = "engine-adapter")]
+impl SourceMiddlewareFactory for MapFactory {
+    fn name(&self) -> String {
+        MapFactory::name(self)
+    }
+    fn create(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|value| Arc::new(value) as Arc<dyn SourceMiddleware>)
     }
 }

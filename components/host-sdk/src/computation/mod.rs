@@ -32,6 +32,7 @@ pub use drasi_computation_plugin_sdk::metadata::{
     Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, PluginMetadata,
 };
 pub use drasi_computation_plugin_sdk::transport::Failure as NativeFailure;
+pub(crate) use factory::runtime_configuration_schema;
 pub use factory::NativeFactory;
 pub use loader::{load, try_load, NativePlugin};
 pub(crate) use loader::{try_load_library, try_read_metadata};

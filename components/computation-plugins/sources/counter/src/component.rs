@@ -1,16 +1,18 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
+
 use async_trait::async_trait;
+use drasi_computation_contracts::{
+    ComponentDescriptor, ContextEntry, ContextValue, GraphChangeCodec, OutputEnvelope, PortId,
+    StreamId,
+};
 use drasi_computation_plugin_sdk::{
     ControlMessage, ControlNotification, ControlSender, NativeControlHandler,
 };
-use drasi_core::models::{
+use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
-};
-use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComputationComponent, ContextEntry, ContextValue, EnvelopeSource,
-    GraphChangeCodec, OutputEnvelope, PortId, StreamId,
 };
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -91,7 +93,7 @@ impl Counter {
     }
 }
 #[async_trait]
-impl ComputationComponent for Counter {
+impl NativeComponent for Counter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -109,7 +111,7 @@ impl ComputationComponent for Counter {
     }
 }
 #[async_trait]
-impl EnvelopeSource for Counter {
+impl NativeSource for Counter {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         anyhow::ensure!(self.running, "counter is not running");
         if self.emitted == self.configuration.count {

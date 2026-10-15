@@ -19,7 +19,7 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{FixedOffset, NaiveDate, NaiveTime, TimeZone};
-use drasi_core::{
+use drasi_core_types::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
         variable_value::{
@@ -36,7 +36,7 @@ use ordered_float::OrderedFloat;
 use serde_json::json;
 
 use crate::{
-    channels::{ResultDiff, SourceEvent, SourceEventWrapper},
+    exchange::{ResultDiff, SourceEvent, SourceEventWrapper},
     profiling::ProfilingMetadata,
 };
 

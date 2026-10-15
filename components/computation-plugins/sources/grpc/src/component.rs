@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
+
 use crate::{
     config::GrpcSourceConfig,
     ingress::{Ingress, SourceRuntime},
@@ -9,10 +11,8 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use drasi_computation_contracts::{ComponentDescriptor, OutputEnvelope};
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
-use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComputationComponent, EnvelopeSource, OutputEnvelope,
-};
 use futures_util::Stream;
 use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
@@ -36,7 +36,7 @@ impl GrpcSource {
     }
 }
 #[async_trait]
-impl ComputationComponent for GrpcSource {
+impl NativeComponent for GrpcSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.runtime.descriptor
     }
@@ -51,7 +51,7 @@ impl ComputationComponent for GrpcSource {
     }
 }
 #[async_trait]
-impl EnvelopeSource for GrpcSource {
+impl NativeSource for GrpcSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         self.runtime.next().await
     }

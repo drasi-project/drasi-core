@@ -5,6 +5,12 @@ only the components your solution uses; there is no standard or network bundle.
 Each dynamic library owns its configuration, factory, implementation and export.
 Shared crates contain helpers, not additional registered components.
 
+The nine dynamic plugins use the lightweight `drasi-computation-contracts` and
+`drasi-core-types` packages, not `drasi-lib` or the query engine. The SDK exposes
+only supported plugin operations and borrowed host services. A query-result
+message does not require query execution. `make check-native-dependencies`
+checks every native library independently, including its build dependencies.
+
 | Role | Crate | Component kind | Hosting |
 |---|---|---|---|
 | Source | [drasi-computation-source-counter](sources/counter) | `drasi.standard/volatile-counter` | Dynamic or Rust SDK |
@@ -31,7 +37,8 @@ Load `target/debug/libdrasi_computation_sink_sse.dylib` on macOS,
 `libdrasi_computation_sink_sse.so` on Linux, or `drasi_computation_sink_sse.dll` on
 Windows. This library exposes **only** `drasi.network/sse-sink`; it does not
 register HTTP/gRPC sources or sinks. Its dependency graph does not require their
-component crates, gRPC, protobuf generation or `protoc`.
+component crates, gRPC, protobuf generation, `protoc`, `drasi-lib`, or the query
+engine and query-language parsers.
 
 Use the same command with another dynamic component's package name. Without
 `dynamic-plugin`, its Rust `plugin()` definition is available without exporting

@@ -73,7 +73,7 @@ impl TransactionalDeliveryHandler for Stateful {
 
 async fn state(delivery: &DeliveryRunner) -> anyhow::Result<Option<ElementValue>> {
     let context = TransactionContext::new(
-        &delivery.scope.consumer,
+        delivery.scope.consumer(),
         delivery
             .transaction
             .resources()

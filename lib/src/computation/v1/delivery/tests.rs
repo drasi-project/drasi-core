@@ -30,8 +30,10 @@ mod transactional;
 
 #[test]
 fn exhausted_delivery_budget_cannot_be_reset_by_graph_failure_classification() {
+    let batch = DeliveryBatch::new(scope(), input(&producer("source/out"), 1, 1), &codec())
+        .expect("valid delivery batch");
     let error = anyhow::Error::new(DeliveryError::Handling {
-        id: DeliveryId("bounded-retry".into()),
+        id: batch.item(0).expect("operation").id,
         attempts: 3,
         source: drasi_core::interface::IndexError::IOError.into(),
     })
@@ -1138,13 +1140,13 @@ async fn delivery_stream_keys_separate_consumer_scope_port_and_persistent_produc
 
 #[test]
 fn delivery_position_validation_rejects_malformed_versions_keys_and_ranges() -> anyhow::Result<()> {
-    let position = DeliveryPosition {
-        version: 1,
-        stream: format!("drasi-delivery-stream-v1-{}", "a".repeat(64)),
-        sequence: u64::MAX,
-        operation: 1,
-        operations: 2,
-    };
+    let position: DeliveryPosition = serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "stream": format!("drasi-delivery-stream-v1-{}", "a".repeat(64)),
+        "sequence": u64::MAX,
+        "operation": 1,
+        "operations": 2,
+    }))?;
     position.validate()?;
     let encoded = serde_json::to_value(&position)?;
     assert_eq!(

@@ -1,13 +1,15 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeTransformer};
+
 use async_trait::async_trait;
-use drasi_computation_plugin_sdk::{NativeTransactionContext, TransactionalComponent};
-use drasi_core::models::{Element, ElementValue, SourceChange};
-use drasi_lib::computation::v1::{
-    ChangeEnvelope, ComponentDescriptor, ComputationComponent, GraphChangeCodec, InputEnvelope,
-    OutputEnvelope, PortId, Schema, StreamId, Transformer,
+use drasi_computation_contracts::{
+    ChangeEnvelope, ComponentDescriptor, GraphChangeCodec, InputEnvelope, OutputEnvelope, PortId,
+    Schema, StreamId,
 };
+use drasi_computation_plugin_sdk::{NativeTransactionContext, TransactionalComponent};
+use drasi_core_types::models::{Element, ElementValue, SourceChange};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -123,7 +125,7 @@ impl Arithmetic {
     }
 }
 #[async_trait]
-impl ComputationComponent for Arithmetic {
+impl NativeComponent for Arithmetic {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -141,7 +143,7 @@ impl ComputationComponent for Arithmetic {
     }
 }
 #[async_trait]
-impl Transformer for Arithmetic {
+impl NativeTransformer for Arithmetic {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         anyhow::ensure!(
             self.running && input.port.as_str() == "in",

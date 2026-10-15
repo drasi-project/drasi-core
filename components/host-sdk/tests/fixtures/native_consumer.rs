@@ -116,7 +116,7 @@ impl Handler {
     }
 }
 #[async_trait]
-impl ComputationComponent for Handler {
+impl sdk::NativeComponent for Handler {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

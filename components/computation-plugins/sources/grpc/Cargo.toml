@@ -22,7 +22,7 @@ kind = "source-grpc"
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-grpc-common = { workspace = true, features = ["source"] }
 drasi-computation-network-common = { workspace = true, features = ["grpc-source"] }
-drasi-lib = { workspace = true }
+drasi-computation-contracts = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 async-stream = "0.3"

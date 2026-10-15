@@ -208,7 +208,7 @@ acknowledges recoverable input, the transformer must already have persisted it.
 
 The compatibility boundaries are in
 [`plugin_source.rs`](../src/computation/v1/plugin_source.rs),
-[`graph_codec.rs`](../src/computation/v1/graph_codec.rs),
+[`graph_codec.rs`](../../components/computation-contracts/src/graph_codec.rs),
 [`query_catalog.rs`](../src/computation/v1/query_catalog.rs) and
 [`runtime/reaction.rs`](../src/computation/runtime/reaction.rs).
 Follow those when data arrives correctly at one interface but disappears or
@@ -425,11 +425,13 @@ persistence and FFI still allocate or serialize. Keep transactions,
 acknowledgements and storage handles out of annotations; those are local
 capabilities with ownership rules, not ordinary immutable data.
 
-Read [`data.rs`](../src/computation/v1/data.rs) for validation,
-[`envelope.rs`](../src/computation/v1/envelope.rs) for sharing/derivation and
-[`ports.rs`](../src/computation/v1/ports.rs) for connection compatibility.
-[`codec.rs`](../src/computation/v1/codec.rs) is the persisted JSON envelope
-format; [`binary_codec.rs`](../src/computation/v1/binary_codec.rs) is the
+The shared implementations live in `drasi-computation-contracts`; runtime
+imports re-export the same types. Read
+[`data.rs`](../../components/computation-contracts/src/data.rs) for validation,
+[`envelope.rs`](../../components/computation-contracts/src/envelope.rs) for sharing/derivation and
+[`ports.rs`](../../components/computation-contracts/src/ports.rs) for connection compatibility.
+[`codec.rs`](../../components/computation-contracts/src/codec.rs) is the persisted JSON envelope
+format; [`binary_codec.rs`](../../components/computation-contracts/src/binary_codec.rs) is the
 full-fidelity binary boundary. Changing one does not silently migrate the other.
 Tests in [computation_codec.rs](../tests/computation_codec.rs) and
 [computation_graph_codec.rs](../tests/computation_graph_codec.rs) protect

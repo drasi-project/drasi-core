@@ -4,12 +4,12 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use drasi_core::interface::{SourceCheckpoint, StorageDurability};
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     decode_bounded_messagepack, encode_bounded_messagepack, ComponentId, SourceProgressKey,
-    SourceProgressProvider, SourceProgressReader, SourceProgressSnapshot, SourceProgressUpdates,
+    SourceProgressProvider, SourceProgressSnapshot, SourceProgressUpdates, SourceProgressView,
     StreamId,
 };
+use drasi_core_types::interface::{SourceCheckpoint, StorageDurability};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -244,8 +244,8 @@ impl NativeSourceProgress {
         Ok(Self(Arc::new(Provider { raw, identity })))
     }
 
-    pub fn reader(&self) -> SourceProgressReader {
-        SourceProgressReader::External(self.0.clone())
+    pub fn reader(&self) -> SourceProgressView {
+        SourceProgressView::new(self.0.clone())
     }
 }
 

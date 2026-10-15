@@ -270,7 +270,6 @@ mod tests {
         let binding = ProgressBinding::new(&owner);
         let handle = capability(&binding);
         let reader = handle.reader();
-        assert!(reader.local_owner().is_none());
         assert!(reader.same_owner(&handle.clone().reader()));
         assert_eq!(reader.graph_id(), "graph");
         assert_eq!(reader.component_id(), owner.component_id());

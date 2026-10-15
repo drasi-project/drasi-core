@@ -1,11 +1,12 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::NativeComponent as ComputationComponent;
 use crate::{abi, transport::Failure, wire, Component, NativeTransactionContext};
 use async_trait::async_trait;
-use drasi_lib::computation::v1::{
-    BinaryEnvelopeCodec, ComputationComponent, DeliveryBatch, DeliveryBatchIdentity,
-    DeliveryHandler, DeliveryItem, DeliveryScope, EnvelopeCodec, InputEnvelope, PortId, Schema,
+use drasi_computation_contracts::{
+    BinaryEnvelopeCodec, DeliveryBatch, DeliveryBatchIdentity, DeliveryHandler, DeliveryItem,
+    DeliveryScope, EnvelopeCodec, InputEnvelope, PortId, Schema,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -26,8 +27,9 @@ pub enum ConsumerMode {
 impl ConsumerMode {
     pub fn validate_factory(self, metadata: &crate::FactoryMetadata) -> anyhow::Result<()> {
         anyhow::ensure!(
-            metadata.role == drasi_lib::computation::v1::ComponentRole::Sink
-                && metadata.completion == Some(drasi_lib::computation::v1::SinkCompletion::Handled)
+            metadata.role == drasi_computation_contracts::ComponentRole::Sink
+                && metadata.completion
+                    == Some(drasi_computation_contracts::SinkCompletion::Handled)
                 && !metadata.capabilities.snapshot,
             "native consumer requires a handled, non-snapshot sink"
         );
@@ -179,7 +181,7 @@ impl ConsumerState {
         &self,
         input: &[u8],
         codec: &BinaryEnvelopeCodec,
-        descriptor: &drasi_lib::computation::v1::ComponentDescriptor,
+        descriptor: &drasi_computation_contracts::ComponentDescriptor,
     ) -> anyhow::Result<Vec<u8>> {
         let input: BeginBatch = wire::decode(input)?;
         let envelope = codec.decode(&input.envelope)?;
@@ -187,7 +189,7 @@ impl ConsumerState {
             descriptor,
             &input.port,
             &envelope,
-            drasi_lib::computation::v1::PortDirection::Input,
+            drasi_computation_contracts::PortDirection::Input,
         )?;
         let batch = DeliveryBatch::new(
             self.scope.clone(),

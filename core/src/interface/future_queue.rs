@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
 use crate::models::{ElementReference, ElementTimestamp};
 
@@ -26,13 +25,7 @@ pub enum PushType {
     Overwrite,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FutureElementRef {
-    pub element_ref: ElementReference,
-    pub original_time: ElementTimestamp,
-    pub due_time: ElementTimestamp,
-    pub group_signature: u64,
-}
+pub use drasi_core_types::interface::FutureElementRef;
 
 #[async_trait]
 pub trait FutureQueue: Send + Sync {

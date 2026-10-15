@@ -479,7 +479,9 @@ impl Factory for ProbeFactory {
         let mode = request.configuration["mode"].as_str().unwrap().to_owned();
         let reader = match mode.as_str() {
             "ignored" => None,
-            "substituted" => Some(SourceProgressReader::from(owner())),
+            "substituted" => Some(drasi_computation_contracts::SourceProgressView::new(
+                Arc::new(progress.reader()),
+            )),
             _ => Some(progress.reader()),
         };
         *captured().lock().unwrap() = Some(progress);
@@ -494,33 +496,17 @@ impl Factory for ProbeFactory {
 }
 struct Probe {
     descriptor: ComponentDescriptor,
-    reader: Option<SourceProgressReader>,
+    reader: Option<drasi_computation_contracts::SourceProgressView>,
     mode: String,
     started: bool,
 }
 #[async_trait]
-impl ComputationComponent for Probe {
+impl sdk::NativeComponent for Probe {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
     fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({"mode":self.mode}))
-    }
-    fn recovery_contract(&self) -> ComponentRecovery {
-        if self.reader.is_none()
-            || self.mode == "retentionless"
-            || (self.mode == "mutate" && self.started)
-        {
-            ComponentRecovery::default()
-        } else {
-            ComponentRecovery::admitted(StorageDurability::LOCAL_POWER_LOSS).replay_until(id(
-                if self.mode == "wrong-consumer" {
-                    "another"
-                } else {
-                    "query"
-                },
-            ))
-        }
     }
     async fn start(&mut self) -> Result<()> {
         self.started = true;
@@ -532,9 +518,26 @@ impl ComputationComponent for Probe {
     }
 }
 #[async_trait]
-impl EnvelopeSource for Probe {
-    fn recovery_reader(&self) -> Option<SourceProgressReader> {
+impl sdk::NativeSource for Probe {
+    fn recovery_reader(&self) -> Option<drasi_computation_contracts::SourceProgressView> {
         self.reader.clone()
+    }
+    fn replay_retention(&self) -> Option<(StorageDurability, ComponentId)> {
+        if self.reader.is_none()
+            || self.mode == "retentionless"
+            || (self.mode == "mutate" && self.started)
+        {
+            None
+        } else {
+            Some((
+                StorageDurability::LOCAL_POWER_LOSS,
+                id(if self.mode == "wrong-consumer" {
+                    "another"
+                } else {
+                    "query"
+                }),
+            ))
+        }
     }
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         Ok(None)
@@ -639,7 +642,7 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
             Some(owner()),
         )?;
         let captured = captured().lock().unwrap().take().unwrap();
-        assert!(captured.reader().local_owner().is_none());
+        assert_eq!(captured.reader().component_id(), &id("query"));
         assert!(captured.reader().snapshot().is_ok());
         assert_eq!(
             source.recovery_contract().replay_retention().is_some(),

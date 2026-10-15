@@ -20,8 +20,8 @@ kind = "transformer-arithmetic"
 
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
-drasi-core = { workspace = true }
-drasi-lib = { workspace = true }
+drasi-core-types = { workspace = true }
+drasi-computation-contracts = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

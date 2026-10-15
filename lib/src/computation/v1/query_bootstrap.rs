@@ -24,18 +24,11 @@ use std::{pin::Pin, sync::Arc};
 use super::{ChangeEnvelope, StreamId};
 
 pub(super) const BOOTSTRAP_STATE: &str = "\0computation:query-bootstrap-state:v1";
-pub const MAX_BOOTSTRAP_STATE_BYTES: usize = 65536;
 
-/// Bounded connector handover metadata in the query's own transaction domain.
-/// Writes finish before external initialization effects may begin. State survives
-/// an explicit query reset, so a connector can identify its unfinished resources.
-/// Query deprovisioning removes it. The provider must not retain this borrowed service.
-#[async_trait]
-pub trait BootstrapState: Send + Sync {
-    fn durability(&self) -> StorageDurability;
-    async fn read(&self) -> anyhow::Result<Option<Bytes>>;
-    async fn write(&self, state: Bytes) -> anyhow::Result<()>;
-}
+pub use drasi_computation_contracts::{
+    BootstrapPreparation, BootstrapState, BootstrapWatermark, ComputationBootstrapSnapshot,
+    MAX_BOOTSTRAP_STATE_BYTES,
+};
 
 pub(super) struct QueryBootstrapState<'a>(pub &'a ComputationQuery);
 
@@ -88,18 +81,6 @@ impl BootstrapState for QueryBootstrapState<'_> {
             .await?;
         Ok(())
     }
-}
-
-pub struct BootstrapWatermark {
-    pub stream: StreamId,
-    pub source_id: Option<String>,
-    pub sequence: u64,
-    pub position: Option<Bytes>,
-}
-
-pub struct ComputationBootstrapSnapshot {
-    pub changes: Pin<Box<dyn Stream<Item = anyhow::Result<ChangeEnvelope>> + Send>>,
-    pub watermarks: Vec<BootstrapWatermark>,
 }
 
 /// A held provider lifecycle, not a sampled stop or a processing-state proof.
@@ -172,13 +153,6 @@ pub trait ComputationBootstrapProvider: Send + Sync {
     fn completion_state(&self) -> anyhow::Result<Option<Bytes>> {
         Ok(None)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BootstrapPreparation {
-    Ready,
-    RefreshVolatile,
-    ResetRequired,
 }
 
 pub struct QueryBootstrapResource(pub Arc<dyn ComputationBootstrapProvider>);

@@ -10,19 +10,19 @@ use crate::proto::source;
 use anyhow::Context;
 use anyhow::{ensure, Result};
 #[cfg(any(feature = "http-source", feature = "grpc-source"))]
-use drasi_core::models::SourceChange;
+use drasi_computation_contracts::ComponentId;
+use drasi_computation_contracts::{
+    ChangeOperation, InputEnvelope, QueryChangeCodec, QueryRowKind, Record, RecordImage, StreamId,
+    UpdateSemantics,
+};
+#[cfg(any(feature = "http-source", feature = "grpc-source"))]
+use drasi_core_types::models::SourceChange;
 #[cfg(feature = "grpc-source")]
-use drasi_core::models::{
+use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
 };
 #[cfg(feature = "http-source")]
 pub use drasi_http_common::{HttpElement, HttpSourceChange};
-#[cfg(any(feature = "http-source", feature = "grpc-source"))]
-use drasi_lib::computation::v1::ComponentId;
-use drasi_lib::computation::v1::{
-    ChangeOperation, InputEnvelope, QueryChangeCodec, QueryRowKind, Record, RecordImage, StreamId,
-    UpdateSemantics,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(feature = "grpc-source")]
@@ -253,7 +253,7 @@ pub struct Notification {
     pub row_signature: u64,
 }
 
-fn row(record: &Record, query_id: &str) -> Result<drasi_lib::computation::v1::DecodedQueryRow> {
+fn row(record: &Record, query_id: &str) -> Result<drasi_computation_contracts::DecodedQueryRow> {
     ensure!(
         record.image() == RecordImage::Full,
         "query output requires full row images"

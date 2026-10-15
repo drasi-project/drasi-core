@@ -3,6 +3,7 @@
 The continuous query engine: evaluates parsed Cypher/GQL ASTs against a labeled property graph and emits result diffs as elements change. Foundation crate of the workspace.
 
 ## Invariants (change with extreme care)
+- Shared models, result values and value errors are owned by `../core-types` and re-exported here. Keep their serialization and grouping behavior identical; run both packages' tests and shared-tests after changing them. The model package must not depend on this evaluator.
 - Query solving, change detection, projection, aggregation and middleware evaluation have one implementation in `query/evaluator.rs`. `ContinuousQuery` keeps the standalone API; graph transactions own the same `QueryEvaluator` without a nested legacy runtime. Do not fork those algorithms.
 - Solution signatures and result keys are SpookyHash values persisted as DB keys by external index backends - changing the hash algorithm, the hashed fields, or their order breaks persisted state on upgrade
 - Use `crate::hashing::SpookyHasher` (or `drasi_core::hashing::SpookyHasher` downstream). It preserves the pinned `hashers` 1.0.1 algorithm without its unconditional stdout writes. Fragmented-input equivalence and stdout-silence tests protect both contracts; do not substitute a different hash implementation.

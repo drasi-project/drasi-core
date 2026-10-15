@@ -1,16 +1,17 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use crate::NativeTransformer as Transformer;
 use crate::{
     abi,
     transport::{checked_table, take_status, Failure, OperationFuture},
     wire,
 };
 use async_trait::async_trait;
-use drasi_core::models::{Element, ElementReference, ElementValue};
-use drasi_lib::computation::v1::{
-    BinaryEnvelopeCodec, ChangeEnvelope, ChangeSetRef, ComponentId, Schema, Transformer,
+use drasi_computation_contracts::{
+    BinaryEnvelopeCodec, ChangeEnvelope, ChangeSetRef, ComponentId, Schema,
 };
+use drasi_core_types::models::{Element, ElementReference, ElementValue};
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 
@@ -148,8 +149,8 @@ impl<'a> NativeTransactionContext<'a> {
 mod tests {
     use super::*;
     use crate::transport;
-    use drasi_core::models::{ElementMetadata, ElementPropertyMap};
-    use drasi_lib::computation::v1::GraphChangeCodec;
+    use drasi_computation_contracts::GraphChangeCodec;
+    use drasi_core_types::models::{ElementMetadata, ElementPropertyMap};
     use std::{
         collections::HashMap,
         ffi::c_void,

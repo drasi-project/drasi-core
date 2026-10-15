@@ -96,35 +96,7 @@ pub enum ComponentEntityConstruction {
     External,
 }
 
-/// A component's semantic category, separate from its port/lifecycle execution
-/// role. Hosts can annotate wrappers through [`ComponentDescriptor::with_semantic_kind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ComponentSemanticKind {
-    Source,
-    Transformer,
-    Query,
-    Sink,
-    Reaction,
-    Service,
-}
-
-impl From<ComponentRole> for ComponentSemanticKind {
-    fn from(role: ComponentRole) -> Self {
-        match role {
-            ComponentRole::Source => Self::Source,
-            ComponentRole::Transformer => Self::Transformer,
-            ComponentRole::Query => Self::Query,
-            ComponentRole::Sink => Self::Sink,
-            ComponentRole::Service => Self::Service,
-        }
-    }
-}
-
-impl ComponentSemanticKind {
-    fn for_component(role: ComponentRole, descriptor: &ComponentDescriptor) -> Self {
-        descriptor.semantic_kind().unwrap_or_else(|| role.into())
-    }
-}
+pub use drasi_computation_contracts::ComponentSemanticKind;
 
 #[derive(Debug, Clone)]
 pub struct ComponentEntity {

@@ -4,6 +4,12 @@
 crate's `config` module. Shared network code supplies only common validation
 and delivery-policy helpers.
 
+The normal sink and `delivery::HttpDeliveryHandler` do not depend on the graph
+runtime. Applications that host `delivery::HttpDeliveryEndpoint` explicitly
+enable `delivery-receiver`: that endpoint actually runs a host-owned delivery
+runner and therefore needs `drasi-lib`. This feature is not needed to build or
+load the HTTP sink plugin.
+
 `drasi-computation-sink-http` provides only `drasi.network/http-sink`
 (implementation `"1"`, configuration `1`).
 

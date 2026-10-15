@@ -2,6 +2,7 @@
 
 members = [
   "core",
+  "core-types",
   "query-ast",
   "query-cypher",
   "query-gql",
@@ -115,6 +116,7 @@ members = [
   "components/plugin-sdk",
 
   # Native ComputationGraph plugin family (independent of the legacy ABI)
+  "components/computation-contracts",
   "components/computation-plugin-abi",
   "components/computation-plugin-sdk",
 
@@ -173,15 +175,17 @@ drasi-query-ast = { version = "0.3.5", path = "query-ast" }
 drasi-query-cypher = { version = "0.3.6", path = "query-cypher" }
 drasi-query-gql = { version = "0.3.6", path = "query-gql" }
 drasi-core = { version = "0.5.10", path = "core" }
+drasi-core-types = { version = "0.11.3", path = "core-types" }
 drasi-functions-cypher = { version = "0.5.10", path = "functions-cypher" }
 drasi-functions-gql = { version = "0.5.10", path = "functions-gql" }
-drasi-middleware = { version = "0.5.11", path = "middleware" }
+drasi-middleware = { version = "0.5.11", path = "middleware", default-features = false }
 drasi-identity-azure = { version = "0.2.15", path = "components/identity/azure" }
 drasi-identity-aws = { version = "0.2.8", path = "components/identity/aws" }
 drasi-lib = { version = "0.9.3", path = "lib" }
 drasi-ffi-primitives = { version = "0.11.3", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.11.3", path = "components/plugin-sdk" }
 drasi-computation-plugin-abi = { version = "0.11.3", path = "components/computation-plugin-abi" }
+drasi-computation-contracts = { version = "0.11.3", path = "components/computation-contracts" }
 drasi-computation-plugin-sdk = { version = "0.11.3", path = "components/computation-plugin-sdk" }
 drasi-computation-bridge-common = { version = "0.11.3", path = "components/computation-plugins/common/bridge" }
 drasi-computation-network-common = { version = "0.11.3", path = "components/computation-plugins/common/network" }

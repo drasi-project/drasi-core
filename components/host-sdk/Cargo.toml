@@ -18,6 +18,7 @@ drasi-core = { workspace = true }
 drasi-plugin-sdk = { workspace = true }
 drasi-computation-plugin-abi = { workspace = true }
 drasi-computation-plugin-sdk = { workspace = true }
+drasi-computation-contracts = { workspace = true }
 libloading = "0.8"
 async-trait = "0.1"
 anyhow = "1.0"

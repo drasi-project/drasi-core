@@ -52,7 +52,7 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
 [dev-dependencies]
-drasi-computation-sink-http = { workspace = true }
+drasi-computation-sink-http = { workspace = true, features = ["delivery-receiver"] }
 drasi-core.workspace = true
 drasi-index-rocksdb = { path = "../../indexes/rocksdb" }
 tempfile = "3.8"

@@ -21,7 +21,7 @@ kind = "sink-sse"
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-network-common = { workspace = true }
-drasi-lib = { workspace = true }
+drasi-computation-contracts = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 async-stream = "0.3"

@@ -37,7 +37,19 @@ cargo() {
     [[ "$*" != *--no-default-features* ]] || profile=no-default-features
     [[ "$*" != *computation-rocksdb-tests* ]] || profile=extra-capabilities
     local sources=(lib lib/tests/*.rs)
-    if [[ " $* " == *" -p lib-integration-tests "* ]]; then
+    if [[ " $* " == *" -p drasi-core-types "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-core-types
+        profile=core-types
+        sources=(lib)
+    elif [[ " $* " == *" -p drasi-computation-contracts "* ]]; then
+        inventory=/dev/null
+        mappings=/dev/null
+        package=drasi-computation-contracts
+        profile=shared-contracts
+        sources=(lib)
+    elif [[ " $* " == *" -p lib-integration-tests "* ]]; then
         inventory=lib/tests/runtime_parity/integration-cases.tsv
         mappings=/dev/null
         package=lib-integration-tests
@@ -303,7 +315,7 @@ for omitted in baseline suite discovery execution ignored failure capability map
         printf 'Runner accepted missing %s coverage.\n' "$omitted" >&2
         exit 1
     fi
-    for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+    for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
         test -f "$logs/missing-$omitted/$profile.exit-code"
     done
 done

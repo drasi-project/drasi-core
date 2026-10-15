@@ -18,7 +18,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
-use drasi_core::{
+use drasi_core_types::{
     evaluation::variable_value::{
         duration::Duration, float::Float, integer::Integer, zoned_datetime::ZonedDateTime,
         zoned_time::ZonedTime, ListRange, RangeBound, VariableValue,

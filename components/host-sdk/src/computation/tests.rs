@@ -164,7 +164,7 @@ struct TestComponent {
     controlled: bool,
 }
 #[async_trait]
-impl ComputationComponent for TestComponent {
+impl sdk::NativeComponent for TestComponent {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -191,7 +191,7 @@ impl ComputationComponent for TestComponent {
     }
 }
 #[async_trait]
-impl EnvelopeSource for TestComponent {
+impl sdk::NativeSource for TestComponent {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         if self.configuration["panic_next"] == true {
             self.seen += 1;
@@ -216,7 +216,7 @@ impl EnvelopeSource for TestComponent {
     }
 }
 #[async_trait]
-impl Transformer for TestComponent {
+impl sdk::NativeTransformer for TestComponent {
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         anyhow::ensure!(
             self.configuration["fail_transform"] != true,
@@ -237,7 +237,7 @@ impl Transformer for TestComponent {
     }
 }
 #[async_trait]
-impl EnvelopeSink for TestComponent {
+impl sdk::NativeSink for TestComponent {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
@@ -247,7 +247,7 @@ impl EnvelopeSink for TestComponent {
     }
 }
 #[async_trait]
-impl ComputationService for TestComponent {
+impl sdk::NativeService for TestComponent {
     async fn run(&mut self) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(2)).await;
         self.seen += 1;

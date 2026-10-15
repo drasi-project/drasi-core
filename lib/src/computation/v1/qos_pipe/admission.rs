@@ -10,34 +10,7 @@ use sha2::{Digest, Sha256};
 
 pub(super) const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum AdmissionRejection {
-    #[error("client admission is not enabled")]
-    NotEnabled,
-    #[error("admission is busy")]
-    Busy,
-    #[error("unknown, retired or foreign producer session")]
-    SessionExpired,
-    #[error("producer sequence {received} is not the expected next number {expected:?}")]
-    Sequence {
-        received: u64,
-        expected: Option<u64>,
-    },
-    #[error("producer sequence {0} is outside the retained receipt window")]
-    ReceiptExpired(u64),
-    #[error("producer sequence {0} was already accepted with a different payload")]
-    PayloadConflict(u64),
-    #[error("producer still has unhandled subscriber obligations")]
-    PendingObligations,
-    #[error("admission identifiers must not exceed 256 bytes")]
-    IdentifierTooLong,
-}
-
-impl From<AdmissionRejection> for PipeError {
-    fn from(error: AdmissionRejection) -> Self {
-        PipeError::Backend(error.into())
-    }
-}
+pub use drasi_computation_contracts::AdmissionRejection;
 
 /// Bounds apply to one channel, not to an unbounded set of client names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,31 +67,7 @@ pub(super) fn bounded_identifier(value: &str) -> Result<(), PipeError> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProducerSession {
-    pub incarnation: uuid::Uuid,
-    pub producer: ComponentId,
-    pub epoch: u64,
-}
-
-/// This receipt proves acceptance at the configured storage boundary, not that
-/// a query or external destination has handled the event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdmissionReceipt {
-    pub session: ProducerSession,
-    pub sequence: u64,
-    pub position: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProducerStatus {
-    pub session: ProducerSession,
-    pub next_sequence: Option<u64>,
-    pub earliest_receipt: Option<u64>,
-}
+pub use drasi_computation_contracts::{AdmissionReceipt, ProducerSession, ProducerStatus};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

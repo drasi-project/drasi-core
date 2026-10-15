@@ -94,16 +94,59 @@ impl Factory for SqliteFactory {
             request.id.clone(),
             config.stream,
             config.settings,
-            progress.reader(),
+            SourceProgressReader::External(Arc::new(progress.reader())),
         )?;
+        let reader = progress.reader();
         let commands = Commands {
             sql: source.handle(),
             progress,
         };
         Ok(sdk::CreatedComponent {
-            component: sdk::Component::Source(Box::new(source)),
+            component: sdk::Component::Source(Box::new(PluginSource { source, reader })),
             control_handler: Some(Arc::new(commands)),
         })
+    }
+}
+
+// This test-only wrapper exercises the existing in-process SQLite source through
+// the plugin boundary; it is not a production registration or a legacy adapter.
+struct PluginSource {
+    source: SqliteSource,
+    reader: drasi_computation_contracts::SourceProgressView,
+}
+
+#[async_trait]
+impl sdk::NativeComponent for PluginSource {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        self.source.descriptor()
+    }
+    fn configuration(&self) -> Result<serde_json::Value> {
+        self.source.configuration()
+    }
+    fn requires_readiness_confirmation(&self) -> bool {
+        self.source.requires_readiness_confirmation()
+    }
+    async fn start(&mut self) -> Result<()> {
+        self.source.start().await
+    }
+    async fn stop(&mut self) -> Result<()> {
+        self.source.stop().await
+    }
+}
+
+#[async_trait]
+impl sdk::NativeSource for PluginSource {
+    fn recovery_reader(&self) -> Option<drasi_computation_contracts::SourceProgressView> {
+        Some(self.reader.clone())
+    }
+    fn replay_retention(&self) -> Option<(drasi_core::interface::StorageDurability, ComponentId)> {
+        self.source
+            .recovery_contract()
+            .replay_retention()
+            .map(|(durability, consumer)| (durability, consumer.clone()))
+    }
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        self.source.next().await
     }
 }
 

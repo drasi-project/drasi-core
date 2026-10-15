@@ -26,40 +26,7 @@ use crate::computation::v1::{
     EnvelopeSource, FailureDisposition, ResourceId, SinkCompletion, Transformer,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub struct PluginIdentity {
-    pub id: Arc<str>,
-    pub version: Arc<str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub struct ImplementationIdentity {
-    pub name: Arc<str>,
-    pub version: Arc<str>,
-    pub plugin: Option<PluginIdentity>,
-}
-
-impl ImplementationIdentity {
-    pub fn try_new(name: impl Into<Arc<str>>, version: impl Into<Arc<str>>) -> GraphResult<Self> {
-        let value = Self {
-            name: name.into(),
-            version: version.into(),
-            plugin: None,
-        };
-        value.validate()?;
-        Ok(value)
-    }
-
-    fn validate(&self) -> GraphResult<()> {
-        validate_identifier("implementation", &self.name)?;
-        validate_identifier("implementation version", &self.version)?;
-        if let Some(plugin) = &self.plugin {
-            validate_identifier("plugin", &plugin.id)?;
-            validate_identifier("plugin version", &plugin.version)?;
-        }
-        Ok(())
-    }
-}
+pub use drasi_computation_contracts::{ImplementationIdentity, PluginIdentity};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ConfigurationValue {

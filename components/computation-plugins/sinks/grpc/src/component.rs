@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
+
 use crate::{
     config::{backoff, duration, GrpcSinkConfig},
     proto::reaction,
@@ -8,9 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComputationComponent, EnvelopeSink, InputEnvelope, SinkCompletion,
-};
+use drasi_computation_contracts::{ComponentDescriptor, InputEnvelope, SinkCompletion};
 use std::time::Duration;
 use tonic::Request;
 
@@ -96,7 +96,7 @@ impl GrpcSink {
     }
 }
 #[async_trait]
-impl ComputationComponent for GrpcSink {
+impl NativeComponent for GrpcSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -132,7 +132,7 @@ impl ComputationComponent for GrpcSink {
     }
 }
 #[async_trait]
-impl EnvelopeSink for GrpcSink {
+impl NativeSink for GrpcSink {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }

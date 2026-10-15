@@ -46,10 +46,10 @@ use super::{ComponentGeneration, ComponentId};
 /// Maximum UTF-8 reason length, or combined UTF-8 kind and encoded JSON length.
 ///
 /// This excludes fixed notification metadata and component identifiers.
-pub const MAX_CONTROL_PAYLOAD_BYTES: usize = 16 * 1024;
+pub use drasi_computation_contracts::MAX_CONTROL_PAYLOAD_BYTES;
 
 /// Maximum JSON child depth, counting the root value as depth zero.
-pub const MAX_CONTROL_JSON_DEPTH: usize = 64;
+pub use drasi_computation_contracts::MAX_CONTROL_JSON_DEPTH;
 
 /// Direction of travel relative to the sender and the graph's data edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

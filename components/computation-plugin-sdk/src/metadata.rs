@@ -8,9 +8,8 @@ use std::{
     sync::Arc,
 };
 
-use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComponentId, ComponentRole, ComponentSemanticKind, ConfigurationField,
-    ConfigurationSchema, ConfigurationType, FactoryDescriptor, ImplementationIdentity,
+use drasi_computation_contracts::{
+    ComponentDescriptor, ComponentId, ComponentRole, ComponentSemanticKind, ImplementationIdentity,
     PluginIdentity, PortDescriptor, PortDirection, SchemaDescriptor, SinkCompletion,
 };
 use serde::{Deserialize, Serialize};
@@ -31,16 +30,6 @@ pub enum ConfigType {
 }
 
 impl ConfigType {
-    fn runtime(self) -> ConfigurationType {
-        match self {
-            Self::Boolean => ConfigurationType::Boolean,
-            Self::Integer => ConfigurationType::Integer,
-            Self::String => ConfigurationType::String,
-            Self::Object => ConfigurationType::Object,
-            Self::Array => ConfigurationType::Array,
-            Self::Json => ConfigurationType::Json,
-        }
-    }
     pub(crate) fn accepts(self, value: &Value) -> bool {
         match self {
             Self::Boolean => value.is_boolean(),
@@ -87,26 +76,6 @@ impl ConfigSchema {
                 })
                 .collect(),
             allow_additional: false,
-        }
-    }
-
-    pub fn runtime(&self) -> ConfigurationSchema {
-        ConfigurationSchema {
-            fields: self
-                .fields
-                .iter()
-                .map(|(name, field)| {
-                    (
-                        Arc::from(name.as_str()),
-                        ConfigurationField {
-                            value_type: field.value_type.runtime(),
-                            required: field.required,
-                            secret: field.secret,
-                        },
-                    )
-                })
-                .collect(),
-            allow_additional: self.allow_additional,
         }
     }
 
@@ -172,16 +141,6 @@ impl FactoryMetadata {
         }
     }
 
-    pub fn factory_descriptor(&self) -> FactoryDescriptor {
-        FactoryDescriptor {
-            implementation: self.implementation.clone(),
-            role: self.role,
-            configuration_version: self.configuration_version,
-            configuration: self.configuration.runtime(),
-            dependencies: BTreeMap::new(),
-        }
-    }
-
     pub fn validate(
         &self,
         plugin: &PluginIdentity,
@@ -225,7 +184,7 @@ impl FactoryMetadata {
                 port.id()
             );
             if let Some(completion) = self.completion {
-                drasi_lib::computation::v1::validate_sink_completion(
+                drasi_computation_contracts::validate_sink_completion(
                     completion,
                     port.requirements(),
                 )?;
@@ -335,7 +294,7 @@ mod tests {
         assert!(schema
             .validate(&json!({"stream": "events", "extra": 1}))
             .is_err());
-        assert!(!schema.runtime().allow_additional);
+        assert!(!schema.allow_additional);
         Ok(())
     }
 }

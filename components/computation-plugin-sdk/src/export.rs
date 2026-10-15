@@ -1,10 +1,13 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use drasi_lib::computation::v1::{
-    BinaryEnvelopeCodec, ComputationComponent, ComputationService, EnvelopeSink, EnvelopeSource,
-    PluginIdentity, PortDirection, Record, RecordImage, RecordReference, Schema,
-    SourceProgressReader, Transformer, WakeupSource,
+use crate::{
+    NativeComponent as ComputationComponent, NativeService as ComputationService,
+    NativeSink as EnvelopeSink, NativeSource as EnvelopeSource, NativeTransformer as Transformer,
+};
+use drasi_computation_contracts::{
+    BinaryEnvelopeCodec, PluginIdentity, PortDirection, Record, RecordImage, RecordReference,
+    Schema, SourceProgressView, WakeupSource,
 };
 use std::{
     ffi::c_void,
@@ -595,7 +598,7 @@ unsafe extern "C" fn factory_recovery(state: *mut c_void, index: u32) -> Reply {
         let source_progress = factory.supports_source_progress();
         if source_progress
             && state.definition.metadata.factories[index as usize].role
-                != drasi_lib::computation::v1::ComponentRole::Source
+                != drasi_computation_contracts::ComponentRole::Source
         {
             return Err(Failure::protocol("source progress requires a source"));
         }
@@ -618,7 +621,7 @@ unsafe extern "C" fn factory_services(state: *mut c_void, index: u32) -> Reply {
         let source_admission = factory.supports_source_admission();
         let metadata = &state.definition.metadata.factories[index as usize];
         if source_admission
-            && (metadata.role != drasi_lib::computation::v1::ComponentRole::Source
+            && (metadata.role != drasi_computation_contracts::ComponentRole::Source
                 || metadata.ports.len() != 1)
         {
             return Err(Failure::protocol(
@@ -732,30 +735,28 @@ struct Instance {
     running: AtomicBool,
     damaged: Arc<transport::PanicState>,
     admission: bool,
-    progress: Option<SourceProgressReader>,
+    progress: Option<SourceProgressView>,
     recovery: Option<crate::progress::InstanceRecovery>,
     consumer: Option<Box<crate::consumer::ConsumerState>>,
 }
 
 fn source_recovery(
     component: &Component,
-    progress: &SourceProgressReader,
+    progress: &SourceProgressView,
 ) -> anyhow::Result<crate::progress::InstanceRecovery> {
     let Component::Source(source) = component else {
         anyhow::bail!("source progress requires a source");
     };
     anyhow::ensure!(
-        source.recovery_progress().is_none()
-            && source
-                .recovery_reader()
-                .is_some_and(|reader| reader.same_owner(progress)),
+        source
+            .recovery_reader()
+            .is_some_and(|reader| reader.same_owner(progress)),
         "native source must use its actual negotiated progress reader"
     );
-    let contract = source.recovery_contract();
-    let retention = match contract.replay_retention() {
+    let retention = match source.replay_retention() {
         Some((retention, consumer)) => {
             anyhow::ensure!(
-                consumer == progress.component_id(),
+                &consumer == progress.component_id(),
                 "native replay retention names a different progress owner"
             );
             Some(retention)
@@ -858,7 +859,7 @@ unsafe fn create_component_with_services(
             anyhow::ensure!(
                 admission.is_null()
                     || (factory.supports_source_admission()
-                        && metadata.role == drasi_lib::computation::v1::ComponentRole::Source
+                        && metadata.role == drasi_computation_contracts::ComponentRole::Source
                         && metadata.ports.len() == 1),
                 "unsupported native source admission"
             );
@@ -878,7 +879,7 @@ unsafe fn create_component_with_services(
                 anyhow::ensure!(
                     admission.is_null()
                         && factory.supports_source_progress()
-                        && metadata.role == drasi_lib::computation::v1::ComponentRole::Source,
+                        && metadata.role == drasi_computation_contracts::ComponentRole::Source,
                     "unsupported native source progress binding"
                 );
                 let capability = unsafe { crate::NativeSourceProgress::from_borrowed(progress)? };
@@ -901,21 +902,13 @@ unsafe fn create_component_with_services(
             let role = match &component {
                 Component::Source(source) => {
                     anyhow::ensure!(
-                        source.recovery_progress().is_none(),
-                        "Rust source progress owners cannot cross the native ABI"
-                    );
-                    anyhow::ensure!(
                         progress.is_some() || source.recovery_reader().is_none(),
                         "native source progress requires its negotiated recovery service"
                     );
-                    anyhow::ensure!(
-                        source.admission().is_none(),
-                        "Rust source admission handles cannot cross native ABI 1.0"
-                    );
-                    drasi_lib::computation::v1::ComponentRole::Source
+                    drasi_computation_contracts::ComponentRole::Source
                 }
                 Component::Transformer(_) | Component::Transactional(_) => {
-                    drasi_lib::computation::v1::ComponentRole::Transformer
+                    drasi_computation_contracts::ComponentRole::Transformer
                 }
                 Component::Sink(sink) => {
                     anyhow::ensure!(
@@ -923,12 +916,12 @@ unsafe fn create_component_with_services(
                             && metadata.capabilities.snapshot == sink.supports_snapshot(),
                         "native sink completion/snapshot capability mismatch"
                     );
-                    drasi_lib::computation::v1::ComponentRole::Sink
+                    drasi_computation_contracts::ComponentRole::Sink
                 }
                 Component::Consumer(_) | Component::TransactionalConsumer(_) => {
-                    drasi_lib::computation::v1::ComponentRole::Sink
+                    drasi_computation_contracts::ComponentRole::Sink
                 }
-                Component::Service(_) => drasi_lib::computation::v1::ComponentRole::Service,
+                Component::Service(_) => drasi_computation_contracts::ComponentRole::Service,
             };
             anyhow::ensure!(
                 metadata.role == role,
@@ -947,10 +940,6 @@ unsafe fn create_component_with_services(
                 metadata.capabilities.transactional
                     == matches!(&component, Component::Transactional(_)),
                 "native transactional interface does not match metadata"
-            );
-            anyhow::ensure!(
-                component.base().control_handler().is_none(),
-                "Rust graph control handlers cannot cross FFI; supply NativeControlHandler"
             );
             anyhow::ensure!(
                 created.control_handler.is_some() == metadata.capabilities.control,
@@ -1178,15 +1167,15 @@ unsafe extern "C" fn begin(
         let allowed = match code {
             START | STOP => true,
             NEXT => {
-                instance.factory.role == drasi_lib::computation::v1::ComponentRole::Source
+                instance.factory.role == drasi_computation_contracts::ComponentRole::Source
                     && !instance.admission
             }
             TRANSFORM | DELIVERY_COMPLETED => {
-                instance.factory.role == drasi_lib::computation::v1::ComponentRole::Transformer
+                instance.factory.role == drasi_computation_contracts::ComponentRole::Transformer
             }
-            HANDLE => instance.factory.role == drasi_lib::computation::v1::ComponentRole::Sink,
+            HANDLE => instance.factory.role == drasi_computation_contracts::ComponentRole::Sink,
             RUN | QUIESCE => {
-                instance.factory.role == drasi_lib::computation::v1::ComponentRole::Service
+                instance.factory.role == drasi_computation_contracts::ComponentRole::Service
             }
             CONTINUE => c.continuations,
             WAKE_WAIT | WAKE_PENDING | ON_WAKEUP => c.wakeups,

@@ -1384,7 +1384,8 @@ impl SourceBase {
     /// Maximum allowed size for source position bytes (64KB).
     /// Positions exceeding this limit are skipped at checkpoint time
     /// to prevent memory issues, preserving the last good position.
-    pub const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
+    pub const MAX_SOURCE_POSITION_BYTES: usize =
+        drasi_computation_contracts::MAX_SOURCE_POSITION_BYTES;
 
     /// Return `candidate` clamped to at least `*last`, updating `*last`.
     ///

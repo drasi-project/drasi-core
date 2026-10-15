@@ -20,7 +20,7 @@ drasi-computation-sink-bridge = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }
-drasi-middleware = { workspace = true, features = ["map", "relabel"] }
+drasi-middleware = { workspace = true, features = ["engine-adapter", "map", "relabel"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

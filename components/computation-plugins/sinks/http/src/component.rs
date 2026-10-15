@@ -1,15 +1,15 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
+
 use crate::{
     config::{backoff, duration, HttpSinkConfig},
     wire,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComputationComponent, EnvelopeSink, InputEnvelope, SinkCompletion,
-};
+use drasi_computation_contracts::{ComponentDescriptor, InputEnvelope, SinkCompletion};
 
 pub(crate) struct HttpSink {
     descriptor: ComponentDescriptor,
@@ -65,7 +65,7 @@ impl HttpSink {
     }
 }
 #[async_trait]
-impl ComputationComponent for HttpSink {
+impl NativeComponent for HttpSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -88,7 +88,7 @@ impl ComputationComponent for HttpSink {
     }
 }
 #[async_trait]
-impl EnvelopeSink for HttpSink {
+impl NativeSink for HttpSink {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }

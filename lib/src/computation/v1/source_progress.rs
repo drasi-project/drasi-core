@@ -24,62 +24,9 @@ use std::{
 };
 use tokio::sync::watch;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SourceProgressKey {
-    Source(String),
-    Stream(StreamId),
-}
-
-/// A read-only view of an owning query or durable middleware's committed input
-/// progress. Persistence comes from that component's actual checkpoint provider,
-/// not from this watch channel. A non-immediate owner requires an asserted,
-/// validated path through identity-preserving stateless components.
-#[derive(Debug, Clone, Default)]
-pub struct SourceProgressSnapshot {
-    pub ready: bool,
-    /// All source resume/reset preparation completed for this generation. Live
-    /// inputs may now buffer, but evaluation still waits for bootstrap readiness.
-    pub admitting: bool,
-    pub recovered: bool,
-    pub bootstrap_complete: bool,
-    pub persistent: bool,
-    pub reset_generation: u64,
-    pub checkpoints: BTreeMap<SourceProgressKey, SourceCheckpoint>,
-    /// Consumed transport positions are not source resume cursors. Replayed
-    /// logical input can advance these without advancing `checkpoints`.
-    pub transport_sequences: BTreeMap<StreamId, u64>,
-    pub failure: Option<Arc<str>>,
-}
-
-/// A subscription to committed progress. Reads mark the returned state observed;
-/// changes may coalesce, but cancelling `changed` must not consume an update.
-#[async_trait]
-pub trait SourceProgressUpdates: Send + Sync {
-    fn snapshot(&mut self) -> anyhow::Result<Arc<SourceProgressSnapshot>>;
-    async fn changed(&mut self) -> anyhow::Result<()>;
-}
-
-#[async_trait]
-impl SourceProgressUpdates for watch::Receiver<Arc<SourceProgressSnapshot>> {
-    fn snapshot(&mut self) -> anyhow::Result<Arc<SourceProgressSnapshot>> {
-        Ok(self.borrow_and_update().clone())
-    }
-
-    async fn changed(&mut self) -> anyhow::Result<()> {
-        Ok(watch::Receiver::changed(self).await?)
-    }
-}
-
-/// Read-only progress supplied by another boundary, such as a plugin host.
-/// Implementations must surface revocation and read errors, not return a default
-/// snapshot. Synchronous reads must be bounded and perform no storage or network
-/// I/O. Subscriptions own their observation state without forwarding tasks.
-pub trait SourceProgressProvider: Send + Sync + 'static {
-    fn graph_id(&self) -> &str;
-    fn component_id(&self) -> &ComponentId;
-    fn snapshot(&self) -> anyhow::Result<Arc<SourceProgressSnapshot>>;
-    fn subscribe(&self) -> anyhow::Result<Box<dyn SourceProgressUpdates>>;
-}
+pub use drasi_computation_contracts::{
+    SourceProgressKey, SourceProgressProvider, SourceProgressSnapshot, SourceProgressUpdates,
+};
 
 /// Separates readable progress from proof of the actual local transaction owner.
 /// An external provider never supplies that proof, even when its names match.

@@ -54,36 +54,7 @@ pub enum HandlingOutcome {
     Failed { reason: String },
 }
 
-/// Typed in-process pipe errors; provider errors retain their source chain.
-#[derive(Debug, thiserror::Error)]
-pub enum PipeError {
-    #[error("bounded pipe capacity is outside the supported nonzero range")]
-    InvalidCapacity,
-    #[error(transparent)]
-    Contract(#[from] ContractError),
-    #[error("pipe is closed")]
-    Closed,
-    #[error("pipe receiver has already been taken")]
-    ReceiverTaken,
-    #[error("broadcast receiver lagged by {skipped} envelopes")]
-    Lagged { skipped: u64 },
-    #[error("retained pipe capacity is exhausted")]
-    CapacityExhausted,
-    #[error("retained position {requested} is unavailable; oldest retained position is {oldest}")]
-    PositionUnavailable { requested: u64, oldest: u64 },
-    #[error("durable acceptance could not be determined: {source}")]
-    AcceptanceUnknown {
-        #[source]
-        source: anyhow::Error,
-    },
-    #[error("durable acknowledgement could not be determined: {source}")]
-    AcknowledgementUnknown {
-        #[source]
-        source: anyhow::Error,
-    },
-    #[error(transparent)]
-    Backend(#[from] anyhow::Error),
-}
+pub use drasi_computation_contracts::PipeError;
 
 /// Failure to confirm acceptance, returning the immutable event. Volatile failures
 /// are definite nonacceptance; durable commit ambiguity is explicitly distinguished.

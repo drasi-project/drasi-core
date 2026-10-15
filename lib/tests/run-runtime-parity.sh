@@ -37,7 +37,7 @@ fi
 
 python3 lib/tests/runtime_parity/check_requirements.py || exit 1
 
-for profile in default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
     package=drasi-lib
     inventory=lib/tests/runtime_parity/original-cases.tsv
     mappings=lib/tests/runtime_parity/case-mappings.tsv
@@ -46,6 +46,17 @@ for profile in default no-default-features extra-capabilities integration plugin
     features=(--locked)
     test_arguments=(--format pretty)
     case "$profile" in
+        core-types|shared-contracts)
+            if [[ "$profile" == core-types ]]; then
+                package=drasi-core-types
+            else
+                package=drasi-computation-contracts
+            fi
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(lib)
+            targets=(--lib)
+            ;;
         no-default-features) features+=(--no-default-features) ;;
         extra-capabilities)
             features+=(--no-default-features --features \

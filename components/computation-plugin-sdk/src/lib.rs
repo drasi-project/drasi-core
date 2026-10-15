@@ -7,6 +7,7 @@
 pub use drasi_computation_plugin_abi as abi;
 pub mod admission;
 pub mod bootstrap;
+mod component;
 pub mod configuration;
 pub mod consumer;
 mod control;
@@ -18,7 +19,8 @@ pub mod transport;
 pub mod wire;
 
 pub use admission::{AdmissionError, AdmissionErrorKind, NativeAdmission};
-pub use bootstrap::{BootstrapFactory, BootstrapFactoryMetadata};
+pub use bootstrap::{BootstrapFactory, BootstrapFactoryMetadata, NativeBootstrapProvider};
+pub use component::{NativeComponent, NativeService, NativeSink, NativeSource, NativeTransformer};
 pub use configuration::{ConfigDefinition, ConfigDetails, ConfigOption};
 pub use consumer::{ConsumerMode, NativeConsumer, NativeTransactionalConsumer};
 pub use control::{

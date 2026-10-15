@@ -37,7 +37,7 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use drasi_core::{
+use drasi_core_types::{
     evaluation::context::QueryVariables,
     interface::FutureElementRef,
     models::{Element, ElementMetadata, ElementReference},

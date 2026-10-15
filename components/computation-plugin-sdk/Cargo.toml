@@ -8,8 +8,8 @@ readme = "README.md"
 
 [dependencies]
 drasi-computation-plugin-abi = { workspace = true }
-drasi-lib = { workspace = true }
-drasi-core = { workspace = true }
+drasi-computation-contracts = { workspace = true }
+drasi-core-types = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 bytes = "1"

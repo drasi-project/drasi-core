@@ -213,6 +213,11 @@ The result is that the rest of the server code works with normal Rust trait obje
 
 ### Native ComputationGraph plugins
 
+Plugin-side `NativeComponent` interfaces and shared messages no longer depend on
+the runtime. This host package is where those operations become graph-owned
+components, runtime configuration schemas and actual storage/progress bindings.
+The base ABI and wire formats are unchanged; older native binaries remain valid.
+
 Optional recovery-v1 source progress binds only an actual
 `QuerySourceProgressResource` under `source_progress`; it is mutually exclusive
 with the source's optional `admission` binding. The proxy retains the real local

@@ -2019,11 +2019,11 @@ of current completion.
 [query-parts]: ../../core/src/evaluation/parts/mod.rs
 [average]: ../../core/src/evaluation/functions/aggregation/avg.rs
 [solver]: ../../core/src/path_solver/mod.rs
-[graph-codec]: ../src/computation/v1/graph_codec.rs
-[query-codec]: ../src/computation/v1/query_codec.rs
-[output-identity]: ../src/computation/v1/output_identity.rs
-[envelope]: ../src/computation/v1/envelope.rs
-[value-codec]: ../src/computation/internal/typed_change/value_codec.rs
+[graph-codec]: ../../components/computation-contracts/src/graph_codec.rs
+[query-codec]: ../../components/computation-contracts/src/query_codec.rs
+[output-identity]: ../../components/computation-contracts/src/output_identity.rs
+[envelope]: ../../components/computation-contracts/src/envelope.rs
+[value-codec]: ../../components/computation-contracts/src/internal/typed_change/value_codec.rs
 [delivery]: ../src/computation/v1/delivery.rs
 [consumer-recovery]: ../src/computation/v1/consumer_recovery.rs
 [middleware-recovery]: ../src/computation/v1/middleware_recovery.rs

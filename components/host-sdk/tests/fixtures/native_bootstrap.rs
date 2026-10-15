@@ -94,7 +94,7 @@ impl sdk::BootstrapFactory for Factory {
         &self,
         request: &sdk::CreateRequest,
         progress: Option<sdk::NativeSourceProgress>,
-    ) -> anyhow::Result<Arc<dyn ComputationBootstrapProvider>> {
+    ) -> anyhow::Result<Arc<dyn sdk::NativeBootstrapProvider>> {
         let config: Configuration = serde_json::from_value(request.configuration.clone())?;
         anyhow::ensure!(config.count <= 100, "fixture count exceeds limit");
         anyhow::ensure!(
@@ -146,15 +146,12 @@ struct Provider {
     pending: AtomicBool,
 }
 #[async_trait]
-impl ComputationBootstrapProvider for Provider {
-    fn recovery_reader(&self) -> Option<SourceProgressReader> {
+impl sdk::NativeBootstrapProvider for Provider {
+    fn recovery_reader(&self) -> Option<drasi_computation_contracts::SourceProgressView> {
         self.progress.as_ref().map(|progress| {
             let reader = progress.reader();
             if self.invalid_reader.load(Ordering::Acquire) {
-                SourceProgressReader::Local(Arc::new(
-                    QuerySourceProgress::new(reader.graph_id(), reader.component_id().clone())
-                        .expect("validated progress identity"),
-                ))
+                drasi_computation_contracts::SourceProgressView::new(Arc::new(reader))
             } else {
                 reader
             }

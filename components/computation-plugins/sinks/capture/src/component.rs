@@ -1,10 +1,11 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
+
 use async_trait::async_trait;
-use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComputationComponent, EnvelopeCodec, EnvelopeSink, GraphChangeCodec,
-    InputEnvelope, SinkCompletion,
+use drasi_computation_contracts::{
+    ComponentDescriptor, EnvelopeCodec, GraphChangeCodec, InputEnvelope, SinkCompletion,
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
@@ -64,7 +65,7 @@ impl Capture {
     }
 }
 #[async_trait]
-impl ComputationComponent for Capture {
+impl NativeComponent for Capture {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -93,7 +94,7 @@ impl ComputationComponent for Capture {
     }
 }
 #[async_trait]
-impl EnvelopeSink for Capture {
+impl NativeSink for Capture {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }

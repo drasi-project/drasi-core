@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
+
 use crate::{
     config::HttpSourceConfig,
     ingress::{Ingress as SharedIngress, SourceRuntime},
@@ -16,10 +18,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use drasi_computation_contracts::{ComponentDescriptor, OutputEnvelope};
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
-use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComputationComponent, EnvelopeSource, OutputEnvelope,
-};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -42,7 +42,7 @@ impl HttpSource {
     }
 }
 #[async_trait]
-impl ComputationComponent for HttpSource {
+impl NativeComponent for HttpSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.runtime.descriptor
     }
@@ -71,7 +71,7 @@ impl ComputationComponent for HttpSource {
     }
 }
 #[async_trait]
-impl EnvelopeSource for HttpSource {
+impl NativeSource for HttpSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         self.runtime.next().await
     }

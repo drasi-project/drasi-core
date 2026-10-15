@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 use anyhow::{ensure, Result};
+use drasi_computation_contracts::StreamId;
 pub use drasi_computation_network_common::config::{backoff, duration, FailurePolicy};
 use drasi_computation_network_common::config::{input_stream, normalized_headers, timeout_ms};
-use drasi_lib::computation::v1::StreamId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

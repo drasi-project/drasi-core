@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::ingress::Ingress;
-use drasi_computation_plugin_sdk::{AdmissionError, AdmissionErrorKind, NativeAdmission};
-use drasi_core::models::SourceChange;
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     AdmissionReceipt, ChangeEnvelope, GraphChangeCodec, ProducerSession,
 };
+use drasi_computation_plugin_sdk::{AdmissionError, AdmissionErrorKind, NativeAdmission};
+use drasi_core_types::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, time::Duration};
 

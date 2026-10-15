@@ -154,7 +154,7 @@ impl NativeBootstrapConfig {
             metadata.source_progress == self.source_progress.is_some(),
             "native bootstrap source progress binding mismatch"
         );
-        metadata.configuration.runtime().validate_values(
+        crate::computation::runtime_configuration_schema(&metadata.configuration).validate_values(
             &self.configuration,
             declarations,
             resources,
@@ -193,12 +193,10 @@ impl NativeBootstrapConfig {
                 Ok(progress)
             })
             .transpose()?;
-        let configuration = factory
-            .metadata()
-            .configuration
-            .runtime()
-            .resolve_values(&self.configuration, dependencies)
-            .await?;
+        let configuration =
+            crate::computation::runtime_configuration_schema(&factory.metadata().configuration)
+                .resolve_values(&self.configuration, dependencies)
+                .await?;
         let provider = factory.create_query_provider(
             self.component.clone(),
             serde_json::to_value(configuration)?,

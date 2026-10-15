@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
+
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use axum::{
@@ -9,13 +11,13 @@ use axum::{
     routing::get,
     Router,
 };
+use drasi_computation_contracts::{
+    workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
+    *,
+};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
     FactoryMetadata,
-};
-use drasi_lib::{
-    computation::v1::*,
-    context::workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -176,7 +178,7 @@ fn events(
 }
 
 #[async_trait]
-impl ComputationComponent for SseSink {
+impl NativeComponent for SseSink {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -269,7 +271,7 @@ impl ComputationComponent for SseSink {
     }
 }
 #[async_trait]
-impl EnvelopeSink for SseSink {
+impl NativeSink for SseSink {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Accepted
     }

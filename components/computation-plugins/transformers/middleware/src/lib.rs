@@ -1,17 +1,16 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+mod component;
+
+use drasi_computation_contracts::{
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
+    PortDirection, PortId,
+};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
     FactoryMetadata, PluginDefinition,
 };
-use drasi_core::{middleware::MiddlewareTypeRegistry, models::SourceMiddlewareConfig};
-use drasi_lib::computation::v1::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, MiddlewareTransformer,
-    MiddlewareTransformerDefinition, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    StreamId,
-};
-use serde::Deserialize;
 use std::sync::Arc;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
@@ -83,27 +82,9 @@ impl Factory for MiddlewareFactory {
         request: &CreateRequest,
         _control: ControlSender,
     ) -> anyhow::Result<CreatedComponent> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Configuration {
-            stream: StreamId,
-            middleware: Vec<SourceMiddlewareConfig>,
-            pipeline: Vec<String>,
-        }
-        let configuration: Configuration = serde_json::from_value(request.configuration.clone())?;
-        let mut registry = MiddlewareTypeRegistry::new();
-        registry.register(Arc::new(drasi_middleware::map::MapFactory::new()));
-        registry.register(Arc::new(
-            drasi_middleware::relabel::RelabelMiddlewareFactory::new(),
-        ));
-        Ok(Component::Transformer(Box::new(MiddlewareTransformer::new(
-            MiddlewareTransformerDefinition {
-                id: request.id.clone(),
-                output_stream: configuration.stream,
-                middleware: configuration.middleware,
-                pipeline: configuration.pipeline,
-            },
-            Arc::new(registry),
+        Ok(Component::Transformer(Box::new(component::Middleware::new(
+            self.metadata().descriptor(request.id.clone())?,
+            request.configuration.clone(),
         )?))
         .into())
     }

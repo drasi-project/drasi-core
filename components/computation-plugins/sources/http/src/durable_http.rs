@@ -13,8 +13,8 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use drasi_computation_contracts::{ComponentId, ProducerSession};
 use drasi_computation_plugin_sdk::{AdmissionError, AdmissionErrorKind};
-use drasi_lib::computation::v1::{ComponentId, ProducerSession};
 use serde::Deserialize;
 use std::sync::Arc;
 

@@ -22,7 +22,7 @@ kind = "sink-grpc"
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-network-common = { workspace = true, features = ["grpc-sink"] }
 drasi-grpc-common = { workspace = true, features = ["reaction"] }
-drasi-lib = { workspace = true }
+drasi-computation-contracts = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 chrono = "0.4"

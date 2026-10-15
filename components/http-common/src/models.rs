@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /// Shared data schema for HTTP source events.
 ///
-/// This schema closely mirrors drasi_core::models::SourceChange for efficient conversion
+/// This schema closely mirrors drasi_core_types::models::SourceChange for efficient conversion
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "lowercase")]
 pub enum HttpSourceChange {
@@ -69,12 +69,12 @@ pub enum HttpElement {
     },
 }
 
-/// Convert HttpSourceChange to drasi_core::models::SourceChange
+/// Convert HttpSourceChange to drasi_core_types::models::SourceChange
 pub fn convert_http_to_source_change(
     http_change: &HttpSourceChange,
     source_id: &str,
-) -> Result<drasi_core::models::SourceChange> {
-    use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
+) -> Result<drasi_core_types::models::SourceChange> {
+    use drasi_core_types::models::{ElementMetadata, ElementReference, SourceChange};
 
     // Get timestamp or use current time in milliseconds
     // Note: HTTP API accepts timestamps in nanoseconds, we convert to milliseconds
@@ -125,8 +125,10 @@ fn create_element_from_http(
     http_element: &HttpElement,
     source_id: &str,
     timestamp: u64,
-) -> Result<drasi_core::models::Element> {
-    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
+) -> Result<drasi_core_types::models::Element> {
+    use drasi_core_types::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference,
+    };
 
     match http_element {
         HttpElement::Node {
@@ -203,8 +205,8 @@ fn create_element_from_http(
 /// Convert JSON value to ElementValue
 fn convert_json_to_element_value(
     value: &serde_json::Value,
-) -> Result<drasi_core::models::ElementValue> {
-    use drasi_core::models::ElementValue;
+) -> Result<drasi_core_types::models::ElementValue> {
+    use drasi_core_types::models::ElementValue;
     use ordered_float::OrderedFloat;
 
     match value {
@@ -225,7 +227,7 @@ fn convert_json_to_element_value(
             Ok(ElementValue::List(elements?))
         }
         serde_json::Value::Object(obj) => {
-            let mut map = drasi_core::models::ElementPropertyMap::new();
+            let mut map = drasi_core_types::models::ElementPropertyMap::new();
             for (key, val) in obj {
                 map.insert(key, convert_json_to_element_value(val)?);
             }
@@ -369,7 +371,7 @@ mod tests {
     /// milliseconds when constructing SourceChange elements.
     #[test]
     fn test_effective_from_converts_nanos_to_millis() {
-        use drasi_core::models::validate_effective_from;
+        use drasi_core_types::models::validate_effective_from;
 
         // Simulate a nanosecond timestamp on the wire (Feb 2026)
         let nanos_on_wire: u64 = 1_771_000_000_000_000_000;
@@ -381,7 +383,7 @@ mod tests {
         let source_change = convert_http_to_source_change(&http_change, "test-src").unwrap();
 
         match source_change {
-            drasi_core::models::SourceChange::Insert { element } => {
+            drasi_core_types::models::SourceChange::Insert { element } => {
                 let ef = element.get_effective_from();
                 assert!(
                     validate_effective_from(ef).is_ok(),
@@ -396,14 +398,14 @@ mod tests {
     /// when no timestamp is provided on the wire.
     #[test]
     fn test_effective_from_auto_generated_is_millis() {
-        use drasi_core::models::validate_effective_from;
+        use drasi_core_types::models::validate_effective_from;
 
         let json = r#"{ "operation": "insert", "element": { "type": "node", "id": "n1", "labels": ["Test"], "properties": {} } }"#;
         let http_change: HttpSourceChange = serde_json::from_str(json).unwrap();
         let source_change = convert_http_to_source_change(&http_change, "test-src").unwrap();
 
         match source_change {
-            drasi_core::models::SourceChange::Insert { element } => {
+            drasi_core_types::models::SourceChange::Insert { element } => {
                 let ef = element.get_effective_from();
                 assert!(
                     validate_effective_from(ef).is_ok(),

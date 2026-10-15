@@ -3,9 +3,9 @@
 
 mod component;
 
+use drasi_computation_contracts::QueryChangeCodec;
 use drasi_computation_network_common::config;
 use drasi_computation_plugin_sdk::PluginDefinition;
-use drasi_lib::computation::v1::QueryChangeCodec;
 use std::sync::Arc;
 
 pub use component::{sse_payload, SseFactory, SseSinkConfig};

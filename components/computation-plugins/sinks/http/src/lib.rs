@@ -5,14 +5,14 @@ mod component;
 pub mod config;
 pub mod delivery;
 
+use drasi_computation_contracts::{
+    ComponentRole, ImplementationIdentity, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    QueryChangeCodec, SinkCompletion,
+};
 use drasi_computation_network_common::wire;
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
     FactoryMetadata, PluginDefinition,
-};
-use drasi_lib::computation::v1::{
-    ComponentRole, ImplementationIdentity, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    QueryChangeCodec, SinkCompletion,
 };
 use std::sync::Arc;
 

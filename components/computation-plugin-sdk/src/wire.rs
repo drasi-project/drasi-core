@@ -5,7 +5,7 @@
 //! bounded named MessagePack with binary buffers and binary computation envelopes.
 
 use crate::{abi, metadata::Capabilities};
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     decode_bounded_messagepack, encode_bounded_messagepack, BinaryEnvelopeCodec, ChangeEnvelope,
     ComponentDescriptor, ComponentId, ImplementationIdentity, InputEnvelope, OutputEnvelope,
     PortId, RecordId, Schema, SchemaDescriptor,
@@ -134,7 +134,7 @@ pub fn check_port(
     descriptor: &ComponentDescriptor,
     port: &PortId,
     envelope: &ChangeEnvelope,
-    direction: drasi_lib::computation::v1::PortDirection,
+    direction: drasi_computation_contracts::PortDirection,
 ) -> anyhow::Result<()> {
     let declared = descriptor
         .ports()
@@ -151,7 +151,7 @@ pub fn check_port(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_lib::computation::v1::{GraphChangeCodec, StreamId};
+    use drasi_computation_contracts::{GraphChangeCodec, StreamId};
 
     #[test]
     fn envelope_operation_uses_borrowed_binary_payload_and_current_wire_version() {

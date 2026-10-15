@@ -10,6 +10,7 @@ All Drasi plugins (sources, bootstrappers, reactions, indexes, identity, secret 
 - ffi-primitives must stay dependency-free (std only)
 - Indexes, state stores, and WALs are NOT dynamic plugins - they link statically (wiring rules: see lib/AGENTS.md)
 - Native libraries are process-pinned and expose only implemented ABI capabilities. Never pass Rust futures, trait objects, Arc/Bytes ownership or borrowed TransactionContext pointers across the new boundary. Transaction participants use the revocable host mailbox and have no commit operation.
+- Native plugin producers implement the SDK's `NativeComponent`, `NativeSource`, `NativeTransformer`, `NativeSink`, `NativeService` and `NativeBootstrapProvider` interfaces. Import messages/codecs from computation-contracts and values from core-types; never import graph/query/storage owners merely for plugin data or callbacks.
 - Select optional consumer wrappers before exporting an operation future, so ordinary native operations do not retain consumer state or gain an extra boxed future. Rebuild the actual cdylib when qualifying Host changes; path dependencies alone do not update it.
 - .tsp files inside plugin src/ directories are wire-format documentation, not codegen inputs - there is no codegen step to find, and they should not be deleted
 

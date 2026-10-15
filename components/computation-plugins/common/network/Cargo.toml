@@ -16,8 +16,8 @@ grpc-sink = ["dep:drasi-grpc-common", "drasi-grpc-common/reaction", "dep:reqwest
 
 [dependencies]
 drasi-computation-plugin-sdk = { workspace = true }
-drasi-core = { workspace = true }
-drasi-lib = { workspace = true }
+drasi-core-types = { workspace = true }
+drasi-computation-contracts = { workspace = true }
 drasi-http-common = { workspace = true, optional = true }
 drasi-grpc-common = { workspace = true, optional = true }
 anyhow = "1"

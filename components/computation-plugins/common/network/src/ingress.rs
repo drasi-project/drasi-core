@@ -3,13 +3,13 @@
 
 use crate::config::IngressConfig;
 use anyhow::{Context, Result};
-use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
-use drasi_core::models::SourceChange;
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::workers::spawn_owned_worker;
+use drasi_computation_contracts::{
     ComponentDescriptor, GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress,
     OutputEnvelope, PortId,
 };
-use drasi_lib::context::workers::spawn_owned_worker;
+use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
+use drasi_core_types::models::SourceChange;
 use futures_util::FutureExt;
 use std::{future::Future, net::SocketAddr, panic::AssertUnwindSafe, sync::Arc};
 use tokio::{
@@ -316,14 +316,14 @@ impl SourceRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_lib::computation::v1::ComponentId;
+    use drasi_computation_contracts::ComponentId;
     use tokio::sync::Notify;
 
     fn runtime() -> Result<SourceRuntime> {
         SourceRuntime::new(
             ComponentDescriptor::try_new(ComponentId::try_new("test")?, vec![])?,
             IngressConfig {
-                stream: drasi_lib::computation::v1::StreamId::try_new("test")?,
+                stream: drasi_computation_contracts::StreamId::try_new("test")?,
                 source_id: "facilities-db".into(),
                 host: "127.0.0.1".into(),
                 port: 0,

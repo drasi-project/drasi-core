@@ -33,12 +33,6 @@ impl ReplayOptions {
     }
 }
 
-impl From<ReplayRejection> for PipeError {
-    fn from(error: ReplayRejection) -> Self {
-        PipeError::Backend(error.into())
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReplayState {

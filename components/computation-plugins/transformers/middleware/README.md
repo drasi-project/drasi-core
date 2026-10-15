@@ -1,5 +1,10 @@
 # Native middleware transformer
 
+Map and relabel use the same processing implementations as query middleware,
+without the `drasi-middleware/engine-adapter` feature. The plugin owns only
+pipeline ordering, envelope identity and lifecycle; it needs no query evaluator
+or unused element-index cache.
+
 `drasi-computation-transformer-middleware` provides only
 `drasi.standard/middleware` (implementation `"1"`, configuration `1`).
 

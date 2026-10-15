@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     AdmissionReceipt, AdmissionRejection, BinaryEnvelopeCodec, ChangeEnvelope, ComponentId,
     GraphProducerIdentity, PipeError, ProducerSession, ProducerStatus,
 };
@@ -299,7 +299,7 @@ fn encode(value: &impl Serialize) -> Result<Vec<u8>, AdmissionError> {
 mod tests {
     use super::*;
     use crate::transport;
-    use drasi_lib::computation::v1::GraphChangeCodec;
+    use drasi_computation_contracts::GraphChangeCodec;
     use std::{
         ffi::c_void,
         sync::atomic::{AtomicUsize, Ordering},
@@ -420,7 +420,7 @@ mod tests {
             );
             let input = GraphChangeCodec::encode_changes(
                 &[],
-                drasi_lib::computation::v1::StreamId::try_new("in").unwrap(),
+                drasi_computation_contracts::StreamId::try_new("in").unwrap(),
                 1,
                 None,
             )

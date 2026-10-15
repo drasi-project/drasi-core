@@ -16,7 +16,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use drasi_core::{
+use drasi_core_types::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
         variable_value::VariableValue,
@@ -25,7 +25,7 @@ use drasi_core::{
 };
 
 use crate::{
-    channels::{QueryResult, ResultDiff, SourceEvent, SourceEventParts, SourceEventWrapper},
+    exchange::{QueryResult, ResultDiff, SourceEvent, SourceEventParts, SourceEventWrapper},
     profiling::ProfilingMetadata,
 };
 

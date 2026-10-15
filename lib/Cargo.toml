@@ -76,13 +76,15 @@ name = "computation_instance"
 name = "computation_runtime"
 
 [dependencies]
+drasi-core-types = { workspace = true }
+drasi-computation-contracts = { workspace = true }
 drasi-core = { workspace = true, features = ["computation"] }
 drasi-functions-cypher.workspace = true
 drasi-functions-gql.workspace = true
 drasi-query-ast.workspace = true
 drasi-query-cypher.workspace = true
 drasi-query-gql.workspace = true
-drasi-middleware = { workspace = true, optional = true }
+drasi-middleware = { workspace = true, optional = true, features = ["engine-adapter"] }
 
 # Note: Index backends (RocksDB, Garnet) are now plugins and NOT direct dependencies.
 # Users who need persistent storage should:
@@ -118,6 +120,7 @@ sha2 = "0.10"
 
 
 [dev-dependencies]
+drasi-computation-contracts = { workspace = true, features = ["test-support"] }
 # Testing utilities
 tempfile = "3.8"
 mockall = "0.12"

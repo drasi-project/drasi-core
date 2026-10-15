@@ -313,14 +313,7 @@ pub enum GraphState {
     CleanupRequired,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ComponentRole {
-    Source,
-    Transformer,
-    Query,
-    Sink,
-    Service,
-}
+pub use drasi_computation_contracts::ComponentRole;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Endpoint {
@@ -2706,12 +2699,7 @@ fn validate_emissions(
 /// big-endian sequence bytes. Opaque caller IDs are also accepted; callers retain
 /// their uniqueness obligation. The runtime checks authoritative (stream, sequence)
 /// with bounded per-port state, not an unbounded global logical-ID deduplication set.
-pub fn emission_id(stream: &StreamId, sequence: u64) -> super::Result<EnvelopeId> {
-    EnvelopeId::try_new(
-        stream.as_str(),
-        bytes::Bytes::copy_from_slice(&sequence.to_be_bytes()),
-    )
-}
+pub use drasi_computation_contracts::emission_id;
 
 #[cfg(test)]
 mod work_budget_tests {

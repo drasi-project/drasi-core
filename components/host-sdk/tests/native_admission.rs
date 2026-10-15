@@ -70,7 +70,7 @@ struct Source {
     admission: Option<sdk::NativeAdmission>,
 }
 #[async_trait]
-impl ComputationComponent for Source {
+impl sdk::NativeComponent for Source {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -85,7 +85,7 @@ impl ComputationComponent for Source {
     }
 }
 #[async_trait]
-impl EnvelopeSource for Source {
+impl sdk::NativeSource for Source {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         assert!(
             self.admission.is_none(),

@@ -6,7 +6,7 @@
 
 use crate::{abi, ConfigField, ConfigSchema, ConfigType, PluginMetadata};
 use anyhow::{ensure, Result};
-use drasi_lib::computation::v1::ImplementationIdentity;
+use drasi_computation_contracts::ImplementationIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -195,7 +195,7 @@ impl ConfigDefinition {
         };
         let mut names = std::collections::BTreeSet::new();
         for option in &definition.options {
-            drasi_lib::computation::v1::ComponentId::try_new(option.name.as_str())?;
+            drasi_computation_contracts::ComponentId::try_new(option.name.as_str())?;
             ensure!(
                 names.insert(&option.name),
                 "duplicate configuration field {}",

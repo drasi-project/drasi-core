@@ -3,13 +3,13 @@
 
 mod component;
 
+use drasi_computation_contracts::{
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, SinkCompletion,
+};
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
     FactoryMetadata, PluginDefinition,
-};
-use drasi_lib::computation::v1::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, SinkCompletion,
 };
 use std::sync::Arc;
 

@@ -625,17 +625,18 @@ and remaining qualification work.
 
 ## 9. Where the implementation lives
 
-All paths below are within `drasi-lib`; the main public types are exported from
-`drasi_lib::computation::v1`.
+Shared data definitions and codecs live in `drasi-computation-contracts`; runtime
+implementations remain in `drasi-lib`. The runtime re-exports the same data types
+through `drasi_lib::computation::v1`; plugins import the lightweight package directly.
 
 | Subject | Source |
 |---|---|
-| Schema/record/change validation; envelopes | [data.rs](../src/computation/v1/data.rs), [envelope.rs](../src/computation/v1/envelope.rs) |
-| Ports, requirements, capability checks | [ports.rs](../src/computation/v1/ports.rs) |
+| Schema/record/change validation; envelopes | [data.rs](../../components/computation-contracts/src/data.rs), [envelope.rs](../../components/computation-contracts/src/envelope.rs) |
+| Ports, requirements, capability checks | [ports.rs](../../components/computation-contracts/src/ports.rs) |
 | Send/receive, receipts, acknowledgement contracts | [pipe.rs](../src/computation/v1/pipe.rs) |
 | Providers/control; bounded and broadcast | [bounded_pipe.rs](../src/computation/v1/bounded_pipe.rs), [broadcast_pipe.rs](../src/computation/v1/broadcast_pipe.rs) |
 | Ranked inputs and ordinary pipeline assembly | [ranked_pipe.rs](../src/computation/v1/ranked_pipe.rs), [pipeline.rs](../src/computation/v1/pipeline.rs) |
 | Single-consumer history and storage | [retained_pipe.rs](../src/computation/v1/retained_pipe.rs), [retained_store.rs](../src/computation/v1/retained_store.rs) |
 | Shared subscriber history | [qos_pipe.rs](../src/computation/v1/qos_pipe.rs) |
-| Storage/plugin encoding; standard data schemas | [codec.rs](../src/computation/v1/codec.rs), [binary_codec.rs](../src/computation/v1/binary_codec.rs), [graph_codec.rs](../src/computation/v1/graph_codec.rs), [query_codec.rs](../src/computation/v1/query_codec.rs) |
+| Storage/plugin encoding; standard data schemas | [codec.rs](../../components/computation-contracts/src/codec.rs), [binary_codec.rs](../../components/computation-contracts/src/binary_codec.rs), [graph_codec.rs](../../components/computation-contracts/src/graph_codec.rs), [query_codec.rs](../../components/computation-contracts/src/query_codec.rs) |
 | Graph checks, routing, and binding lifecycle | [graph.rs](../src/computation/v1/graph.rs), [controller.rs](../src/computation/v1/graph/controller.rs), [topology.rs](../src/computation/v1/graph/topology.rs) |

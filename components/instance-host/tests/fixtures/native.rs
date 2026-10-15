@@ -91,7 +91,7 @@ struct Service {
 }
 
 #[async_trait]
-impl ComputationComponent for Service {
+impl drasi_computation_plugin_sdk::NativeComponent for Service {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -129,7 +129,7 @@ impl ComputationComponent for Service {
 }
 
 #[async_trait]
-impl ComputationService for Service {
+impl drasi_computation_plugin_sdk::NativeService for Service {
     async fn run(&mut self) -> Result<()> {
         if self.configuration.mode == "block" {
             if !self.configuration.marker.is_empty() {

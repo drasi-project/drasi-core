@@ -15,9 +15,8 @@
 use std::sync::Arc;
 
 use crate::relabel::RelabelMiddlewareFactory;
-use drasi_core::{
-    in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{FutureElementRef, MiddlewareSetupError, SourceMiddlewareFactory},
+use drasi_core_types::{
+    interface::{FutureElementRef, MiddlewareSetupError},
     models::{
         Element, ElementMetadata, ElementReference, ElementTimestamp, ElementValue, SourceChange,
         SourceMiddlewareConfig,
@@ -117,16 +116,12 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change =
             create_node_insert_change(vec!["Person", "Employee"], json!({"name": "John Doe"}));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -150,16 +145,12 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change =
             create_node_insert_change(vec!["OldLabel", "UnchangedLabel"], json!({"data": "test"}));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -183,18 +174,14 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_node_insert_change(
             vec!["ExistingLabel", "AnotherLabel"],
             json!({"data": "test"}),
         );
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -219,18 +206,14 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_node_insert_change(
             vec!["Person", "Company", "Employee", "Manager"],
             json!({"data": "test"}),
         );
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -260,15 +243,11 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_node_update_change(vec!["TempLabel"], json!({"updated": true}));
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -292,18 +271,14 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_relation_insert_change(
             vec!["KNOWS", "SOCIAL_LINK"],
             json!({"since": "2020-01-01"}),
         );
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -327,15 +302,11 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_delete_change(vec!["OldLabel", "KeepLabel"]);
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -358,15 +329,11 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let source_change = create_future_change();
 
-        let result = subject
-            .process(source_change.clone(), element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change.clone()).await.unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], source_change);
@@ -381,8 +348,7 @@ mod process {
             }
         });
         let mw_config = create_mw_config(config);
-        let subject = factory.create(&mw_config).unwrap();
-        let element_index = Arc::new(InMemoryElementIndex::new());
+        let subject = factory.build(&mw_config).unwrap();
 
         let properties = json!({
             "name": "Test Node",
@@ -392,10 +358,7 @@ mod process {
 
         let source_change = create_node_insert_change(vec!["TestLabel"], properties.clone());
 
-        let result = subject
-            .process(source_change, element_index.as_ref())
-            .await
-            .unwrap();
+        let result = subject.apply(source_change).await.unwrap();
 
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -426,7 +389,7 @@ mod factory {
             }
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
     }
 
@@ -437,7 +400,7 @@ mod factory {
             "labelMappings": {}
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
@@ -454,7 +417,7 @@ mod factory {
             // Missing label_mappings field
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
@@ -471,7 +434,7 @@ mod factory {
             "labelMappings": "invalid_format" // Should be an object, not string
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_err());
         match result {
             Err(MiddlewareSetupError::InvalidConfiguration(msg)) => {
@@ -496,7 +459,7 @@ mod factory {
             }
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
     }
 
@@ -509,7 +472,7 @@ mod factory {
             }
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
     }
 
@@ -524,7 +487,7 @@ mod factory {
             "labelMappings": mappings
         });
         let mw_config = create_mw_config(config);
-        let result = factory.create(&mw_config);
+        let result = factory.build(&mw_config);
         assert!(result.is_ok());
     }
 }

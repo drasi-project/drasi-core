@@ -5,7 +5,7 @@
 
 use anyhow::{ensure, Result};
 #[cfg(any(feature = "ingress", feature = "http-sink", feature = "grpc-sink"))]
-use drasi_lib::computation::v1::{ComponentId, StreamId};
+use drasi_computation_contracts::{ComponentId, StreamId};
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "http-sink", feature = "grpc-sink"))]

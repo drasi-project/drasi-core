@@ -8,13 +8,14 @@ unreleased JSON-envelope wire prototype (version 1) is explicitly rejected.
 
 ## Authoring
 
-A plugin exports configuration-only factories for the existing
-`drasi_lib::computation::v1` `EnvelopeSource`, `Transformer`, `EnvelopeSink` and
-`ComputationService` interfaces. It does not wrap them in legacy Source/Reaction
-adapters or introduce another graph executor.
+A plugin exports configuration-only factories for this SDK's `NativeSource`,
+`NativeTransformer`, `NativeSink` and `NativeService` interfaces. Shared messages,
+schemas and codecs come from `drasi-computation-contracts`; graph and result
+values come from `drasi-core-types`. None requires the graph runtime, query
+evaluator, query parsers or legacy plugin SDK.
 
-1. Implement the appropriate native graph trait, including the real
-   `ComputationComponent::configuration()` persistence hook.
+1. Implement `NativeComponent` and the appropriate processing trait, including
+   the real `NativeComponent::configuration()` persistence hook.
 2. Implement this SDK's `Factory`. Its `metadata()` declares implementation and
    configuration versions, a `ConfigSchema`, fixed port/schema descriptors, sink
    completion and explicit `Capabilities`. Its synchronous `create()` receives a
@@ -25,7 +26,7 @@ adapters or introduce another graph executor.
 ```rust,ignore
 use std::sync::Arc;
 use drasi_computation_plugin_sdk::{PluginDefinition, export_computation_plugin};
-use drasi_lib::computation::v1::GraphChangeCodec;
+use drasi_computation_contracts::GraphChangeCodec;
 
 fn definition() -> anyhow::Result<PluginDefinition> {
     PluginDefinition::new(
@@ -39,6 +40,25 @@ fn definition() -> anyhow::Result<PluginDefinition> {
 #[cfg(feature = "dynamic-plugin")]
 export_computation_plugin!(definition());
 ```
+
+### Migrating native Rust implementations
+
+Replace runtime-only imports with `drasi-computation-contracts` data types and
+the SDK's `NativeComponent`/processing traits. A native source receives only a
+`SourceProgressView`, not the host's `QuerySourceProgress` owner. It declares
+`replay_retention()` separately when needed; the SDK still verifies the exact
+negotiated reader and consumer identity. Bootstrap factories return
+`NativeBootstrapProvider`. Graph-local control handlers, admission owners,
+query APIs and construction contexts are intentionally absent from these
+plugin-side traits.
+
+The Host SDK adapts the existing binary operations to graph-owned interfaces.
+No second executor or legacy compatibility layer is introduced. This is a Rust
+source migration, not an ABI or wire-format change: existing native ABI 1.0
+libraries remain loadable.
+
+Use `make check-native-dependencies` to ensure an independently selected native
+plugin build cannot regain an engine/runtime dependency through a helper crate.
 
 Declare the dynamic library feature and explicit native family metadata in the
 plugin manifest so `xtask` can discover it independently of legacy crate categories:
@@ -251,7 +271,7 @@ tracking, make separate stores atomic, or deduplicate external effects.
 The independently negotiated `drasi_computation_plugin_consumer_v1` extension
 leaves base ABI 1.0 and wire 2 unchanged. Declare `Factory::consumer_mode()` as
 `External` or `Transactional`, with a handled, non-snapshot sink descriptor.
-Return `Component::Consumer` for a `ComputationComponent + DeliveryHandler`, or
+Return `Component::Consumer` for a `NativeComponent + DeliveryHandler`, or
 `Component::TransactionalConsumer` for a `NativeTransactionalConsumer`. Ordinary
 `Component::Sink` factories retain their existing behavior and acquire no ledger.
 Consumer factories reject construction through the ordinary, unbound create path.
@@ -388,6 +408,7 @@ The independent `drasi_computation_plugin_bootstrap_v1` entry point exposes
 `PluginDefinition::with_bootstrap_factories`. It adds no component role and does
 not change base metadata, ABI **1.0.0**, wire **2**, or existing optional tables.
 The Host SDK exposes the negotiated `NativePlugin::bootstrap_factories()`.
+Plugin-side factories return `NativeBootstrapProvider`; only the host-side
 `NativeBootstrapFactory::create_provider` returns a real
 `ComputationBootstrapProvider`, suitable for a query's `QueryBootstrapResource`.
 Factories only configure providers: preparation and snapshot work remain

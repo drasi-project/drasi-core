@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::{durable::invalid, ingress::Ingress, proto::admission as proto, wire};
+use drasi_computation_contracts::{AdmissionReceipt, ComponentId, ProducerSession, ProducerStatus};
 use drasi_computation_plugin_sdk::{AdmissionError, AdmissionErrorKind};
-use drasi_lib::computation::v1::{AdmissionReceipt, ComponentId, ProducerSession, ProducerStatus};
 use futures_util::Stream;
 use std::{pin::Pin, sync::Arc, time::Duration};
 use tonic::{Request, Response, Status};
