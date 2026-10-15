@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! In-memory query output state with O(1) result-set operations and outbox ring buffer.
-//!
-//! `QueryOutputState` replaces the naive `Vec<serde_json::Value>` approach with an
-//! `im::HashMap` keyed by `row_signature`, providing:
-//! - O(1) insert, update, and delete operations
-//! - O(1) structural-sharing clones for non-blocking snapshot reads
-//! - A bounded ring buffer (`outbox`) of recent `QueryResult` emissions
+//! Query-result exchange types used by the runtime, plugins and snapshot readers.
+//! The deprecated `QueryOutputState` cache is retained for source compatibility;
+//! it is not the state used by graph-owned queries.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -52,10 +48,10 @@ pub const DEFAULT_OUTBOX_CAPACITY: usize = 1000;
 ///
 /// All fields are private to enforce invariants (sequence monotonicity, ring buffer
 /// bounds). Use accessor methods for read access and `apply_diffs` /
-/// `advance_sequence_and_push` for mutations. Persistent queries hydrate this
-/// struct from durable storage on start (`hydrate`); after that, reads are
-/// memory-served.
+/// `advance_sequence_and_push` for mutations. Existing callers can hydrate it
+/// from their own durable state; graph-owned queries do not hydrate this cache.
 #[derive(Debug, Clone)]
+#[deprecated(note = "legacy result cache; use graph-owned query result and recovery APIs")]
 pub struct QueryOutputState {
     /// Live result set, keyed by `row_signature` for O(1) updates.
     /// Uses `im::HashMap` for O(1) structural-sharing clones (the clone itself is
@@ -77,6 +73,7 @@ pub struct QueryOutputState {
     generation: u64,
 }
 
+#[allow(deprecated)]
 impl QueryOutputState {
     /// Maximum allowed outbox capacity to prevent memory exhaustion from misconfiguration.
     const MAX_OUTBOX_CAPACITY: usize = 1_000_000;
@@ -403,13 +400,6 @@ pub enum DurableOutputInconsistency {
     /// fail start (retryable) and must **not** AutoReset/wipe.
     #[error("failed to read durable query output: {message}")]
     ReadFailed { message: String },
-}
-
-impl DurableOutputInconsistency {
-    /// Transient storage read failures must not authorize a destructive wipe.
-    pub(crate) fn is_transient_read(&self) -> bool {
-        matches!(self, Self::ReadFailed { .. })
-    }
 }
 
 /// Reconcile durable output high-water marks without lowering either side.
@@ -758,6 +748,7 @@ impl Stream for OutboxStream {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::collections::HashMap;

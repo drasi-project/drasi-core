@@ -1,6 +1,11 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Source/reaction helpers and the retained legacy query helper's cleanup contract.
+//! Native query execution is covered by the ComputationGraph lifecycle suites.
+
+#![allow(deprecated)]
+
 use drasi_lib::{
     channels::ComponentStatus,
     context::workers::WorkerCleanupError,

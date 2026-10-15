@@ -216,7 +216,7 @@ pub struct SourceBase {
     /// Serializes timestamp normalization and enqueue per source. Convenience
     /// dispatch methods also allocate their sequence under this lock (#640).
     /// Explicit-wrapper producers must serialize allocation and dispatch
-    /// themselves so `SequenceDedup` does not discard reordered live events.
+    /// themselves so query checkpoints do not discard reordered live events.
     ///
     /// The guarded value is the last timestamp stamped on a dispatched event.
     /// Each event's timestamp is clamped to at least the previous timestamp to
@@ -2570,15 +2570,16 @@ mod tests {
     }
 
     /// Regression test for issue #640: dispatching changes concurrently on a
-    /// single source must not silently drop any via `SequenceDedup`.
+    /// single source must preserve order relative to a saved checkpoint.
     ///
     /// Before the per-source dispatch serialization, two concurrent
     /// `dispatch_source_change` calls could assign sequences in one order but
-    /// reach the subscriber in the opposite order. The query processor's
-    /// `SequenceDedup` then treats the later-delivered, lower-numbered event as
+    /// reach the subscriber in the opposite order. A checkpoint comparison
+    /// then treats the later-delivered, lower-numbered event as
     /// an already-processed replay and drops it. With serialized dispatch,
     /// delivery order matches sequence order, so nothing is dropped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(deprecated)]
     async fn concurrent_dispatch_preserves_sequence_order() {
         const EVENTS_PER_TRIAL: u64 = 50;
         const TRIALS: usize = 20;
@@ -2616,7 +2617,7 @@ mod tests {
             }
 
             // Drain the subscriber in delivery order and run the events through a
-            // fresh `SequenceDedup`, mirroring the query processor loop.
+            // legacy checkpoint model, not the current query implementation.
             let mut dedup = crate::queries::SequenceDedup::default();
             let mut delivered_sequences = Vec::new();
             let mut delivered_timestamps = Vec::new();
@@ -2665,8 +2666,9 @@ mod tests {
     /// received the same serialization fix as `dispatch_event`. Dispatching
     /// batches concurrently on one source must likewise deliver every event in
     /// strictly increasing sequence order with nothing dropped by
-    /// `SequenceDedup`.
+    /// the checkpoint comparison model used by this source-level test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(deprecated)]
     async fn concurrent_batch_dispatch_preserves_sequence_order() {
         const BATCHES_PER_TRIAL: u64 = 20;
         const EVENTS_PER_BATCH: u64 = 3;
@@ -3711,11 +3713,12 @@ mod tests {
         );
     }
 
-    /// End-to-end regression proof for #827: after a restart resume, the sequences
+    /// Source-level regression for #827: after a restart resume, the sequences
     /// SourceBase *fills in* for a source that omits them must land strictly above
-    /// the query's checkpoint, so the real `SequenceDedup` filter does not drop
-    /// them as stale replays. This exercises the actual bug, not just the plumbing.
+    /// the supplied query checkpoint. The legacy comparison helper is only a
+    /// test model here; full query recovery is checked by the runtime suites.
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_filled_sequences_survive_dedup_after_restart() {
         let source_id = "dedup-restart";
         // Query checkpointed sequence 500 before restart.
@@ -3735,7 +3738,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Seed the dedup filter exactly as the query manager does on resume.
+        // Seed the source-level checkpoint comparison model.
         let dedup = crate::queries::SequenceDedup::new(
             std::iter::once((source_id.to_string(), checkpoint)).collect(),
         );

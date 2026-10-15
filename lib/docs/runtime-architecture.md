@@ -1341,7 +1341,7 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::profiling::ProfilingConfig` — struct; [source](../../lib/src/profiling/mod.rs#L207).
 - `drasi_lib::profiling::ProfilingElapsedSummary` — struct; [source](../../lib/src/profiling/mod.rs#L195).
 - `drasi_lib::profiling::ProfilingMetadata` — struct; [source](../../lib/src/profiling/mod.rs#L24).
-- `drasi_lib::queries::base::QueryBase` — struct; [source](../../lib/src/queries/base.rs#L61).
+- `drasi_lib::queries::base::QueryBase` — deprecated compatibility import, not query execution; [implementation](../src/compatibility/query_base.rs).
 - `drasi_lib::queries::config_hash::JoinIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L81).
 - `drasi_lib::queries::config_hash::QueryIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L43).
 - `drasi_lib::queries::config_hash::SourceIdentity` — struct; [source](../../lib/src/queries/config_hash.rs#L68).
@@ -1355,13 +1355,13 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::queries::output_state::OutboxGap` — struct; [source](../../lib/src/queries/output_state.rs#L477).
 - `drasi_lib::queries::output_state::OutboxResponse` — struct; [source](../../lib/src/queries/output_state.rs#L578).
 - `drasi_lib::queries::output_state::OutboxStream` — struct; [source](../../lib/src/queries/output_state.rs#L706).
-- `drasi_lib::queries::output_state::QueryOutputState` — struct; [source](../../lib/src/queries/output_state.rs#L47).
+- `drasi_lib::queries::output_state::QueryOutputState` — deprecated compatibility cache, not the runtime's typed query state; [source](../src/queries/output_state.rs).
 - `drasi_lib::queries::output_state::SnapshotResponse` — struct; [source](../../lib/src/queries/output_state.rs#L509).
 - `drasi_lib::queries::output_state::SnapshotStream` — struct; [source](../../lib/src/queries/output_state.rs#L591).
 - `drasi_lib::queries::priority_queue::PriorityQueue` — type alias; [source](../../lib/src/queries/priority_queue.rs#L24).
 - `drasi_lib::queries::priority_queue::QueryEventQueue` — struct; [source](../../lib/src/queries/priority_queue.rs#L48).
 - `drasi_lib::queries::priority_queue::RankedSourceEvent` — struct; [source](../../lib/src/queries/priority_queue.rs#L31).
-- `drasi_lib::queries::sequence_dedup::SequenceDedup` — struct; [source](../../lib/src/queries/sequence_dedup.rs#L31).
+- `drasi_lib::queries::sequence_dedup::SequenceDedup` — deprecated compatibility import, not current query recovery; [implementation](../src/compatibility/sequence_dedup.rs).
 - `drasi_lib::queries::subscription_builder::SubscriptionSettingsBuilder` — struct; [source](../../lib/src/queries/subscription_builder.rs#L20).
 - `drasi_lib::queries::traits::Query` — trait; [source](../../lib/src/queries/traits.rs#L27).
 - `drasi_lib::reactions::bootstrap_context::BootstrapBackend` — trait; [source](../../lib/src/reactions/bootstrap_context.rs#L30).

@@ -40,6 +40,9 @@ lib::managers::tracing_layer::tests::	shared	Unchanged tracing conversion and co
 lib::metrics::	shared	Unchanged atomic metric values; runtime metric increments are separately exercised in metrics_e2e.
 lib::profiling::tests::	shared	Unchanged profiling values and timestamp helpers.
 lib::queries::base::tests::	legacy-structure	Concrete QueryBase dispatchers, local status handles and spawned-task fields; native queries do not instantiate QueryBase.
+lib::compatibility::query_base::tests::	legacy-structure	Retained QueryBase compatibility tests; current queries do not instantiate this helper.
+lib::compatibility::sequence_dedup::tests::	legacy-structure	Retained checkpoint-helper compatibility tests; actual query recovery is tested through the runtime.
+lib::compatibility::tests::	shared	Original public helper paths resolve to the retained compatibility types.
 lib::queries::checkpoint_tests::	runtime	Original checkpoint, provider and recovery scenarios use shared manager/store fixtures with unchanged semantic values.
 lib::queries::checkpoint_tests::tests::test_sequence_assignment_monotonic	shared	Direct unchanged source plugin sequence assignment.
 lib::queries::checkpoint_tests::tests::test_source_position_preserved_through_dispatch	shared	Direct unchanged source plugin dispatch and cursor.

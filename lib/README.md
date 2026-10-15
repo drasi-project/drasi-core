@@ -52,6 +52,14 @@ visible, supports dependency-aware changes and lets independent queries run in
 parallel. Existing source/reaction plugins remain usable through adapters;
 there is no second execution engine.
 
+The public `QueryBase`, `SequenceDedup` and old JSON `QueryOutputState` helpers are
+deprecated compatibility utilities, not the implementation of current queries.
+`QueryBase` and `SequenceDedup` now live under `compatibility`; their original
+imports remain available. The old output cache stays beside the existing public
+result-exchange types to preserve those APIs. Snapshot/outbox response and stream
+types are still used and are not deprecated. New query code should use the
+graph-owned construction, result and recovery APIs described below.
+
 Start with the guide for your task:
 
 | Guide | What it covers |

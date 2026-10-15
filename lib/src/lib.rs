@@ -34,6 +34,9 @@
 /// Read-only component inspection and compatibility data types.
 pub mod component_graph;
 
+/// Retired public helpers retained for existing callers, not runtime components.
+pub mod compatibility;
+
 /// Fluent builders for DrasiLib and components
 pub mod builder;
 

@@ -34,15 +34,19 @@ mod checkpoint_tests;
 #[cfg(test)]
 mod e2e_checkpoint_tests;
 
+#[allow(deprecated)]
 pub use base::QueryBase;
 pub use config_hash::compute_config_hash;
 pub use label_extractor::*;
 pub use manager::*;
+#[allow(deprecated)]
+pub use output_state::QueryOutputState;
 pub use output_state::{
     output_epoch_hash, DurableOutputInconsistency, FetchError, KeyedSnapshotRow, OutboxGap,
-    OutboxResponse, OutboxStream, QueryOutputState, SnapshotResponse, SnapshotStream,
+    OutboxResponse, OutboxStream, SnapshotResponse, SnapshotStream,
 };
 pub use priority_queue::*;
+#[allow(deprecated)]
 pub use sequence_dedup::SequenceDedup;
 pub use subscription_builder::*;
 pub use traits::Query;
