@@ -835,7 +835,10 @@ class WorkflowTests(unittest.TestCase):
         call = self.document["on"]["workflow_call"]["inputs"]
         dispatch = self.document["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(set(repair.PUBLISH_DEFAULTS), set(call))
-        self.assertEqual(call, {key: dispatch[key] for key in call})
+        internal = {"candidate_artifact", "candidate_sha256", "allow_branch_test"}
+        self.assertEqual({key: value for key, value in call.items() if key not in internal},
+                         {key: dispatch[key] for key in call if key not in internal})
+        self.assertTrue(internal.isdisjoint(dispatch))
         self.assertEqual("none", dispatch["repair_batch"]["default"])
         self.assertEqual("plan", dispatch["repair_action"]["default"])
         self.assertEqual(["none", *REVIEWED["batches"]], dispatch["repair_batch"]["options"])
@@ -844,7 +847,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_selection_script_drives_actual_parsed_workflow_routes(self):
         normal = {
-            "select-mode", "visibility-preflight", "list-plugin-packages",
+            "select-mode", "prepare-candidate", "visibility-preflight", "list-plugin-packages",
             "build-and-publish", "verify-public-visibility",
         }
         for batch, action, expected in (
@@ -863,7 +866,7 @@ class WorkflowTests(unittest.TestCase):
                 ))
         for field in ("dry_run", "skip_visibility"):
             inputs = {**repair.PUBLISH_DEFAULTS, field: True}
-            self.assertEqual({"select-mode", "visibility-preflight", "build-and-publish"},
+            self.assertEqual({"select-mode", "prepare-candidate", "visibility-preflight", "build-and-publish"},
                              self.runnable(inputs, "publish"))
 
     def test_privileged_gate_rejects_untrusted_context_even_with_forged_selector_output(self):
@@ -892,8 +895,10 @@ class WorkflowTests(unittest.TestCase):
             "cancel-in-progress": False,
         }, self.jobs["repair-execute"]["concurrency"])
         self.assertNotIn("concurrency", self.document)
-        self.assertEqual("python3 .github/scripts/repair-plugin-signatures.py select",
-                         self.jobs["select-mode"]["steps"][1]["run"])
+        self.assertIn("python3 .github/scripts/repair-plugin-signatures.py select",
+                      self.jobs["select-mode"]["steps"][1]["run"])
+        self.assertIn("python3 .github/scripts/release-candidate.py publication-context",
+                      self.jobs["select-mode"]["steps"][1]["run"])
         self.assertEqual("${{ steps.select.outputs.mode }}",
                          self.jobs["select-mode"]["outputs"]["mode"])
         for name in ("repair-plan", "repair-execute"):

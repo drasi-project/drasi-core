@@ -56,6 +56,21 @@ on:
           - execute
   workflow_call:
     inputs:
+      allow_branch_test:
+        description: 'Internal temporary opt-in for isolated manual nightly branch rehearsals'
+        required: false
+        type: boolean
+        default: false
+      candidate_artifact:
+        description: 'Prepared candidate artifact from this workflow run'
+        required: false
+        type: string
+        default: ''
+      candidate_sha256:
+        description: 'SHA-256 of the prepared candidate manifest'
+        required: false
+        type: string
+        default: ''
       pre_release:
         description: 'Pre-release label (e.g., "dev.1", "rc.1"). Leave empty for stable release.'
         required: false
@@ -112,6 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.select.outputs.mode }}
+      certificate_identity: ${{ steps.select.outputs.certificate_identity }}
     steps:
       - name: Checkout workflow code, never the publication ref input
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -123,7 +139,80 @@ jobs:
         id: select
         env:
           WORKFLOW_INPUTS: ${{ toJSON(inputs) }}
-        run: python3 .github/scripts/repair-plugin-signatures.py select
+        run: |
+          python3 .github/scripts/release-candidate.py publication-context
+          python3 .github/scripts/repair-plugin-signatures.py select
+
+  prepare-candidate:
+    name: Prepare one locked publication candidate
+    needs: select-mode
+    if: ${{ needs.select-mode.outputs.mode == 'publish' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ inputs.candidate_artifact || format('plugin-candidate-{0}-{1}', github.run_id, github.run_attempt) }}
+      sha256: ${{ inputs.candidate_sha256 || steps.freeze.outputs.candidate_sha256 }}
+    steps:
+      - name: Checkout trusted tooling
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate candidate input pair
+        env:
+          ARTIFACT: ${{ inputs.candidate_artifact }}
+          SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          if { [ -n "$ARTIFACT" ] && [ -z "$SHA256" ]; } || { [ -z "$ARTIFACT" ] && [ -n "$SHA256" ]; }; then
+            echo "::error::Candidate artifact and hash must be provided together."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Checkout standalone publication source
+        if: ${{ inputs.candidate_artifact == '' }}
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.ref }}
+          path: selected-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Freeze standalone candidate from trusted history
+        if: ${{ inputs.candidate_artifact == '' }}
+        id: freeze
+        run: |
+          git -C selected-source merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::Publication ref must belong to trusted main history."
+            exit 1
+          }
+          python3 .github/scripts/release-candidate.py freeze --root selected-source --output candidate
+
+      - name: Retain standalone candidate
+        if: ${{ inputs.candidate_artifact == '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Download caller candidate
+        if: ${{ inputs.candidate_artifact != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: candidate
+
+      - name: Validate caller candidate
+        if: ${{ inputs.candidate_artifact != '' }}
+        env:
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: python3 .github/scripts/release-candidate.py restore --bundle candidate --sha256 "$CANDIDATE_SHA256" --root selected-source
 
   repair-plan:
     name: Plan Plugin Signature Repair (read-only)
@@ -226,15 +315,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
       - name: Verify plugin directory is public (read-only)
         if: ${{ !inputs.dry_run && !inputs.skip_visibility }}
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
-        run: .github/scripts/package-visibility.sh verify-public drasi-plugin-directory
+          INPUT_REGISTRY: ${{ inputs.registry }}
+        run: |
+          directory="$(python3 .github/scripts/release-candidate.py packages --registry "$INPUT_REGISTRY")"
+          registry_path="${INPUT_REGISTRY#ghcr.io/}"
+          export PACKAGE_VISIBILITY_ORG="${registry_path%%/*}"
+          .github/scripts/package-visibility.sh verify-public "$directory"
 
   list-plugin-packages:
     name: List Plugin Packages
-    needs: [select-mode, visibility-preflight]
+    needs: [select-mode, visibility-preflight, prepare-candidate]
     if: ${{ needs.select-mode.outputs.mode == 'publish' && !inputs.dry_run && !inputs.skip_visibility }}
     permissions:
       contents: read
@@ -242,23 +340,26 @@ jobs:
     outputs:
       packages: ${{ steps.list.outputs.packages }}
     steps:
-      - name: Checkout build ref
+      - name: Checkout trusted tooling
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Download prepared inventory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          ref: ${{ inputs.ref }}
+          name: ${{ needs.prepare-candidate.outputs.artifact }}
+          path: candidate
 
-      - name: Install Rust toolchain
-        run: rustup show
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
 
       - name: List plugin packages
         id: list
+        env:
+          INPUT_REGISTRY: ${{ inputs.registry }}
+          CANDIDATE_SHA256: ${{ needs.prepare-candidate.outputs.sha256 }}
         run: |
-          {
-            echo "drasi-plugin-directory"
-            cargo run -p xtask -- list-plugins \
-              | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
-              | awk '{print $1}'
-          } | sort -u > "$RUNNER_TEMP/plugin-packages"
+          python3 .github/scripts/release-candidate.py packages --bundle candidate \
+            --sha256 "$CANDIDATE_SHA256" --registry "$INPUT_REGISTRY" > "$RUNNER_TEMP/plugin-packages"
           {
             echo "packages<<EOF"
             cat "$RUNNER_TEMP/plugin-packages"
@@ -267,9 +368,14 @@ jobs:
 
   build-and-publish:
     name: Build & Publish (${{ matrix.arch_suffix }})
-    needs: [select-mode, visibility-preflight]
+    needs: [select-mode, visibility-preflight, prepare-candidate]
     if: ${{ needs.select-mode.outputs.mode == 'publish' }}
     runs-on: ${{ matrix.os }}
+    env:
+      CANDIDATE_SHA256: ${{ needs.prepare-candidate.outputs.sha256 }}
+    defaults:
+      run:
+        working-directory: prepared
     strategy:
       fail-fast: false
       matrix:
@@ -311,13 +417,25 @@ jobs:
             arch_suffix: darwin-arm64
 
     steps:
-      - name: Checkout code
+      - name: Checkout trusted tooling
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          # Empty ref falls back to the triggering ref (release-plz, nightly, and
-          # manual runs).
-          ref: ${{ inputs.ref }}
-          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download prepared candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.prepare-candidate.outputs.artifact }}
+          path: candidate
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Restore and validate prepared source
+        shell: bash
+        working-directory: .
+        run: python .github/scripts/release-candidate.py restore --bundle candidate --sha256 "$CANDIDATE_SHA256" --root prepared
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux' && !matrix.manylinux
@@ -354,11 +472,11 @@ jobs:
         if: runner.os == 'Linux' && !matrix.manylinux
         # $(uname -m) is x86_64 on amd64 runners and aarch64 on arm64 runners,
         # which matches the Debian multiarch lib path on both.
-        run: echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> $GITHUB_ENV
+        run: echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> "$GITHUB_ENV"
 
       - name: Set JQ_LIB_DIR (macOS)
         if: runner.os == 'macOS'
-        run: echo "JQ_LIB_DIR=$(brew --prefix jq)/lib" >> $GITHUB_ENV
+        run: echo "JQ_LIB_DIR=$(brew --prefix jq)/lib" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         run: rustup show
@@ -371,9 +489,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.4
 
       - name: Install cosign
-        # Only needed to sign published artifacts; the OCI push itself
-        # authenticates via OCI_REGISTRY_USERNAME/PASSWORD (see xtask), so skip
-        # the cosign download entirely when not signing (e.g. the nightly).
+        # OCI pushes authenticate separately; cosign is required for signed publication.
         if: ${{ inputs.sign }}
         uses: sigstore/cosign-installer@v3
 
@@ -397,7 +513,7 @@ jobs:
               "${{ matrix.manylinux_image }}" \
               bash ci/scripts/build-plugins-manylinux.sh "${{ matrix.target }}"
           else
-            cargo run -p xtask -- build-plugins --release --target "${{ matrix.target }}"
+            cargo run --locked -p xtask -- build-plugins --release --target "${{ matrix.target }}"
           fi
 
       - name: Verify glibc floor (-gnu plugins)
@@ -444,6 +560,11 @@ jobs:
             exit 1
           fi
 
+      - name: Check frozen inputs before publication
+        shell: bash
+        working-directory: .
+        run: python .github/scripts/release-candidate.py check --bundle candidate --sha256 "$CANDIDATE_SHA256" --root prepared
+
       - name: Publish plugins (per-architecture tag)
         if: ${{ !inputs.dry_run }}
         shell: bash
@@ -458,8 +579,10 @@ jobs:
           INPUT_SIGN: ${{ inputs.sign }}
           TARGET: ${{ matrix.target }}
           ARCH_SUFFIX: ${{ matrix.arch_suffix }}
-          COSIGN_VERIFY_CERTIFICATE_IDENTITY: https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main
+          COSIGN_VERIFY_CERTIFICATE_IDENTITY: ${{ needs.select-mode.outputs.certificate_identity }}
           COSIGN_VERIFY_CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          # Never redirect signatures into a different package namespace.
+          COSIGN_REPOSITORY: ''
         run: |
           # Defence in depth: reject anything outside the expected charset before
           # the value reaches the command line.
@@ -474,7 +597,7 @@ jobs:
           fi
           # Build the args as an array so each element is passed verbatim (no
           # word-splitting or globbing).
-          ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX")
+          ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --report publication.json)
           if [ "$INPUT_SIGN" = "true" ]; then
             ARGS+=(--sign)
           fi
@@ -484,7 +607,35 @@ jobs:
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
           fi
-          cargo run -p xtask -- publish-plugins "${ARGS[@]}"
+          cargo run --locked -p xtask -- publish-plugins "${ARGS[@]}"
+
+      - name: Bind publication results to the candidate
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        working-directory: .
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p reports
+          python .github/scripts/release-candidate.py target-report --bundle candidate \
+            --sha256 "$CANDIDATE_SHA256" --root prepared --report prepared/publication.json \
+            --target "$TARGET" --output "reports/$TARGET.json"
+
+      - name: Retain target publication report
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-result-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+          path: reports/*.json
+          if-no-files-found: error
+
+      - name: Retain partial publication diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-failure-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+          path: prepared/publication.json
+          if-no-files-found: ignore
 
       - name: Publish plugins (dry run)
         if: ${{ inputs.dry_run }}
@@ -511,7 +662,12 @@ jobs:
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
           fi
-          cargo run -p xtask -- publish-plugins "${ARGS[@]}"
+          cargo run --locked -p xtask -- publish-plugins "${ARGS[@]}"
+
+      - name: Verify candidate remained unchanged
+        shell: bash
+        working-directory: .
+        run: python .github/scripts/release-candidate.py check --bundle candidate --sha256 "$CANDIDATE_SHA256" --root prepared
 
   verify-public-visibility:
     name: Verify Public Package Visibility
@@ -533,7 +689,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
           PACKAGE_NAMES: ${{ needs.list-plugin-packages.outputs.packages }}
+          INPUT_REGISTRY: ${{ inputs.registry }}
         run: |
           set -euo pipefail
+          registry_path="${INPUT_REGISTRY#ghcr.io/}"
+          export PACKAGE_VISIBILITY_ORG="${registry_path%%/*}"
           mapfile -t packages <<< "$PACKAGE_NAMES"
           .github/scripts/package-visibility.sh verify-public "${packages[@]}"

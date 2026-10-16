@@ -117,6 +117,55 @@ This runs `release-plz release` for unpublished crate versions and, on success, 
 
 New packages may be private after their first push. If final visibility verification fails, a package administrator must make them public in GitHub Package settings, then rerun the failed verification job. If only plugin publishing failed after crates were published, it can also be retried via a new `publish-plugins.yml` dispatch at the intended release ref without republishing crates.
 
+Plugin publication has separate artifact and catalog outcomes. A required upload,
+signing, verification, or catalog error fails the command and Actions job, even
+when other entries succeeded. Artifact failures suppress that batch's catalog
+updates. Catalog failures do **not** roll back uploaded plugins or successful
+catalog writes. Inspect the failed entry and retained partial-publication report;
+do not interpret an upload message as a complete release or change versions just
+to repair a catalog. Existing signature-only repair remains a separate operation.
+
+#### Shared dependency baseline and prepared candidates
+
+The root `Cargo.lock` is committed. Normal nightly and release preparation use
+this same reviewed dependency baseline. `release-plz.toml` sets
+`dependencies_update = false`: release-plz reconciles workspace version changes
+with `cargo update --workspace`, rather than refreshing every external dependency.
+Workspace entries, or dependencies whose changed constraints require it, may
+still change. Generated release PRs must include the corresponding lock changes.
+Review their manifest and lock diffs together.
+
+To intentionally update dependencies, run `cargo update` (or
+`cargo update -p <package> --precise <version>`), review and commit `Cargo.lock`
+together with any manifest changes, and run the normal tests and release
+rehearsal. Do not delete the lockfile as a workaround for a locked-build error.
+The initial committed lock establishes a new baseline; it is not a reconstruction
+of the dependencies used in an older release.
+
+Before fan-out, the workflows retain `source.tar` and `candidate.json`. The
+candidate records the source commit, prepared-source SHA-256, baseline and
+prepared lock hashes, toolchain, mode, versions, and expected eight-target plugin
+inventory. Nightly snapshots the tree **after** release-plz prepares versions and
+changelogs. Production snapshots the release tree before crate publication.
+Standalone plugin dispatch snapshots once and accepts only refs from trusted
+main history. Production publication and repair must run from the official
+repository's main; the temporary isolated nightly branch exception is documented below.
+
+Each target restores the same bundle and validates its hashes before building.
+Metadata, outer xtask invocations, nested Cargo/cross builds, and manylinux builds
+use `--locked`. Source/lock checks also run after the work. Missing or inconsistent
+locks fail; targets never regenerate them. Different targets still compile their
+appropriate dependency subsets. This freezes Rust inputs, not OS packages or
+byte-for-byte output binaries, and does not impose our lock on downstream crate
+consumers.
+
+Candidate artifacts are retained for 90 days and named by run ID and attempt.
+For a nightly retry, rerun **all jobs** so the attempt's candidate, packages, tags,
+and reports agree; a partial rerun must not borrow a different attempt's outputs.
+Expired/missing artifacts require a new explicit preparation, not a silent
+fallback. The reusable workflow's `candidate_artifact` and `candidate_sha256`
+inputs are an internal same-run contract, not arbitrary cross-run download inputs.
+
 #### Release Flow
 
 1. **Merge feature/fix PRs to main** → Workflow creates a "Release PR" with:
@@ -208,7 +257,93 @@ Repository maintainers are responsible for manual rotation before expiry. GitHub
 - **Purpose**: Builds and publishes the plugin architecture matrix and verifies public GHCR package visibility without changing it.
 - **Triggers**: Called by `release-plz.yml` after crate publication, called by `nightly.yml`, or dispatched manually.
 - **Inputs**: `sign` controls cosign signing; `dry_run` skips publication and visibility checks; `skip_visibility` skips the visibility preflight, package listing, and final verification.
-- **Nightly behavior**: `nightly.yml` runs `release-plz update` (no crate publication), then publishes unsigned plugins with `sign: false`, `dry_run: false`, `skip_visibility: true`, and a fixed `drasi-nightly-test` tag by default. A passing nightly does not validate the signed, versioned release's visibility checks.
+- **Candidate inputs**: Internal callers provide the same-run prepared artifact and manifest hash; standalone dispatch prepares one locked candidate before the matrix.
+- **Nightly behavior**: Uses the same eight targets, native setup, GNU glibc 2.28 checks, and required cosign signing/verification as production, but writes only to the dedicated test namespace described below.
+
+### [nightly.yml](nightly.yml)
+
+Scheduled nightly uses the committed lockfile baseline and the same release-plz
+configuration as release preparation. Manual `fresh_dependencies: true` explicitly
+refreshes dependencies in the temporary candidate and marks the handoff `fresh`.
+It does not commit changes or silently replace the scheduled release-parity lane.
+There are no skip/reuse-tag inputs that can produce a ready incomplete candidate.
+
+#### Temporary pre-merge branch rehearsal
+
+Manual dispatch accepts a default-off `allow_branch_test` flag. After committing
+and pushing the candidate branch to **drasi-project/drasi-core** (not a fork), run:
+
+```bash
+gh workflow run nightly.yml --repo drasi-project/drasi-core \
+  --ref ruokun-niu-core-release-safeguards \
+  -f allow_branch_test=true -f fresh_dependencies=false
+```
+
+This dispatches the workflow revision on the named branch; no merge is needed.
+The workflow must already be registered for manual dispatch on the default branch.
+The Actions UI may show only main's inputs until merged, so use the CLI above.
+This is a real, full eight-platform signed publication to the isolated nightly
+namespace, not a dry run. The package provisioning requirements below still apply.
+Forks, tags, scheduled branch runs, production namespace overrides, unsigned
+publication, visibility bypasses, and signature repair are not enabled by this
+flag. Production publishing and repair remain main-only. Remove this temporary
+flag and its guarded exception after pre-merge rehearsal is complete.
+
+Branch candidates record `source_ref` and `branch_test: true`; signatures are
+verified against the exact `publish-plugins.yml@refs/heads/<branch>` identity,
+not main's identity. Their ready artifacts are diagnostic rehearsal outputs and
+must not be treated as trusted-main release candidates by downstream consumers.
+
+The sequence is preparation, verified local packaging, eight-target signed plugin
+publication plus public visibility checks, then complete-inventory validation.
+Packaging uses Cargo's supported multi-package selection for all publishable,
+release-enabled workspace crates, including their unpublished dependency versions.
+Internal `publish = false` and release-plz exclusions remain excluded. Cargo checks
+the dependency closure and builds extracted `.crate` sources; verification is
+never disabled. Package-local normalized lockfiles are outputs, not replacements
+for the frozen root build lock. The verified `.crate` files and checksums are
+retained as Actions artifacts; nothing is published to crates.io.
+
+Nightly OCI repositories are under `ghcr.io/drasi-project/drasi-core-nightly`,
+including `drasi-core-nightly/drasi-plugin-directory`. Tags are
+`nightly-<run_id>-<run_attempt>-<architecture>`. Cosign signatures stay alongside
+these test repositories; signature repository redirection is disabled. Official
+plugin repositories, catalogs, version tags and GitHub Releases are unchanged.
+
+Before enabling this path, an administrator must provision the test directory
+package and grant the workflow access. The directory must be public; newly
+created test plugin packages may also require the administrator's public-visibility
+step. The existing `PACKAGES_ADMIN_TOKEN` is used only for GET checks of
+namespace-qualified names. Missing access or visibility fails the rehearsal;
+the workflow does not change credentials or package settings.
+
+#### Exact producer handoff to test-infra
+
+After all required stages pass, the run uploads
+`nightly-ready-<run_id>-<run_attempt>` containing `ready.json` (schema version 1).
+It identifies the producer repository/run/attempt, source commit and prepared
+source hash, candidate artifact and manifest hash, lock hash, mode, toolchain,
+crate/SDK/core/lib versions, package checksums, all eight plugin target inventories,
+immutable OCI digest references, and the exact cosign identity and issuer.
+
+The consumer must receive an **explicit producer run ID and attempt**, check
+through GitHub's API that that nightly attempt completed successfully on trusted
+main, and download its named ready artifact and candidate bundle. It must compare
+hashes, build a deliberately pinned compatible host against the prepared source,
+install the recorded digests without local-binary or mutable-tag fallback, verify
+signatures under the recorded publisher policy, and associate results with this
+candidate. A ready artifact from an unfinished or failed run is insufficient.
+
+This consumer interface is implemented by
+[drasi-project/test-infra#103](https://github.com/drasi-project/test-infra/issues/103).
+The existing test-infra workflow does **not** yet accept the full contract; core
+does not dispatch it with unsupported inputs or add cross-repository credentials.
+Its merged [coverage](https://github.com/drasi-project/test-infra/pull/93) is the
+Linux x86_64 HTTP/gRPC standard/adaptive subset, not every plugin on eight platforms.
+Until that consumer integration and an authorized end-to-end run complete,
+producer readiness is **not runtime E2E success**. A green core nightly validates
+packaging and signed test publication, not crates.io writes/quotas or production
+release creation.
 
 ### [scorecard.yaml](scorecard.yaml)
 - **Purpose**: Runs OpenSSF Scorecard analysis to evaluate repository security and best practices.

@@ -25,6 +25,17 @@ jobs:
       - name: Test recovery helper and workflow gates
         run: python3 .github/scripts/repair-plugin-signatures.test.py
 
+  release-candidate:
+    name: Release Candidate Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Test locked candidates, packaging and handoff gates
+        run: python3 .github/scripts/release-candidate.test.py
+
   test:
     uses: drasi-project/.github/.github/workflows/rust-unit-test.yaml@main
     with:

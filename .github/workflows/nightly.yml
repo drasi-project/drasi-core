@@ -1,9 +1,7 @@
 name: Nightly Build
 
-# Nightly pipeline for drasi-core. It:
-#   1. runs the release-plz dry-run as a release health signal,
-#   2. builds and publishes the plugins from main's HEAD to a fixed, overwritable
-#      OCI tag via workflow_call.
+# Rehearse packaging and signed publication from one locked, prepared candidate.
+# No crates.io writes, official tags/releases, or production OCI repositories.
 
 on:
   schedule:
@@ -12,18 +10,13 @@ on:
     - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
-      plugin_tag:
-        description: 'Fixed OCI tag for nightly plugins'
-        required: false
-        type: string
-        default: 'drasi-nightly-test'
-      skip_release_dry_run:
-        description: 'Skip the release-plz dry-run check'
+      allow_branch_test:
+        description: 'TEMPORARY: allow an official-repository branch rehearsal in the isolated nightly namespace'
         required: false
         type: boolean
         default: false
-      skip_publish_plugins:
-        description: 'Skip publishing plugins (reuse already-published nightly tag)'
+      fresh_dependencies:
+        description: 'Explicit fresh-dependency rehearsal instead of the committed baseline'
         required: false
         type: boolean
         default: false
@@ -33,63 +26,150 @@ permissions:
   contents: read
 
 jobs:
-  # Release-dry-run signal: run the release tooling in dry-run mode to catch
-  # packaging / semver / changelog breakage early. Uses the shared
-  # install-release-tools composite action (same pinned versions as release-plz.yml)
-  # and runs only `release-plz update`, which publishes nothing. A failure here
-  # fails the nightly and, because the rest of the chain depends on it, stops the
-  # plugin publish.
-  release-dry-run:
-    name: Release dry-run (release-plz)
-    if: ${{ inputs.skip_release_dry_run != true }}
+  prepare:
+    name: Prepare locked release candidate
+    if: ${{ github.repository == 'drasi-project/drasi-core' && (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.allow_branch_test == true && startsWith(github.ref, 'refs/heads/'))) }}
     runs-on: ubuntu-latest
+    outputs:
+      candidate_sha256: ${{ steps.freeze.outputs.candidate_sha256 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install release tools
         uses: ./.github/actions/install-release-tools
 
-      - name: Release-plz dry-run
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Prepare release versions without publishing
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: release-plz update
+
+      - name: Explicit fresh-dependency update
+        if: ${{ inputs.fresh_dependencies == true }}
+        run: cargo update
+
+      - name: Freeze prepared source and lockfile
+        id: freeze
+        env:
+          MODE: ${{ inputs.fresh_dependencies && 'fresh' || 'locked' }}
+          ALLOW_BRANCH_TEST: ${{ inputs.allow_branch_test == true }}
+        run: python3 .github/scripts/release-candidate.py freeze --output "$RUNNER_TEMP/candidate" --mode "$MODE"
+
+      - name: Retain exact prepared candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 90
+
+  package:
+    name: Package and verify local release crates
+    needs: prepare
+    runs-on: ubuntu-latest-8-cores
+    env:
+      CANDIDATE_SHA256: ${{ needs.prepare.outputs.candidate_sha256 }}
+    steps:
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nightly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate
+      - name: Restore exact source
+        run: python3 .github/scripts/release-candidate.py restore --bundle candidate --sha256 "$CANDIDATE_SHA256" --root prepared
+      - name: Install packaging build dependencies
         run: |
-          echo "=== release-plz update (dry-run: version bumps, changelog, semver checks) ==="
-          release-plz update
-          echo "=== release-plz dry-run passed ==="
+          sudo apt-get update
+          sudo apt-get install -y libjq-dev libssl-dev protobuf-compiler cmake clang libclang-dev
+          echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> "$GITHUB_ENV"
+      - name: Package with extracted-source build verification
+        run: python3 .github/scripts/release-candidate.py package --bundle candidate --sha256 "$CANDIDATE_SHA256" --root prepared --output packages.json
+      - name: Retain verified crate archives
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-crates-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            prepared/target/package/*.crate
+            packages.json
+          if-no-files-found: error
 
   publish-plugins:
     name: Publish nightly plugins
-    needs: release-dry-run
-    # Elevated package scope needed by the called publish-plugins.yml for OCI push.
-    # A called workflow's token can't exceed the calling job's grants, and that
-    # check is static: publish-plugins.yml declares id-token: write at workflow
-    # level, so callers must grant it even though sign: false leaves it unused.
+    needs: [prepare, package]
     permissions:
       contents: read
       packages: write
       id-token: write
-    # Single chain: publish only after the release dry-run passes. always()
-    # so a *skipped* release-dry-run (skip_release_dry_run) still lets publishing
-    # proceed, while a *failed* release-dry-run blocks the rest of the nightly.
-    # skip_publish_plugins reuses an already-published nightly tag.
-    if: >-
-      ${{ always()
-        && needs.release-dry-run.result != 'failure'
-        && needs.release-dry-run.result != 'cancelled'
-        && inputs.skip_publish_plugins != true }}
     uses: ./.github/workflows/publish-plugins.yml
     with:
-      tag: ${{ inputs.plugin_tag || 'drasi-nightly-test' }}
-      # Nightly -test channel: skip cosign signing to avoid orphaned signatures
-      # on each tag overwrite.
-      sign: false
+      allow_branch_test: ${{ inputs.allow_branch_test == true }}
+      candidate_artifact: nightly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+      candidate_sha256: ${{ needs.prepare.outputs.candidate_sha256 }}
+      registry: ghcr.io/drasi-project/drasi-core-nightly
+      tag: nightly-${{ github.run_id }}-${{ github.run_attempt }}
+      sign: true
       dry_run: false
-      # Nightly test packages are already pullable; skip public visibility checks
-# (no package metadata token is needed on this path).
-      skip_visibility: true
+      skip_visibility: false
+    secrets:
+      PACKAGES_ADMIN_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
+
+  handoff:
+    name: Emit complete producer handoff
+    needs: [prepare, package, publish-plugins]
+    runs-on: ubuntu-latest
+    env:
+      CANDIDATE_SHA256: ${{ needs.prepare.outputs.candidate_sha256 }}
+    steps:
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nightly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nightly-crates-${{ github.run_id }}-${{ github.run_attempt }}
+          path: crates
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: plugin-result-${{ github.run_id }}-${{ github.run_attempt }}-*
+          path: reports
+          merge-multiple: true
+      - name: Require complete verified inventory
+        run: |
+          python3 .github/scripts/release-candidate.py handoff --bundle candidate \
+            --sha256 "$CANDIDATE_SHA256" --reports reports --packages crates/packages.json \
+            --output ready.json
+      - name: Retain consumer handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ready.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Summarize producer readiness
+        run: |
+          {
+            echo "Prepared candidate: $CANDIDATE_SHA256"
+            echo "All eight publication targets passed. This is producer readiness, not runtime E2E success."
+            echo "Consumer must select run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT and verify completed success."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # If any job in the nightly failed, open (or update) a tracking issue so the
   # failure is visible without watching Actions.
@@ -97,7 +177,7 @@ jobs:
   # adds a comment instead of opening a new one.
   report-failure:
     name: Report nightly failure
-    needs: [release-dry-run, publish-plugins]
+    needs: [prepare, package, publish-plugins, handoff]
     if: ${{ always() && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-latest
     # Only this job writes the tracking issue.

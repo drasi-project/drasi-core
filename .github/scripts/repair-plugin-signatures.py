@@ -48,6 +48,9 @@ ANNOTATIONS = {
     "io.drasi.plugin.target-triple": "target_triple",
 }
 PUBLISH_DEFAULTS = {
+    "allow_branch_test": False,
+    "candidate_artifact": "",
+    "candidate_sha256": "",
     "pre_release": "",
     "tag": "",
     "registry": "ghcr.io/drasi-project",
